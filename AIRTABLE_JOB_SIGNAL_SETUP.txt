@@ -1,0 +1,68 @@
+TGTC V3.2 - Airtable fields required
+====================================
+
+Before running the patched pipeline, add these five fields to the existing
+Leads table. Field names must match exactly.
+
+1. Job Freshness
+   Type: Single select
+   Options:
+   - fresh
+   - aging
+   - stale_review
+   - unknown_review
+
+2. Job Age Days
+   Type: Number
+   Precision: integer / 0 decimals
+
+3. Job URL Status
+   Type: Single select
+   Options:
+   - verified
+   - fallback_used
+   - aggregator_review
+   - unverified_review
+   - broken
+
+4. Job URL Source
+   Type: Single line text
+
+5. Job Signal Notes
+   Type: Long text
+
+Behavior
+--------
+- fresh: posted 0-7 days ago
+- aging: posted 8-29 days ago
+- stale_review: posted 30+ days ago, or explicit expiration is in the past
+- unknown_review: posting date is missing/unparseable
+
+- verified: selected URL returned a normal 2xx/3xx response
+- fallback_used: a better/working company, ATS, LinkedIn, Indeed, or other URL
+  replaced the original Job URL
+- aggregator_review: only an aggregator URL is available; the lead is kept
+- unverified_review: a likely-good URL could not be machine-verified (for
+  example a bot block, 403, 429, timeout, or server error)
+- broken: no usable URL was found or all candidates returned strong dead-link
+  evidence such as 404/410
+
+Instantly safeguard
+-------------------
+run_approved.py blocks enrollment when:
+- Job Freshness is stale_review or unknown_review
+- Job URL Status is broken, aggregator_review, or unverified_review
+
+After manual review, the reviewer can override the gate by:
+- changing Job Freshness to fresh or aging after confirming the role is active
+- replacing/verifying Job URL and changing Job URL Status to verified or
+  fallback_used
+- then setting Status to Approved
+
+Backfill existing Airtable rows
+-------------------------------
+Run in CMD from C:\TGTC\tgtc_pipeline:
+
+python repair_airtable_job_signals.py
+
+Then refresh Airtable.
