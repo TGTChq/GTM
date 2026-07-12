@@ -82,6 +82,9 @@ DATE_POSTED = os.getenv("DATE_POSTED", "today")
 COUNTRY = os.getenv("COUNTRY", "us")
 NUM_PAGES = _env_int("NUM_PAGES", 3)
 SEARCH_DELAY_SECONDS = _env_float("SEARCH_DELAY_SECONDS", 0.8)
+# Reject only clearly stale job-intent signals before enrichment. Unknown or
+# conflicting dates remain eligible; the oldest parseable source date is used.
+MAX_JOB_AGE_DAYS = _env_int("MAX_JOB_AGE_DAYS", 30)
 
 ROLES = _env_json(
     "ROLES_JSON",

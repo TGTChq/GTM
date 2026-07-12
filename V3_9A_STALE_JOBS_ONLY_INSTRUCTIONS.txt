@@ -1,0 +1,40 @@
+TGTC V3.9A — STALE JOBS ONLY
+
+Purpose
+- Keep the existing Job URL behavior unchanged.
+- Do NOT reject Trabajo.org or other aggregator URLs.
+- Reject only clearly stale jobs before Apollo/Hunter enrichment.
+- Unknown or unparseable dates are kept.
+- Uses the oldest parseable date signal when JSearch exposes conflicting dates.
+- Supports relative ages such as 30+ days ago, 8 weeks ago, 5 months ago, and 1 year ago.
+
+Install
+1. Copy the contents of this patch into C:\TGTC\tgtc_pipeline.
+2. Replace files when Windows asks.
+3. Run:
+   python -m unittest discover -s tests -v
+4. Expected:
+   Ran 50 tests
+   OK
+
+Railway — daily service only
+Add:
+MAX_JOB_AGE_DAYS=30
+
+Do not add this variable to tgtc-approved-sync; it is only used by the daily pipeline.
+
+Git
+Run:
+  git add config.py job_filter.py job_signal.py .env.example tests\test_stale_job_filter_v39a.py V3_9A_STALE_JOBS_ONLY_INSTRUCTIONS.txt
+  git commit -m "Filter clearly stale job postings"
+  git push
+
+Expected filter summary
+The daily filter summary will now include:
+  excluded_stale
+
+Notes
+- A job at 30 days or older is rejected.
+- A job at 29 days or newer is kept.
+- A missing/unknown date is kept rather than rejected.
+- URL selection and Trabajo.org handling are not changed by this patch.

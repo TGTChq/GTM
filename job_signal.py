@@ -116,17 +116,38 @@ def _parse_datetime(value: object, *, relative_to: Optional[datetime] = None) ->
     if re.fullmatch(r"\d{10,13}", text):
         return _parse_datetime(int(text), relative_to=base_now)
 
-    lowered = text.lower()
+    lowered = text.lower().strip()
     if lowered in {"today", "just posted", "new"}:
         return base_now
-    relative = re.search(r"(\d+)\s*\+?\s*days?\s+ago", lowered)
+    if lowered == "yesterday":
+        from datetime import timedelta
+        return base_now - timedelta(days=1)
+
+    # Human-readable ages are common in syndicated job feeds.  Parse the
+    # major units so an old listing cannot masquerade as recent merely because
+    # the API also exposes a newer re-syndication timestamp. Months and years
+    # are intentionally conservative approximations for freshness filtering.
+    word_number = {"a": 1, "an": 1, "one": 1}
+    relative = re.search(
+        r"(\d+|a|an|one)\s*\+?\s*(minute|hour|day|week|month|year)s?\s+ago",
+        lowered,
+    )
     if relative:
         from datetime import timedelta
-        return base_now - timedelta(days=int(relative.group(1)))
-    relative_hours = re.search(r"(\d+)\s*hours?\s+ago", lowered)
-    if relative_hours:
-        from datetime import timedelta
-        return base_now - timedelta(hours=int(relative_hours.group(1)))
+        raw_amount, unit = relative.groups()
+        amount = int(raw_amount) if raw_amount.isdigit() else word_number[raw_amount]
+        if unit == "minute":
+            return base_now - timedelta(minutes=amount)
+        if unit == "hour":
+            return base_now - timedelta(hours=amount)
+        if unit == "day":
+            return base_now - timedelta(days=amount)
+        if unit == "week":
+            return base_now - timedelta(days=amount * 7)
+        if unit == "month":
+            return base_now - timedelta(days=amount * 30)
+        if unit == "year":
+            return base_now - timedelta(days=amount * 365)
 
     normalized = text.replace("Z", "+00:00")
     try:

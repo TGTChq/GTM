@@ -16,6 +16,7 @@ from typing import Dict, List, Optional, Set, Tuple
 from domain_utils import normalize_company_domain
 
 import config
+from job_signal import classify_freshness
 from pipeline_state import SeenJobsRegistry
 
 logger = logging.getLogger(__name__)
@@ -125,6 +126,21 @@ def is_job_aggregator_or_publisher(job: Dict) -> Tuple[bool, str]:
 
     if corroborating_signals:
         return True, "generic_job_publisher:" + ",".join(corroborating_signals)
+    return False, ""
+
+
+def is_stale_job(job: Dict) -> Tuple[bool, str]:
+    """Reject only clearly stale job-intent signals before enrichment.
+
+    JSearch can occasionally surface an old syndicated listing inside a
+    recent-date query. We use the oldest parseable posting signal in the
+    payload. Missing/unparseable dates are retained rather than rejected.
+    """
+    _freshness, age_days, reason = classify_freshness(job)
+    if reason == "explicit_expiration_is_in_the_past":
+        return True, "expired_job_posting"
+    if age_days is not None and age_days >= config.MAX_JOB_AGE_DAYS:
+        return True, f"stale_job:{age_days}days"
     return False, ""
 
 
@@ -353,6 +369,7 @@ def run_filter(
         "input_total": len(jobs),
         "kept": 0,
         "excluded_aggregator": 0,
+        "excluded_stale": 0,
         "excluded_staffing": 0,
         "excluded_industry": 0,
         "excluded_non_us": 0,
@@ -363,6 +380,7 @@ def run_filter(
 
     checks = [
         ("excluded_aggregator", is_job_aggregator_or_publisher),
+        ("excluded_stale", is_stale_job),
         ("excluded_staffing", is_staffing_company),
         ("excluded_industry", is_excluded_industry),
         ("excluded_non_us", lambda job: (lambda ok, reason: (not ok, reason))(*is_us_job(job))),
