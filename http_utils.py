@@ -15,6 +15,15 @@ import config
 logger = logging.getLogger(__name__)
 
 RETRYABLE_STATUS_CODES = {408, 425, 429, 500, 502, 503, 504}
+MAX_SERVER_RETRY_AFTER_SECONDS = 60.0
+
+
+class RetryWindowTooLong(requests.HTTPError):
+    """Raised instead of sleeping for an impractically long server retry window."""
+
+    def __init__(self, message: str, *, response: requests.Response, retry_after: float):
+        super().__init__(message, response=response)
+        self.retry_after = retry_after
 
 
 def request_with_retry(
@@ -46,7 +55,30 @@ def request_with_retry(
                 return response
 
             retry_after = response.headers.get("Retry-After")
-            delay = float(retry_after) if retry_after and retry_after.isdigit() else min(2 ** attempt, 20)
+            try:
+                server_delay = float(retry_after) if retry_after is not None else None
+            except (TypeError, ValueError):
+                server_delay = None
+
+            if (
+                response.status_code == 429
+                and server_delay is not None
+                and server_delay > MAX_SERVER_RETRY_AFTER_SECONDS
+            ):
+                logger.error(
+                    "HTTP 429 for %s requested a %.1fs retry window; failing fast "
+                    "instead of blocking the pipeline.",
+                    url,
+                    server_delay,
+                )
+                raise RetryWindowTooLong(
+                    f"HTTP 429 retry window too long ({server_delay:.1f}s): "
+                    f"{response.text[:500]}",
+                    response=response,
+                    retry_after=server_delay,
+                )
+
+            delay = server_delay if server_delay is not None else min(2 ** attempt, 20)
             last_error = requests.HTTPError(
                 f"Retryable HTTP {response.status_code}: {response.text[:500]}",
                 response=response,
@@ -54,6 +86,8 @@ def request_with_retry(
             if attempt < retries:
                 logger.warning("HTTP %s for %s; retrying in %.1fs", response.status_code, url, delay)
                 time.sleep(delay)
+        except RetryWindowTooLong:
+            raise
         except requests.HTTPError as exc:
             last_error = exc
             status = exc.response.status_code if exc.response is not None else None

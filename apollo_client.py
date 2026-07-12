@@ -11,10 +11,47 @@ from domain_utils import normalize_company_domain
 import requests
 
 import config
-from http_utils import debug_dump, request_with_retry, safe_json
+from http_utils import RetryWindowTooLong, debug_dump, request_with_retry, safe_json
 
 logger = logging.getLogger(__name__)
 APOLLO_BASE_URL = "https://api.apollo.io/api/v1"
+
+
+class ApolloCreditsExhaustedError(RuntimeError):
+    """Raised when Apollo cannot perform credit-consuming enrichment."""
+
+
+def _response_body(exc: requests.HTTPError) -> str:
+    response = exc.response
+    if response is None:
+        return ""
+    try:
+        return response.text or ""
+    except Exception:
+        return ""
+
+
+def _looks_like_credit_exhaustion(exc: requests.HTTPError) -> bool:
+    body = _response_body(exc).lower()
+    credit_markers = (
+        "shared credits",
+        "credits are used up",
+        "credits used up",
+        "out of credits",
+        "insufficient credits",
+        "credit limit",
+        "no credits remaining",
+        "buy more credits",
+    )
+    return any(marker in body for marker in credit_markers)
+
+
+def _raise_credit_error(exc: requests.HTTPError) -> None:
+    raise ApolloCreditsExhaustedError(
+        "Apollo credit-consuming enrichment is unavailable. The team's shared "
+        "credits appear to be exhausted. Ask an Apollo admin to add credits, "
+        "then rerun the daily pipeline."
+    ) from exc
 
 
 @dataclass
@@ -133,6 +170,12 @@ def enrich_organization(
         )
     except requests.HTTPError as exc:
         status = exc.response.status_code if exc.response is not None else None
+        if isinstance(exc, RetryWindowTooLong) or _looks_like_credit_exhaustion(exc):
+            logger.error(
+                "Apollo organization enrichment is unavailable due to exhausted "
+                "credits or an excessively long retry window."
+            )
+            _raise_credit_error(exc)
         if status in {404, 422}:
             # A company-level enrichment miss must not abort the whole daily run.
             # When a multi-identifier request is rejected, retry once with the
@@ -156,6 +199,12 @@ def enrich_organization(
                         if retry_exc.response is not None
                         else None
                     )
+                    if isinstance(retry_exc, RetryWindowTooLong) or _looks_like_credit_exhaustion(retry_exc):
+                        logger.error(
+                            "Apollo organization enrichment is unavailable due to "
+                            "exhausted credits or an excessively long retry window."
+                        )
+                        _raise_credit_error(retry_exc)
                     if retry_status in {404, 422}:
                         logger.warning(
                             "Apollo organization enrichment unavailable for %s "
@@ -329,6 +378,12 @@ def match_person(person: Dict[str, Any]) -> PersonMatch:
         )
     except requests.HTTPError as exc:
         status = exc.response.status_code if exc.response is not None else None
+        if isinstance(exc, RetryWindowTooLong) or _looks_like_credit_exhaustion(exc):
+            logger.error(
+                "Apollo person enrichment is unavailable due to exhausted credits "
+                "or an excessively long retry window."
+            )
+            _raise_credit_error(exc)
         if status in {404, 422}:
             # Apollo can occasionally return a search-result person ID that its
             # enrichment endpoint can no longer resolve. This is a record-level
