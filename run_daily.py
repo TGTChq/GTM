@@ -101,7 +101,16 @@ def run_pipeline() -> dict:
         return _fail(summary, "audit", audit.failures)
 
     logger.info("=== STEP 3: HIRING MANAGER ===")
-    enriched = run_hiring_manager_identification(filtered.output_path)
+    logger.info(
+        "Daily throughput: target=%d reviewable leads, safety cap=%d eligible companies",
+        config.TARGET_REVIEWABLE_LEADS_PER_RUN,
+        config.MAX_ELIGIBLE_COMPANIES_PER_RUN,
+    )
+    enriched = run_hiring_manager_identification(
+        filtered.output_path,
+        target_reviewable_leads=config.TARGET_REVIEWABLE_LEADS_PER_RUN,
+        max_eligible_companies=config.MAX_ELIGIBLE_COMPANIES_PER_RUN,
+    )
     summary["steps"]["hiring_manager"] = {
         "success": enriched.success,
         "input_jobs": enriched.total_input_jobs,
@@ -112,6 +121,14 @@ def run_pipeline() -> dict:
         "contactable_hiring_managers": enriched.contactable_hiring_managers,
         "uncontactable_hiring_managers": enriched.uncontactable_hiring_managers,
         "contactable_rate": enriched.contactable_rate,
+        "target_reviewable_leads": enriched.target_reviewable_leads,
+        "reviewable_leads": enriched.reviewable_leads,
+        "reviewable_target_reached": enriched.reviewable_target_reached,
+        "max_eligible_companies": enriched.max_eligible_companies,
+        "eligible_company_limit_reached": enriched.eligible_company_limit_reached,
+        "companies_considered": enriched.companies_considered,
+        "eligible_companies": enriched.eligible_companies,
+        "stop_reason": enriched.stop_reason,
         "excluded": enriched.company_criteria_excluded,
         "stats": enriched.stats,
         "output": enriched.output_path,
@@ -119,6 +136,13 @@ def run_pipeline() -> dict:
     }
     if config.PRODUCTION and not enriched.success:
         return _fail(summary, "hiring_manager", enriched.errors)
+    if not enriched.reviewable_target_reached:
+        logger.warning(
+            "Daily target not reached: %d/%d reviewable leads. Stop reason: %s",
+            enriched.reviewable_leads,
+            enriched.target_reviewable_leads or 0,
+            enriched.stop_reason,
+        )
 
     logger.info("=== STEP 4: AIRTABLE REVIEW QUEUE ===")
     enriched_payload = json.loads(Path(enriched.output_path).read_text(encoding="utf-8"))
@@ -132,8 +156,18 @@ def run_pipeline() -> dict:
         )
 
     # Commit seen-state only after the downstream review queue is safely updated.
-    filtered_payload = json.loads(Path(filtered.output_path).read_text(encoding="utf-8"))
-    registry.mark_jobs(filtered_payload.get("jobs", []))
+    # When the daily throughput target/cap stops enrichment early, mark only the
+    # jobs that were actually processed. Unprocessed jobs remain eligible for a
+    # later run instead of disappearing from the queue.
+    processed_job_refs = enriched_payload.get("processed_job_refs", [])
+    if not processed_job_refs:
+        logger.warning(
+            "Step 3 output did not include processed_job_refs; falling back to "
+            "the full filtered set for backward compatibility"
+        )
+        filtered_payload = json.loads(Path(filtered.output_path).read_text(encoding="utf-8"))
+        processed_job_refs = filtered_payload.get("jobs", [])
+    registry.mark_jobs(processed_job_refs)
 
     summary["success"] = True
     summary["finished_at"] = datetime.now().isoformat()

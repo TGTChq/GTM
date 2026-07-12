@@ -68,7 +68,7 @@ def main() -> int:
     )
     enriched = hiring_manager.run_hiring_manager_identification(
         filtered.output_path,
-        max_eligible_companies=args.companies,
+        target_eligible_companies=args.companies,
     )
     eligible_buckets = enriched.hiring_manager_found + enriched.hiring_manager_not_found
     print(

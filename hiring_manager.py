@@ -40,7 +40,13 @@ class Step3Result:
     eligible_companies: int = 0
     company_criteria_excluded_companies: int = 0
     target_eligible_companies: Optional[int] = None
+    target_reviewable_leads: Optional[int] = None
+    reviewable_leads: int = 0
+    reviewable_target_reached: bool = True
+    max_eligible_companies: Optional[int] = None
+    eligible_company_limit_reached: bool = False
     target_reached: bool = True
+    stop_reason: str = "candidate_pool_exhausted"
     stats: Dict = field(default_factory=dict)
     success: bool = True
     errors: List[str] = field(default_factory=list)
@@ -378,21 +384,65 @@ def process_company(company_jobs: List[Dict]) -> Tuple[List[Dict], Dict]:
     return leads, dict(stats)
 
 
+def _is_reviewable_lead(lead: Dict) -> bool:
+    """Mirror Airtable's reviewable-lead gate without making an API call."""
+    return bool(
+        lead.get("_step3_status") == "found"
+        and lead.get("hiring_manager_confidence") in {"high", "medium", "low"}
+        and lead.get("hiring_manager_email")
+        and lead.get("lead_key")
+    )
+
+
+def _count_unique_reviewable_leads(leads: List[Dict]) -> int:
+    return len(
+        {
+            str(lead.get("lead_key"))
+            for lead in leads
+            if _is_reviewable_lead(lead)
+        }
+    )
+
+
+def _job_state_ref(job: Dict) -> Dict:
+    """Keep only the fields SeenJobsRegistry needs for cross-day dedupe."""
+    return {
+        "job_id": job.get("job_id"),
+        "employer_name": job.get("employer_name"),
+        "employer_website": job.get("employer_website"),
+        "job_title": job.get("job_title"),
+    }
+
+
 def run_hiring_manager_identification(
     input_path: Optional[str] = None,
     *,
+    target_eligible_companies: Optional[int] = None,
+    target_reviewable_leads: Optional[int] = None,
     max_eligible_companies: Optional[int] = None,
 ) -> Step3Result:
-    """Run Step 3, optionally stopping after N eligible companies.
+    """Run Step 3 with optional controlled-test and production stop conditions.
 
-    ``max_eligible_companies`` is used by the controlled test runner.  Companies
-    rejected by firmographic criteria do not count toward the target, so
-    ``--companies 10`` now means ten eligible companies whenever the filtered
-    candidate pool is large enough.
+    ``target_eligible_companies`` is used by the controlled test runner, where
+    ``--companies 10`` means ten eligible companies after firmographic checks.
+
+    ``target_reviewable_leads`` is the daily production goal. A reviewable lead
+    is a unique company/bucket contact that passes the same gate used by the
+    Airtable writer: usable email, confidence, and lead key.
+
+    ``max_eligible_companies`` is a production safety cap. It bounds enrichment
+    usage on days when contactability is low. The target is a goal, not a hard
+    promise: the available filtered market may produce fewer leads, and a final
+    company with multiple buckets can make the count slightly exceed the target.
     """
     validate_preflight()
-    if max_eligible_companies is not None and max_eligible_companies < 1:
-        raise ValueError("max_eligible_companies must be at least 1")
+    for name, value in (
+        ("target_eligible_companies", target_eligible_companies),
+        ("target_reviewable_leads", target_reviewable_leads),
+        ("max_eligible_companies", max_eligible_companies),
+    ):
+        if value is not None and value < 1:
+            raise ValueError(f"{name} must be at least 1")
 
     input_path = input_path or config.STEP2_KEPT_FILE
     payload = json.loads(Path(input_path).read_text(encoding="utf-8"))
@@ -411,6 +461,7 @@ def run_hiring_manager_identification(
     eligible_companies = 0
     excluded_companies = 0
     total_candidate_companies = len(jobs_by_company)
+    stop_reason = "candidate_pool_exhausted"
 
     for index, (company_key, company_jobs) in enumerate(jobs_by_company.items(), 1):
         logger.info("[%d/%d] Enriching %s", index, total_candidate_companies, company_key)
@@ -429,13 +480,45 @@ def run_hiring_manager_identification(
         else:
             eligible_companies += 1
 
+        reviewable_leads = _count_unique_reviewable_leads(all_leads)
+
+        if (
+            target_reviewable_leads is not None
+            and reviewable_leads >= target_reviewable_leads
+        ):
+            stop_reason = "reviewable_lead_target_reached"
+            logger.info(
+                "Reached daily target of %d reviewable leads after considering %d "
+                "companies (%d eligible)",
+                target_reviewable_leads,
+                companies_considered,
+                eligible_companies,
+            )
+            break
+
+        if (
+            target_eligible_companies is not None
+            and eligible_companies >= target_eligible_companies
+        ):
+            stop_reason = "eligible_company_target_reached"
+            logger.info(
+                "Reached controlled-test target of %d eligible companies after "
+                "considering %d companies",
+                target_eligible_companies,
+                companies_considered,
+            )
+            break
+
         if (
             max_eligible_companies is not None
             and eligible_companies >= max_eligible_companies
         ):
-            logger.info(
-                "Reached target of %d eligible companies after considering %d companies",
+            stop_reason = "eligible_company_safety_cap_reached"
+            logger.warning(
+                "Reached safety cap of %d eligible companies with %d reviewable "
+                "leads after considering %d companies",
                 max_eligible_companies,
+                reviewable_leads,
                 companies_considered,
             )
             break
@@ -453,9 +536,24 @@ def run_hiring_manager_identification(
     uncontactable = eligible_buckets - contactable
     match_rate = identified / eligible_buckets if eligible_buckets else 0.0
     contactable_rate = contactable / eligible_buckets if eligible_buckets else 0.0
+    reviewable_leads = _count_unique_reviewable_leads(all_leads)
+
+    reviewable_target_reached = (
+        target_reviewable_leads is None
+        or reviewable_leads >= target_reviewable_leads
+    )
+    eligible_target_reached = (
+        target_eligible_companies is None
+        or eligible_companies >= target_eligible_companies
+    )
+    eligible_company_limit_reached = (
+        max_eligible_companies is not None
+        and eligible_companies >= max_eligible_companies
+    )
     target_reached = (
-        max_eligible_companies is None
-        or eligible_companies >= max_eligible_companies
+        reviewable_target_reached
+        if target_reviewable_leads is not None
+        else eligible_target_reached
     )
 
     output_path = str(Path(config.STEP3_OUTPUT_DIR) / f"jobs_enriched_{datetime.now():%Y-%m-%d}.json")
@@ -470,7 +568,13 @@ def run_hiring_manager_identification(
                 "companies_considered": companies_considered,
                 "eligible_companies": eligible_companies,
                 "company_criteria_excluded_companies": excluded_companies,
-                "target_eligible_companies": max_eligible_companies,
+                "target_eligible_companies": target_eligible_companies,
+                "target_reviewable_leads": target_reviewable_leads,
+                "reviewable_leads": reviewable_leads,
+                "reviewable_target_reached": reviewable_target_reached,
+                "max_eligible_companies": max_eligible_companies,
+                "eligible_company_limit_reached": eligible_company_limit_reached,
+                "stop_reason": stop_reason,
                 "target_reached": target_reached,
                 "company_criteria_excluded": excluded_buckets,
                 "eligible_company_buckets": eligible_buckets,
@@ -480,6 +584,10 @@ def run_hiring_manager_identification(
                 "contactable_hiring_managers": contactable,
                 "uncontactable_hiring_managers": uncontactable,
                 "contactable_rate": round(contactable_rate, 4),
+                # Only these processed jobs should enter cross-day seen-state.
+                # Jobs left unprocessed because a daily target/cap was reached
+                # remain eligible for a later run.
+                "processed_job_refs": [_job_state_ref(job) for job in processed_jobs],
                 # Backward-compatible aliases.
                 "hiring_manager_found": identified,
                 "hiring_manager_not_found": not_identified,
@@ -513,8 +621,14 @@ def run_hiring_manager_identification(
         companies_considered=companies_considered,
         eligible_companies=eligible_companies,
         company_criteria_excluded_companies=excluded_companies,
-        target_eligible_companies=max_eligible_companies,
+        target_eligible_companies=target_eligible_companies,
+        target_reviewable_leads=target_reviewable_leads,
+        reviewable_leads=reviewable_leads,
+        reviewable_target_reached=reviewable_target_reached,
+        max_eligible_companies=max_eligible_companies,
+        eligible_company_limit_reached=eligible_company_limit_reached,
         target_reached=target_reached,
+        stop_reason=stop_reason,
         stats=dict(total_stats),
         success=not errors,
         errors=errors,

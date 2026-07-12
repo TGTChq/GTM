@@ -111,6 +111,12 @@ MIN_ROLES_WITH_RESULTS = _env_int("MIN_ROLES_WITH_RESULTS", 4)
 MAX_ROLE_FAILURES = _env_int("MAX_ROLE_FAILURES", 3)
 MIN_HIRING_MANAGER_MATCH_RATE = _env_float("MIN_HIRING_MANAGER_MATCH_RATE", 0.70)
 ENFORCE_HM_MATCH_RATE = _env_bool("ENFORCE_HM_MATCH_RATE", False)
+
+# Daily production throughput controls. The pipeline stops enrichment after it
+# reaches the reviewable-lead target, with an eligible-company safety cap to
+# bound Apollo/Hunter usage on low-contactability days.
+TARGET_REVIEWABLE_LEADS_PER_RUN = _env_int("TARGET_REVIEWABLE_LEADS_PER_RUN", 30)
+MAX_ELIGIBLE_COMPANIES_PER_RUN = _env_int("MAX_ELIGIBLE_COMPANIES_PER_RUN", 60)
 SEEN_JOBS_RETENTION_DAYS = _env_int("SEEN_JOBS_RETENTION_DAYS", 30)
 CRM_MIN_MATCH_LENGTH = _env_int("CRM_MIN_MATCH_LENGTH", 4)
 
