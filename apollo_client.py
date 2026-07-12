@@ -8,6 +8,8 @@ from typing import Any, Dict, List, Optional
 
 from domain_utils import normalize_company_domain
 
+import requests
+
 import config
 from http_utils import debug_dump, request_with_retry, safe_json
 
@@ -227,6 +229,23 @@ def match_person(person: Dict[str, Any]) -> PersonMatch:
             data,
             redact_keys=("email", "personal_emails", "phone_numbers", "phone_number"),
         )
+    except requests.HTTPError as exc:
+        status = exc.response.status_code if exc.response is not None else None
+        if status in {404, 422}:
+            # Apollo can occasionally return a search-result person ID that its
+            # enrichment endpoint can no longer resolve. This is a record-level
+            # miss, not a pipeline-level failure. Preserve the candidate identity
+            # so the existing Hunter fallback can still try first/last name +
+            # company domain, and continue processing the rest of the run.
+            logger.warning(
+                "Apollo person enrichment skipped for %s: HTTP %s. "
+                "Keeping search-result identity and continuing to Hunter fallback.",
+                person_id,
+                status,
+            )
+            return base
+        logger.error("Apollo person enrichment failed for %s: %s", person_id, exc)
+        raise
     except Exception as exc:
         logger.error("Apollo person enrichment failed for %s: %s", person_id, exc)
         raise
