@@ -78,6 +78,37 @@ def _person_org_domain(person: Dict[str, Any]) -> str:
     return ""
 
 
+def _organization_enrichment_request(
+    params: Dict[str, str],
+    *,
+    debug_name: str,
+) -> Dict[str, Any]:
+    response = request_with_retry(
+        "GET",
+        f"{APOLLO_BASE_URL}/organizations/enrich",
+        headers=_headers(),
+        params=params,
+    )
+    data = safe_json(response)
+    debug_dump(debug_name, data)
+    return data
+
+
+def _unresolved_organization(
+    *,
+    domain: str,
+    name: str,
+    raw: Optional[Dict[str, Any]] = None,
+) -> OrgEnrichment:
+    """Preserve safe input identity when Apollo cannot enrich one company."""
+    return OrgEnrichment(
+        found=False,
+        name=name or None,
+        domain=_domain(domain) or None,
+        raw=raw,
+    )
+
+
 def enrich_organization(
     *,
     domain: str = "",
@@ -87,23 +118,90 @@ def enrich_organization(
     if not any((domain, name, website)):
         return OrgEnrichment(found=False)
 
+    normalized_domain = _domain(domain)
     params: Dict[str, str] = {}
-    if domain:
-        params["domain"] = _domain(domain)
+    if normalized_domain:
+        params["domain"] = normalized_domain
     if name:
         params["name"] = name
     if website:
         params["website"] = website
 
     try:
-        response = request_with_retry(
-            "GET",
-            f"{APOLLO_BASE_URL}/organizations/enrich",
-            headers=_headers(),
-            params=params,
+        data = _organization_enrichment_request(
+            params, debug_name="apollo_organization_enrich"
         )
-        data = safe_json(response)
-        debug_dump("apollo_organization_enrich", data)
+    except requests.HTTPError as exc:
+        status = exc.response.status_code if exc.response is not None else None
+        if status in {404, 422}:
+            # A company-level enrichment miss must not abort the whole daily run.
+            # When a multi-identifier request is rejected, retry once with the
+            # normalized domain only. This removes any stale/noisy name or website
+            # value while keeping the strongest company identifier.
+            if normalized_domain and params != {"domain": normalized_domain}:
+                logger.warning(
+                    "Apollo organization enrichment returned HTTP %s for %s; "
+                    "retrying once with domain only.",
+                    status,
+                    normalized_domain,
+                )
+                try:
+                    data = _organization_enrichment_request(
+                        {"domain": normalized_domain},
+                        debug_name="apollo_organization_enrich_domain_only",
+                    )
+                except requests.HTTPError as retry_exc:
+                    retry_status = (
+                        retry_exc.response.status_code
+                        if retry_exc.response is not None
+                        else None
+                    )
+                    if retry_status in {404, 422}:
+                        logger.warning(
+                            "Apollo organization enrichment unavailable for %s "
+                            "after domain-only retry (HTTP %s). Continuing with "
+                            "unknown firmographics and the input domain.",
+                            normalized_domain,
+                            retry_status,
+                        )
+                        return _unresolved_organization(
+                            domain=normalized_domain, name=name
+                        )
+                    logger.error(
+                        "Apollo organization enrichment failed for %s/%s: %s",
+                        domain,
+                        name,
+                        retry_exc,
+                    )
+                    raise
+                except Exception as retry_exc:
+                    logger.error(
+                        "Apollo organization enrichment failed for %s/%s: %s",
+                        domain,
+                        name,
+                        retry_exc,
+                    )
+                    raise
+            else:
+                logger.warning(
+                    "Apollo organization enrichment unavailable for %s/%s "
+                    "(HTTP %s). Continuing with unknown firmographics and the "
+                    "input domain.",
+                    normalized_domain or domain,
+                    name,
+                    status,
+                )
+                return _unresolved_organization(
+                    domain=normalized_domain or domain, name=name
+                )
+        else:
+            logger.error(
+                "Apollo organization enrichment failed for %s/%s: %s",
+                domain,
+                name,
+                exc,
+            )
+            raise
     except Exception as exc:
         logger.error("Apollo organization enrichment failed for %s/%s: %s", domain, name, exc)
         raise
