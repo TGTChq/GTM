@@ -17,11 +17,13 @@ JSearch
 
 ## Core Capabilities
 
-* Collects recent US job postings across TGTC target roles
-* Matches each posting to the most relevant role and campaign
-* Excludes staffing firms, out-of-scope industries, non-US roles, duplicates, CRM companies, and companies outside the target employee range
+* Collects recent US job postings across the centralized Intent 2.0 role catalog
+* Normalizes 100+ search titles into canonical roles, functions, and buyer hierarchies
+* Matches duplicate search results to the most specific relevant role and campaign
+* Excludes staffing firms, out-of-scope industries, explicit in-person/non-paying roles, non-US roles, duplicates, CRM companies, and companies outside the target employee range
 * Routes technical and GTM automation roles according to job-description signals
-* Identifies the most relevant hiring manager by function
+* Separates campaign function from hiring-manager routing so Data, IT, Finance, HR, Product, E-commerce, and other roles reach the right buyer
+* Identifies the most relevant hiring manager across all related openings in the same company/function
 * Uses Apollo and Hunter for contact enrichment
 * Generates concise, role-specific personalization from job-description signals
 * Groups related openings by company and functional bucket
@@ -89,7 +91,7 @@ pip install -r requirements.txt
 
 Create a local `.env` using `.env.example` as the reference.
 
-Run validation:
+Run validation (73 tests plus catalog-wide subtests):
 
 ```bash
 python -m unittest discover -s tests -v

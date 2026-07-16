@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 from typing import Dict, List
 
@@ -12,16 +13,34 @@ import requests
 import airtable_client
 import config
 from http_utils import request_with_retry, safe_json
+from role_catalog import canonical_role_for_search, get_function_bucket
 
 
 def _configured_campaign_ids() -> List[str]:
     values = {config.INSTANTLY_CAMPAIGN_ID}
     for base_env in config.CAMPAIGN_ENV_BY_BUCKET.values():
-        values.add(__import__("os").getenv(base_env, ""))
+        values.add(os.getenv(base_env, ""))
         for band in ("SMALL", "MID", "LARGE", "UNKNOWN"):
-            values.add(__import__("os").getenv(f"{base_env}_{band}", ""))
+            values.add(os.getenv(f"{base_env}_{band}", ""))
     return sorted(value for value in values if value)
 
+
+
+def _active_function_buckets() -> List[str]:
+    return sorted({
+        get_function_bucket(canonical_role_for_search(role)) for role in config.ROLES
+    })
+
+
+def _bucket_has_campaign(bucket: str) -> bool:
+    if config.INSTANTLY_CAMPAIGN_ID:
+        return True
+    base_env = config.CAMPAIGN_ENV_BY_BUCKET.get(bucket)
+    if not base_env:
+        return False
+    if os.getenv(base_env, ""):
+        return True
+    return any(os.getenv(f"{base_env}_{band}", "") for band in ("SMALL", "MID", "LARGE", "UNKNOWN"))
 
 def static_checks() -> Dict:
     errors: List[str] = []
@@ -42,6 +61,17 @@ def static_checks() -> Dict:
         warnings.append("VERIFY_WITH_HUNTER=1 but HUNTER_API_KEY is missing")
     if not _configured_campaign_ids():
         errors.append("No Instantly campaign ID is configured")
+    else:
+        uncovered_buckets = [
+            bucket for bucket in _active_function_buckets()
+            if not _bucket_has_campaign(bucket)
+        ]
+        if uncovered_buckets:
+            warnings.append(
+                "No Instantly campaign is configured for active role buckets: "
+                + ", ".join(uncovered_buckets)
+                + ". Leads can enter Airtable but cannot be enrolled until routing is added."
+            )
 
     crm = Path(config.CRM_EXCLUSION_FILE)
     if not crm.exists():

@@ -21,6 +21,8 @@ import re
 from dataclasses import dataclass
 from typing import Dict, Iterable, List, Pattern, Sequence, Tuple
 
+from role_catalog import get_fallback_focus
+
 
 @dataclass(frozen=True)
 class FocusSignal:
@@ -476,7 +478,7 @@ def _fallback_focus(job: Dict, matched_role: str) -> str:
         r"\b(ai|artificial intelligence|llm|agentic|ai[- ]powered)\b", text, re.I
     ):
         return "AI-powered GTM systems, workflow automation, and revenue operations"
-    return ROLE_FOCUS_FALLBACKS.get(matched_role, "")
+    return ROLE_FOCUS_FALLBACKS.get(matched_role) or get_fallback_focus(matched_role)
 
 
 def extract_role_focus(

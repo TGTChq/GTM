@@ -264,6 +264,40 @@ def is_us_job(job: Dict) -> Tuple[bool, str]:
     return False, "missing_us_signals"
 
 
+
+def is_explicitly_in_person(job: Dict) -> Tuple[bool, str]:
+    """Reject only postings with clear in-person requirements.
+
+    A missing/unknown remote flag is not enough to reject a role; those records
+    remain visible to the human reviewer. An explicit JSearch false flag or an
+    explicit onsite/hybrid phrase is treated as conclusive.
+    """
+    remote_flag = job.get("job_is_remote")
+    if remote_flag is True:
+        return False, ""
+    if remote_flag is False:
+        return True, "explicit_job_is_remote_false"
+
+    title = job.get("job_title") or ""
+    location = job.get("job_location") or ""
+    description = (job.get("job_description") or "")[:5000]
+    text = f"{title}\n{location}\n{description}"
+    for pattern in config.IN_PERSON_JOB_PATTERNS:
+        if re.search(pattern, text, re.I):
+            return True, f"explicit_in_person_signal:{pattern}"
+    return False, ""
+
+
+def is_non_paying_role(job: Dict) -> Tuple[bool, str]:
+    """Reject postings that explicitly state the role is unpaid/equity-only."""
+    title = job.get("job_title") or ""
+    description = (job.get("job_description") or "")[:5000]
+    text = f"{title}\n{description}"
+    for pattern in config.NON_PAYING_JOB_PATTERNS:
+        if re.search(pattern, text, re.I):
+            return True, f"non_paying_role:{pattern}"
+    return False, ""
+
 def _detect_company_column(headers: List[str]) -> Optional[str]:
     preferred = [
         "company", "company name", "employer", "employer name", "account",
@@ -372,6 +406,8 @@ def run_filter(
         "excluded_stale": 0,
         "excluded_staffing": 0,
         "excluded_industry": 0,
+        "excluded_in_person": 0,
+        "excluded_non_paying": 0,
         "excluded_non_us": 0,
         "excluded_crm": 0,
         "excluded_duplicate": 0,
@@ -383,6 +419,8 @@ def run_filter(
         ("excluded_stale", is_stale_job),
         ("excluded_staffing", is_staffing_company),
         ("excluded_industry", is_excluded_industry),
+        ("excluded_in_person", is_explicitly_in_person),
+        ("excluded_non_paying", is_non_paying_role),
         ("excluded_non_us", lambda job: (lambda ok, reason: (not ok, reason))(*is_us_job(job))),
         ("excluded_crm", lambda job: is_in_crm(job, crm_normalized, crm_compact)),
     ]

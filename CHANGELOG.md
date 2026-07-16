@@ -1,3 +1,17 @@
+# Intent-Based Outbound 2.0 — July Week 3
+
+- Added `role_catalog.py` as the single source of truth for 118 canonical target roles, function buckets, hiring-manager routing, aliases, and safe focus fallbacks.
+- Removed broad AI concepts (`AI Training`, `AI Transformation`) and roles that skew heavily in-person.
+- Kept `Graphic Designer` only under Marketing.
+- Added Finance, Operations, People/HR, Product, E-commerce, Data, IT, and Partnerships buyer hierarchies.
+- Separated campaign/function grouping from specialized hiring-manager routing.
+- Added explicit in-person and non-paying job filters plus audit leak checks.
+- Added global Senior, Event Marketing, and Field Marketing title exclusions.
+- Changed successful zero-result searches from failures into a separate market-observation metric.
+- Added specificity tie-breaking so a role such as `Tax Accountant` wins over the broader `Accountant` query.
+- Added campaign-routing configuration for the new functional buckets and setup warnings when a bucket lacks a campaign.
+- Added 11 new tests plus catalog-wide routing/fallback subtests; total suite: 73 passing tests.
+
 # Corrections made
 
 ## Pipeline integrity

@@ -19,7 +19,11 @@ import hunter_client as hunter
 from job_filter import extract_domain, normalize_text
 from job_signal import annotate_job
 from role_focus import extract_role_focus
-from role_mapping import get_bucket_name_for_job, get_target_titles_for_job
+from role_mapping import (
+    get_bucket_name_for_job,
+    get_hiring_manager_bucket_for_job,
+    get_target_titles_for_jobs,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -213,6 +217,9 @@ def _build_no_contact_lead(
     lead.update(
         {
             "_role_bucket": bucket,
+            "_hiring_manager_buckets": sorted({
+                get_hiring_manager_bucket_for_job(job) for job in bucket_jobs
+            }),
             "_step3_status": status,
             "_step3_reason": reason,
             "_company_criteria_reason": company_reason,
@@ -291,9 +298,7 @@ def process_company(company_jobs: List[Dict]) -> Tuple[List[Dict], Dict]:
             stats[f"bucket_{bucket}_not_found"] += 1
             continue
 
-        target_titles = get_target_titles_for_job(
-            primary, org.employee_count, bucket_override=bucket
-        )
+        target_titles = get_target_titles_for_jobs(bucket_jobs, org.employee_count)
         people = apollo.search_people_at_company(search_domain, target_titles)
         time.sleep(config.APOLLO_RATE_LIMIT_DELAY)
         candidate = pick_best_candidate(people, target_titles)
@@ -344,6 +349,9 @@ def process_company(company_jobs: List[Dict]) -> Tuple[List[Dict], Dict]:
         lead.update(
             {
                 "_role_bucket": bucket,
+                "_hiring_manager_buckets": sorted({
+                    get_hiring_manager_bucket_for_job(job) for job in bucket_jobs
+                }),
                 "_step3_status": "found" if found else "not_found",
                 "_step3_reason": "email_invalid" if confidence == "invalid" else ("contact_found" if found else "no_usable_email"),
                 "_company_criteria_reason": company_reason,

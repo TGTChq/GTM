@@ -10,6 +10,8 @@ from typing import Any, Dict
 
 from dotenv import load_dotenv
 
+from role_catalog import DEFAULT_SEARCH_ROLES
+
 BASE_DIR = Path(__file__).resolve().parent
 load_dotenv(BASE_DIR / ".env")
 
@@ -86,26 +88,20 @@ SEARCH_DELAY_SECONDS = _env_float("SEARCH_DELAY_SECONDS", 0.8)
 # conflicting dates remain eligible; the oldest parseable source date is used.
 MAX_JOB_AGE_DAYS = _env_int("MAX_JOB_AGE_DAYS", 30)
 
-ROLES = _env_json(
-    "ROLES_JSON",
-    [
-        "GTM Engineer",
-        "AI Engineer",
-        "Automation Specialist",
-        "Graphic Designer",
-        "Video Editor",
-        "Performance Marketing Manager",
-        "Customer Support",
-        "Customer Success Manager",
-    ],
-)
+ROLES = _env_json("ROLES_JSON", list(DEFAULT_SEARCH_ROLES))
 
+# Global title exclusions from Brett's Intent-Based Outbound 2.0 rules.
+# Phrase matching is word-boundary based in jsearch_scraper.py.
 EXCLUDED_TITLE_KEYWORDS = [
     "vp",
     "vice president",
     "director",
     "intern",
     "internship",
+    "senior",
+    "sr",
+    "event marketing",
+    "field marketing",
 ]
 
 # ---------- Health gates ----------
@@ -183,6 +179,11 @@ CAMPAIGN_ENV_BY_BUCKET = {
     "marketing": "INSTANTLY_CAMPAIGN_MARKETING",
     "customer_success": "INSTANTLY_CAMPAIGN_CUSTOMER_SUCCESS",
     "customer_support": "INSTANTLY_CAMPAIGN_CUSTOMER_SUPPORT",
+    "finance": "INSTANTLY_CAMPAIGN_FINANCE",
+    "operations": "INSTANTLY_CAMPAIGN_OPERATIONS",
+    "people_hr": "INSTANTLY_CAMPAIGN_PEOPLE_HR",
+    "product": "INSTANTLY_CAMPAIGN_PRODUCT",
+    "ecommerce": "INSTANTLY_CAMPAIGN_ECOMMERCE",
 }
 
 
@@ -208,6 +209,30 @@ def resolve_campaign_id(role_bucket: str, employee_count: int | None) -> str:
             return bucket_campaign
     return INSTANTLY_CAMPAIGN_ID
 
+
+# Explicit work-arrangement and compensation exclusions from the 2.0 brief.
+# Unknown work arrangements remain eligible for human review; only clear
+# in-person/non-paying evidence is rejected automatically.
+IN_PERSON_JOB_PATTERNS = [
+    r"\bon[- ]site\b",
+    r"\bonsite\b",
+    r"\bin[- ]person\b",
+    r"\bhybrid\b",
+    r"\boffice[- ]based\b",
+    r"\bwork from (the|our) office\b",
+    r"\bmust (be able to )?commute\b",
+    r"\brelocat(e|ion|required)\b",
+    r"\b[1-5] days? (a|per) week in (the )?office\b",
+]
+
+NON_PAYING_JOB_PATTERNS = [
+    r"\bunpaid\b",
+    r"\bvolunteer (role|position|opportunity)\b",
+    r"\bcommission[- ]only\b",
+    r"\bequity[- ]only\b",
+    r"\bno (financial )?compensation\b",
+    r"\bwithout (financial )?compensation\b",
+]
 
 # ---------- Filtering dictionaries ----------
 STAFFING_EMPLOYER_KEYWORDS = [

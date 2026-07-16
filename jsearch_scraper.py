@@ -15,6 +15,7 @@ from typing import Dict, List, Optional
 import config
 from http_utils import request_with_retry, safe_json
 from pipeline_state import SeenJobsRegistry
+from role_catalog import canonical_role_for_search, role_specificity
 from role_relevance import assess_role, normalize_relevance_score
 
 logger = logging.getLogger(__name__)
@@ -100,10 +101,13 @@ def run_daily_scrape(registry: Optional[SeenJobsRegistry] = None) -> ScrapeResul
 
     candidates_by_job_id: Dict[str, List[Dict]] = {}
     failed_roles: List[str] = []
+    zero_result_roles: List[str] = []
     raw_role_counts: Dict[str, int] = {}
+    canonical_roles = [canonical_role_for_search(role) for role in config.ROLES]
     stats = {
         "raw_role_counts": raw_role_counts,
-        "selected_role_counts": {role: 0 for role in config.ROLES},
+        "selected_role_counts": {role: 0 for role in dict.fromkeys(canonical_roles)},
+        "zero_result_roles": zero_result_roles,
         "excluded_by_seniority": 0,
         "excluded_role_mismatch": 0,
         "ambiguous_role_matches": 0,
@@ -112,19 +116,23 @@ def run_daily_scrape(registry: Optional[SeenJobsRegistry] = None) -> ScrapeResul
         "missing_job_id_skipped": 0,
     }
 
-    for role in config.ROLES:
-        logger.info("[%s] Searching JSearch...", role)
+    for search_role in config.ROLES:
+        canonical_role = canonical_role_for_search(search_role)
+        logger.info("[%s] Searching JSearch...", search_role)
         try:
-            raw_jobs = fetch_jobs_for_role(role)
-            logger.info("[%s] Fetched %d raw postings", role, len(raw_jobs))
+            raw_jobs = fetch_jobs_for_role(search_role)
+            logger.info("[%s] Fetched %d raw postings", search_role, len(raw_jobs))
         except Exception as exc:
-            logger.exception("[%s] Search failed: %s", role, exc)
+            logger.exception("[%s] Search failed: %s", search_role, exc)
             raw_jobs = []
-            failed_roles.append(role)
+            failed_roles.append(search_role)
 
-        raw_role_counts[role] = len(raw_jobs)
-        if not raw_jobs and role not in failed_roles:
-            failed_roles.append(role)
+        raw_role_counts[search_role] = len(raw_jobs)
+        # A successful query with zero matches is a valid market observation,
+        # not an API failure. Track it separately so a broad role catalog does
+        # not trip the production failure gate.
+        if not raw_jobs and search_role not in failed_roles:
+            zero_result_roles.append(search_role)
 
         for job in raw_jobs:
             job_id = _candidate_key(job)
@@ -138,9 +146,11 @@ def run_daily_scrape(registry: Optional[SeenJobsRegistry] = None) -> ScrapeResul
                 stats["excluded_by_seniority"] += 1
                 continue
 
-            assessment = assess_role(job, role)
+            assessment = assess_role(job, canonical_role)
             candidate = dict(job)
-            candidate["_matched_role"] = role
+            candidate["_matched_role"] = canonical_role
+            candidate["_search_role"] = search_role
+            candidate["_role_specificity"] = role_specificity(canonical_role)
             candidate["_role_relevance_status"] = assessment.status
             candidate["_role_relevance_points"] = assessment.score
             candidate["_role_relevance_score"] = normalize_relevance_score(assessment.score)
@@ -157,17 +167,23 @@ def run_daily_scrape(registry: Optional[SeenJobsRegistry] = None) -> ScrapeResul
             key=lambda item: (
                 item.get("_role_relevance_status") == "accept",
                 item.get("_role_relevance_score", 0),
+                item.get("_role_specificity", 0),
             ),
             reverse=True,
         )
         best = candidates[0]
-        best["_query_roles"] = [item["_matched_role"] for item in candidates]
+        best["_query_roles"] = list(dict.fromkeys(
+            item["_matched_role"] for item in candidates
+        ))
+        best["_query_search_titles"] = list(dict.fromkeys(
+            item.get("_search_role", item["_matched_role"]) for item in candidates
+        ))
         best["_query_role_scores"] = {
-            item["_matched_role"]: item.get("_role_relevance_score", 0)
+            item.get("_search_role", item["_matched_role"]): item.get("_role_relevance_score", 0)
             for item in candidates
         }
         best["_query_role_points"] = {
-            item["_matched_role"]: item.get("_role_relevance_points", 0)
+            item.get("_search_role", item["_matched_role"]): item.get("_role_relevance_points", 0)
             for item in candidates
         }
         if best.get("_role_relevance_status") == "reject":
@@ -209,7 +225,7 @@ def run_daily_scrape(registry: Optional[SeenJobsRegistry] = None) -> ScrapeResul
         )
     if len(set(failed_roles)) > config.MAX_ROLE_FAILURES:
         errors.append(
-            f"{len(set(failed_roles))} role searches failed/returned zero results "
+            f"{len(set(failed_roles))} role searches failed "
             f"(maximum {config.MAX_ROLE_FAILURES})"
         )
 
