@@ -39,6 +39,27 @@ class HttpRetryAfterGuardTests(unittest.TestCase):
         mocked_sleep.assert_not_called()
         self.assertEqual(mocked_request.call_count, 1)
 
+    @patch("http_utils.time.sleep")
+    @patch("http_utils.requests.request")
+    def test_monthly_quota_exhaustion_fails_fast_without_retry(
+        self, mocked_request, mocked_sleep
+    ):
+        mocked_request.return_value = _response(
+            429,
+            "You have exceeded the MONTHLY quota for Requests on your current plan, BASIC. "
+            "Upgrade your plan.",
+        )
+
+        with self.assertRaises(http_utils.QuotaExhaustedError):
+            http_utils.request_with_retry(
+                "GET",
+                "https://jsearch.p.rapidapi.com/search-v2",
+                max_retries=3,
+            )
+
+        mocked_sleep.assert_not_called()
+        self.assertEqual(mocked_request.call_count, 1)
+
 
 class ApolloCreditGuardTests(unittest.TestCase):
     @patch("apollo_client.request_with_retry")

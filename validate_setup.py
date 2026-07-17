@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 from typing import Dict, List
 
@@ -12,16 +13,34 @@ import requests
 import airtable_client
 import config
 from http_utils import request_with_retry, safe_json
+from role_catalog import canonical_role_for_search, get_function_bucket
 
 
 def _configured_campaign_ids() -> List[str]:
     values = {config.INSTANTLY_CAMPAIGN_ID}
     for base_env in config.CAMPAIGN_ENV_BY_BUCKET.values():
-        values.add(__import__("os").getenv(base_env, ""))
+        values.add(os.getenv(base_env, ""))
         for band in ("SMALL", "MID", "LARGE", "UNKNOWN"):
-            values.add(__import__("os").getenv(f"{base_env}_{band}", ""))
+            values.add(os.getenv(f"{base_env}_{band}", ""))
     return sorted(value for value in values if value)
 
+
+
+def _active_function_buckets() -> List[str]:
+    return sorted({
+        get_function_bucket(canonical_role_for_search(role)) for role in config.ROLES
+    })
+
+
+def _bucket_has_campaign(bucket: str) -> bool:
+    if config.INSTANTLY_CAMPAIGN_ID:
+        return True
+    base_env = config.CAMPAIGN_ENV_BY_BUCKET.get(bucket)
+    if not base_env:
+        return False
+    if os.getenv(base_env, ""):
+        return True
+    return any(os.getenv(f"{base_env}_{band}", "") for band in ("SMALL", "MID", "LARGE", "UNKNOWN"))
 
 def static_checks() -> Dict:
     errors: List[str] = []
@@ -40,8 +59,57 @@ def static_checks() -> Dict:
 
     if config.VERIFY_WITH_HUNTER and not config.HUNTER_API_KEY:
         warnings.append("VERIFY_WITH_HUNTER=1 but HUNTER_API_KEY is missing")
+
+    if config.JSEARCH_MAX_QUERIES_PER_RUN < 0:
+        errors.append("JSEARCH_MAX_QUERIES_PER_RUN cannot be negative")
+    elif config.JSEARCH_MAX_QUERIES_PER_RUN:
+        warnings.append(
+            "JSEARCH_MAX_QUERIES_PER_RUN is active and will truncate the complete "
+            f"role catalog to {config.JSEARCH_MAX_QUERIES_PER_RUN} queries per run"
+        )
+    if config.NUM_PAGES < 1:
+        errors.append("NUM_PAGES must be at least 1")
+    if config.JSEARCH_MAX_ESTIMATED_UNITS_PER_RUN < 0:
+        errors.append("JSEARCH_MAX_ESTIMATED_UNITS_PER_RUN cannot be negative")
+    scheduled_queries = (
+        min(len(config.ROLES), config.JSEARCH_MAX_QUERIES_PER_RUN)
+        if config.JSEARCH_MAX_QUERIES_PER_RUN
+        else len(config.ROLES)
+    )
+    estimated_units = scheduled_queries * max(1, config.NUM_PAGES)
+    if (
+        config.JSEARCH_MAX_ESTIMATED_UNITS_PER_RUN > 0
+        and estimated_units > config.JSEARCH_MAX_ESTIMATED_UNITS_PER_RUN
+    ):
+        errors.append(
+            "Estimated JSearch usage exceeds the configured per-run budget: "
+            f"{scheduled_queries} queries x {config.NUM_PAGES} pages = "
+            f"{estimated_units} units > "
+            f"{config.JSEARCH_MAX_ESTIMATED_UNITS_PER_RUN}. Set NUM_PAGES=1 "
+            "for the daily full catalog or intentionally raise the budget."
+        )
+    if config.JSEARCH_MIN_REMAINING_REQUESTS < 0:
+        errors.append("JSEARCH_MIN_REMAINING_REQUESTS cannot be negative")
+    if not 0 <= config.MAX_ROLE_FAILURE_RATE <= 1:
+        errors.append("MAX_ROLE_FAILURE_RATE must be between 0 and 1")
+    if config.JSEARCH_STOP_ON_LOW_QUOTA and config.JSEARCH_MIN_REMAINING_REQUESTS <= 0:
+        warnings.append(
+            "JSEARCH_STOP_ON_LOW_QUOTA=1 has no effect unless "
+            "JSEARCH_MIN_REMAINING_REQUESTS is greater than zero"
+        )
     if not _configured_campaign_ids():
         errors.append("No Instantly campaign ID is configured")
+    else:
+        uncovered_buckets = [
+            bucket for bucket in _active_function_buckets()
+            if not _bucket_has_campaign(bucket)
+        ]
+        if uncovered_buckets:
+            warnings.append(
+                "No Instantly campaign is configured for active role buckets: "
+                + ", ".join(uncovered_buckets)
+                + ". Leads can enter Airtable but cannot be enrolled until routing is added."
+            )
 
     crm = Path(config.CRM_EXCLUSION_FILE)
     if not crm.exists():

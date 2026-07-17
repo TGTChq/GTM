@@ -13,7 +13,7 @@ Create a table named `Leads` (or set `AIRTABLE_TABLE_NAME` to your table name) w
 | Focus Quality | Single select | `specific`, `manual_required` |
 | Focus Evidence | Long text | Exact JD signals that produced the suggested focus |
 | Matched Role | Single select or text | One of the configured target roles |
-| Role Bucket | Single select or text | `gtm_revenue`, `engineering`, `marketing`, `customer_success`, `customer_support` |
+| Role Bucket | Single select or text | `gtm_revenue`, `engineering`, `marketing`, `customer_success`, `customer_support`, `finance`, `operations`, `people_hr`, `product`, `ecommerce` |
 | Job URL | URL | |
 | Job Source | Single line text | |
 | Posted At | Single line text or date | Single line text is safest across source formats |
@@ -59,4 +59,4 @@ The code does not auto-create schema fields. Airtable's normal records API will 
 
 The phrase is designed to follow the words **“focused on”**, so do not add a period, a leading “focused on,” or a full sentence. Preserve acronyms and product names (`AI`, `CRM`, `LLM`, `APIs`, `HubSpot`, etc.).
 
-If the extractor cannot find enough explicit evidence, it leaves `Role Focus` blank and sets `Focus Quality = manual_required`. Fill or edit the field before changing `Status` to `Approved`. The Instantly worker refuses to enroll an approved record that is missing `Role Focus`.
+If the extractor cannot find enough explicit evidence, it inserts a controlled role-level fallback and sets `Focus Quality = manual_required`. Review or edit that fallback before changing `Status` to `Approved`. The Instantly worker refuses to enroll an approved record that is missing `Role Focus`.

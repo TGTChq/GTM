@@ -17,11 +17,13 @@ JSearch
 
 ## Core Capabilities
 
-* Collects recent US job postings across TGTC target roles
-* Matches each posting to the most relevant role and campaign
-* Excludes staffing firms, out-of-scope industries, non-US roles, duplicates, CRM companies, and companies outside the target employee range
+* Collects recent US job postings across the centralized Intent 2.0 role catalog
+* Normalizes 100+ search titles into canonical roles, functions, and buyer hierarchies
+* Matches duplicate search results to the most specific relevant role and campaign
+* Excludes staffing firms, out-of-scope industries, explicit in-person/non-paying roles, non-US roles, duplicates, CRM companies, and companies outside the target employee range
 * Routes technical and GTM automation roles according to job-description signals
-* Identifies the most relevant hiring manager by function
+* Separates campaign function from hiring-manager routing so Data, IT, Finance, HR, Product, E-commerce, and other roles reach the right buyer
+* Identifies the most relevant hiring manager across all related openings in the same company/function
 * Uses Apollo and Hunter for contact enrichment
 * Generates concise, role-specific personalization from job-description signals
 * Groups related openings by company and functional bucket
@@ -89,7 +91,7 @@ pip install -r requirements.txt
 
 Create a local `.env` using `.env.example` as the reference.
 
-Run validation:
+Run validation (102 tests, including live-data regression hardening):
 
 ```bash
 python -m unittest discover -s tests -v
@@ -113,3 +115,34 @@ The following files and directories are excluded from version control:
 * raw, filtered, and enriched run data
 
 Production credentials must be stored only in Railway environment variables.
+
+### JSearch smoke-test semantics
+
+Limited `run_scrape_test.py` runs validate API/auth/quota health even when a valid query produces zero selected jobs. Full-catalog runs still enforce production yield and role-distribution gates. Omitting `--max-queries` honors `JSEARCH_MAX_QUERIES_PER_RUN`; pass `--max-queries 0` to force the complete catalog.
+
+
+## Offline filter replay and quota-safe JSearch operation
+
+The daily 118-role catalog is designed to run with one JSearch page per role:
+
+```env
+NUM_PAGES=1
+JSEARCH_MAX_ESTIMATED_UNITS_PER_RUN=150
+JSEARCH_STOP_ON_LOW_QUOTA=1
+JSEARCH_MIN_REMAINING_REQUESTS=500
+```
+
+The scraper estimates request units before its first network call. A 118-role,
+three-page run estimates 354 units and is blocked by the default 150-unit guard.
+Hard monthly/subscription quota responses also abort immediately instead of
+retrying every remaining role.
+
+Saved JSearch data can be re-filtered without any external calls:
+
+```bash
+python run_filter_replay.py --input data/raw/jobs_YYYY-MM-DD.json
+```
+
+The replay writes accepted/rejected JSON, a role-level CSV, and a quality report
+under `data/replay/`. It does not call JSearch, Apollo, Hunter, Airtable, or
+Instantly.

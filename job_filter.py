@@ -40,6 +40,12 @@ class FilterResult:
     errors: List[str] = field(default_factory=list)
 
 
+@dataclass(frozen=True)
+class WorkArrangementEvidence:
+    status: str
+    reason: str
+
+
 def normalize_text(value: str) -> str:
     if not value:
         return ""
@@ -149,11 +155,13 @@ def is_staffing_company(job: Dict) -> Tuple[bool, str]:
     employer_norm = normalize_text(employer)
 
     for marketplace in config.FREELANCE_MARKETPLACE_EMPLOYERS:
-        if normalize_text(marketplace) in employer_norm:
+        marketplace_norm = normalize_text(marketplace)
+        if employer_norm == marketplace_norm or _contains_keyword(employer_norm, marketplace_norm):
             return True, f"freelance_marketplace:{marketplace}"
 
     for known in config.KNOWN_STAFFING_EMPLOYERS:
-        if normalize_text(known) in employer_norm:
+        known_norm = normalize_text(known)
+        if employer_norm == known_norm or _contains_keyword(employer_norm, known_norm):
             return True, f"known_staffing_employer:{known}"
 
     for keyword in config.STAFFING_EMPLOYER_KEYWORDS:
@@ -172,7 +180,13 @@ def is_staffing_company(job: Dict) -> Tuple[bool, str]:
         if normalized_phrase in description:
             # Strong first-person phrases are enough; generic signals require a vague employer.
             is_first_person = normalized_phrase.startswith(("we are", "our ", "we place", "we connect"))
-            if is_first_person or employer_is_vague or normalized_phrase.startswith("on behalf"):
+            is_explicit_intermediary = normalized_phrase in {"as an agency worker"}
+            if (
+                is_first_person
+                or is_explicit_intermediary
+                or employer_is_vague
+                or normalized_phrase.startswith("on behalf")
+            ):
                 return True, f"staffing_phrase_in_description:{phrase}"
 
     return False, ""
@@ -183,8 +197,13 @@ def is_excluded_industry(job: Dict) -> Tuple[bool, str]:
         return False, ""
 
     employer_norm = normalize_text(job.get("employer_name", "") or "")
+    title_norm = normalize_text(job.get("job_title", "") or "")
     website = (job.get("employer_website") or "").lower()
     apply_domain = extract_domain(job.get("job_apply_link") or "")
+
+    for keyword in config.EXCLUDED_INDUSTRY_JOB_TITLE_KEYWORDS:
+        if _contains_keyword(title_norm, keyword):
+            return True, f"excluded_industry_job_title:{keyword}"
 
     for keyword in config.EXCLUDED_INDUSTRY_EMPLOYER_KEYWORDS:
         if _contains_keyword(employer_norm, keyword):
@@ -198,6 +217,11 @@ def is_excluded_industry(job: Dict) -> Tuple[bool, str]:
     for keyword in config.EXCLUDED_MEDIA_PRODUCTION_KEYWORDS:
         if _contains_keyword(employer_norm, keyword):
             return True, f"excluded_industry_media_production:{keyword}"
+
+    description = (job.get("job_description") or "")[:3000]
+    for pattern in config.EXCLUDED_INDUSTRY_DESCRIPTION_PATTERNS:
+        if re.search(pattern, description, re.I):
+            return True, f"excluded_industry_description:{pattern}"
 
     return False, ""
 
@@ -217,6 +241,15 @@ def _coordinates_are_us(job: Dict) -> bool:
 
 def is_us_job(job: Dict) -> Tuple[bool, str]:
     apply_link = (job.get("job_apply_link") or "").lower()
+    eligibility_text = "\n".join([
+        job.get("job_title") or "",
+        job.get("job_location") or "",
+        (job.get("job_description") or "")[:4000],
+    ])
+    for pattern in config.FOREIGN_ONLY_ELIGIBILITY_PATTERNS:
+        if re.search(pattern, eligibility_text, re.I):
+            return False, f"foreign_only_eligibility:{pattern}"
+
     for country_slug in config.FOREIGN_COUNTRY_URL_SLUGS:
         if re.search(r"--" + re.escape(country_slug) + r"--", apply_link, re.I):
             return False, f"non_us_apply_link_slug:{country_slug}"
@@ -263,6 +296,92 @@ def is_us_job(job: Dict) -> Tuple[bool, str]:
 
     return False, "missing_us_signals"
 
+
+
+def classify_work_arrangement(job: Dict) -> WorkArrangementEvidence:
+    """Resolve work arrangement from high-confidence text before provider flags.
+
+    JSearch sometimes marks an explicitly remote title as ``job_is_remote=False``.
+    Conversely, a true flag can coexist with a hybrid or onsite title. Title and
+    location requirements therefore have the highest precedence, followed by
+    precise requirement language in the description, explicit remote language,
+    and finally the provider flag.
+    """
+    title_location = "\n".join([
+        job.get("job_title") or "",
+        job.get("job_location") or "",
+    ])
+    description = (job.get("job_description") or "")[:6000]
+
+    for pattern in config.IN_PERSON_TITLE_LOCATION_PATTERNS:
+        if re.search(pattern, title_location, re.I):
+            return WorkArrangementEvidence(
+                "in_person", f"in_person_title_or_location:{pattern}"
+            )
+
+    for pattern in config.IN_PERSON_DESCRIPTION_PATTERNS:
+        if re.search(pattern, description, re.I):
+            return WorkArrangementEvidence(
+                "in_person", f"required_in_person_description:{pattern}"
+            )
+
+    for pattern in config.REMOTE_TITLE_LOCATION_PATTERNS:
+        if re.search(pattern, title_location, re.I):
+            return WorkArrangementEvidence(
+                "remote", f"remote_title_or_location:{pattern}"
+            )
+
+    for pattern in config.REMOTE_DESCRIPTION_PATTERNS:
+        if re.search(pattern, description, re.I):
+            return WorkArrangementEvidence(
+                "remote", f"remote_description:{pattern}"
+            )
+
+    remote_flag = job.get("job_is_remote")
+    if remote_flag is True:
+        return WorkArrangementEvidence("remote", "jsearch_remote_true")
+    if remote_flag is False:
+        return WorkArrangementEvidence(
+            "in_person", "jsearch_remote_false_without_remote_evidence"
+        )
+    return WorkArrangementEvidence("unknown", "missing_work_arrangement_evidence")
+
+
+def is_explicitly_in_person(job: Dict) -> Tuple[bool, str]:
+    evidence = classify_work_arrangement(job)
+    if evidence.status == "in_person":
+        return True, evidence.reason
+    return False, ""
+
+
+
+def is_obvious_role_mismatch(job: Dict) -> Tuple[bool, str]:
+    """Reject high-confidence catalog leakage that should never reach enrichment."""
+    matched_role = job.get("_matched_role") or ""
+    if matched_role not in {"Automation Specialist", "AI Automation Engineer"}:
+        return False, ""
+    text = "\n".join([
+        job.get("job_title") or "",
+        (job.get("job_description") or "")[:6000],
+    ])
+    patterns = [
+        r"\b(?:industrial|manufacturing) automation\b",
+        r"\b(?:plc|scada|controls engineer|instrumentation)\b",
+    ]
+    for pattern in patterns:
+        if re.search(pattern, text, re.I):
+            return True, f"obvious_role_mismatch:{pattern}"
+    return False, ""
+
+def is_non_paying_role(job: Dict) -> Tuple[bool, str]:
+    """Reject postings that explicitly state the role is unpaid/equity-only."""
+    title = job.get("job_title") or ""
+    description = (job.get("job_description") or "")[:5000]
+    text = f"{title}\n{description}"
+    for pattern in config.NON_PAYING_JOB_PATTERNS:
+        if re.search(pattern, text, re.I):
+            return True, f"non_paying_role:{pattern}"
+    return False, ""
 
 def _detect_company_column(headers: List[str]) -> Optional[str]:
     preferred = [
@@ -355,6 +474,7 @@ def find_latest_raw_file() -> str:
 def run_filter(
     input_path: Optional[str] = None,
     registry: Optional[SeenJobsRegistry] = None,
+    output_dir: Optional[str] = None,
 ) -> FilterResult:
     input_path = input_path or find_latest_raw_file()
     registry = registry or SeenJobsRegistry()
@@ -372,6 +492,9 @@ def run_filter(
         "excluded_stale": 0,
         "excluded_staffing": 0,
         "excluded_industry": 0,
+        "excluded_role_mismatch": 0,
+        "excluded_in_person": 0,
+        "excluded_non_paying": 0,
         "excluded_non_us": 0,
         "excluded_crm": 0,
         "excluded_duplicate": 0,
@@ -383,45 +506,56 @@ def run_filter(
         ("excluded_stale", is_stale_job),
         ("excluded_staffing", is_staffing_company),
         ("excluded_industry", is_excluded_industry),
+        ("excluded_role_mismatch", is_obvious_role_mismatch),
+        ("excluded_in_person", is_explicitly_in_person),
+        ("excluded_non_paying", is_non_paying_role),
         ("excluded_non_us", lambda job: (lambda ok, reason: (not ok, reason))(*is_us_job(job))),
         ("excluded_crm", lambda job: is_in_crm(job, crm_normalized, crm_compact)),
     ]
 
     for job in jobs:
+        arrangement = classify_work_arrangement(job)
+        candidate = {
+            **job,
+            "_work_arrangement": arrangement.status,
+            "_work_arrangement_reason": arrangement.reason,
+        }
         rejected_reason = ""
         rejected_stat = ""
         for stat_name, check in checks:
-            matched, reason = check(job)
+            matched, reason = check(candidate)
             if matched:
                 rejected_stat = stat_name
                 rejected_reason = reason
                 break
         if rejected_reason:
             stats[rejected_stat] += 1
-            rejected.append({**job, "_filter_reason": rejected_reason})
+            rejected.append({**candidate, "_filter_reason": rejected_reason})
             continue
 
-        key = dedup_key(job)
+        key = dedup_key(candidate)
         if not all(key):
-            rejected.append({**job, "_filter_reason": "missing_company_or_title"})
+            rejected.append({**candidate, "_filter_reason": "missing_company_or_title"})
             stats["excluded_duplicate"] += 1
             continue
         if key in seen_dedup_keys:
             stats["excluded_duplicate"] += 1
-            rejected.append({**job, "_filter_reason": "duplicate_company_title_in_run"})
+            rejected.append({**candidate, "_filter_reason": "duplicate_company_title_in_run"})
             continue
         if registry.has_dedup_key(key):
             stats["excluded_previously_seen"] += 1
-            rejected.append({**job, "_filter_reason": "previously_seen_company_title"})
+            rejected.append({**candidate, "_filter_reason": "previously_seen_company_title"})
             continue
 
         seen_dedup_keys.add(key)
-        kept.append(job)
+        kept.append(candidate)
         stats["kept"] += 1
 
     stamp = datetime.now().strftime("%Y-%m-%d")
-    output_path = str(Path(config.FILTERED_OUTPUT_DIR) / f"jobs_filtered_{stamp}.json")
-    rejected_path = str(Path(config.FILTERED_OUTPUT_DIR) / f"jobs_rejected_{stamp}.json")
+    destination = Path(output_dir or config.FILTERED_OUTPUT_DIR)
+    destination.mkdir(parents=True, exist_ok=True)
+    output_path = str(destination / f"jobs_filtered_{stamp}.json")
+    rejected_path = str(destination / f"jobs_rejected_{stamp}.json")
     Path(output_path).write_text(
         json.dumps({
             "filter_date": datetime.now().isoformat(),

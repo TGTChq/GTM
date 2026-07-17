@@ -10,6 +10,8 @@ import re
 from dataclasses import dataclass
 from typing import Dict, Iterable, List, Pattern
 
+from role_catalog import canonical_role_for_search, get_role_definition
+
 
 @dataclass(frozen=True)
 class RoleAssessment:
@@ -170,10 +172,67 @@ def _matches(patterns: List[Pattern[str]], text: str) -> List[str]:
     return [pattern.pattern for pattern in patterns if pattern.search(text)]
 
 
-def assess_role(job: Dict, target_role: str) -> RoleAssessment:
-    rules = RULES.get(target_role)
-    if not rules:
+def _normalized_title(value: str) -> str:
+    value = re.sub(r"[^a-z0-9]+", " ", (value or "").lower())
+    return re.sub(r"\s+", " ", value).strip()
+
+
+def _phrase_pattern(value: str) -> Pattern[str]:
+    tokens = [re.escape(token) for token in _normalized_title(value).split()]
+    # Permit common punctuation/hyphen variants between title tokens.
+    return re.compile(r"\b" + r"[\s\-/&]+".join(tokens) + r"\b", re.I)
+
+
+def _assess_catalog_role(job: Dict, target_role: str) -> RoleAssessment:
+    definition = get_role_definition(target_role)
+    if not definition:
         return RoleAssessment("review", 0, ["no_role_rules"])
+
+    title = (job.get("job_title") or "").strip()
+    description = (job.get("job_description") or "")[:12000]
+    title_normalized = _normalized_title(title)
+    full_text = f"{title}\n{description}"
+
+    term_patterns = [(term, _phrase_pattern(term)) for term in definition.match_terms]
+    exact_title = any(title_normalized == _normalized_title(term) for term, _ in term_patterns)
+    strong_title = [term for term, pattern in term_patterns if pattern.search(title)]
+    strong_anywhere = [term for term, pattern in term_patterns if pattern.search(full_text)]
+    context_patterns = _compile(definition.context_patterns)
+    context = _matches(context_patterns, full_text)
+    negative_patterns = _compile(definition.negative_patterns)
+    negative = _matches(negative_patterns, full_text)
+
+    if negative:
+        return RoleAssessment("reject", -7, ["catalog_negative_signal"])
+
+    score = 0
+    reasons: List[str] = []
+    if exact_title:
+        score += 8
+        reasons.append("exact_catalog_title_match")
+    elif strong_title:
+        score += 5
+        reasons.append("strong_catalog_title_match")
+    elif strong_anywhere:
+        score += 2
+        reasons.append("catalog_description_match")
+
+    if context:
+        score += min(3, len(context))
+        reasons.append(f"context_matches:{min(3, len(context))}")
+
+    if score >= 5:
+        return RoleAssessment("accept", score, reasons)
+    if score >= 1:
+        return RoleAssessment("review", score, reasons)
+    return RoleAssessment("reject", score, reasons or ["insufficient_role_evidence"])
+
+
+def assess_role(job: Dict, target_role: str) -> RoleAssessment:
+    canonical_role = canonical_role_for_search(target_role)
+    rules = RULES.get(canonical_role)
+    if not rules:
+        return _assess_catalog_role(job, canonical_role)
 
     title = (job.get("job_title") or "").strip()
     description = (job.get("job_description") or "")[:12000]

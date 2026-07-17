@@ -1,26 +1,34 @@
-"""Maps target roles to the most likely functional hiring managers.
+"""Map TGTC target roles to campaign functions and likely hiring managers.
 
-Automation Specialist is routed dynamically because the same title can describe
-very different jobs:
-- GTM/revenue automation -> CRO / RevOps leadership
-- technical/AI automation -> CTO / Engineering leadership
+Intent-Based Outbound 2.0 separates two concepts that used to be conflated:
+
+- function bucket: how roles are grouped for one account-level campaign/shortlist;
+- hiring-manager bucket: which leadership hierarchy Apollo should search.
+
+For example, Data Analyst belongs to the broader Engineering/Data/IT campaign
+function but should prioritize Data leadership rather than a generic VP Eng.
 """
 
 from __future__ import annotations
 
 import re
-from typing import Dict, List
+from typing import Dict, Iterable, List
 
+from role_catalog import (
+    ROLE_DEFINITIONS,
+    get_function_bucket,
+    get_hiring_manager_bucket,
+)
+
+
+# Backward-compatible public mapping used by tests and reporting.
 ROLE_TO_BUCKET: Dict[str, str] = {
-    "GTM Engineer": "gtm_revenue",
-    "AI Engineer": "engineering",
-    "Automation Specialist": "engineering",  # default; job-aware routing may override
-    "Graphic Designer": "marketing",
-    "Video Editor": "marketing",
-    "Performance Marketing Manager": "marketing",
-    "Customer Success Manager": "customer_success",
-    "Customer Support": "customer_support",
+    role: definition.function_bucket for role, definition in ROLE_DEFINITIONS.items()
 }
+ROLE_TO_HIRING_MANAGER_BUCKET: Dict[str, str] = {
+    role: definition.hiring_manager_bucket for role, definition in ROLE_DEFINITIONS.items()
+}
+
 
 BUCKET_TITLES: Dict[str, List[str]] = {
     "gtm_revenue": [
@@ -45,6 +53,34 @@ BUCKET_TITLES: Dict[str, List[str]] = {
         "Head of Engineering",
         "Head of AI",
         "VP AI",
+        "Founder",
+        "Co-Founder",
+        "CEO",
+    ],
+    "data": [
+        "Chief Data Officer",
+        "VP Data",
+        "VP of Data",
+        "Head of Data",
+        "Head of Analytics",
+        "VP Analytics",
+        "CTO",
+        "VP Engineering",
+        "VP of Engineering",
+        "Founder",
+        "Co-Founder",
+        "CEO",
+    ],
+    "it": [
+        "CIO",
+        "Chief Information Officer",
+        "VP Information Technology",
+        "VP of Information Technology",
+        "VP IT",
+        "Head of IT",
+        "Head of Information Technology",
+        "CTO",
+        "Chief Technology Officer",
         "Founder",
         "Co-Founder",
         "CEO",
@@ -81,13 +117,93 @@ BUCKET_TITLES: Dict[str, List[str]] = {
         "Head of Support",
         "Head of Customer Experience",
         "VP Customer Experience",
+        "Chief Customer Officer",
         "COO",
         "Chief Operating Officer",
         "Founder",
         "Co-Founder",
         "CEO",
     ],
+    "finance": [
+        "CFO",
+        "Chief Financial Officer",
+        "VP Finance",
+        "VP of Finance",
+        "Head of Finance",
+        "Controller",
+        "Corporate Controller",
+        "COO",
+        "Chief Operating Officer",
+        "Founder",
+        "Co-Founder",
+        "CEO",
+    ],
+    "operations": [
+        "COO",
+        "Chief Operating Officer",
+        "VP Operations",
+        "VP of Operations",
+        "Head of Operations",
+        "Chief of Staff",
+        "Founder",
+        "Co-Founder",
+        "CEO",
+    ],
+    "people_hr": [
+        "CHRO",
+        "Chief Human Resources Officer",
+        "Chief People Officer",
+        "VP People",
+        "VP of People",
+        "VP Human Resources",
+        "VP of Human Resources",
+        "Head of People",
+        "Head of Talent Acquisition",
+        "Founder",
+        "Co-Founder",
+        "CEO",
+    ],
+    "product": [
+        "Chief Product Officer",
+        "CPO",
+        "VP Product",
+        "VP of Product",
+        "Head of Product",
+        "Head of Design",
+        "VP Design",
+        "CTO",
+        "Founder",
+        "Co-Founder",
+        "CEO",
+    ],
+    "ecommerce": [
+        "VP Ecommerce",
+        "VP of Ecommerce",
+        "Head of Ecommerce",
+        "Head of E-commerce",
+        "CMO",
+        "Chief Marketing Officer",
+        "VP Marketing",
+        "COO",
+        "Founder",
+        "Co-Founder",
+        "CEO",
+    ],
+    "partnerships": [
+        "VP Partnerships",
+        "VP of Partnerships",
+        "Head of Partnerships",
+        "Chief Business Officer",
+        "VP Business Development",
+        "Head of Business Development",
+        "Chief Revenue Officer",
+        "CRO",
+        "Founder",
+        "Co-Founder",
+        "CEO",
+    ],
 }
+
 
 _GTM_SYSTEMS_TITLES = [
     "Head of GTM Systems",
@@ -96,23 +212,17 @@ _GTM_SYSTEMS_TITLES = [
     "VP of Revenue Systems",
     "Head of Business Systems",
 ]
-
 _GTM_SALES_OPS_TITLES = [
     "Head of Sales Operations",
     "VP Sales Operations",
     "VP of Sales Operations",
 ]
-
 _GTM_MARKETING_OPS_TITLES = [
     "Head of Marketing Operations",
     "VP Marketing Operations",
     "VP of Marketing Operations",
 ]
-
-_GTM_OPERATIONS_FALLBACK_TITLES = [
-    "COO",
-    "Chief Operating Officer",
-]
+_GTM_OPERATIONS_FALLBACK_TITLES = ["COO", "Chief Operating Officer"]
 
 _GTM_SYSTEMS_PATTERNS = [
     re.compile(pattern, re.I)
@@ -125,7 +235,6 @@ _GTM_SYSTEMS_PATTERNS = [
         r"\bsystems integration\b",
     )
 ]
-
 _GTM_SALES_OPS_PATTERNS = [
     re.compile(pattern, re.I)
     for pattern in (
@@ -136,7 +245,6 @@ _GTM_SALES_OPS_PATTERNS = [
         r"\bsales process\b",
     )
 ]
-
 _GTM_MARKETING_OPS_PATTERNS = [
     re.compile(pattern, re.I)
     for pattern in (
@@ -147,18 +255,6 @@ _GTM_MARKETING_OPS_PATTERNS = [
         r"\battribution\b",
     )
 ]
-
-
-def _dedupe_titles(titles: List[str]) -> List[str]:
-    seen = set()
-    result: List[str] = []
-    for title in titles:
-        key = title.lower().strip()
-        if key not in seen:
-            seen.add(key)
-            result.append(title)
-    return result
-
 
 _AUTOMATION_GTM_PATTERNS = [
     re.compile(pattern, re.I)
@@ -175,7 +271,6 @@ _AUTOMATION_GTM_PATTERNS = [
         r"\bsales (operations|systems|automation)\b",
     )
 ]
-
 _AUTOMATION_TECH_PATTERNS = [
     re.compile(pattern, re.I)
     for pattern in (
@@ -193,26 +288,55 @@ _AUTOMATION_TECH_PATTERNS = [
 ]
 
 
+def _dedupe_titles(titles: Iterable[str]) -> List[str]:
+    seen = set()
+    result: List[str] = []
+    for title in titles:
+        key = title.lower().strip()
+        if key not in seen:
+            seen.add(key)
+            result.append(title)
+    return result
+
+
+def _promote_founders(titles: List[str], employee_count: int | None) -> List[str]:
+    if employee_count is None or employee_count >= 75:
+        return titles
+    founder_titles = ["Founder", "Co-Founder", "CEO"]
+    return founder_titles + [title for title in titles if title not in founder_titles]
+
+
 def get_bucket_name(matched_role: str) -> str:
-    """Static bucket lookup; use get_bucket_name_for_job when a JD is available."""
-    return ROLE_TO_BUCKET.get(matched_role, "gtm_revenue")
+    """Return the campaign/function bucket for a canonical role."""
+    return get_function_bucket(matched_role)
 
 
-def get_bucket_name_for_job(job: Dict) -> str:
-    """Route an Automation Specialist based on explicit JD signals."""
-    matched_role = job.get("_matched_role", "")
-    if matched_role != "Automation Specialist":
-        return get_bucket_name(matched_role)
+def get_hiring_manager_bucket_name(matched_role: str) -> str:
+    """Return the buyer-title hierarchy bucket for a canonical role."""
+    return get_hiring_manager_bucket(matched_role)
 
+
+def _automation_is_gtm(job: Dict) -> bool:
     text = f"{job.get('job_title') or ''}\n{job.get('job_description') or ''}"[:16000]
     gtm_score = sum(bool(pattern.search(text)) for pattern in _AUTOMATION_GTM_PATTERNS)
     technical_score = sum(bool(pattern.search(text)) for pattern in _AUTOMATION_TECH_PATTERNS)
+    return gtm_score >= 1 and gtm_score > technical_score
 
-    # A single explicit GTM signal is enough when no stronger technical signal
-    # exists; otherwise technical/engineering remains the conservative default.
-    if gtm_score >= 1 and gtm_score > technical_score:
+
+def get_bucket_name_for_job(job: Dict) -> str:
+    """Return function bucket, with context-aware Automation Specialist routing."""
+    matched_role = job.get("_matched_role", "")
+    if matched_role == "Automation Specialist" and _automation_is_gtm(job):
         return "gtm_revenue"
-    return "engineering"
+    return get_bucket_name(matched_role)
+
+
+def get_hiring_manager_bucket_for_job(job: Dict) -> str:
+    """Return likely buyer hierarchy, with context-aware automation routing."""
+    matched_role = job.get("_matched_role", "")
+    if matched_role == "Automation Specialist" and _automation_is_gtm(job):
+        return "gtm_revenue"
+    return get_hiring_manager_bucket_name(matched_role)
 
 
 def get_target_titles(
@@ -220,26 +344,13 @@ def get_target_titles(
     employee_count: int | None = None,
     bucket_override: str | None = None,
 ) -> List[str]:
-    """Return ordered titles; founder titles are promoted for small companies."""
-    bucket = bucket_override or get_bucket_name(matched_role)
-    titles = list(BUCKET_TITLES[bucket])
-    if employee_count is not None and employee_count < 75:
-        founder_titles = ["Founder", "Co-Founder", "CEO"]
-        titles = founder_titles + [title for title in titles if title not in founder_titles]
-    return titles
+    """Return ordered hiring-manager titles for one canonical role."""
+    bucket = bucket_override or get_hiring_manager_bucket_name(matched_role)
+    titles = list(BUCKET_TITLES.get(bucket, BUCKET_TITLES["gtm_revenue"]))
+    return _promote_founders(titles, employee_count)
 
-def get_target_titles_for_job(
-    job: Dict,
-    employee_count: int | None = None,
-    bucket_override: str | None = None,
-) -> List[str]:
-    """Return context-aware hiring-manager titles for a specific posting."""
-    matched_role = job.get("_matched_role", "")
-    bucket = bucket_override or get_bucket_name_for_job(job)
-    base = get_target_titles(matched_role, employee_count, bucket_override=bucket)
-    if bucket != "gtm_revenue":
-        return base
 
+def _contextual_gtm_titles(job: Dict) -> List[str]:
     text = f"{job.get('job_title') or ''}\n{job.get('job_description') or ''}"[:16000]
     contextual: List[str] = []
     if any(pattern.search(text) for pattern in _GTM_SYSTEMS_PATTERNS):
@@ -248,12 +359,37 @@ def get_target_titles_for_job(
         contextual.extend(_GTM_SALES_OPS_TITLES)
     if any(pattern.search(text) for pattern in _GTM_MARKETING_OPS_PATTERNS):
         contextual.extend(_GTM_MARKETING_OPS_TITLES)
+    return contextual
 
-    # Operations leadership is a last-resort functional owner, not the first
-    # choice. It is appended after Brett's preferred CRO/RevOps/GTM titles.
-    combined = _dedupe_titles(contextual + base + _GTM_OPERATIONS_FALLBACK_TITLES)
-    if employee_count is not None and employee_count < 75:
-        founder_titles = ["Founder", "Co-Founder", "CEO"]
-        combined = founder_titles + [title for title in combined if title not in founder_titles]
-    return combined
 
+def get_target_titles_for_job(
+    job: Dict,
+    employee_count: int | None = None,
+    bucket_override: str | None = None,
+) -> List[str]:
+    """Return context-aware hiring-manager titles for a specific posting."""
+    matched_role = job.get("_matched_role", "")
+    hm_bucket = bucket_override or get_hiring_manager_bucket_for_job(job)
+    base = get_target_titles(matched_role, employee_count, bucket_override=hm_bucket)
+    if hm_bucket != "gtm_revenue":
+        return base
+
+    combined = _dedupe_titles(
+        _contextual_gtm_titles(job) + base + _GTM_OPERATIONS_FALLBACK_TITLES
+    )
+    return _promote_founders(combined, employee_count)
+
+
+def get_target_titles_for_jobs(
+    jobs: Iterable[Dict], employee_count: int | None = None
+) -> List[str]:
+    """Build one ordered buyer search across all openings in a function bucket.
+
+    This prevents a company with, for example, both Data and Engineering roles
+    from losing a relevant leader merely because one posting was selected as the
+    primary outbound signal.
+    """
+    combined: List[str] = []
+    for job in jobs:
+        combined.extend(get_target_titles_for_job(job, employee_count))
+    return _promote_founders(_dedupe_titles(combined), employee_count)

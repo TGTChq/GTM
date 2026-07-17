@@ -137,6 +137,12 @@ def audit_kept_records(kept: List[Dict], crm_norm: set, crm_compact: set) -> Dic
         industry, reason = jf.is_excluded_industry(job)
         if industry:
             failures.append(("industry_leak", job.get("employer_name"), reason))
+        in_person, reason = jf.is_explicitly_in_person(job)
+        if in_person:
+            failures.append(("in_person_leak", job.get("employer_name"), reason))
+        non_paying, reason = jf.is_non_paying_role(job)
+        if non_paying:
+            failures.append(("non_paying_leak", job.get("employer_name"), reason))
         us_ok, reason = jf.is_us_job(job)
         if not us_ok:
             failures.append(("non_us_leak", job.get("employer_name"), reason))

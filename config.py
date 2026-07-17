@@ -10,6 +10,8 @@ from typing import Any, Dict
 
 from dotenv import load_dotenv
 
+from role_catalog import DEFAULT_SEARCH_ROLES
+
 BASE_DIR = Path(__file__).resolve().parent
 load_dotenv(BASE_DIR / ".env")
 
@@ -80,38 +82,46 @@ JSEARCH_HOST = os.getenv("JSEARCH_HOST", "jsearch.p.rapidapi.com")
 JSEARCH_ENDPOINT = os.getenv("JSEARCH_ENDPOINT", "https://jsearch.p.rapidapi.com/search-v2")
 DATE_POSTED = os.getenv("DATE_POSTED", "today")
 COUNTRY = os.getenv("COUNTRY", "us")
-NUM_PAGES = _env_int("NUM_PAGES", 3)
+NUM_PAGES = _env_int("NUM_PAGES", 1)
 SEARCH_DELAY_SECONDS = _env_float("SEARCH_DELAY_SECONDS", 0.8)
+# Operational controls keep the complete Brett-approved catalog active while
+# bounding request-unit usage. Zero disables only the corresponding guard.
+JSEARCH_MAX_QUERIES_PER_RUN = _env_int("JSEARCH_MAX_QUERIES_PER_RUN", 0)
+# Guard the estimated request units before the first API call. JSearch charges
+# approximately one request unit per requested page; 118 roles x 1 page = 118.
+# Set to 0 only for an intentional, supervised deep diagnostic.
+JSEARCH_MAX_ESTIMATED_UNITS_PER_RUN = _env_int(
+    "JSEARCH_MAX_ESTIMATED_UNITS_PER_RUN", 150
+)
+JSEARCH_STOP_ON_LOW_QUOTA = _env_bool("JSEARCH_STOP_ON_LOW_QUOTA", True)
+JSEARCH_MIN_REMAINING_REQUESTS = _env_int("JSEARCH_MIN_REMAINING_REQUESTS", 500)
 # Reject only clearly stale job-intent signals before enrichment. Unknown or
 # conflicting dates remain eligible; the oldest parseable source date is used.
 MAX_JOB_AGE_DAYS = _env_int("MAX_JOB_AGE_DAYS", 30)
 
-ROLES = _env_json(
-    "ROLES_JSON",
-    [
-        "GTM Engineer",
-        "AI Engineer",
-        "Automation Specialist",
-        "Graphic Designer",
-        "Video Editor",
-        "Performance Marketing Manager",
-        "Customer Support",
-        "Customer Success Manager",
-    ],
-)
+ROLES = _env_json("ROLES_JSON", list(DEFAULT_SEARCH_ROLES))
 
+# Global title exclusions from Brett's Intent-Based Outbound 2.0 rules.
+# Phrase matching is word-boundary based in jsearch_scraper.py.
 EXCLUDED_TITLE_KEYWORDS = [
     "vp",
     "vice president",
     "director",
     "intern",
     "internship",
+    "senior",
+    "sr",
+    "event marketing",
+    "field marketing",
 ]
 
 # ---------- Health gates ----------
 MIN_JOBS_PER_RUN = _env_int("MIN_JOBS_PER_RUN", 10)
 MIN_ROLES_WITH_RESULTS = _env_int("MIN_ROLES_WITH_RESULTS", 4)
 MAX_ROLE_FAILURES = _env_int("MAX_ROLE_FAILURES", 3)
+# The absolute threshold protects small role sets; the rate prevents the full
+# 100+ role catalog from failing because of a handful of isolated query errors.
+MAX_ROLE_FAILURE_RATE = _env_float("MAX_ROLE_FAILURE_RATE", 0.10)
 MIN_HIRING_MANAGER_MATCH_RATE = _env_float("MIN_HIRING_MANAGER_MATCH_RATE", 0.70)
 ENFORCE_HM_MATCH_RATE = _env_bool("ENFORCE_HM_MATCH_RATE", False)
 
@@ -183,6 +193,11 @@ CAMPAIGN_ENV_BY_BUCKET = {
     "marketing": "INSTANTLY_CAMPAIGN_MARKETING",
     "customer_success": "INSTANTLY_CAMPAIGN_CUSTOMER_SUCCESS",
     "customer_support": "INSTANTLY_CAMPAIGN_CUSTOMER_SUPPORT",
+    "finance": "INSTANTLY_CAMPAIGN_FINANCE",
+    "operations": "INSTANTLY_CAMPAIGN_OPERATIONS",
+    "people_hr": "INSTANTLY_CAMPAIGN_PEOPLE_HR",
+    "product": "INSTANTLY_CAMPAIGN_PRODUCT",
+    "ecommerce": "INSTANTLY_CAMPAIGN_ECOMMERCE",
 }
 
 
@@ -208,6 +223,88 @@ def resolve_campaign_id(role_bucket: str, employee_count: int | None) -> str:
             return bucket_campaign
     return INSTANTLY_CAMPAIGN_ID
 
+
+# Work-arrangement evidence from the 2.0 brief. JSearch's boolean remote flag
+# is useful but not authoritative: live validation showed remote jobs whose
+# title explicitly said "Remote" while job_is_remote was false. Strong text
+# evidence therefore wins over the provider flag.
+REMOTE_TITLE_LOCATION_PATTERNS = [
+    r"\b100% remote\b",
+    r"\bfully remote\b",
+    r"\bremote[- ]first\b",
+    r"\bwork from home\b",
+    r"\bwfh\b",
+    r"\bhome[- ]based\b",
+    r"\bremote\b",
+]
+
+REMOTE_DESCRIPTION_PATTERNS = [
+    r"\bthis is (?:a )?(?:full(?:y)? |100% )?remote (?:job|position|role|opportunity)\b",
+    r"\b(?:job|work) location\s*:\s*(?:100% |fully )?remote\b",
+    r"\blocation\s*:\s*(?:100% |fully )?remote\b",
+    r"\bremote anywhere in (?:the )?united states\b",
+    r"\bwork remotely from anywhere in (?:the )?united states\b",
+    r"\bopen to remote candidates\b",
+    r"\bwork from home\b",
+    r"\bhome[- ]based position\b",
+]
+
+# Title/location evidence is high precision. A title such as "Remote/Hybrid"
+# is rejected because it still advertises an in-person operating model.
+IN_PERSON_TITLE_LOCATION_PATTERNS = [
+    r"\bon[- ]site\b",
+    r"\bonsite\b",
+    r"\bin[- ]person\b",
+    r"\bhybrid\b",
+    r"\boffice[- ]based\b",
+]
+
+# Description evidence must describe an actual requirement, not merely contain
+# a word such as "onsite" in a product/channel context.
+IN_PERSON_DESCRIPTION_PATTERNS = [
+    r"\bthis is (?:an? )?(?:on[- ]site|onsite|in[- ]person|in[- ]office|hybrid) (?:job|position|role)\b",
+    r"\bthis is (?:an? )?(?:on[- ]site|onsite|in[- ]office),?[^.\n]{0,40}\b(?:job|position|role)\b",
+    r"\b(?:the )?(?:position|role) is (?:an? )?(?:on[- ]site|onsite|in[- ]office)\b",
+    r"\b(?:must|required to|expected to) (?:work|be|report|come) (?:on[- ]site|onsite|in[- ]person|in (?:the|our) office)\b",
+    r"\bwork from (?:the|our) office\b",
+    r"\bmust (?:be able to )?commute\b",
+    r"\bwithin commuting distance\b",
+    r"\brelocation (?:is )?required\b",
+    r"\b[1-5] days? (?:a|per) week in (?:the )?office\b",
+    r"\bnot (?:a )?remote (?:job|position|role)\b",
+    r"\bnot (?:a )?(?:traditional )?work[- ]from[- ]home role\b",
+    r"\blittle to no work from home\b",
+    r"\bsignificant portion or all work (?:must be|to be) performed in (?:a )?(?:scif|office|facility)\b",
+    r"\bwork location\s*:\s*hybrid remote\b",
+    r"\bhybrid remote in\b",
+    r"\bfield[- ]based position\b",
+    r"\bhybrid (?:work model|schedule|position|role)\b",
+    r"\bin office (?:monday|tuesday|wednesday|thursday|friday|[1-5] days?)\b",
+    r"\btravel (?:approximately |up to |minimum |at least )?(?:2[5-9]|[3-9]\d|100)%\b",
+    r"\bfrequent travel\b",
+    r"\btravel regularly to (?:client|customer) sites\b",
+    r"\bestimated 1\+ day/?week\b",
+]
+
+# Explicit foreign-only eligibility overrides a noisy US country field.
+FOREIGN_ONLY_ELIGIBILITY_PATTERNS = [
+    r"\bremote role for (?:eu|european union|uk|canadian|australian) residents\b",
+    r"\b(?:eu|european union|uk|canadian|australian) residents only\b",
+    r"\bmust be (?:based|located|resident) in (?:the )?(?:eu|european union|uk|canada|australia|india|philippines|latam)\b",
+    r"\bopen only to candidates (?:based|located) in (?:the )?(?:eu|european union|uk|canada|australia|india|philippines|latam)\b",
+    r"\bavailable only (?:to|for) (?:the )?(?:eu|european union|uk|canada|australia|india|philippines|latam)\b",
+    r"\b(?:role|position|job) (?:is )?(?:fully )?remote (?:role )?based (?:with teams )?in (?:the )?(?:philippines|india|canada|australia|uk|europe|eu|latam)\b",
+    r"\bfully remote role based (?:with teams )?in (?:the )?(?:philippines|india|canada|australia|uk|europe|eu|latam)\b",
+]
+
+NON_PAYING_JOB_PATTERNS = [
+    r"\bunpaid\b",
+    r"\bvolunteer (role|position|opportunity)\b",
+    r"\bcommission[- ]only\b",
+    r"\bequity[- ]only\b",
+    r"\bno (financial )?compensation\b",
+    r"\bwithout (financial )?compensation\b",
+]
 
 # ---------- Filtering dictionaries ----------
 STAFFING_EMPLOYER_KEYWORDS = [
@@ -261,6 +358,9 @@ KNOWN_JOB_AGGREGATOR_EMPLOYERS = [
     "startup jobs",
     "tech jobs",
     "ai jobs",
+    "msccn",
+    "huzzle",
+    "huzzle.com",
 ]
 
 # Generic employer-name patterns are only used with corroborating evidence
@@ -364,6 +464,21 @@ KNOWN_STAFFING_EMPLOYERS = [
     "tundra technical",
     "lensa",
     "bebee",
+    "paired",
+    "realynk assistants",
+    "aston carter",
+    "lasalle network",
+    "stand 8",
+    "gridiron it solutions",
+    "my3tech",
+    "baer group",
+    "delphi-us",
+    "linda werner associates",
+    "clindcast",
+    "digi axess",
+    "bright vision technologies",
+    "vava virtual assistants",
+    "venraro",
 ]
 
 VAGUE_EMPLOYER_SIGNALS = [
@@ -390,6 +505,7 @@ STAFFING_DESCRIPTION_PHRASES = [
     "we place candidates",
     "we connect talent with employers",
     "direct hire placement services",
+    "as an agency worker",
 ]
 
 # Phrases that usually mean the direct employer is rejecting agency submissions.
@@ -430,6 +546,20 @@ EXCLUDED_INDUSTRY_EMPLOYER_KEYWORDS = [
     "health system",
     "medical center",
     "healthcare system",
+    "healthcare",
+    "health care",
+    "health",
+    "medical",
+    "clinic",
+    "diagnostics",
+    "healthineers",
+    "labcorp",
+    "orthofix",
+    "public radio",
+    "public media",
+    "arts alliance",
+    "blue cross",
+    "steris",
     "event planning",
     "event management company",
     "events company",
@@ -447,12 +577,41 @@ EXCLUDED_MEDIA_PRODUCTION_KEYWORDS = [
     "media production company",
 ]
 
+# High-confidence first-party descriptions for excluded industries. These are
+# intentionally narrow so a software vendor serving nonprofits or healthcare
+# clients is not excluded merely because the sector appears in the JD.
+EXCLUDED_INDUSTRY_DESCRIPTION_PATTERNS = [
+    r"\bwe are (?:a|an) (?:501\(c\)\(3\) |non[- ]?profit |nonprofit )?(?:organization|charity|foundation)\b",
+    r"\bour (?:non[- ]?profit|nonprofit) organization\b",
+    r"\bregistered 501\(c\)\(3\)\b",
+]
+
+EXCLUDED_INDUSTRY_JOB_TITLE_KEYWORDS = [
+    "clinical",
+    "patient",
+    "medical",
+    "healthcare",
+    "hospital",
+    "diagnostics",
+]
+
 GOVERNMENT_WEBSITE_MARKERS = [".gov"]
 FREELANCE_MARKETPLACE_EMPLOYERS = [
     "upwork",
     "fiverr",
     "freelancer com",
     "peopleperhour",
+    "mercor",
+    "braintrust",
+    "twine",
+    "dataannotation",
+    "toloka annotators",
+    "the work app",
+    "workada",
+    "rex.zone",
+    "review pays",
+    "certified mobile notary",
+    "the ai training company",
 ]
 GOVERNMENT_JOB_BOARD_DOMAINS = ["governmentjobs.com", "usajobs.gov", "neogov.com"]
 

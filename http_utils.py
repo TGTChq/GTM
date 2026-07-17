@@ -26,6 +26,25 @@ class RetryWindowTooLong(requests.HTTPError):
         self.retry_after = retry_after
 
 
+class QuotaExhaustedError(requests.HTTPError):
+    """Raised immediately for a hard monthly/subscription quota exhaustion."""
+
+
+_HARD_QUOTA_PATTERNS = (
+    "exceeded the monthly quota",
+    "monthly quota for requests",
+    "current plan, basic",
+    "upgrade your plan",
+)
+
+
+def _is_hard_quota_exhaustion(response: requests.Response) -> bool:
+    if response.status_code != 429:
+        return False
+    body = (response.text or "").lower()
+    return any(pattern in body for pattern in _HARD_QUOTA_PATTERNS)
+
+
 def request_with_retry(
     method: str,
     url: str,
@@ -53,6 +72,16 @@ def request_with_retry(
             if response.status_code not in RETRYABLE_STATUS_CODES:
                 response.raise_for_status()
                 return response
+
+            if _is_hard_quota_exhaustion(response):
+                logger.error(
+                    "Hard API quota exhaustion for %s; failing fast without retries.",
+                    url,
+                )
+                raise QuotaExhaustedError(
+                    f"Hard API quota exhausted: {response.text[:500]}",
+                    response=response,
+                )
 
             retry_after = response.headers.get("Retry-After")
             try:
@@ -86,7 +115,7 @@ def request_with_retry(
             if attempt < retries:
                 logger.warning("HTTP %s for %s; retrying in %.1fs", response.status_code, url, delay)
                 time.sleep(delay)
-        except RetryWindowTooLong:
+        except (RetryWindowTooLong, QuotaExhaustedError):
             raise
         except requests.HTTPError as exc:
             last_error = exc

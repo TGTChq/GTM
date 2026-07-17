@@ -22,6 +22,7 @@
 ./logs/.gitkeep
 ./pipeline_state.py
 ./requirements.txt
+./role_catalog.py
 ./role_focus.py
 ./role_mapping.py
 ./role_relevance.py
@@ -30,6 +31,9 @@
 ./run_daily.bat
 ./run_daily.py
 ./run_full_test.py
+./run_filter_replay.py
+./run_scrape_test.py
 ./run_step4.py
 ./tests/test_core.py
+./tests/test_intent_outbound_v2.py
 ./validate_setup.py
