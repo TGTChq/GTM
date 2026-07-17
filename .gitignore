@@ -11,12 +11,14 @@ __pycache__/
 .pytest_cache/
 
 # Runtime output
+*.log
 logs/*
 !logs/.gitkeep
 data/raw/*
 data/filtered/*
 data/enriched/*
 data/state/*
+data/replay/*
 *.corrupt.*
 
 # Keep production inputs tracked

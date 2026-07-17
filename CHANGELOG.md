@@ -78,3 +78,25 @@
 - Added 16 unit tests covering the highest-risk logic, including role-focus formatting and dynamic Automation Specialist routing.
 - Added Airtable schema and n8n scheduling documentation.
 - Added `.gitignore` rules for secrets, logs, state, and raw/enriched data.
+
+- Fixed limited JSearch smoke tests so CLI omission honors the env query cap and zero-yield successful queries do not fail API health validation.
+
+
+## Intent-Based Outbound 2.0 quality and quota hardening
+
+- Replaced the provider-flag-only remote decision with evidence precedence across
+  title, location, precise description requirements, and the JSearch flag.
+- Added traceable `_work_arrangement` and `_work_arrangement_reason` metadata.
+- Rejected explicit hybrid, onsite, field-based, high-travel, and foreign-only
+  eligibility cases while preserving remote-option and unknown cases for review.
+- Added live-observed staffing, freelance marketplace, healthcare, nonprofit,
+  media, and aggregator leakage controls.
+- Added `run_filter_replay.py` for zero-credit offline reprocessing and role-level
+  quality reporting.
+- Changed the default JSearch page depth from 3 to 1 for the daily 118-role run.
+- Added a 150 estimated-unit preflight budget and a 500-unit low-quota reserve.
+- Added fail-fast handling for hard monthly/subscription 429 responses.
+- Expanded the test suite from 81 to 102 passing tests.
+- Offline replay of 1,356 saved postings produced 80 accepted jobs, removed 9
+  prior leakage records, and recovered 67 remote jobs hidden by false provider
+  flags, without making external calls.

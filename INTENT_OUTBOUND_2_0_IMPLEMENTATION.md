@@ -45,3 +45,37 @@
 4. Confirm campaign routing or keep new-function leads in Airtable only.
 5. Run a non-production scrape/filter sample and inspect relevance, in-person
    exclusions, role distribution, and runtime before merging to `main`.
+
+- Limited JSearch diagnostics now separate API health from market yield and honor the env query cap when the CLI flag is omitted.
+
+
+## Live quality hardening after the 2026-07-17 full-catalog validation
+
+The 118-role live validation completed with 118/118 successful queries and no
+API failures, but it exposed two production issues:
+
+1. JSearch sometimes returned `job_is_remote=false` for titles that explicitly
+   said Remote or Work From Home.
+2. Three pages across the full catalog consumed too much monthly quota for a
+   daily schedule.
+
+The hardening resolves those issues by:
+
+- using explicit title/location and precise requirement-language evidence before
+  trusting the provider remote flag;
+- rejecting hybrid, onsite, field-based, high-travel, and foreign-only roles when
+  the requirement is explicit;
+- adding observed staffing, marketplace, healthcare, nonprofit, media, and
+  foreign-eligibility leakage controls;
+- annotating every record with `_work_arrangement` and
+  `_work_arrangement_reason` for reviewer traceability;
+- adding `run_filter_replay.py` so saved results can be reprocessed offline;
+- defaulting the daily catalog to one page per role;
+- blocking estimated over-budget runs before network calls;
+- aborting immediately on hard monthly/subscription quota exhaustion.
+
+Offline replay of the 1,356 saved role-relevant postings changed the filter from
+22 accepted / 1,334 rejected to 80 accepted / 1,276 rejected. It retained 13 of
+the original accepted records, removed 9 clear leaks, and recovered 67 remote
+postings whose provider flag was false. No external API or downstream write was
+used for the replay.

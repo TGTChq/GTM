@@ -59,6 +59,44 @@ def static_checks() -> Dict:
 
     if config.VERIFY_WITH_HUNTER and not config.HUNTER_API_KEY:
         warnings.append("VERIFY_WITH_HUNTER=1 but HUNTER_API_KEY is missing")
+
+    if config.JSEARCH_MAX_QUERIES_PER_RUN < 0:
+        errors.append("JSEARCH_MAX_QUERIES_PER_RUN cannot be negative")
+    elif config.JSEARCH_MAX_QUERIES_PER_RUN:
+        warnings.append(
+            "JSEARCH_MAX_QUERIES_PER_RUN is active and will truncate the complete "
+            f"role catalog to {config.JSEARCH_MAX_QUERIES_PER_RUN} queries per run"
+        )
+    if config.NUM_PAGES < 1:
+        errors.append("NUM_PAGES must be at least 1")
+    if config.JSEARCH_MAX_ESTIMATED_UNITS_PER_RUN < 0:
+        errors.append("JSEARCH_MAX_ESTIMATED_UNITS_PER_RUN cannot be negative")
+    scheduled_queries = (
+        min(len(config.ROLES), config.JSEARCH_MAX_QUERIES_PER_RUN)
+        if config.JSEARCH_MAX_QUERIES_PER_RUN
+        else len(config.ROLES)
+    )
+    estimated_units = scheduled_queries * max(1, config.NUM_PAGES)
+    if (
+        config.JSEARCH_MAX_ESTIMATED_UNITS_PER_RUN > 0
+        and estimated_units > config.JSEARCH_MAX_ESTIMATED_UNITS_PER_RUN
+    ):
+        errors.append(
+            "Estimated JSearch usage exceeds the configured per-run budget: "
+            f"{scheduled_queries} queries x {config.NUM_PAGES} pages = "
+            f"{estimated_units} units > "
+            f"{config.JSEARCH_MAX_ESTIMATED_UNITS_PER_RUN}. Set NUM_PAGES=1 "
+            "for the daily full catalog or intentionally raise the budget."
+        )
+    if config.JSEARCH_MIN_REMAINING_REQUESTS < 0:
+        errors.append("JSEARCH_MIN_REMAINING_REQUESTS cannot be negative")
+    if not 0 <= config.MAX_ROLE_FAILURE_RATE <= 1:
+        errors.append("MAX_ROLE_FAILURE_RATE must be between 0 and 1")
+    if config.JSEARCH_STOP_ON_LOW_QUOTA and config.JSEARCH_MIN_REMAINING_REQUESTS <= 0:
+        warnings.append(
+            "JSEARCH_STOP_ON_LOW_QUOTA=1 has no effect unless "
+            "JSEARCH_MIN_REMAINING_REQUESTS is greater than zero"
+        )
     if not _configured_campaign_ids():
         errors.append("No Instantly campaign ID is configured")
     else:

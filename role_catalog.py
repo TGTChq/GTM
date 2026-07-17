@@ -183,7 +183,16 @@ _ROLE_DEFINITIONS = [
     _role("Partnerships Manager", "gtm_revenue", "partnerships", "strategic partnerships, partner development, and channel growth"),
 
     # AI Talent
-    _role("AI Automation Engineer", "engineering", "engineering", "AI automation, agent workflows, and systems integrations"),
+    _role(
+        "AI Automation Engineer",
+        "engineering",
+        "engineering",
+        "AI automation, agent workflows, and systems integrations",
+        negative_patterns=(
+            r"\b(?:industrial|manufacturing) automation\b",
+            r"\b(?:plc|scada|controls engineer|instrumentation)\b",
+        ),
+    ),
     _role("AI Engineer", "engineering", "engineering", "AI systems, LLM integrations, and production automation"),
     _role("GTM Engineer", "gtm_revenue", "gtm_revenue", "GTM systems, workflow automation, and revenue operations"),
     _role("AI Content Specialist", "marketing", "marketing", "AI-assisted content production, editorial workflows, and content optimization"),

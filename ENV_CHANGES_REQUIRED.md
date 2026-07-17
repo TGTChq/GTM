@@ -71,3 +71,27 @@ The founded-before-2010 filter remains disabled:
 ```env
 ENFORCE_FOUNDED_BEFORE=0
 ```
+
+
+## JSearch Pro-plan observability and safety controls
+
+Use one page for the complete daily 118-role catalog. The live three-page test
+showed that page depth consumes materially more RapidAPI request units.
+
+```env
+NUM_PAGES=1
+JSEARCH_MAX_QUERIES_PER_RUN=0
+JSEARCH_MAX_ESTIMATED_UNITS_PER_RUN=150
+JSEARCH_STOP_ON_LOW_QUOTA=1
+JSEARCH_MIN_REMAINING_REQUESTS=500
+MAX_ROLE_FAILURE_RATE=0.10
+```
+
+`JSEARCH_MAX_ESTIMATED_UNITS_PER_RUN` is a preflight guard. With 118 roles and
+`NUM_PAGES=1`, the estimate is 118 units. With `NUM_PAGES=3`, the estimate is
+354 units and the run is blocked before the first request unless the budget is
+explicitly raised for a supervised diagnostic.
+
+Hard monthly/subscription quota errors fail fast and do not retry the remaining
+catalog. `run_scrape_test.py` still records quota headers, runtime, raw results,
+and selected results when the API provides them.
