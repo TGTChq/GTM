@@ -95,12 +95,27 @@ JSEARCH_MAX_ESTIMATED_UNITS_PER_RUN = _env_int(
 )
 JSEARCH_STOP_ON_LOW_QUOTA = _env_bool("JSEARCH_STOP_ON_LOW_QUOTA", True)
 JSEARCH_MIN_REMAINING_REQUESTS = _env_int("JSEARCH_MIN_REMAINING_REQUESTS", 500)
+# Ask JSearch for remote inventory directly instead of paying to retrieve mostly
+# onsite jobs and discarding them later. Text bias remains configurable because
+# provider flags can be imperfect, while the downstream evidence resolver still
+# makes the final work-arrangement decision.
+JSEARCH_REMOTE_JOBS_ONLY = _env_bool("JSEARCH_REMOTE_JOBS_ONLY", True)
+JSEARCH_REMOTE_QUERY_BIAS = _env_bool("JSEARCH_REMOTE_QUERY_BIAS", True)
 # After one-page coverage of the full role catalog, use only the remaining
-# request-unit budget on page 2 for the highest-yielding roles from the same run.
-# Diagnostic/smoke runs with an explicit role/query cap never deepen automatically.
+# request-unit budget on page 2 for roles whose page-1 results already survive
+# the local pre-enrichment gates. Diagnostic/smoke runs never deepen automatically.
 JSEARCH_ADAPTIVE_DEEPENING = _env_bool("JSEARCH_ADAPTIVE_DEEPENING", True)
 JSEARCH_MAX_EXTRA_PAGES_PER_ROLE = _env_int(
     "JSEARCH_MAX_EXTRA_PAGES_PER_ROLE", 1
+)
+JSEARCH_ADAPTIVE_MAX_EXTRA_QUERIES = _env_int(
+    "JSEARCH_ADAPTIVE_MAX_EXTRA_QUERIES", 32
+)
+JSEARCH_ADAPTIVE_MIN_PREFILTER_VIABLE = _env_int(
+    "JSEARCH_ADAPTIVE_MIN_PREFILTER_VIABLE", 1
+)
+JSEARCH_ADAPTIVE_BUCKET_BALANCING = _env_bool(
+    "JSEARCH_ADAPTIVE_BUCKET_BALANCING", True
 )
 # Reject only clearly stale job-intent signals before enrichment. Unknown or
 # conflicting dates remain eligible; the oldest parseable source date is used.
@@ -136,7 +151,7 @@ ENFORCE_HM_MATCH_RATE = _env_bool("ENFORCE_HM_MATCH_RATE", False)
 # reaches the reviewable-lead target, with an eligible-company safety cap to
 # bound Apollo/Hunter usage on low-contactability days.
 TARGET_REVIEWABLE_LEADS_PER_RUN = _env_int("TARGET_REVIEWABLE_LEADS_PER_RUN", 30)
-MAX_ELIGIBLE_COMPANIES_PER_RUN = _env_int("MAX_ELIGIBLE_COMPANIES_PER_RUN", 60)
+MAX_ELIGIBLE_COMPANIES_PER_RUN = _env_int("MAX_ELIGIBLE_COMPANIES_PER_RUN", 90)
 SEEN_JOBS_RETENTION_DAYS = _env_int("SEEN_JOBS_RETENTION_DAYS", 30)
 CRM_MIN_MATCH_LENGTH = _env_int("CRM_MIN_MATCH_LENGTH", 4)
 

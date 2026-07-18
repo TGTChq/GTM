@@ -90,6 +90,22 @@ def static_checks() -> Dict:
         )
     if config.JSEARCH_MIN_REMAINING_REQUESTS < 0:
         errors.append("JSEARCH_MIN_REMAINING_REQUESTS cannot be negative")
+    if config.JSEARCH_MAX_EXTRA_PAGES_PER_ROLE < 0:
+        errors.append("JSEARCH_MAX_EXTRA_PAGES_PER_ROLE cannot be negative")
+    if config.JSEARCH_ADAPTIVE_MAX_EXTRA_QUERIES < 0:
+        errors.append("JSEARCH_ADAPTIVE_MAX_EXTRA_QUERIES cannot be negative")
+    if config.JSEARCH_ADAPTIVE_MIN_PREFILTER_VIABLE < 0:
+        errors.append("JSEARCH_ADAPTIVE_MIN_PREFILTER_VIABLE cannot be negative")
+    if not config.JSEARCH_REMOTE_JOBS_ONLY:
+        warnings.append(
+            "JSEARCH_REMOTE_JOBS_ONLY=0 can substantially reduce reviewable lead volume "
+            "because onsite jobs consume the same request budget"
+        )
+    if config.MAX_ELIGIBLE_COMPANIES_PER_RUN < config.TARGET_REVIEWABLE_LEADS_PER_RUN:
+        warnings.append(
+            "MAX_ELIGIBLE_COMPANIES_PER_RUN is below TARGET_REVIEWABLE_LEADS_PER_RUN; "
+            "the daily target cannot be reached unless every eligible company converts"
+        )
     if not 0 <= config.MAX_ROLE_FAILURE_RATE <= 1:
         errors.append("MAX_ROLE_FAILURE_RATE must be between 0 and 1")
     if config.JSEARCH_STOP_ON_LOW_QUOTA and config.JSEARCH_MIN_REMAINING_REQUESTS <= 0:

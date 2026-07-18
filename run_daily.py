@@ -73,6 +73,16 @@ def run_pipeline() -> dict:
     }
     if config.PRODUCTION and not scrape.success:
         return _fail(summary, "scrape", scrape.errors)
+    logger.info(
+        "JSearch strategy: remote_only=%s remote_query_bias=%s base_units=%d "
+        "adaptive_queries=%d adaptive_prefilter_viable_added=%d buckets=%s",
+        config.JSEARCH_REMOTE_JOBS_ONLY,
+        config.JSEARCH_REMOTE_QUERY_BIAS,
+        scrape.stats.get("base_estimated_request_units", 0),
+        scrape.stats.get("adaptive_extra_queries", 0),
+        scrape.stats.get("adaptive_prefilter_viable_added", 0),
+        scrape.stats.get("adaptive_bucket_counts", {}),
+    )
 
     logger.info("=== STEP 2: FILTER ===")
     filtered = run_filter(input_path=scrape.output_path, registry=registry)
