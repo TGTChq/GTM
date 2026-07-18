@@ -224,6 +224,8 @@ def _prefilter_metric_name(stat_name: str) -> str:
         "excluded_role_mismatch": "prefilter_rejected_role_mismatch",
         "excluded_in_person": "prefilter_rejected_in_person",
         "excluded_non_paying": "prefilter_rejected_non_paying",
+        "excluded_non_active": "prefilter_rejected_non_active",
+        "excluded_non_full_time": "prefilter_rejected_non_full_time",
         "excluded_non_us": "prefilter_rejected_non_us",
     }
     return mapping.get(stat_name, "prefilter_rejected_other")
@@ -254,6 +256,8 @@ def _ingest_query_jobs(
         "prefilter_rejected_role_mismatch": 0,
         "prefilter_rejected_in_person": 0,
         "prefilter_rejected_non_paying": 0,
+        "prefilter_rejected_non_active": 0,
+        "prefilter_rejected_non_full_time": 0,
         "prefilter_rejected_non_us": 0,
         "prefilter_rejected_other": 0,
     }

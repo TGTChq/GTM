@@ -114,8 +114,27 @@ def _best_input_domain(job: Dict) -> str:
     return get_safe_employer_domain(job)[0] or _domain_from_apply_link(job)
 
 
-def passes_company_criteria(org: apollo.OrgEnrichment) -> Tuple[bool, str, bool]:
+def _name_matches_blocklist(name: str, values: List[str]) -> Optional[str]:
+    normalized = normalize_text(name or "")
+    if not normalized:
+        return None
+    for value in values:
+        candidate = normalize_text(value)
+        if normalized == candidate or re.search(r"\b" + re.escape(candidate) + r"\b", normalized):
+            return value
+    return None
+
+
+def passes_company_criteria(
+    org: apollo.OrgEnrichment, company_name: str = ""
+) -> Tuple[bool, str, bool]:
     """Return (eligible, reason, needs_manual_review)."""
+    resolved_name = org.name or company_name
+    if blocked := _name_matches_blocklist(
+        resolved_name, [*config.KNOWN_STAFFING_EMPLOYERS, *config.KNOWN_JOB_AGGREGATOR_EMPLOYERS]
+    ):
+        return False, f"excluded_intermediary_company:{blocked}", False
+
     if not org.found:
         if config.REJECT_UNKNOWN_FIRMOGRAPHICS:
             return False, "rejected_no_org_data", False
@@ -221,7 +240,10 @@ def _person_belongs_to_company(
 
 def _selection_tier(title: str | None) -> str:
     normalized = normalize_text(title or "")
-    if normalized in {"founder", "co founder", "ceo"}:
+    if re.search(
+        r"\b(?:founder|co founder|ceo|chief executive officer|owner|president)\b",
+        normalized,
+    ):
         return "founder_fallback"
     if any(token in normalized for token in ("manager", "director", "head")):
         return "direct_functional_leader"
@@ -326,7 +348,7 @@ def process_company(company_jobs: List[Dict]) -> Tuple[List[Dict], Dict]:
     else:
         stats["company_domain_unresolved"] += 1
 
-    eligible, company_reason, company_needs_review = passes_company_criteria(org)
+    eligible, company_reason, company_needs_review = passes_company_criteria(org, company_name)
 
     jobs_by_bucket: Dict[str, List[Dict]] = defaultdict(list)
     for job in company_jobs:
@@ -403,6 +425,18 @@ def process_company(company_jobs: List[Dict]) -> Tuple[List[Dict], Dict]:
         terminal_reason = "no_usable_email"
 
         for candidate in ranked_candidates[:max_person_attempts]:
+            candidate_tier = _selection_tier(candidate.get("title"))
+            if (
+                candidate_tier == "founder_fallback"
+                and (
+                    org.employee_count is None
+                    or org.employee_count > config.FOUNDER_FALLBACK_MAX_EMPLOYEES
+                )
+            ):
+                stats["candidate_founder_fallback_disallowed"] += 1
+                terminal_reason = "founder_fallback_disallowed_for_company_size"
+                continue
+
             stats["person_match_attempts"] += 1
             person = apollo.match_person(candidate)
             time.sleep(config.APOLLO_RATE_LIMIT_DELAY)

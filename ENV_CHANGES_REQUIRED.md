@@ -116,3 +116,24 @@ To make the 30-lead target feasible at realistic contactability rates, use:
 TARGET_REVIEWABLE_LEADS_PER_RUN=30
 MAX_ELIGIBLE_COMPANIES_PER_RUN=90
 ```
+
+
+## Paid-test quality recovery gates
+
+The wider 118-role catalog must preserve the original paid-test standard. Add
+these variables to the **GTM** Railway service only:
+
+```env
+REQUIRE_FULL_TIME_ROLES=1
+REJECT_NON_ACTIVE_HIRING_SIGNALS=1
+REQUIRE_EXPLICIT_US_REMOTE_SCOPE=1
+FOUNDER_FALLBACK_MAX_EMPLOYEES=99
+AIRTABLE_SUPPRESS_EXISTING_COMPANY=1
+```
+
+These gates reject explicit part-time/contract/freelance roles, future-opening
+or talent-pool posts, and generic `Anywhere` records that have no independent US
+hiring evidence. Founder/CEO fallback is limited to companies with at most 99
+employees, and Airtable suppresses an account already present under another
+contact or role bucket when its lifecycle is still active. Rejected and Error
+records may re-enter. No new Airtable columns are required.

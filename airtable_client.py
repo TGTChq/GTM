@@ -9,6 +9,8 @@ from typing import Dict, Iterable, List, Set
 from urllib.parse import quote
 
 import config
+from company_identity import normalize_company_name
+from domain_utils import normalize_company_domain
 from job_signal import annotate_job
 from http_utils import request_with_retry, safe_json
 
@@ -112,8 +114,14 @@ def _job_to_fields(job: Dict) -> Dict:
         "Job Age Days": job.get("job_age_days"),
         "Job URL Status": job.get("job_url_status"),
         "Job URL Source": job.get("job_url_source"),
-        "Job Signal Notes": job.get("job_signal_notes"),
-        "Location": job.get("job_location"),
+        "Job Signal Notes": " | ".join(
+            part for part in (
+                job.get("job_signal_notes"),
+                f"us_evidence={job.get('_us_eligibility_reason')}" if job.get("_us_eligibility_reason") else "",
+                f"employment={job.get('_employment_quality_reason')}" if job.get("_employment_quality_reason") else "",
+            ) if part
+        ),
+        "Location": job.get("_normalized_location") or job.get("job_location"),
         "Employment Type": job.get("job_employment_type"),
         "Relevance": job.get("_role_relevance_status"),
         "Relevance Score": job.get("_role_relevance_score"),
@@ -149,6 +157,10 @@ def _get_existing_leads() -> Dict[str, Dict]:
         params: List[tuple[str, str | int]] = [
             ("pageSize", 100),
             ("fields[]", "Lead Key"),
+            ("fields[]", "Company"),
+            ("fields[]", "Website"),
+            ("fields[]", "Role Bucket"),
+            ("fields[]", "Status"),
             ("fields[]", "Role Focus"),
             ("fields[]", "Focus Quality"),
             ("fields[]", "Focus Evidence"),
@@ -156,7 +168,6 @@ def _get_existing_leads() -> Dict[str, Dict]:
             ("fields[]", "Matched Role"),
             ("fields[]", "Job URL"),
             ("fields[]", "Posted At"),
-            ("fields[]", "Website"),
             ("fields[]", "Job Freshness"),
             ("fields[]", "Job Age Days"),
             ("fields[]", "Job URL Status"),
@@ -182,6 +193,47 @@ def _get_existing_leads() -> Dict[str, Dict]:
     return records_by_key
 
 
+def _company_identity_keys_from_fields(fields: Dict) -> Set[str]:
+    keys: Set[str] = set()
+    domain = normalize_company_domain(fields.get("Website"))
+    if domain:
+        keys.add(f"domain:{domain}")
+    company = normalize_company_name(fields.get("Company"))
+    if company:
+        keys.add(f"name:{company}")
+    return keys
+
+
+def _company_identity_keys_from_job(job: Dict) -> Set[str]:
+    fields = {
+        "Website": (
+            f"https://{job.get('company_domain')}"
+            if job.get("company_domain")
+            else job.get("employer_website")
+        ),
+        "Company": job.get("employer_name"),
+    }
+    return _company_identity_keys_from_fields(fields)
+
+
+def _active_existing_company_keys(existing: Dict[str, Dict]) -> Set[str]:
+    keys: Set[str] = set()
+    for record in existing.values():
+        fields = record.get("fields") or {}
+        status = str(fields.get("Status") or "").strip().lower()
+        # Rejected and Error records may re-enter when a later job is genuinely
+        # qualified. Pending, Approved, Enrolled, and blank legacy states remain
+        # suppressed to avoid uncoordinated multi-campaign contact.
+        retryable_statuses = {
+            str(config.AIRTABLE_STATUS_ERROR).strip().lower(),
+            str(config.AIRTABLE_STATUS_REJECTED).strip().lower(),
+        }
+        if status in retryable_statuses:
+            continue
+        keys.update(_company_identity_keys_from_fields(fields))
+    return keys
+
+
 def _ensure_job_signal(job: Dict) -> Dict:
     required = ("job_freshness", "job_url_status", "job_url_selected")
     if all(job.get(key) not in (None, "") for key in required):
@@ -203,8 +255,22 @@ def push_leads(jobs: List[Dict], batch_size: int = 10) -> Dict:
     unique_by_key = {job["lead_key"]: job for job in reviewable}
     existing = _get_existing_leads()
 
-    to_create = [job for key, job in unique_by_key.items() if key not in existing]
     existing_keys = [key for key in unique_by_key if key in existing]
+    existing_company_keys = (
+        _active_existing_company_keys(existing)
+        if config.AIRTABLE_SUPPRESS_EXISTING_COMPANY
+        else set()
+    )
+    suppressed_company_keys: List[str] = []
+    to_create: List[Dict] = []
+    for key, job in unique_by_key.items():
+        if key in existing:
+            continue
+        company_keys = _company_identity_keys_from_job(job)
+        if company_keys and company_keys & existing_company_keys:
+            suppressed_company_keys.append(key)
+            continue
+        to_create.append(job)
 
     # Repair blank generated fields only. Never overwrite reviewer-edited values
     # or reset Status on an existing record.
@@ -298,6 +364,7 @@ def push_leads(jobs: List[Dict], batch_size: int = 10) -> Dict:
         time.sleep(config.AIRTABLE_RATE_LIMIT_DELAY)
 
     skipped_existing = len(existing_keys) - len(to_update)
+    skipped_existing_company = len(suppressed_company_keys)
     skipped_no_contact = len(jobs) - len(reviewable)
     signal_review_required = sum(
         bool(job.get("job_signal_review_required")) for job in unique_by_key.values()
@@ -307,6 +374,8 @@ def push_leads(jobs: List[Dict], batch_size: int = 10) -> Dict:
         "updated_missing_role_focus": updated_missing_role_focus,
         "updated_missing_job_signals": updated_missing_job_signals,
         "skipped_existing": skipped_existing,
+        "skipped_existing_company": skipped_existing_company,
+        "suppressed_company_lead_keys": suppressed_company_keys,
         "failed": failed,
         "failed_lead_keys": failed_lead_keys,
         "skipped_no_contact": skipped_no_contact,

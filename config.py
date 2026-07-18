@@ -121,6 +121,17 @@ JSEARCH_ADAPTIVE_BUCKET_BALANCING = _env_bool(
 # conflicting dates remain eligible; the oldest parseable source date is used.
 MAX_JOB_AGE_DAYS = _env_int("MAX_JOB_AGE_DAYS", 30)
 
+# Quality gates restore the paid-test standard before any Apollo/Hunter spend.
+# The 118-role catalog remains active, but only current full-time roles with
+# explicit US hiring evidence may reach enrichment.
+REQUIRE_FULL_TIME_ROLES = _env_bool("REQUIRE_FULL_TIME_ROLES", True)
+REJECT_NON_ACTIVE_HIRING_SIGNALS = _env_bool(
+    "REJECT_NON_ACTIVE_HIRING_SIGNALS", True
+)
+REQUIRE_EXPLICIT_US_REMOTE_SCOPE = _env_bool(
+    "REQUIRE_EXPLICIT_US_REMOTE_SCOPE", True
+)
+
 ROLES = _env_json("ROLES_JSON", list(DEFAULT_SEARCH_ROLES))
 
 # Global title exclusions from Brett's Intent-Based Outbound 2.0 rules.
@@ -173,6 +184,13 @@ APOLLO_EXCLUDED_INDUSTRY_KEYWORDS = [
     "nonprofit organization management",
     "hospital & health care",
     "hospitals and health care",
+    "health care",
+    "healthcare",
+    "mental health care",
+    "mental health",
+    "medical practice",
+    "human resources services",
+    "outsourcing/offshoring",
     "events services",
     "broadcast media",
     "newspapers",
@@ -194,12 +212,22 @@ APOLLO_MAX_PERSON_MATCH_ATTEMPTS_PER_BUCKET = _env_int(
 HUNTER_MAX_FALLBACK_ATTEMPTS_PER_BUCKET = _env_int(
     "HUNTER_MAX_FALLBACK_ATTEMPTS_PER_BUCKET", 2
 )
+# Founders remain a legitimate fallback for genuinely small companies, but not
+# for mid-market accounts where a functional leader should exist.
+FOUNDER_FALLBACK_MAX_EMPLOYEES = _env_int(
+    "FOUNDER_FALLBACK_MAX_EMPLOYEES", 99
+)
 
 # ---------- Airtable ----------
 AIRTABLE_TOKEN = os.getenv("AIRTABLE_TOKEN", "")
 AIRTABLE_BASE_ID = os.getenv("AIRTABLE_BASE_ID", "")
 AIRTABLE_TABLE_NAME = os.getenv("AIRTABLE_TABLE_NAME", "Leads")
 AIRTABLE_RATE_LIMIT_DELAY = _env_float("AIRTABLE_RATE_LIMIT_DELAY", 0.25)
+# Suppress a company already present anywhere in the review/outbound table, even
+# when a new manager or role would otherwise generate a different Lead Key.
+AIRTABLE_SUPPRESS_EXISTING_COMPANY = _env_bool(
+    "AIRTABLE_SUPPRESS_EXISTING_COMPANY", True
+)
 AIRTABLE_STATUS_PENDING = os.getenv("AIRTABLE_STATUS_PENDING", "Pending")
 AIRTABLE_STATUS_APPROVED = os.getenv("AIRTABLE_STATUS_APPROVED", "Approved")
 AIRTABLE_STATUS_REJECTED = os.getenv("AIRTABLE_STATUS_REJECTED", "Rejected")
@@ -274,6 +302,7 @@ REMOTE_DESCRIPTION_PATTERNS = [
     r"\blocation\s*:\s*(?:100% |fully )?remote\b",
     r"\bremote anywhere in (?:the )?united states\b",
     r"\bwork remotely from anywhere in (?:the )?united states\b",
+    r"\banywhere in (?:the )?(?:u\.?s\.?|usa|united states)\b",
     r"\bopen to remote candidates\b",
     r"\bwork from home\b",
     r"\bhome[- ]based position\b",
@@ -336,6 +365,40 @@ NON_PAYING_JOB_PATTERNS = [
     r"\bwithout (financial )?compensation\b",
 ]
 
+# Provider employment labels are not trusted when the title/description carries
+# a stronger contradictory signal (for example, "Full-time" plus "15 hrs/wk").
+NON_FULL_TIME_TITLE_PATTERNS = [
+    r"\bpart[- ]time\b",
+    r"\bcontractor\b",
+    r"\bcontract (?:role|position|opportunity|job)\b",
+    r"\btemporary (?:role|position|opportunity|job)\b",
+    r"\btemp(?:orary)?[- ]to[- ]hire\b",
+    r"\bfreelance(?:r)?\b",
+    r"\bseasonal\b",
+    r"\bper diem\b",
+    r"\b(?:up to|at least|approximately|minimum of)?\s*\d{1,2}\+?\s*(?:hours|hrs)(?:\s+per|/)\s*(?:week|wk)\b",
+    r"\b\d{1,2}\s*[-–]\s*\d{1,2}\s*(?:hours|hrs)(?:\s+per|/)\s*(?:week|wk)\b",
+]
+NON_FULL_TIME_DESCRIPTION_PATTERNS = [
+    r"\bthis is (?:a )?part[- ]time (?:role|position|job)\b",
+    r"\b(?:up to|at least|approximately|minimum of)?\s*\d{1,2}\+?\s*(?:hours|hrs)(?:\s+per|/)\s*(?:week|wk)\b",
+    r"\b\d{1,2}\s*[-–]\s*\d{1,2}\s*(?:hours|hrs)(?:\s+per|/)\s*(?:week|wk)\b",
+]
+NON_FULL_TIME_EMPLOYMENT_TYPES = {
+    "part time", "part-time", "contract", "contractor", "temporary",
+    "temp", "freelance", "internship", "seasonal", "per diem",
+}
+NON_ACTIVE_HIRING_SIGNAL_PATTERNS = [
+    r"\bfuture openings?\b",
+    r"\bfuture opportunities\b",
+    r"\bevergreen (?:role|position|opening)\b",
+    r"\btalent pool\b",
+    r"\btalent pipeline\b",
+    r"\bexpression of interest\b",
+    r"\bgeneral application\b",
+    r"\bregister your interest\b",
+]
+
 # ---------- Filtering dictionaries ----------
 STAFFING_EMPLOYER_KEYWORDS = [
     "staffing",
@@ -391,6 +454,15 @@ KNOWN_JOB_AGGREGATOR_EMPLOYERS = [
     "msccn",
     "huzzle",
     "huzzle.com",
+    "learn4good",
+    "remoteleaf",
+    "towardjobs",
+    "toward jobs",
+    "powertofly",
+    "power to fly",
+    "dice",
+    "freelanceshop",
+    "freelance shop",
 ]
 
 # Generic employer-name patterns are only used with corroborating evidence
@@ -532,6 +604,17 @@ KNOWN_STAFFING_EMPLOYERS = [
     "bright vision technologies",
     "vava virtual assistants",
     "venraro",
+    "recxchange",
+    "qureos",
+    "zillion technologies",
+    "lancesoft",
+    "gofasti",
+    "my smart pros",
+    "mysmartpros",
+    "crossing hurdles",
+    "remote talent cloud",
+    "blueline search",
+    "atomus partners",
 ]
 
 VAGUE_EMPLOYER_SIGNALS = [
@@ -669,6 +752,35 @@ FREELANCE_MARKETPLACE_EMPLOYERS = [
 GOVERNMENT_JOB_BOARD_DOMAINS = ["governmentjobs.com", "usajobs.gov", "neogov.com"]
 
 # ---------- Geography ----------
+GENERIC_REMOTE_LOCATIONS = {
+    "", "remote", "anywhere", "work from home", "united states", "usa", "us",
+}
+US_REMOTE_SCOPE_PATTERNS = [
+    r"\bremote[ ,(/-]*(?:u\.?s\.?|usa|united states)\b",
+    r"\b(?:u\.?s\.?|usa|united states)[ -]based\b",
+    r"\bremote anywhere in (?:the )?united states\b",
+    r"\bwork remotely from anywhere in (?:the )?united states\b",
+    r"\banywhere in (?:the )?(?:u\.?s\.?|usa|united states)\b",
+    r"\bmust (?:reside|live|be based|be located) in (?:the )?(?:u\.?s\.?|usa|united states)\b",
+    r"\bopen to candidates (?:based|located) in (?:the )?(?:u\.?s\.?|usa|united states)\b",
+    r"\b(?:u\.?s\.?|usa|united states) (?:residents|candidates) only\b",
+    r"\bavailable (?:to candidates )?(?:from|in) [^.\n]{0,80}\b(?:u\.?s\.?|usa|united states)\b",
+]
+GLOBAL_REMOTE_PATTERNS = [
+    r"\bglobal remote\b",
+    r"\bremote worldwide\b",
+    r"\bwork from anywhere in the world\b",
+    r"\bworldwide remote\b",
+]
+# A generic ``Anywhere`` location plus the query's country echo is not proof of
+# US eligibility. These markers catch explicit foreign locations before the
+# provider country field is considered.
+FOREIGN_CITY_URL_SLUGS = [
+    "warsaw", "london", "toronto", "vancouver", "berlin", "paris",
+    "madrid", "barcelona", "lisbon", "dublin", "amsterdam", "manila",
+    "cebu", "mumbai", "bangalore", "bengaluru", "delhi", "sydney",
+    "melbourne", "mexico-city", "sao-paulo", "bogota", "buenos-aires",
+]
 US_COUNTRY_CODES = {"us", "usa", "united states", "united states of america"}
 US_STATE_NAMES = {
     "alabama", "alaska", "arizona", "arkansas", "california", "colorado", "connecticut",
