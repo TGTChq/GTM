@@ -112,3 +112,14 @@
 - Use remaining JSearch request-unit budget for adaptive page-2 discovery only on high-yield roles after full one-page catalog coverage.
 - Prefer first-party-domain companies before the Apollo safety cap and print full filter/contactability funnels in Railway logs.
 - Make Airtable Website use the validated company domain instead of a job-board domain.
+
+## 2026-07-18 — Remote inventory and adaptive yield optimization
+
+- Request remote jobs directly from JSearch and bias the search query toward remote US roles.
+- Reuse the exact zero-credit Step 2 gates during scraping to measure true pre-enrichment yield.
+- Rank page-2 calls by new unique jobs that survive aggregator, staffing, industry, remote, US, and role checks.
+- Round-robin adaptive queries across functional buckets before allocating overflow.
+- Cap adaptive expansion at 32 queries and stop carrying a role forward when an extra page adds no viable jobs.
+- Raise the default eligible-company safety cap from 60 to 90 so a 30-reviewable-lead target is achievable at observed contactability rates.
+- Add Railway logs for remote search settings, adaptive viable yield, and bucket allocation.
+- Expand the test suite from 109 to 116 passing tests.

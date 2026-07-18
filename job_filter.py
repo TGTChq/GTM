@@ -47,6 +47,18 @@ class WorkArrangementEvidence:
     reason: str
 
 
+@dataclass(frozen=True)
+class PreEnrichmentAssessment:
+    """Local, zero-credit eligibility signal used by Step 1 and Step 2."""
+
+    eligible: bool
+    stat_name: str
+    reason: str
+    work_arrangement: WorkArrangementEvidence
+    employer_domain: str
+    employer_domain_source: str
+
+
 def normalize_text(value: str) -> str:
     if not value:
         return ""
@@ -486,6 +498,58 @@ def is_in_crm(job: Dict, crm_normalized: Set[str], crm_compact: Set[str]) -> Tup
     return False, ""
 
 
+def assess_pre_enrichment_viability(job: Dict) -> PreEnrichmentAssessment:
+    """Apply every zero-credit gate shared by scraping and final filtering.
+
+    CRM suppression, in-run deduplication, and persistent seen-state are excluded
+    because they require run-level context. Everything else is intentionally the
+    same logic used by Step 2, so adaptive JSearch deepening rewards jobs that can
+    actually reach enrichment instead of merely matching a title.
+    """
+    arrangement = classify_work_arrangement(job)
+    employer_domain, employer_domain_source = get_safe_employer_domain(job)
+
+    checks = [
+        ("excluded_aggregator", is_job_aggregator_or_publisher),
+        ("excluded_stale", is_stale_job),
+        ("excluded_staffing", is_staffing_company),
+        ("excluded_industry", is_excluded_industry),
+        ("excluded_role_mismatch", is_obvious_role_mismatch),
+        (
+            "excluded_in_person",
+            lambda _job: (
+                arrangement.status == "in_person",
+                arrangement.reason if arrangement.status == "in_person" else "",
+            ),
+        ),
+        ("excluded_non_paying", is_non_paying_role),
+        (
+            "excluded_non_us",
+            lambda candidate: (lambda ok, reason: (not ok, reason))(*is_us_job(candidate)),
+        ),
+    ]
+    for stat_name, check in checks:
+        matched, reason = check(job)
+        if matched:
+            return PreEnrichmentAssessment(
+                eligible=False,
+                stat_name=stat_name,
+                reason=reason,
+                work_arrangement=arrangement,
+                employer_domain=employer_domain,
+                employer_domain_source=employer_domain_source,
+            )
+
+    return PreEnrichmentAssessment(
+        eligible=True,
+        stat_name="",
+        reason="",
+        work_arrangement=arrangement,
+        employer_domain=employer_domain,
+        employer_domain_source=employer_domain_source,
+    )
+
+
 def find_latest_raw_file() -> str:
     candidates = sorted(Path(config.OUTPUT_DIR).glob("jobs_*.json"), reverse=True)
     if not candidates:
@@ -523,39 +587,24 @@ def run_filter(
         "excluded_previously_seen": 0,
     }
 
-    checks = [
-        ("excluded_aggregator", is_job_aggregator_or_publisher),
-        ("excluded_stale", is_stale_job),
-        ("excluded_staffing", is_staffing_company),
-        ("excluded_industry", is_excluded_industry),
-        ("excluded_role_mismatch", is_obvious_role_mismatch),
-        ("excluded_in_person", is_explicitly_in_person),
-        ("excluded_non_paying", is_non_paying_role),
-        ("excluded_non_us", lambda job: (lambda ok, reason: (not ok, reason))(*is_us_job(job))),
-        ("excluded_crm", lambda job: is_in_crm(job, crm_normalized, crm_compact)),
-    ]
-
     for job in jobs:
-        arrangement = classify_work_arrangement(job)
-        employer_domain, employer_domain_source = get_safe_employer_domain(job)
+        assessment = assess_pre_enrichment_viability(job)
         candidate = {
             **job,
-            "_work_arrangement": arrangement.status,
-            "_work_arrangement_reason": arrangement.reason,
-            "_employer_domain_input": employer_domain,
-            "_employer_domain_source": employer_domain_source,
+            "_work_arrangement": assessment.work_arrangement.status,
+            "_work_arrangement_reason": assessment.work_arrangement.reason,
+            "_employer_domain_input": assessment.employer_domain,
+            "_employer_domain_source": assessment.employer_domain_source,
         }
-        rejected_reason = ""
-        rejected_stat = ""
-        for stat_name, check in checks:
-            matched, reason = check(candidate)
-            if matched:
-                rejected_stat = stat_name
-                rejected_reason = reason
-                break
-        if rejected_reason:
-            stats[rejected_stat] += 1
-            rejected.append({**candidate, "_filter_reason": rejected_reason})
+        if not assessment.eligible:
+            stats[assessment.stat_name] += 1
+            rejected.append({**candidate, "_filter_reason": assessment.reason})
+            continue
+
+        in_crm, crm_reason = is_in_crm(candidate, crm_normalized, crm_compact)
+        if in_crm:
+            stats["excluded_crm"] += 1
+            rejected.append({**candidate, "_filter_reason": crm_reason})
             continue
 
         key = dedup_key(candidate)

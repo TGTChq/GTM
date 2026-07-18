@@ -130,12 +130,21 @@ NUM_PAGES=1
 JSEARCH_MAX_ESTIMATED_UNITS_PER_RUN=150
 JSEARCH_STOP_ON_LOW_QUOTA=1
 JSEARCH_MIN_REMAINING_REQUESTS=500
+JSEARCH_REMOTE_JOBS_ONLY=1
+JSEARCH_REMOTE_QUERY_BIAS=1
+JSEARCH_ADAPTIVE_DEEPENING=1
+JSEARCH_ADAPTIVE_MAX_EXTRA_QUERIES=32
+JSEARCH_ADAPTIVE_MIN_PREFILTER_VIABLE=1
+JSEARCH_ADAPTIVE_BUCKET_BALANCING=1
 ```
 
 The scraper estimates request units before its first network call. A 118-role,
 three-page run estimates 354 units and is blocked by the default 150-unit guard.
-Hard monthly/subscription quota responses also abort immediately instead of
-retrying every remaining role.
+The base request asks JSearch for remote inventory directly. Remaining units are
+allocated only to roles whose first page survives the same local aggregator,
+staffing, industry, work-arrangement, geography, and role-quality gates used by
+Step 2. Allocation round-robins across functional buckets before giving a bucket
+more page-2 calls. Hard monthly/subscription quota responses abort immediately.
 
 Saved JSearch data can be re-filtered without any external calls:
 

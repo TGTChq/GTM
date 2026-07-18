@@ -8,15 +8,18 @@ import math
 import re
 import sys
 import time
+from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional
 
 import config
+from job_filter import assess_pre_enrichment_viability
 from http_utils import QuotaExhaustedError, request_with_retry, safe_json
 from pipeline_state import SeenJobsRegistry
 from role_catalog import canonical_role_for_search, role_specificity
+from role_mapping import get_bucket_name
 from role_relevance import assess_role, normalize_relevance_score
 
 logger = logging.getLogger(__name__)
@@ -80,6 +83,14 @@ def _quota_snapshot(headers) -> Dict[str, object]:
     }
 
 
+def build_search_query(role: str) -> str:
+    """Build a remote-biased US query without changing the canonical role."""
+    cleaned = str(role or "").strip()
+    if config.JSEARCH_REMOTE_QUERY_BIAS and not re.search(r"\bremote\b", cleaned, re.I):
+        return f"remote {cleaned} in United States"
+    return f"{cleaned} in United States"
+
+
 def fetch_jobs_for_role(
     role: str, *, page: int = 1, num_pages: Optional[int] = None
 ) -> JSearchFetchResult:
@@ -89,12 +100,14 @@ def fetch_jobs_for_role(
         "Content-Type": "application/json",
     }
     params = {
-        "query": f"{role} in United States",
+        "query": build_search_query(role),
         "page": str(max(1, int(page))),
         "num_pages": str(config.NUM_PAGES if num_pages is None else max(1, int(num_pages))),
         "date_posted": config.DATE_POSTED,
         "country": config.COUNTRY,
     }
+    if config.JSEARCH_REMOTE_JOBS_ONLY:
+        params["remote_jobs_only"] = "true"
     started = time.perf_counter()
     response = request_with_retry(
         "GET",
@@ -139,6 +152,10 @@ def validate_preflight() -> None:
         raise ValueError("JSEARCH_MIN_REMAINING_REQUESTS cannot be negative")
     if config.JSEARCH_MAX_EXTRA_PAGES_PER_ROLE < 0:
         raise ValueError("JSEARCH_MAX_EXTRA_PAGES_PER_ROLE cannot be negative")
+    if config.JSEARCH_ADAPTIVE_MAX_EXTRA_QUERIES < 0:
+        raise ValueError("JSEARCH_ADAPTIVE_MAX_EXTRA_QUERIES cannot be negative")
+    if config.JSEARCH_ADAPTIVE_MIN_PREFILTER_VIABLE < 0:
+        raise ValueError("JSEARCH_ADAPTIVE_MIN_PREFILTER_VIABLE cannot be negative")
     if not 0 <= config.MAX_ROLE_FAILURE_RATE <= 1:
         raise ValueError("MAX_ROLE_FAILURE_RATE must be between 0 and 1")
 
@@ -198,6 +215,20 @@ def _merge_quota_snapshot(stats: Dict, quota: Dict[str, object]) -> Optional[int
     return remaining if isinstance(remaining, int) else None
 
 
+def _prefilter_metric_name(stat_name: str) -> str:
+    mapping = {
+        "excluded_aggregator": "prefilter_rejected_aggregator",
+        "excluded_stale": "prefilter_rejected_stale",
+        "excluded_staffing": "prefilter_rejected_staffing",
+        "excluded_industry": "prefilter_rejected_industry",
+        "excluded_role_mismatch": "prefilter_rejected_role_mismatch",
+        "excluded_in_person": "prefilter_rejected_in_person",
+        "excluded_non_paying": "prefilter_rejected_non_paying",
+        "excluded_non_us": "prefilter_rejected_non_us",
+    }
+    return mapping.get(stat_name, "prefilter_rejected_other")
+
+
 def _ingest_query_jobs(
     *,
     raw_jobs: List[Dict],
@@ -212,6 +243,19 @@ def _ingest_query_jobs(
         "review_candidates": 0,
         "rejected_candidates": 0,
         "candidate_rows": 0,
+        "new_unique_candidates": 0,
+        "prefilter_viable_candidates": 0,
+        "new_prefilter_viable_candidates": 0,
+        "prefilter_rejected_candidates": 0,
+        "prefilter_rejected_aggregator": 0,
+        "prefilter_rejected_stale": 0,
+        "prefilter_rejected_staffing": 0,
+        "prefilter_rejected_industry": 0,
+        "prefilter_rejected_role_mismatch": 0,
+        "prefilter_rejected_in_person": 0,
+        "prefilter_rejected_non_paying": 0,
+        "prefilter_rejected_non_us": 0,
+        "prefilter_rejected_other": 0,
     }
     for job in raw_jobs:
         job_id = _candidate_key(job)
@@ -225,6 +269,7 @@ def _ingest_query_jobs(
             stats["excluded_by_seniority"] += 1
             continue
 
+        already_seen_in_run = job_id in candidates_by_job_id
         assessment = assess_role(job, canonical_role)
         candidate = dict(job)
         candidate["_matched_role"] = canonical_role
@@ -234,15 +279,87 @@ def _ingest_query_jobs(
         candidate["_role_relevance_points"] = assessment.score
         candidate["_role_relevance_score"] = normalize_relevance_score(assessment.score)
         candidate["_role_relevance_reasons"] = assessment.reasons
+
+        prefilter = assess_pre_enrichment_viability(candidate)
+        candidate["_prefilter_viable"] = prefilter.eligible
+        candidate["_prefilter_stat"] = prefilter.stat_name
+        candidate["_prefilter_reason"] = prefilter.reason
         candidates_by_job_id.setdefault(job_id, []).append(candidate)
+
         metrics["candidate_rows"] += 1
+        if not already_seen_in_run:
+            metrics["new_unique_candidates"] += 1
         if assessment.status == "accept":
             metrics["accepted_candidates"] += 1
         elif assessment.status == "review":
             metrics["review_candidates"] += 1
         else:
             metrics["rejected_candidates"] += 1
+
+        # Deepening yield must reflect candidates that can actually survive Step 2.
+        if assessment.status in {"accept", "review"}:
+            if prefilter.eligible:
+                metrics["prefilter_viable_candidates"] += 1
+                if not already_seen_in_run:
+                    metrics["new_prefilter_viable_candidates"] += 1
+            else:
+                metrics["prefilter_rejected_candidates"] += 1
+                metrics[_prefilter_metric_name(prefilter.stat_name)] += 1
     return metrics
+
+
+def _adaptive_role_score(role: str, query_metrics: Dict[str, Dict], role_order: Dict[str, int]):
+    metric = query_metrics[role]
+    return (
+        int(metric.get("new_prefilter_viable_candidates", 0)),
+        int(metric.get("prefilter_viable_candidates", 0)),
+        int(metric.get("accepted_candidates", 0)),
+        int(metric.get("review_candidates", 0)),
+        int(metric.get("new_unique_candidates", 0)),
+        int(metric.get("raw_jobs", 0)),
+        -role_order[role],
+    )
+
+
+def _balanced_adaptive_role_order(
+    roles: List[str], query_metrics: Dict[str, Dict], role_order: Dict[str, int]
+) -> List[str]:
+    """Round-robin viable roles across buckets before allocating overflow."""
+    if not config.JSEARCH_ADAPTIVE_BUCKET_BALANCING:
+        return sorted(
+            roles,
+            key=lambda role: _adaptive_role_score(role, query_metrics, role_order),
+            reverse=True,
+        )
+
+    by_bucket: Dict[str, List[str]] = defaultdict(list)
+    for role in roles:
+        canonical_role = query_metrics[role].get("canonical_role") or canonical_role_for_search(role)
+        by_bucket[get_bucket_name(canonical_role)].append(role)
+    for bucket_roles in by_bucket.values():
+        bucket_roles.sort(
+            key=lambda role: _adaptive_role_score(role, query_metrics, role_order),
+            reverse=True,
+        )
+
+    bucket_order = sorted(
+        by_bucket,
+        key=lambda bucket: (
+            sum(
+                int(query_metrics[role].get("new_prefilter_viable_candidates", 0))
+                for role in by_bucket[bucket]
+            ),
+            -min(role_order[role] for role in by_bucket[bucket]),
+            bucket,
+        ),
+        reverse=True,
+    )
+    ordered: List[str] = []
+    while any(by_bucket[bucket] for bucket in bucket_order):
+        for bucket in bucket_order:
+            if by_bucket[bucket]:
+                ordered.append(by_bucket[bucket].pop(0))
+    return ordered
 
 
 def _adaptive_deepening_is_enabled(
@@ -308,7 +425,12 @@ def run_daily_scrape(
         ),
         "adaptive_extra_queries": 0,
         "adaptive_extra_units": 0,
+        "adaptive_query_cap": config.JSEARCH_ADAPTIVE_MAX_EXTRA_QUERIES,
+        "adaptive_candidate_roles": [],
         "adaptive_deepened_roles": [],
+        "adaptive_bucket_counts": {},
+        "adaptive_prefilter_viable_added": 0,
+        "adaptive_zero_yield_roles": [],
         "adaptive_stop_reason": "",
         "queries_failed": 0,
         "query_plan_truncated": len(roles_to_query) < len(planned_roles),
@@ -414,44 +536,53 @@ def run_daily_scrape(
 
         time.sleep(config.SEARCH_DELAY_SECONDS)
 
-    # Use only the unused request-unit budget for selective page-2 discovery.
-    # Every role still receives one-page coverage first; deeper calls are ranked
-    # by current-run title relevance so low-yield roles do not consume extra units.
+    # Use only unused request units for page-2 discovery. Roles qualify only when
+    # page 1 produced candidates that survive the same zero-credit gates as Step 2.
+    # Allocation is round-robin by functional bucket before any bucket receives
+    # additional overflow, preventing one broad function from consuming the run.
     if stats["adaptive_deepening_enabled"] and not stats["query_stop_reason"]:
         unit_budget = config.JSEARCH_MAX_ESTIMATED_UNITS_PER_RUN
-        remaining_units = max(0, unit_budget - estimated_request_units) if unit_budget > 0 else 0
-        role_order = {role: index for index, role in enumerate(roles_to_query)}
-        ranked_roles = sorted(
-            (
-                role for role in roles_to_query
-                if stats["query_metrics"].get(role, {}).get("accepted_candidates", 0)
-                + stats["query_metrics"].get(role, {}).get("review_candidates", 0) > 0
-            ),
-            key=lambda role: (
-                stats["query_metrics"][role].get("accepted_candidates", 0),
-                stats["query_metrics"][role].get("review_candidates", 0),
-                stats["query_metrics"][role].get("raw_jobs", 0),
-                -role_order[role],
-            ),
-            reverse=True,
+        budget_remaining = (
+            max(0, unit_budget - estimated_request_units) if unit_budget > 0 else 0
         )
+        configured_cap = config.JSEARCH_ADAPTIVE_MAX_EXTRA_QUERIES
+        remaining_units = min(budget_remaining, configured_cap) if configured_cap > 0 else 0
+        role_order = {role: index for index, role in enumerate(roles_to_query)}
+        eligible_roles = [
+            role
+            for role in roles_to_query
+            if int(
+                stats["query_metrics"].get(role, {}).get(
+                    "new_prefilter_viable_candidates", 0
+                )
+            )
+            >= config.JSEARCH_ADAPTIVE_MIN_PREFILTER_VIABLE
+        ]
+        ranked_roles = _balanced_adaptive_role_order(
+            eligible_roles, stats["query_metrics"], role_order
+        )
+        stats["adaptive_candidate_roles"] = list(ranked_roles)
+        active_roles = list(ranked_roles)
 
         for extra_page_offset in range(config.JSEARCH_MAX_EXTRA_PAGES_PER_ROLE):
             page_number = 2 + extra_page_offset
-            for search_role in ranked_roles:
+            next_active_roles: List[str] = []
+            for search_role in active_roles:
                 if remaining_units <= 0:
-                    stats["adaptive_stop_reason"] = "estimated_unit_budget_exhausted"
+                    stats["adaptive_stop_reason"] = "adaptive_query_or_unit_budget_exhausted"
                     break
                 canonical_role = canonical_role_for_search(search_role)
+                role_bucket = get_bucket_name(canonical_role)
                 stats["queries_attempted"] += 1
                 stats["adaptive_extra_queries"] += 1
                 stats["adaptive_extra_units"] += 1
                 stats["estimated_request_units"] += 1
                 remaining_units -= 1
                 logger.info(
-                    "[%s] Adaptive JSearch deepening on page %d...",
+                    "[%s] Adaptive JSearch deepening on page %d (bucket=%s)...",
                     search_role,
                     page_number,
+                    role_bucket,
                 )
                 fetch_meta = JSearchFetchResult(jobs=[], duration_seconds=0.0, quota={})
                 try:
@@ -495,7 +626,9 @@ def run_daily_scrape(
                 metric = stats["query_metrics"][search_role]
                 metric["status"] = "error" if query_status == "error" else metric.get("status", "ok")
                 if query_error:
-                    metric["error"] = " | ".join(filter(None, [metric.get("error", ""), query_error]))
+                    metric["error"] = " | ".join(
+                        filter(None, [metric.get("error", ""), query_error])
+                    )
                 metric["raw_jobs"] += len(raw_jobs)
                 metric["duration_seconds"] = round(
                     float(metric.get("duration_seconds", 0)) + fetch_meta.duration_seconds, 3
@@ -511,6 +644,22 @@ def run_daily_scrape(
                     **query_ingest,
                 })
                 stats["adaptive_deepened_roles"].append(search_role)
+                bucket_counts = stats["adaptive_bucket_counts"]
+                bucket_counts[role_bucket] = int(bucket_counts.get(role_bucket, 0)) + 1
+                page_viable = int(query_ingest.get("new_prefilter_viable_candidates", 0))
+                stats["adaptive_prefilter_viable_added"] += page_viable
+                logger.info(
+                    "[%s] Adaptive page %d fetched %d raw postings; %d new jobs "
+                    "survived pre-enrichment gates",
+                    search_role,
+                    page_number,
+                    len(raw_jobs),
+                    page_viable,
+                )
+                if page_viable >= config.JSEARCH_ADAPTIVE_MIN_PREFILTER_VIABLE:
+                    next_active_roles.append(search_role)
+                else:
+                    stats["adaptive_zero_yield_roles"].append(search_role)
 
                 if (
                     config.JSEARCH_STOP_ON_LOW_QUOTA
@@ -526,6 +675,12 @@ def run_daily_scrape(
                     break
                 time.sleep(config.SEARCH_DELAY_SECONDS)
             if stats["adaptive_stop_reason"]:
+                break
+            active_roles = _balanced_adaptive_role_order(
+                next_active_roles, stats["query_metrics"], role_order
+            )
+            if not active_roles:
+                stats["adaptive_stop_reason"] = "no_roles_with_incremental_prefilter_yield"
                 break
 
     stats["queries_scheduled"] = stats["queries_attempted"]

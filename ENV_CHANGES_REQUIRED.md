@@ -84,6 +84,13 @@ JSEARCH_MAX_QUERIES_PER_RUN=0
 JSEARCH_MAX_ESTIMATED_UNITS_PER_RUN=150
 JSEARCH_STOP_ON_LOW_QUOTA=1
 JSEARCH_MIN_REMAINING_REQUESTS=500
+JSEARCH_REMOTE_JOBS_ONLY=1
+JSEARCH_REMOTE_QUERY_BIAS=1
+JSEARCH_ADAPTIVE_DEEPENING=1
+JSEARCH_MAX_EXTRA_PAGES_PER_ROLE=1
+JSEARCH_ADAPTIVE_MAX_EXTRA_QUERIES=32
+JSEARCH_ADAPTIVE_MIN_PREFILTER_VIABLE=1
+JSEARCH_ADAPTIVE_BUCKET_BALANCING=1
 MAX_ROLE_FAILURE_RATE=0.10
 ```
 
@@ -95,3 +102,17 @@ explicitly raised for a supervised diagnostic.
 Hard monthly/subscription quota errors fail fast and do not retry the remaining
 catalog. `run_scrape_test.py` still records quota headers, runtime, raw results,
 and selected results when the API provides them.
+
+The remote-only request and remote query bias prevent onsite inventory from
+consuming most of the daily budget. Adaptive page-2 calls now require at least
+one new job that survives the zero-credit Step 2 gates, and they are distributed
+across role buckets before any bucket receives overflow. Keep `NUM_PAGES=1`; the
+extra depth is controlled by the adaptive budget rather than three pages for all
+118 roles.
+
+To make the 30-lead target feasible at realistic contactability rates, use:
+
+```env
+TARGET_REVIEWABLE_LEADS_PER_RUN=30
+MAX_ELIGIBLE_COMPANIES_PER_RUN=90
+```
