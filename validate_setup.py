@@ -101,6 +101,16 @@ def static_checks() -> Dict:
             "JSEARCH_REMOTE_JOBS_ONLY=0 can substantially reduce reviewable lead volume "
             "because onsite jobs consume the same request budget"
         )
+    if not config.REQUIRE_FULL_TIME_ROLES:
+        warnings.append("REQUIRE_FULL_TIME_ROLES=0 allows non-full-time employment labels")
+    if not config.REJECT_NON_ACTIVE_HIRING_SIGNALS:
+        warnings.append("REJECT_NON_ACTIVE_HIRING_SIGNALS=0 allows evergreen/future-opening posts")
+    if not config.REQUIRE_EXPLICIT_US_REMOTE_SCOPE:
+        warnings.append("REQUIRE_EXPLICIT_US_REMOTE_SCOPE=0 allows generic Anywhere listings from a US query echo")
+    if config.FOUNDER_FALLBACK_MAX_EMPLOYEES < 1:
+        errors.append("FOUNDER_FALLBACK_MAX_EMPLOYEES must be at least 1")
+    if not config.AIRTABLE_SUPPRESS_EXISTING_COMPANY:
+        warnings.append("AIRTABLE_SUPPRESS_EXISTING_COMPANY=0 can create uncoordinated duplicate-account outreach")
     if config.MAX_ELIGIBLE_COMPANIES_PER_RUN < config.TARGET_REVIEWABLE_LEADS_PER_RUN:
         warnings.append(
             "MAX_ELIGIBLE_COMPANIES_PER_RUN is below TARGET_REVIEWABLE_LEADS_PER_RUN; "

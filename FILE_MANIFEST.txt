@@ -37,3 +37,9 @@
 ./tests/test_core.py
 ./tests/test_intent_outbound_v2.py
 ./validate_setup.py
+./audit_airtable_export.py
+./company_identity.py
+./domain_utils.py
+./tests/test_paid_test_quality_recovery.py
+./tests/test_identity_volume_hardening.py
+./tests/test_remote_volume_optimization.py

@@ -155,3 +155,33 @@ python run_filter_replay.py --input data/raw/jobs_YYYY-MM-DD.json
 The replay writes accepted/rejected JSON, a role-level CSV, and a quality report
 under `data/replay/`. It does not call JSearch, Apollo, Hunter, Airtable, or
 Instantly.
+
+
+## Paid-test quality recovery
+
+The production filter is quality-first even with the full 118-role catalog:
+
+- `Anywhere` is not treated as US evidence by itself. A remote listing needs an
+  explicit US scope, a US state/location signal, or another specific US marker.
+- Explicit part-time, contractor, freelance, temporary, hourly-limited, future
+  opening, evergreen, and talent-pool posts are rejected before Apollo.
+- Known job boards, recruiting platforms, staffing firms, and observed
+  intermediary employers are rejected before enrichment.
+- Apollo industry checks remove excluded healthcare, recruiting, outsourcing,
+  government, nonprofit, events, media, and chemical accounts.
+- Founder/CEO fallback is available only for companies with 99 or fewer
+  employees; larger accounts require a functional leader.
+- Airtable suppresses a company already present in an active lifecycle state,
+  even when the contact or role bucket would create a new Lead Key. Rejected
+  and Error records may re-enter when a later job is genuinely qualified.
+- The Airtable `Location` field uses recovered evidence such as `Campbell, CA` or
+  `Remote, United States` instead of the provider's generic `Anywhere` label.
+
+Audit an Airtable export without consuming API credits:
+
+```powershell
+python audit_airtable_export.py "Leads-All Leads.csv" --last 16 --output lead_quality_audit.csv
+```
+
+The audit writes PASS/REVIEW/REJECT decisions and deterministic reasons using the
+same local gates as production.

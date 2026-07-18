@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
+from urllib.parse import unquote
 
 from company_identity import safe_company_domain
 from domain_utils import normalize_company_domain
@@ -48,6 +49,21 @@ class WorkArrangementEvidence:
 
 
 @dataclass(frozen=True)
+class GeographyEvidence:
+    eligible: bool
+    reason: str
+    display_location: str
+    scope: str
+
+
+@dataclass(frozen=True)
+class EmploymentEvidence:
+    eligible: bool
+    reason: str
+    classification: str
+
+
+@dataclass(frozen=True)
 class PreEnrichmentAssessment:
     """Local, zero-credit eligibility signal used by Step 1 and Step 2."""
 
@@ -55,6 +71,8 @@ class PreEnrichmentAssessment:
     stat_name: str
     reason: str
     work_arrangement: WorkArrangementEvidence
+    geography: GeographyEvidence
+    employment: EmploymentEvidence
     employer_domain: str
     employer_domain_source: str
 
@@ -273,62 +291,140 @@ def _coordinates_are_us(job: Dict) -> bool:
     return config.US_LAT_MIN <= lat <= config.US_LAT_MAX and config.US_LON_MIN <= lon <= config.US_LON_MAX
 
 
-def is_us_job(job: Dict) -> Tuple[bool, str]:
-    apply_link = (job.get("job_apply_link") or "").lower()
-    eligibility_text = "\n".join([
-        job.get("job_title") or "",
-        job.get("job_location") or "",
-        (job.get("job_description") or "")[:4000],
-    ])
-    for pattern in config.FOREIGN_ONLY_ELIGIBILITY_PATTERNS:
-        if re.search(pattern, eligibility_text, re.I):
-            return False, f"foreign_only_eligibility:{pattern}"
+def _raw_us_state_abbreviations(text: str) -> List[str]:
+    """Return explicit uppercase US state abbreviations from source text.
 
-    for country_slug in config.FOREIGN_COUNTRY_URL_SLUGS:
-        if re.search(r"--" + re.escape(country_slug) + r"--", apply_link, re.I):
-            return False, f"non_us_apply_link_slug:{country_slug}"
+    Matching is case-sensitive so ordinary words such as ``in`` and ``or`` do
+    not become Indiana or Oregon.
+    """
+    if not text:
+        return []
+    abbreviations = "|".join(sorted((value.upper() for value in config.US_STATE_ABBREVS), key=len, reverse=True))
+    return list(dict.fromkeys(re.findall(rf"(?<![A-Za-z])({abbreviations})(?![A-Za-z])", text)))
 
+
+def _extract_display_location(job: Dict, explicit_us: bool) -> str:
+    raw_location = str(job.get("job_location") or "").strip()
+    normalized_location = normalize_text(raw_location)
+    if normalized_location not in config.GENERIC_REMOTE_LOCATIONS:
+        return raw_location
+
+    city = str(job.get("job_city") or "").strip()
+    state = str(job.get("job_state") or "").strip()
+    if city and state:
+        return f"{city}, {state}"
+    if state:
+        return state
+
+    title = str(job.get("job_title") or "")
+    city_state = re.search(
+        r"\bin\s+([A-Za-z][A-Za-z .'-]{1,50},\s*(?:[A-Z]{2})(?:\b|\s+\d{5}))",
+        title,
+    )
+    if city_state:
+        return city_state.group(1).strip()
+
+    states = _raw_us_state_abbreviations(title)
+    if states:
+        return "Remote, " + ", ".join(states)
+    return "Remote, United States" if explicit_us else (raw_location or "Remote")
+
+
+def assess_us_eligibility(job: Dict) -> GeographyEvidence:
+    """Require independent US evidence for generic remote/Anywhere listings.
+
+    JSearch's ``country=us`` query can echo ``job_country=US`` even when a
+    syndicated listing is global or explicitly foreign. Therefore the country
+    field is accepted only with a non-generic location or separate US evidence.
+    """
+    title = str(job.get("job_title") or "")
+    location = str(job.get("job_location") or "")
+    description = str(job.get("job_description") or "")[:5000]
+    city = str(job.get("job_city") or "")
+    state_raw = str(job.get("job_state") or "").strip()
     country = normalize_text(job.get("job_country") or "")
-    if country:
-        if country in config.US_COUNTRY_CODES:
-            return True, "country_field"
-        return False, f"non_us_country:{country}"
+    apply_link = unquote(str(job.get("job_apply_link") or "")).lower()
+    source_text = "\n".join([title, location, city, state_raw, description])
+    normalized_location_source = normalize_text("\n".join([title, location, city, state_raw]))
+    normalized_location = normalize_text(location)
 
-    location = normalize_text(job.get("job_location") or "")
+    for pattern in config.FOREIGN_ONLY_ELIGIBILITY_PATTERNS:
+        if re.search(pattern, source_text, re.I):
+            return GeographyEvidence(False, f"foreign_only_eligibility:{pattern}", location or "Remote", "foreign")
+    for pattern in config.GLOBAL_REMOTE_PATTERNS:
+        if re.search(pattern, source_text, re.I):
+            return GeographyEvidence(False, f"global_remote_scope:{pattern}", location or "Remote", "global")
+
+    url_tokens = re.sub(r"[^a-z0-9]+", "-", apply_link)
+    for marker in [*config.FOREIGN_COUNTRY_URL_SLUGS, *config.FOREIGN_CITY_URL_SLUGS]:
+        token = marker.lower().strip("-")
+        if token and re.search(rf"(?:^|-)({re.escape(token)})(?:-|$)", url_tokens):
+            return GeographyEvidence(False, f"non_us_apply_link_marker:{marker}", location or "Remote", "foreign")
+
     for marker in config.NON_US_LOCATION_MARKERS:
-        if _location_contains_marker(location, normalize_text(marker)):
-            return False, f"non_us_location:{marker}"
+        normalized_marker = normalize_text(marker)
+        if normalized_marker and _location_contains_marker(normalized_location_source, normalized_marker):
+            return GeographyEvidence(False, f"non_us_location:{marker}", location or "Remote", "foreign")
 
     website = (job.get("employer_website") or "").lower()
     if any(website.endswith(tld) or f"{tld}/" in website for tld in config.NON_US_WEBSITE_TLDS):
-        return False, "non_us_website_tld"
+        return GeographyEvidence(False, "non_us_website_tld", location or "Remote", "foreign")
 
-    state = normalize_text(job.get("job_state") or "")
-    if state in config.US_STATE_ABBREVS or state in config.US_STATE_NAMES:
-        return True, "state_field"
+    explicit_us_pattern = next(
+        (pattern for pattern in config.US_REMOTE_SCOPE_PATTERNS if re.search(pattern, source_text, re.I)),
+        None,
+    )
+    explicit_us = explicit_us_pattern is not None
 
-    # Last comma-delimited token often contains a state abbreviation + ZIP.
-    raw_location = (job.get("job_location") or "").lower()
-    state_part = raw_location.split(",")[-1].strip() if "," in raw_location else ""
-    state_token = state_part.split()[0] if state_part else ""
-    if state_token in config.US_STATE_ABBREVS:
-        return True, "location_state"
+    state_norm = normalize_text(state_raw)
+    state_is_us = bool(
+        state_norm
+        and (state_norm in config.US_STATE_ABBREVS or state_norm in config.US_STATE_NAMES)
+    )
+    # ``Georgia`` alone is ambiguous between the US state and the country.
+    if state_norm == "georgia":
+        state_is_us = False
 
-    if re.search(r"/us/", apply_link) or "gl=us" in apply_link:
-        return True, "apply_link_us"
-    if any(domain in apply_link for domain in config.TRUSTED_US_JOB_BOARD_DOMAINS):
-        return True, "trusted_us_job_board"
+    state_tokens = _raw_us_state_abbreviations("\n".join([title, location, state_raw]))
+    location_has_us_state_name = any(
+        state_name != "georgia" and _location_contains_marker(normalize_text(location), state_name)
+        for state_name in config.US_STATE_NAMES
+    )
+    explicit_state = bool(state_is_us or state_tokens or location_has_us_state_name)
 
-    # Coordinates alone are not conclusive: Canadian locations overlap a broad
-    # US bounding box. Keep them as metadata, not as an independent country signal.
+    if explicit_us or explicit_state:
+        display = _extract_display_location(job, explicit_us=True)
+        reason = (
+            "country_field"
+            if explicit_us_pattern and explicit_us_pattern.startswith(r"\bavailable") and country in config.US_COUNTRY_CODES
+            else (
+                f"explicit_us_scope:{explicit_us_pattern}"
+                if explicit_us_pattern
+                else "explicit_us_state"
+            )
+        )
+        return GeographyEvidence(True, reason, display, "us_explicit")
 
-    if location in {"remote", "anywhere", "work from home", "united states"}:
-        description = normalize_text((job.get("job_description") or "")[:1500])
-        if "united states" in description or re.search(r"\busa\b", description):
-            return True, "remote_us_description"
-        return False, "ambiguous_remote_location"
+    generic_remote = normalized_location in config.GENERIC_REMOTE_LOCATIONS
+    if country and country not in config.US_COUNTRY_CODES:
+        return GeographyEvidence(False, f"non_us_country:{country}", location or "Remote", "foreign")
 
-    return False, "missing_us_signals"
+    if config.REQUIRE_EXPLICIT_US_REMOTE_SCOPE:
+        reason = (
+            "ambiguous_remote_location_without_us_evidence"
+            if generic_remote
+            else "specific_location_without_us_corroboration"
+        )
+        return GeographyEvidence(False, reason, location or "Remote", "ambiguous")
+
+    if country in config.US_COUNTRY_CODES:
+        return GeographyEvidence(True, "country_field", _extract_display_location(job, explicit_us=False), "us_weak")
+    return GeographyEvidence(False, "missing_us_signals", location or "Remote", "ambiguous")
+
+
+def is_us_job(job: Dict) -> Tuple[bool, str]:
+    evidence = assess_us_eligibility(job)
+    return evidence.eligible, evidence.reason
 
 
 
@@ -416,6 +512,48 @@ def is_non_paying_role(job: Dict) -> Tuple[bool, str]:
         if re.search(pattern, text, re.I):
             return True, f"non_paying_role:{pattern}"
     return False, ""
+
+
+def assess_employment_quality(job: Dict) -> EmploymentEvidence:
+    title = str(job.get("job_title") or "")
+    description = str(job.get("job_description") or "")[:5000]
+    employment_type_raw = str(job.get("job_employment_type") or "")
+    employment_type = normalize_text(employment_type_raw)
+
+    if config.REJECT_NON_ACTIVE_HIRING_SIGNALS:
+        for pattern in config.NON_ACTIVE_HIRING_SIGNAL_PATTERNS:
+            if re.search(pattern, f"{title}\n{description}", re.I):
+                return EmploymentEvidence(False, f"non_active_hiring_signal:{pattern}", "non_active")
+
+    for pattern in config.NON_FULL_TIME_TITLE_PATTERNS:
+        if re.search(pattern, title, re.I):
+            return EmploymentEvidence(False, f"non_full_time_title:{pattern}", "non_full_time")
+    for pattern in config.NON_FULL_TIME_DESCRIPTION_PATTERNS:
+        if re.search(pattern, description, re.I):
+            return EmploymentEvidence(False, f"non_full_time_description:{pattern}", "non_full_time")
+    if any(value in employment_type for value in config.NON_FULL_TIME_EMPLOYMENT_TYPES):
+        return EmploymentEvidence(False, f"non_full_time_employment_type:{employment_type_raw}", "non_full_time")
+
+    full_time = employment_type in {"full time", "fulltime"} or bool(
+        re.search(r"\bfull[- ]time\b", title, re.I)
+    )
+    if config.REQUIRE_FULL_TIME_ROLES and employment_type_raw and not full_time:
+        return EmploymentEvidence(False, f"unsupported_employment_type:{employment_type_raw}", "unknown")
+    if full_time:
+        return EmploymentEvidence(True, "explicit_full_time", "full_time")
+    # Some JSearch sources omit employment type entirely. Keep the job when no
+    # contrary part-time/contract signal exists, but preserve the uncertainty.
+    return EmploymentEvidence(True, "employment_type_missing_no_negative_evidence", "unknown")
+
+
+def is_non_full_time_role(job: Dict) -> Tuple[bool, str]:
+    assessment = assess_employment_quality(job)
+    return (not assessment.eligible and assessment.classification != "non_active", assessment.reason)
+
+
+def is_non_active_hiring_signal(job: Dict) -> Tuple[bool, str]:
+    assessment = assess_employment_quality(job)
+    return (assessment.classification == "non_active", assessment.reason)
 
 def _detect_company_column(headers: List[str]) -> Optional[str]:
     preferred = [
@@ -507,6 +645,8 @@ def assess_pre_enrichment_viability(job: Dict) -> PreEnrichmentAssessment:
     actually reach enrichment instead of merely matching a title.
     """
     arrangement = classify_work_arrangement(job)
+    geography = assess_us_eligibility(job)
+    employment = assess_employment_quality(job)
     employer_domain, employer_domain_source = get_safe_employer_domain(job)
 
     checks = [
@@ -524,8 +664,22 @@ def assess_pre_enrichment_viability(job: Dict) -> PreEnrichmentAssessment:
         ),
         ("excluded_non_paying", is_non_paying_role),
         (
+            "excluded_non_active",
+            lambda _job: (
+                employment.classification == "non_active",
+                employment.reason if employment.classification == "non_active" else "",
+            ),
+        ),
+        (
+            "excluded_non_full_time",
+            lambda _job: (
+                not employment.eligible and employment.classification != "non_active",
+                employment.reason if not employment.eligible else "",
+            ),
+        ),
+        (
             "excluded_non_us",
-            lambda candidate: (lambda ok, reason: (not ok, reason))(*is_us_job(candidate)),
+            lambda _job: (not geography.eligible, geography.reason),
         ),
     ]
     for stat_name, check in checks:
@@ -536,6 +690,8 @@ def assess_pre_enrichment_viability(job: Dict) -> PreEnrichmentAssessment:
                 stat_name=stat_name,
                 reason=reason,
                 work_arrangement=arrangement,
+                geography=geography,
+                employment=employment,
                 employer_domain=employer_domain,
                 employer_domain_source=employer_domain_source,
             )
@@ -545,6 +701,8 @@ def assess_pre_enrichment_viability(job: Dict) -> PreEnrichmentAssessment:
         stat_name="",
         reason="",
         work_arrangement=arrangement,
+        geography=geography,
+        employment=employment,
         employer_domain=employer_domain,
         employer_domain_source=employer_domain_source,
     )
@@ -581,6 +739,8 @@ def run_filter(
         "excluded_role_mismatch": 0,
         "excluded_in_person": 0,
         "excluded_non_paying": 0,
+        "excluded_non_active": 0,
+        "excluded_non_full_time": 0,
         "excluded_non_us": 0,
         "excluded_crm": 0,
         "excluded_duplicate": 0,
@@ -593,6 +753,11 @@ def run_filter(
             **job,
             "_work_arrangement": assessment.work_arrangement.status,
             "_work_arrangement_reason": assessment.work_arrangement.reason,
+            "_us_eligibility_reason": assessment.geography.reason,
+            "_remote_scope": assessment.geography.scope,
+            "_normalized_location": assessment.geography.display_location,
+            "_employment_quality": assessment.employment.classification,
+            "_employment_quality_reason": assessment.employment.reason,
             "_employer_domain_input": assessment.employer_domain,
             "_employer_domain_source": assessment.employer_domain_source,
         }

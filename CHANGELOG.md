@@ -123,3 +123,15 @@
 - Raise the default eligible-company safety cap from 60 to 90 so a 30-reviewable-lead target is achievable at observed contactability rates.
 - Add Railway logs for remote search settings, adaptive viable yield, and bucket allocation.
 - Expand the test suite from 109 to 116 passing tests.
+
+
+## 2026-07-18 — Paid-test precision recovery
+
+- Stop treating a JSearch `country=US` echo plus `Location=Anywhere` as proof of US eligibility.
+- Recover specific US locations from titles/state evidence and write them to Airtable.
+- Reject explicit part-time, contractor, freelance, temporary, weekly-hour-limited, and non-active future-opening signals before enrichment.
+- Add observed recruiting-platform, job-board, and staffing-company exclusions from the production audit.
+- Expand Apollo industry exclusions for mental-health, healthcare, HR-services, and outsourcing accounts.
+- Restrict Founder/CEO fallback to companies with at most 99 employees.
+- Suppress Airtable companies in active lifecycle states across contacts and role buckets, while allowing Rejected and Error records to re-enter when a later job is qualified.
+- Add a zero-credit Airtable CSV audit command and 14 regression tests covering the observed production failures.
