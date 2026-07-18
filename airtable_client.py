@@ -93,7 +93,11 @@ def _job_to_fields(job: Dict) -> Dict:
     fields = {
         "Lead Key": job.get("lead_key"),
         "Company": job.get("employer_name"),
-        "Website": job.get("employer_website") or job.get("company_domain"),
+        "Website": (
+            f"https://{job.get('company_domain')}"
+            if job.get("company_domain")
+            else job.get("employer_website")
+        ),
         "Open Role": job.get("job_title"),
         "Open Roles": " | ".join(related_roles),
         "Role Focus": job.get("role_focus"),

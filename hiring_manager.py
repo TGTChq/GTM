@@ -16,7 +16,14 @@ from urllib.parse import parse_qs, unquote, urlparse
 import apollo_client as apollo
 import config
 import hunter_client as hunter
-from job_filter import extract_domain, normalize_text
+from company_identity import (
+    company_names_compatible,
+    domains_equivalent,
+    email_matches_company,
+    is_intermediary_domain,
+    safe_company_domain,
+)
+from job_filter import extract_domain, get_safe_employer_domain, normalize_text
 from job_signal import annotate_job
 from role_focus import extract_role_focus
 from role_mapping import (
@@ -59,16 +66,16 @@ class Step3Result:
 def validate_preflight() -> None:
     if not config.APOLLO_API_KEY:
         raise ValueError("APOLLO_API_KEY is missing from .env")
+    if config.APOLLO_MAX_PERSON_MATCH_ATTEMPTS_PER_BUCKET < 1:
+        raise ValueError("APOLLO_MAX_PERSON_MATCH_ATTEMPTS_PER_BUCKET must be at least 1")
+    if config.HUNTER_MAX_FALLBACK_ATTEMPTS_PER_BUCKET < 0:
+        raise ValueError("HUNTER_MAX_FALLBACK_ATTEMPTS_PER_BUCKET cannot be negative")
     if config.VERIFY_WITH_HUNTER and not config.HUNTER_API_KEY:
         logger.warning("HUNTER_API_KEY is missing; Hunter verification/fallback is disabled")
 
 
 def _is_intermediary_domain(domain: str) -> bool:
-    domain = (domain or "").lower().strip(".")
-    return any(
-        domain == blocked or domain.endswith("." + blocked)
-        for blocked in config.INTERMEDIARY_JOB_DOMAINS
-    )
+    return is_intermediary_domain(domain, config.INTERMEDIARY_JOB_DOMAINS)
 
 
 def _domain_from_apply_link(job: Dict) -> str:
@@ -98,7 +105,13 @@ def _domain_from_apply_link(job: Dict) -> str:
 
 
 def _best_input_domain(job: Dict) -> str:
-    return extract_domain(job.get("employer_website") or "") or _domain_from_apply_link(job)
+    annotated = safe_company_domain(
+        job.get("_employer_domain_input") or "",
+        config.INTERMEDIARY_JOB_DOMAINS,
+    )
+    if annotated:
+        return annotated
+    return get_safe_employer_domain(job)[0] or _domain_from_apply_link(job)
 
 
 def passes_company_criteria(org: apollo.OrgEnrichment) -> Tuple[bool, str, bool]:
@@ -150,21 +163,69 @@ def _title_priority(title: str, target_titles: List[str]) -> Tuple[int, int]:
     return len(target_titles) + 10, 0
 
 
-def pick_best_candidate(people: List[Dict], target_titles: List[str]) -> Optional[Dict]:
-    if not people:
-        return None
-
+def rank_candidates(people: List[Dict], target_titles: List[str]) -> List[Dict]:
+    """Return only title-matched candidates in deterministic priority order."""
     ranked = sorted(
-        people,
+        people or [],
         key=lambda person: (
             _title_priority(person.get("title") or "", target_titles)[0],
             -_title_priority(person.get("title") or "", target_titles)[1],
             not bool(person.get("linkedin_url")),
+            str(person.get("id") or person.get("person_id") or ""),
         ),
     )
-    best = ranked[0]
-    _, quality = _title_priority(best.get("title") or "", target_titles)
-    return best if quality > 0 else None
+    return [
+        person
+        for person in ranked
+        if _title_priority(person.get("title") or "", target_titles)[1] > 0
+    ]
+
+
+def pick_best_candidate(people: List[Dict], target_titles: List[str]) -> Optional[Dict]:
+    ranked = rank_candidates(people, target_titles)
+    return ranked[0] if ranked else None
+
+
+def _organization_domains(org: apollo.OrgEnrichment) -> set[str]:
+    values = [org.domain]
+    raw = org.raw or {}
+    values.extend([
+        raw.get("primary_domain"),
+        raw.get("domain"),
+        raw.get("website_url"),
+    ])
+    return {
+        domain
+        for value in values
+        if (domain := safe_company_domain(value, config.INTERMEDIARY_JOB_DOMAINS))
+    }
+
+
+def _person_belongs_to_company(
+    person: apollo.PersonMatch,
+    company_domains: set[str],
+    company_name: str,
+) -> bool:
+    person_domain = safe_company_domain(
+        person.organization_domain or "", config.INTERMEDIARY_JOB_DOMAINS
+    )
+    if person_domain:
+        return any(domains_equivalent(person_domain, domain) for domain in company_domains)
+    if person.organization_name:
+        return company_names_compatible(company_name, person.organization_name)
+    # Apollo may omit current-organization identity from a person match. The
+    # original people search was domain-constrained, and a usable email must
+    # still pass strict company-domain validation before the lead is reviewable.
+    return True
+
+
+def _selection_tier(title: str | None) -> str:
+    normalized = normalize_text(title or "")
+    if normalized in {"founder", "co founder", "ceo"}:
+        return "founder_fallback"
+    if any(token in normalized for token in ("manager", "director", "head")):
+        return "direct_functional_leader"
+    return "functional_executive"
 
 
 def _email_confidence(
@@ -232,7 +293,10 @@ def _build_no_contact_lead(
             "company_employee_count": org.employee_count,
             "company_founded_year": org.founded_year,
             "company_industry": org.industry,
-            "company_domain": org.domain or extract_domain(primary.get("employer_website") or ""),
+            "company_domain": safe_company_domain(
+                org.domain or _best_input_domain(primary),
+                config.INTERMEDIARY_JOB_DOMAINS,
+            ),
             "hiring_manager_confidence": "none",
         }
     )
@@ -242,7 +306,6 @@ def _build_no_contact_lead(
 def process_company(company_jobs: List[Dict]) -> Tuple[List[Dict], Dict]:
     stats = defaultdict(int)
     first = company_jobs[0]
-    raw_website = first.get("employer_website") or ""
     input_domain = _best_input_domain(first)
     company_name = first.get("employer_name") or ""
     # Never pass a bare company name or a noisy subdomain as Apollo's website.
@@ -253,7 +316,15 @@ def process_company(company_jobs: List[Dict]) -> Tuple[List[Dict], Dict]:
         domain=input_domain, name=company_name, website=enrichment_website
     )
     time.sleep(config.APOLLO_RATE_LIMIT_DELAY)
-    search_domain = org.domain or input_domain
+    search_domain = safe_company_domain(
+        org.domain or input_domain, config.INTERMEDIARY_JOB_DOMAINS
+    )
+    if input_domain:
+        stats["company_domain_from_first_party_signal"] += 1
+    elif search_domain:
+        stats["company_domain_resolved_by_name"] += 1
+    else:
+        stats["company_domain_unresolved"] += 1
 
     eligible, company_reason, company_needs_review = passes_company_criteria(org)
 
@@ -301,9 +372,9 @@ def process_company(company_jobs: List[Dict]) -> Tuple[List[Dict], Dict]:
         target_titles = get_target_titles_for_jobs(bucket_jobs, org.employee_count)
         people = apollo.search_people_at_company(search_domain, target_titles)
         time.sleep(config.APOLLO_RATE_LIMIT_DELAY)
-        candidate = pick_best_candidate(people, target_titles)
+        ranked_candidates = rank_candidates(people, target_titles)
 
-        if not candidate:
+        if not ranked_candidates:
             leads.append(
                 _build_no_contact_lead(
                     primary,
@@ -317,30 +388,88 @@ def process_company(company_jobs: List[Dict]) -> Tuple[List[Dict], Dict]:
                 )
             )
             stats[f"bucket_{bucket}_not_found"] += 1
+            stats["no_matching_hiring_manager"] += 1
             continue
 
-        person = apollo.match_person(candidate)
-        time.sleep(config.APOLLO_RATE_LIMIT_DELAY)
-        hunter_result: Optional[hunter.HunterResult] = None
+        company_domains = _organization_domains(org)
+        company_domains.add(search_domain)
+        max_person_attempts = config.APOLLO_MAX_PERSON_MATCH_ATTEMPTS_PER_BUCKET
+        max_hunter_attempts = config.HUNTER_MAX_FALLBACK_ATTEMPTS_PER_BUCKET
+        hunter_attempts = 0
+        selected_person: Optional[apollo.PersonMatch] = None
+        selected_hunter: Optional[hunter.HunterResult] = None
+        selected_confidence = "none"
+        best_identified: Optional[apollo.PersonMatch] = None
+        terminal_reason = "no_usable_email"
 
-        if person.email and config.VERIFY_WITH_HUNTER and config.HUNTER_API_KEY:
-            hunter_result = hunter.verify_email(person.email)
-            time.sleep(config.HUNTER_RATE_LIMIT_DELAY)
-        elif (
-            not person.email
-            and person.first_name
-            and person.last_name
-            and config.HUNTER_API_KEY
-        ):
-            hunter_result = hunter.find_email(person.first_name, person.last_name, search_domain)
-            time.sleep(config.HUNTER_RATE_LIMIT_DELAY)
-            if hunter_result.found and hunter_result.email:
-                person.email = hunter_result.email
-                person.email_found = True
-                person.email_source = "hunter"
+        for candidate in ranked_candidates[:max_person_attempts]:
+            stats["person_match_attempts"] += 1
+            person = apollo.match_person(candidate)
+            time.sleep(config.APOLLO_RATE_LIMIT_DELAY)
+            if not _person_belongs_to_company(person, company_domains, company_name):
+                stats["candidate_organization_domain_mismatch"] += 1
+                terminal_reason = "candidate_organization_domain_mismatch"
+                continue
+            if person.person_found and best_identified is None:
+                best_identified = person
 
-        confidence = _email_confidence(person, hunter_result)
-        found = confidence not in {"none", "invalid"}
+            hunter_result: Optional[hunter.HunterResult] = None
+            allowed_domains = set(company_domains)
+            if person.organization_domain:
+                allowed_domains.add(person.organization_domain)
+
+            if person.email:
+                if not email_matches_company(person.email, allowed_domains):
+                    stats["candidate_email_domain_mismatch"] += 1
+                    terminal_reason = "candidate_email_domain_mismatch"
+                    person.email = None
+                    person.email_found = False
+                    continue
+                if config.VERIFY_WITH_HUNTER and config.HUNTER_API_KEY:
+                    hunter_result = hunter.verify_email(person.email)
+                    time.sleep(config.HUNTER_RATE_LIMIT_DELAY)
+            elif (
+                person.first_name
+                and person.last_name
+                and config.HUNTER_API_KEY
+                and hunter_attempts < max_hunter_attempts
+            ):
+                hunter_attempts += 1
+                stats["hunter_fallback_attempts"] += 1
+                hunter_result = hunter.find_email(
+                    person.first_name, person.last_name, search_domain
+                )
+                time.sleep(config.HUNTER_RATE_LIMIT_DELAY)
+                if hunter_result.found and hunter_result.email:
+                    if email_matches_company(hunter_result.email, allowed_domains):
+                        person.email = hunter_result.email
+                        person.email_found = True
+                        person.email_source = "hunter"
+                    else:
+                        stats["candidate_email_domain_mismatch"] += 1
+                        terminal_reason = "candidate_email_domain_mismatch"
+                        continue
+
+            confidence = _email_confidence(person, hunter_result)
+            if confidence == "invalid":
+                stats["candidate_email_invalid"] += 1
+                terminal_reason = "email_invalid"
+                continue
+            if confidence == "none":
+                stats["candidate_no_usable_email"] += 1
+                terminal_reason = "no_usable_email"
+                continue
+
+            selected_person = person
+            selected_hunter = hunter_result
+            selected_confidence = confidence
+            terminal_reason = "contact_found"
+            break
+
+        person = selected_person or best_identified or apollo.PersonMatch(person_found=False)
+        hunter_result = selected_hunter
+        found = selected_person is not None
+        confidence = selected_confidence if found else "none"
         role_focus = extract_role_focus(
             primary, primary.get("_matched_role", "")
         )
@@ -353,7 +482,7 @@ def process_company(company_jobs: List[Dict]) -> Tuple[List[Dict], Dict]:
                     get_hiring_manager_bucket_for_job(job) for job in bucket_jobs
                 }),
                 "_step3_status": "found" if found else "not_found",
-                "_step3_reason": "email_invalid" if confidence == "invalid" else ("contact_found" if found else "no_usable_email"),
+                "_step3_reason": terminal_reason,
                 "_company_criteria_reason": company_reason,
                 "_company_needs_review": company_needs_review,
                 "related_open_roles": sorted({j.get("job_title", "") for j in bucket_jobs if j.get("job_title")}),
@@ -372,22 +501,24 @@ def process_company(company_jobs: List[Dict]) -> Tuple[List[Dict], Dict]:
                 "hiring_manager_last_name": person.last_name,
                 "hiring_manager_title": person.title,
                 "hiring_manager_linkedin": person.linkedin_url,
-                "hiring_manager_email": person.email,
-                "hiring_manager_email_source": person.email_source,
-                "apollo_email_status": person.email_status,
+                "hiring_manager_email": person.email if found else None,
+                "hiring_manager_email_source": person.email_source if found else None,
+                "apollo_email_status": person.email_status if found else None,
                 "hunter_email_status": hunter_result.status if hunter_result else None,
                 "hiring_manager_confidence": confidence,
+                "hiring_manager_selection_tier": _selection_tier(person.title) if person.person_found else None,
                 "campaign_id": config.resolve_campaign_id(bucket, org.employee_count),
             }
         )
-        if person.email:
+        if found and person.email:
             lead["lead_key"] = _lead_key(search_domain, person.email, bucket)
         # Freshness and URL quality are evaluated only for contactable leads,
         # because those are the records that enter the Airtable review queue.
-        # Older/aggregator-sourced jobs are kept, but clearly flagged.
         lead = annotate_job(lead, probe_url=found)
         leads.append(lead)
         stats[f"bucket_{bucket}_{'found' if found else 'not_found'}"] += 1
+        if found:
+            stats[f"selection_tier_{_selection_tier(person.title)}"] += 1
 
     return leads, dict(stats)
 
@@ -410,6 +541,18 @@ def _count_unique_reviewable_leads(leads: List[Dict]) -> int:
             if _is_reviewable_lead(lead)
         }
     )
+
+
+def _company_priority(item: Tuple[str, List[Dict]]) -> Tuple[int, int, int]:
+    """Prioritize safer, stronger account signals before the Apollo safety cap."""
+    _company_key, company_jobs = item
+    has_first_party_domain = int(any(_best_input_domain(job) for job in company_jobs))
+    max_relevance = max(
+        (int(job.get("_role_relevance_score") or 0) for job in company_jobs),
+        default=0,
+    )
+    multiple_openings = len({job.get("job_id") for job in company_jobs if job.get("job_id")})
+    return has_first_party_domain, max_relevance, multiple_openings
 
 
 def _job_state_ref(job: Dict) -> Dict:
@@ -468,10 +611,12 @@ def run_hiring_manager_identification(
     companies_considered = 0
     eligible_companies = 0
     excluded_companies = 0
-    total_candidate_companies = len(jobs_by_company)
+    company_items = list(jobs_by_company.items())
+    company_items.sort(key=_company_priority, reverse=True)
+    total_candidate_companies = len(company_items)
     stop_reason = "candidate_pool_exhausted"
 
-    for index, (company_key, company_jobs) in enumerate(jobs_by_company.items(), 1):
+    for index, (company_key, company_jobs) in enumerate(company_items, 1):
         logger.info("[%d/%d] Enriching %s", index, total_candidate_companies, company_key)
         leads, stats = process_company(company_jobs)
         companies_considered += 1

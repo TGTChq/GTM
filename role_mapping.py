@@ -205,6 +205,142 @@ BUCKET_TITLES: Dict[str, List[str]] = {
 }
 
 
+# Direct functional managers are searched before executives. Apollo title search
+# is broad enough to return C-level contacts even when a closer manager exists,
+# so these titles intentionally lead each hierarchy.
+BUCKET_DIRECT_TITLES: Dict[str, List[str]] = {
+    "gtm_revenue": [
+        "Sales Director", "Director of Sales", "Revenue Operations Director",
+        "Director of Revenue Operations", "Revenue Operations Manager",
+        "Sales Operations Director", "Sales Operations Manager",
+    ],
+    "engineering": [
+        "Engineering Manager", "Software Engineering Manager",
+        "Director of Engineering", "Director Engineering",
+    ],
+    "data": [
+        "Data Director", "Director of Data", "Analytics Director",
+        "Director of Analytics", "Data Analytics Manager", "Analytics Manager",
+    ],
+    "it": [
+        "IT Director", "Director of IT", "Information Technology Director",
+        "IT Manager", "Information Technology Manager",
+    ],
+    "marketing": [
+        "Marketing Director", "Director of Marketing", "Growth Director",
+        "Director of Growth", "Marketing Manager",
+    ],
+    "customer_success": [
+        "Customer Success Director", "Director of Customer Success",
+        "Customer Experience Director",
+    ],
+    "customer_support": [
+        "Customer Support Director", "Director of Customer Support",
+        "Support Director", "Customer Support Manager", "Support Manager",
+    ],
+    "finance": [
+        "Finance Director", "Director of Finance", "Accounting Director",
+        "Director of Accounting", "Accounting Manager",
+    ],
+    "operations": [
+        "Operations Director", "Director of Operations", "Operations Manager",
+    ],
+    "people_hr": [
+        "HR Director", "Human Resources Director", "Director of Human Resources",
+        "People Operations Director", "Director of People Operations",
+        "Talent Acquisition Director", "HR Manager",
+    ],
+    "product": [
+        "Product Director", "Director of Product", "Product Design Director",
+        "Director of Product Design", "Design Director",
+    ],
+    "ecommerce": [
+        "Ecommerce Director", "E-commerce Director", "Director of Ecommerce",
+    ],
+    "partnerships": [
+        "Partnerships Director", "Director of Partnerships",
+        "Business Development Director", "Partnerships Manager",
+    ],
+}
+
+
+ROLE_DIRECT_MANAGER_TITLES: Dict[str, List[str]] = {
+    "QA Engineer": [
+        "QA Manager", "Quality Assurance Manager", "Head of QA",
+        "Director of QA", "Quality Engineering Manager",
+        "Director of Quality Engineering", "Head of Quality Engineering",
+    ],
+    "QA Analyst": [
+        "QA Manager", "Quality Assurance Manager", "Head of QA",
+        "Director of QA", "Quality Engineering Manager",
+    ],
+    "Cloud Engineer": [
+        "Cloud Engineering Manager", "Director of Cloud Engineering",
+        "Infrastructure Manager", "Director of Infrastructure",
+    ],
+    "DevOps Engineer": [
+        "DevOps Manager", "Head of DevOps", "Director of DevOps",
+        "Platform Engineering Manager", "Head of Platform Engineering",
+    ],
+    "Data Engineer": [
+        "Data Engineering Manager", "Head of Data Engineering",
+        "Director of Data Engineering",
+    ],
+    "Data Scientist": [
+        "Data Science Manager", "Head of Data Science",
+        "Director of Data Science",
+    ],
+    "Product Designer": [
+        "Product Design Manager", "Head of Product Design",
+        "Director of Product Design", "Design Director", "Head of Design",
+    ],
+    "UX/UI Designer": [
+        "UX Director", "Director of UX", "Design Manager",
+        "Head of Product Design", "Head of Design",
+    ],
+    "Recruiter": [
+        "Recruiting Manager", "Talent Acquisition Manager",
+        "Director of Talent Acquisition", "Head of Talent Acquisition",
+    ],
+    "Technical Recruiter": [
+        "Technical Recruiting Manager", "Talent Acquisition Manager",
+        "Director of Talent Acquisition", "Head of Talent Acquisition",
+    ],
+    "Talent Acquisition Specialist": [
+        "Talent Acquisition Manager", "Director of Talent Acquisition",
+        "Head of Talent Acquisition",
+    ],
+    "Sales Development Representative": [
+        "Sales Development Manager", "Director of Sales Development",
+        "Head of Sales Development",
+    ],
+    "Business Development Representative": [
+        "Business Development Manager", "Director of Business Development",
+        "Head of Business Development",
+    ],
+    "Account Executive": [
+        "Sales Manager", "Regional Sales Director", "Sales Director",
+        "VP Sales", "VP of Sales",
+    ],
+    "GTM Engineer": [
+        "GTM Systems Manager", "Revenue Systems Manager",
+        "Revenue Operations Manager", "Director of Revenue Operations",
+    ],
+    "Shopify Developer": [
+        "Ecommerce Engineering Manager", "Web Development Manager",
+        "Ecommerce Manager", "E-commerce Manager",
+        "Director of Ecommerce", "Head of Ecommerce",
+    ],
+    "Shopify Specialist": [
+        "Ecommerce Manager", "E-commerce Manager",
+        "Director of Ecommerce", "Head of Ecommerce",
+    ],
+    "Executive Assistant": [
+        "Chief of Staff", "COO", "Chief Operating Officer", "CEO",
+    ],
+}
+
+
 _GTM_SYSTEMS_TITLES = [
     "Head of GTM Systems",
     "Head of Revenue Systems",
@@ -299,11 +435,19 @@ def _dedupe_titles(titles: Iterable[str]) -> List[str]:
     return result
 
 
-def _promote_founders(titles: List[str], employee_count: int | None) -> List[str]:
-    if employee_count is None or employee_count >= 75:
-        return titles
-    founder_titles = ["Founder", "Co-Founder", "CEO"]
-    return founder_titles + [title for title in titles if title not in founder_titles]
+def _founders_last(titles: Iterable[str]) -> List[str]:
+    """Keep founder/CEO as true fallbacks, regardless of company size."""
+    founder_keys = {"founder", "co-founder", "co founder", "ceo"}
+    deduped = _dedupe_titles(titles)
+    functional = [
+        title for title in deduped
+        if title.lower().strip() not in founder_keys
+    ]
+    founders = [
+        title for title in deduped
+        if title.lower().strip() in founder_keys
+    ]
+    return functional + founders
 
 
 def get_bucket_name(matched_role: str) -> str:
@@ -346,8 +490,11 @@ def get_target_titles(
 ) -> List[str]:
     """Return ordered hiring-manager titles for one canonical role."""
     bucket = bucket_override or get_hiring_manager_bucket_name(matched_role)
-    titles = list(BUCKET_TITLES.get(bucket, BUCKET_TITLES["gtm_revenue"]))
-    return _promote_founders(titles, employee_count)
+    titles = (
+        list(BUCKET_DIRECT_TITLES.get(bucket, []))
+        + list(BUCKET_TITLES.get(bucket, BUCKET_TITLES["gtm_revenue"]))
+    )
+    return _founders_last(titles)
 
 
 def _contextual_gtm_titles(job: Dict) -> List[str]:
@@ -370,14 +517,18 @@ def get_target_titles_for_job(
     """Return context-aware hiring-manager titles for a specific posting."""
     matched_role = job.get("_matched_role", "")
     hm_bucket = bucket_override or get_hiring_manager_bucket_for_job(job)
+    direct = ROLE_DIRECT_MANAGER_TITLES.get(matched_role, [])
     base = get_target_titles(matched_role, employee_count, bucket_override=hm_bucket)
     if hm_bucket != "gtm_revenue":
-        return base
+        return _founders_last(direct + base)
 
-    combined = _dedupe_titles(
-        _contextual_gtm_titles(job) + base + _GTM_OPERATIONS_FALLBACK_TITLES
+    combined = (
+        direct
+        + _contextual_gtm_titles(job)
+        + base
+        + _GTM_OPERATIONS_FALLBACK_TITLES
     )
-    return _promote_founders(combined, employee_count)
+    return _founders_last(combined)
 
 
 def get_target_titles_for_jobs(
@@ -392,4 +543,4 @@ def get_target_titles_for_jobs(
     combined: List[str] = []
     for job in jobs:
         combined.extend(get_target_titles_for_job(job, employee_count))
-    return _promote_founders(_dedupe_titles(combined), employee_count)
+    return _founders_last(combined)

@@ -85,6 +85,21 @@ def run_pipeline() -> dict:
         "rejected_output": filtered.rejected_path,
         "errors": filtered.errors,
     }
+    logger.info(
+        "Filter funnel: input=%d kept=%d rejected=%d | aggregator=%d staffing=%d "
+        "industry=%d in_person=%d non_us=%d crm=%d duplicate=%d previously_seen=%d",
+        filtered.stats.get("input_total", 0),
+        filtered.kept_count,
+        filtered.rejected_count,
+        filtered.stats.get("excluded_aggregator", 0),
+        filtered.stats.get("excluded_staffing", 0),
+        filtered.stats.get("excluded_industry", 0),
+        filtered.stats.get("excluded_in_person", 0),
+        filtered.stats.get("excluded_non_us", 0),
+        filtered.stats.get("excluded_crm", 0),
+        filtered.stats.get("excluded_duplicate", 0),
+        filtered.stats.get("excluded_previously_seen", 0),
+    )
     if config.PRODUCTION and not filtered.success:
         return _fail(summary, "filter", filtered.errors)
 
@@ -134,6 +149,29 @@ def run_pipeline() -> dict:
         "output": enriched.output_path,
         "errors": enriched.errors,
     }
+    logger.info(
+        "Hiring-manager funnel: companies_considered=%d eligible=%d reviewable=%d/%d "
+        "identified=%d contactable=%d | no_manager=%d no_email=%d invalid_email=%d "
+        "org_domain_mismatch=%d email_domain_mismatch=%d person_match_attempts=%d",
+        enriched.companies_considered,
+        enriched.eligible_companies,
+        enriched.reviewable_leads,
+        enriched.target_reviewable_leads or 0,
+        enriched.hiring_manager_found,
+        enriched.contactable_hiring_managers,
+        enriched.stats.get("no_matching_hiring_manager", 0),
+        enriched.stats.get("candidate_no_usable_email", 0),
+        enriched.stats.get("candidate_email_invalid", 0),
+        enriched.stats.get("candidate_organization_domain_mismatch", 0),
+        enriched.stats.get("candidate_email_domain_mismatch", 0),
+        enriched.stats.get("person_match_attempts", 0),
+    )
+    logger.info(
+        "Hiring-manager selection tiers: direct=%d functional_exec=%d founder_fallback=%d",
+        enriched.stats.get("selection_tier_direct_functional_leader", 0),
+        enriched.stats.get("selection_tier_functional_executive", 0),
+        enriched.stats.get("selection_tier_founder_fallback", 0),
+    )
     if config.PRODUCTION and not enriched.success:
         return _fail(summary, "hiring_manager", enriched.errors)
     if not enriched.reviewable_target_reached:
@@ -148,6 +186,13 @@ def run_pipeline() -> dict:
     enriched_payload = json.loads(Path(enriched.output_path).read_text(encoding="utf-8"))
     airtable_result = airtable_client.push_leads(enriched_payload.get("jobs", []))
     summary["steps"]["airtable"] = airtable_result
+    logger.info(
+        "Airtable result: reviewable=%d created=%d skipped_existing=%d failed=%d",
+        airtable_result.get("reviewable", 0),
+        airtable_result.get("created", 0),
+        airtable_result.get("skipped_existing", 0),
+        airtable_result.get("failed", 0),
+    )
     if airtable_result["failed"]:
         return _fail(
             summary,
