@@ -100,3 +100,15 @@
 - Offline replay of 1,356 saved postings produced 80 accepted jobs, removed 9
   prior leakage records, and recovered 67 remote jobs hidden by false provider
   flags, without making external calls.
+
+## 2026-07-18 — Employer identity and daily volume hardening
+
+- Reject publisher, aggregator, and ATS domains as employer identifiers before Apollo enrichment.
+- Resolve domainless syndicated listings by employer name and require a compatible Apollo organization name.
+- Validate the matched person's current organization and business-email domain against the resolved employer.
+- Try up to three ranked hiring-manager candidates and continue after missing/invalid/mismatched emails.
+- Search direct functional managers before executives; Founder, Co-Founder, and CEO are always true fallbacks.
+- Add role-specific manager hierarchies for QA, Product Design, DevOps, Data, Sales Development, recruiting, GTM systems, and Shopify.
+- Use remaining JSearch request-unit budget for adaptive page-2 discovery only on high-yield roles after full one-page catalog coverage.
+- Prefer first-party-domain companies before the Apollo safety cap and print full filter/contactability funnels in Railway logs.
+- Make Airtable Website use the validated company domain instead of a job-board domain.

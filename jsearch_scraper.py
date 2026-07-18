@@ -80,7 +80,9 @@ def _quota_snapshot(headers) -> Dict[str, object]:
     }
 
 
-def fetch_jobs_for_role(role: str) -> JSearchFetchResult:
+def fetch_jobs_for_role(
+    role: str, *, page: int = 1, num_pages: Optional[int] = None
+) -> JSearchFetchResult:
     headers = {
         "x-rapidapi-key": config.RAPIDAPI_KEY,
         "x-rapidapi-host": config.JSEARCH_HOST,
@@ -88,8 +90,8 @@ def fetch_jobs_for_role(role: str) -> JSearchFetchResult:
     }
     params = {
         "query": f"{role} in United States",
-        "page": "1",
-        "num_pages": str(config.NUM_PAGES),
+        "page": str(max(1, int(page))),
+        "num_pages": str(config.NUM_PAGES if num_pages is None else max(1, int(num_pages))),
         "date_posted": config.DATE_POSTED,
         "country": config.COUNTRY,
     }
@@ -135,6 +137,8 @@ def validate_preflight() -> None:
         raise ValueError("NUM_PAGES must be at least 1")
     if config.JSEARCH_MIN_REMAINING_REQUESTS < 0:
         raise ValueError("JSEARCH_MIN_REMAINING_REQUESTS cannot be negative")
+    if config.JSEARCH_MAX_EXTRA_PAGES_PER_ROLE < 0:
+        raise ValueError("JSEARCH_MAX_EXTRA_PAGES_PER_ROLE cannot be negative")
     if not 0 <= config.MAX_ROLE_FAILURE_RATE <= 1:
         raise ValueError("MAX_ROLE_FAILURE_RATE must be between 0 and 1")
 
@@ -180,6 +184,86 @@ def _coerce_fetch_result(value) -> JSearchFetchResult:
     )
 
 
+def _merge_quota_snapshot(stats: Dict, quota: Dict[str, object]) -> Optional[int]:
+    remaining = quota.get("remaining") if quota else None
+    if quota:
+        for key in ("limit", "remaining", "reset", "used"):
+            if quota.get(key) is not None:
+                stats["quota"][key] = quota[key]
+        if isinstance(remaining, int):
+            lowest = stats["quota"]["lowest_remaining"]
+            stats["quota"]["lowest_remaining"] = (
+                remaining if lowest is None else min(lowest, remaining)
+            )
+    return remaining if isinstance(remaining, int) else None
+
+
+def _ingest_query_jobs(
+    *,
+    raw_jobs: List[Dict],
+    search_role: str,
+    canonical_role: str,
+    registry: SeenJobsRegistry,
+    candidates_by_job_id: Dict[str, List[Dict]],
+    stats: Dict,
+) -> Dict[str, int]:
+    metrics = {
+        "accepted_candidates": 0,
+        "review_candidates": 0,
+        "rejected_candidates": 0,
+        "candidate_rows": 0,
+    }
+    for job in raw_jobs:
+        job_id = _candidate_key(job)
+        if not job_id:
+            stats["missing_job_id_skipped"] += 1
+            continue
+        if registry.has_job_id(job_id):
+            stats["previously_seen_removed"] += 1
+            continue
+        if is_excluded_title(job.get("job_title", "")):
+            stats["excluded_by_seniority"] += 1
+            continue
+
+        assessment = assess_role(job, canonical_role)
+        candidate = dict(job)
+        candidate["_matched_role"] = canonical_role
+        candidate["_search_role"] = search_role
+        candidate["_role_specificity"] = role_specificity(canonical_role)
+        candidate["_role_relevance_status"] = assessment.status
+        candidate["_role_relevance_points"] = assessment.score
+        candidate["_role_relevance_score"] = normalize_relevance_score(assessment.score)
+        candidate["_role_relevance_reasons"] = assessment.reasons
+        candidates_by_job_id.setdefault(job_id, []).append(candidate)
+        metrics["candidate_rows"] += 1
+        if assessment.status == "accept":
+            metrics["accepted_candidates"] += 1
+        elif assessment.status == "review":
+            metrics["review_candidates"] += 1
+        else:
+            metrics["rejected_candidates"] += 1
+    return metrics
+
+
+def _adaptive_deepening_is_enabled(
+    *,
+    search_roles: Optional[List[str]],
+    max_queries: Optional[int],
+    effective_max: Optional[int],
+    planned_roles: List[str],
+) -> bool:
+    # Keep smoke tests and intentionally limited diagnostics deterministic.
+    return bool(
+        config.JSEARCH_ADAPTIVE_DEEPENING
+        and config.NUM_PAGES == 1
+        and config.JSEARCH_MAX_EXTRA_PAGES_PER_ROLE > 0
+        and search_roles is None
+        and max_queries is None
+        and not effective_max
+        and len(planned_roles) >= 100
+    )
+
+
 def run_daily_scrape(
     registry: Optional[SeenJobsRegistry] = None,
     *,
@@ -213,8 +297,19 @@ def run_daily_scrape(
         "queries_attempted": 0,
         "queries_succeeded": 0,
         "num_pages_per_query": config.NUM_PAGES,
+        "base_estimated_request_units": estimated_request_units,
         "estimated_request_units": estimated_request_units,
         "estimated_unit_budget": config.JSEARCH_MAX_ESTIMATED_UNITS_PER_RUN,
+        "adaptive_deepening_enabled": _adaptive_deepening_is_enabled(
+            search_roles=search_roles,
+            max_queries=max_queries,
+            effective_max=effective_max,
+            planned_roles=planned_roles,
+        ),
+        "adaptive_extra_queries": 0,
+        "adaptive_extra_units": 0,
+        "adaptive_deepened_roles": [],
+        "adaptive_stop_reason": "",
         "queries_failed": 0,
         "query_plan_truncated": len(roles_to_query) < len(planned_roles),
         "query_stop_reason": (
@@ -268,18 +363,17 @@ def run_daily_scrape(
             query_error = str(exc)
 
         quota = fetch_meta.quota or {}
-        remaining = quota.get("remaining")
-        if quota:
-            for key in ("limit", "remaining", "reset", "used"):
-                if quota.get(key) is not None:
-                    stats["quota"][key] = quota[key]
-            if isinstance(remaining, int):
-                lowest = stats["quota"]["lowest_remaining"]
-                stats["quota"]["lowest_remaining"] = (
-                    remaining if lowest is None else min(lowest, remaining)
-                )
+        remaining = _merge_quota_snapshot(stats, quota)
 
         raw_role_counts[search_role] = len(raw_jobs)
+        query_ingest = _ingest_query_jobs(
+            raw_jobs=raw_jobs,
+            search_role=search_role,
+            canonical_role=canonical_role,
+            registry=registry,
+            candidates_by_job_id=candidates_by_job_id,
+            stats=stats,
+        )
         stats["query_metrics"][search_role] = {
             "canonical_role": canonical_role,
             "status": query_status,
@@ -287,6 +381,14 @@ def run_daily_scrape(
             "raw_jobs": len(raw_jobs),
             "duration_seconds": fetch_meta.duration_seconds,
             "quota_remaining_after": remaining,
+            "pages": [{
+                "page": 1,
+                "raw_jobs": len(raw_jobs),
+                "duration_seconds": fetch_meta.duration_seconds,
+                "quota_remaining_after": remaining,
+                **query_ingest,
+            }],
+            **query_ingest,
         }
 
         # A successful query with zero matches is a valid market observation,
@@ -294,29 +396,6 @@ def run_daily_scrape(
         # not trip the production failure gate.
         if not raw_jobs and search_role not in failed_roles:
             zero_result_roles.append(search_role)
-
-        for job in raw_jobs:
-            job_id = _candidate_key(job)
-            if not job_id:
-                stats["missing_job_id_skipped"] += 1
-                continue
-            if registry.has_job_id(job_id):
-                stats["previously_seen_removed"] += 1
-                continue
-            if is_excluded_title(job.get("job_title", "")):
-                stats["excluded_by_seniority"] += 1
-                continue
-
-            assessment = assess_role(job, canonical_role)
-            candidate = dict(job)
-            candidate["_matched_role"] = canonical_role
-            candidate["_search_role"] = search_role
-            candidate["_role_specificity"] = role_specificity(canonical_role)
-            candidate["_role_relevance_status"] = assessment.status
-            candidate["_role_relevance_points"] = assessment.score
-            candidate["_role_relevance_score"] = normalize_relevance_score(assessment.score)
-            candidate["_role_relevance_reasons"] = assessment.reasons
-            candidates_by_job_id.setdefault(job_id, []).append(candidate)
 
         if (
             config.JSEARCH_STOP_ON_LOW_QUOTA
@@ -334,6 +413,122 @@ def run_daily_scrape(
             break
 
         time.sleep(config.SEARCH_DELAY_SECONDS)
+
+    # Use only the unused request-unit budget for selective page-2 discovery.
+    # Every role still receives one-page coverage first; deeper calls are ranked
+    # by current-run title relevance so low-yield roles do not consume extra units.
+    if stats["adaptive_deepening_enabled"] and not stats["query_stop_reason"]:
+        unit_budget = config.JSEARCH_MAX_ESTIMATED_UNITS_PER_RUN
+        remaining_units = max(0, unit_budget - estimated_request_units) if unit_budget > 0 else 0
+        role_order = {role: index for index, role in enumerate(roles_to_query)}
+        ranked_roles = sorted(
+            (
+                role for role in roles_to_query
+                if stats["query_metrics"].get(role, {}).get("accepted_candidates", 0)
+                + stats["query_metrics"].get(role, {}).get("review_candidates", 0) > 0
+            ),
+            key=lambda role: (
+                stats["query_metrics"][role].get("accepted_candidates", 0),
+                stats["query_metrics"][role].get("review_candidates", 0),
+                stats["query_metrics"][role].get("raw_jobs", 0),
+                -role_order[role],
+            ),
+            reverse=True,
+        )
+
+        for extra_page_offset in range(config.JSEARCH_MAX_EXTRA_PAGES_PER_ROLE):
+            page_number = 2 + extra_page_offset
+            for search_role in ranked_roles:
+                if remaining_units <= 0:
+                    stats["adaptive_stop_reason"] = "estimated_unit_budget_exhausted"
+                    break
+                canonical_role = canonical_role_for_search(search_role)
+                stats["queries_attempted"] += 1
+                stats["adaptive_extra_queries"] += 1
+                stats["adaptive_extra_units"] += 1
+                stats["estimated_request_units"] += 1
+                remaining_units -= 1
+                logger.info(
+                    "[%s] Adaptive JSearch deepening on page %d...",
+                    search_role,
+                    page_number,
+                )
+                fetch_meta = JSearchFetchResult(jobs=[], duration_seconds=0.0, quota={})
+                try:
+                    fetch_meta = _coerce_fetch_result(
+                        fetch_jobs_for_role(search_role, page=page_number, num_pages=1)
+                    )
+                    raw_jobs = fetch_meta.jobs
+                    stats["queries_succeeded"] += 1
+                    query_status = "ok"
+                    query_error = ""
+                except QuotaExhaustedError:
+                    logger.error(
+                        "[%s] JSearch quota exhausted during adaptive page %d; aborting.",
+                        search_role,
+                        page_number,
+                    )
+                    raise
+                except Exception as exc:
+                    logger.exception(
+                        "[%s] Adaptive page %d failed: %s",
+                        search_role,
+                        page_number,
+                        exc,
+                    )
+                    raw_jobs = []
+                    failed_roles.append(f"{search_role} (page {page_number})")
+                    stats["queries_failed"] += 1
+                    query_status = "error"
+                    query_error = str(exc)
+
+                remaining = _merge_quota_snapshot(stats, fetch_meta.quota or {})
+                query_ingest = _ingest_query_jobs(
+                    raw_jobs=raw_jobs,
+                    search_role=search_role,
+                    canonical_role=canonical_role,
+                    registry=registry,
+                    candidates_by_job_id=candidates_by_job_id,
+                    stats=stats,
+                )
+                raw_role_counts[search_role] = raw_role_counts.get(search_role, 0) + len(raw_jobs)
+                metric = stats["query_metrics"][search_role]
+                metric["status"] = "error" if query_status == "error" else metric.get("status", "ok")
+                if query_error:
+                    metric["error"] = " | ".join(filter(None, [metric.get("error", ""), query_error]))
+                metric["raw_jobs"] += len(raw_jobs)
+                metric["duration_seconds"] = round(
+                    float(metric.get("duration_seconds", 0)) + fetch_meta.duration_seconds, 3
+                )
+                metric["quota_remaining_after"] = remaining
+                for key, value in query_ingest.items():
+                    metric[key] = int(metric.get(key, 0)) + value
+                metric["pages"].append({
+                    "page": page_number,
+                    "raw_jobs": len(raw_jobs),
+                    "duration_seconds": fetch_meta.duration_seconds,
+                    "quota_remaining_after": remaining,
+                    **query_ingest,
+                })
+                stats["adaptive_deepened_roles"].append(search_role)
+
+                if (
+                    config.JSEARCH_STOP_ON_LOW_QUOTA
+                    and config.JSEARCH_MIN_REMAINING_REQUESTS > 0
+                    and isinstance(remaining, int)
+                    and remaining <= config.JSEARCH_MIN_REMAINING_REQUESTS
+                ):
+                    stats["adaptive_stop_reason"] = (
+                        "quota_remaining="
+                        f"{remaining} <= JSEARCH_MIN_REMAINING_REQUESTS="
+                        f"{config.JSEARCH_MIN_REMAINING_REQUESTS}"
+                    )
+                    break
+                time.sleep(config.SEARCH_DELAY_SECONDS)
+            if stats["adaptive_stop_reason"]:
+                break
+
+    stats["queries_scheduled"] = stats["queries_attempted"]
 
     selected_jobs: List[Dict] = []
     for job_id, candidates in candidates_by_job_id.items():

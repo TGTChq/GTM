@@ -13,6 +13,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
 
+from company_identity import safe_company_domain
 from domain_utils import normalize_company_domain
 
 import config
@@ -65,7 +66,7 @@ def normalize_title(title: str) -> str:
 
 
 def dedup_key(job: Dict) -> Tuple[str, str]:
-    domain = extract_domain(job.get("employer_website") or "")
+    domain = get_safe_employer_domain(job)[0]
     company = domain or normalize_text(job.get("employer_name", ""))
     return company, normalize_title(job.get("job_title", ""))
 
@@ -85,11 +86,32 @@ def _contains_keyword(text: str, keyword: str) -> bool:
 
 
 def _domain_is_intermediary(domain: str) -> bool:
-    normalized = (domain or "").lower().strip(".")
-    return any(
-        normalized == blocked or normalized.endswith("." + blocked)
-        for blocked in config.INTERMEDIARY_JOB_DOMAINS
-    )
+    normalized = extract_domain(domain)
+    return bool(normalized and not safe_company_domain(
+        normalized, config.INTERMEDIARY_JOB_DOMAINS
+    ))
+
+
+def get_safe_employer_domain(job: Dict) -> Tuple[str, str]:
+    """Return a company-owned domain and the evidence source used.
+
+    Publisher, aggregator, and ATS domains are deliberately ignored. When the
+    provider gives no safe domain, Step 3 resolves the company by employer name
+    and validates Apollo's returned organization name before using its domain.
+    """
+    candidates: List[Tuple[str, str]] = [
+        (job.get("employer_website") or "", "employer_website"),
+    ]
+    for option in job.get("apply_options") or []:
+        if isinstance(option, dict):
+            candidates.append((option.get("apply_link") or "", "apply_option"))
+    candidates.append((job.get("job_apply_link") or "", "job_apply_link"))
+
+    for value, source in candidates:
+        domain = safe_company_domain(value, config.INTERMEDIARY_JOB_DOMAINS)
+        if domain:
+            return domain, source
+    return "", "employer_name_resolution_required"
 
 
 def is_job_aggregator_or_publisher(job: Dict) -> Tuple[bool, str]:
@@ -446,7 +468,7 @@ def load_crm_companies(path: str) -> Tuple[Set[str], Set[str]]:
 def is_in_crm(job: Dict, crm_normalized: Set[str], crm_compact: Set[str]) -> Tuple[bool, str]:
     employer_norm = normalize_text(job.get("employer_name", "") or "")
     employer_compact = normalize_compact(employer_norm)
-    domain_compact = normalize_compact(extract_domain(job.get("employer_website") or ""))
+    domain_compact = normalize_compact(get_safe_employer_domain(job)[0])
 
     for candidate in (employer_norm, employer_compact, domain_compact):
         if candidate and (candidate in crm_normalized or candidate in crm_compact):
@@ -515,10 +537,13 @@ def run_filter(
 
     for job in jobs:
         arrangement = classify_work_arrangement(job)
+        employer_domain, employer_domain_source = get_safe_employer_domain(job)
         candidate = {
             **job,
             "_work_arrangement": arrangement.status,
             "_work_arrangement_reason": arrangement.reason,
+            "_employer_domain_input": employer_domain,
+            "_employer_domain_source": employer_domain_source,
         }
         rejected_reason = ""
         rejected_stat = ""

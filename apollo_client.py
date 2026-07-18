@@ -6,6 +6,7 @@ import logging
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
+from company_identity import company_names_compatible
 from domain_utils import normalize_company_domain
 
 import requests
@@ -266,6 +267,16 @@ def enrich_organization(
             break
 
     requested_domain = _domain(domain)
+    resolved_name = org.get("name") or ""
+    if not requested_domain and name and not company_names_compatible(name, resolved_name):
+        logger.warning(
+            "Apollo organization name mismatch for %r: resolved %r; treating "
+            "name-only enrichment as untrusted",
+            name,
+            resolved_name,
+        )
+        return _unresolved_organization(domain="", name=name, raw=org)
+
     if requested_domain and resolved_domain and not (
         resolved_domain == requested_domain
         or resolved_domain.endswith("." + requested_domain)

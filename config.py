@@ -95,6 +95,13 @@ JSEARCH_MAX_ESTIMATED_UNITS_PER_RUN = _env_int(
 )
 JSEARCH_STOP_ON_LOW_QUOTA = _env_bool("JSEARCH_STOP_ON_LOW_QUOTA", True)
 JSEARCH_MIN_REMAINING_REQUESTS = _env_int("JSEARCH_MIN_REMAINING_REQUESTS", 500)
+# After one-page coverage of the full role catalog, use only the remaining
+# request-unit budget on page 2 for the highest-yielding roles from the same run.
+# Diagnostic/smoke runs with an explicit role/query cap never deepen automatically.
+JSEARCH_ADAPTIVE_DEEPENING = _env_bool("JSEARCH_ADAPTIVE_DEEPENING", True)
+JSEARCH_MAX_EXTRA_PAGES_PER_ROLE = _env_int(
+    "JSEARCH_MAX_EXTRA_PAGES_PER_ROLE", 1
+)
 # Reject only clearly stale job-intent signals before enrichment. Unknown or
 # conflicting dates remain eligible; the oldest parseable source date is used.
 MAX_JOB_AGE_DAYS = _env_int("MAX_JOB_AGE_DAYS", 30)
@@ -164,6 +171,14 @@ HUNTER_API_KEY = os.getenv("HUNTER_API_KEY", "")
 APOLLO_RATE_LIMIT_DELAY = _env_float("APOLLO_RATE_LIMIT_DELAY", 0.6)
 HUNTER_RATE_LIMIT_DELAY = _env_float("HUNTER_RATE_LIMIT_DELAY", 0.35)
 VERIFY_WITH_HUNTER = _env_bool("VERIFY_WITH_HUNTER", True)
+# Search is free, but each Apollo person match can consume credits. Try a small
+# ranked set so one contact with no email does not discard an otherwise good account.
+APOLLO_MAX_PERSON_MATCH_ATTEMPTS_PER_BUCKET = _env_int(
+    "APOLLO_MAX_PERSON_MATCH_ATTEMPTS_PER_BUCKET", 3
+)
+HUNTER_MAX_FALLBACK_ATTEMPTS_PER_BUCKET = _env_int(
+    "HUNTER_MAX_FALLBACK_ATTEMPTS_PER_BUCKET", 2
+)
 
 # ---------- Airtable ----------
 AIRTABLE_TOKEN = os.getenv("AIRTABLE_TOKEN", "")
@@ -424,6 +439,29 @@ INTERMEDIARY_JOB_DOMAINS = [
     "successfactors.com",
     "bamboohr.com",
     "personio.com",
+    # Syndication/publisher domains observed in production. They may host a real
+    # employer's listing, but they are never safe company identifiers for Apollo.
+    "builtin.com",
+    "builtinchicago.org",
+    "builtinboston.com",
+    "builtinnyc.com",
+    "builtinla.com",
+    "builtinaustin.com",
+    "builtincolorado.com",
+    "builtinseattle.com",
+    "bebee.com",
+    "jobleads.com",
+    "salutemyjob.com",
+    "trabajo.org",
+    "virtualvocations.com",
+    "jobilize.com",
+    "simplyhired.com",
+    "monster.com",
+    "dice.com",
+    "careerjet.com",
+    "flexjobs.com",
+    "remote.co",
+    "wellfound.com",
 ]
 
 KNOWN_STAFFING_EMPLOYERS = [
