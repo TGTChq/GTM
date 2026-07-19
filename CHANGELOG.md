@@ -1,3 +1,14 @@
+# Definitive lead-quality and controlled-volume hardening — July 19, 2026
+
+- Added a zero-credit quality layer that rejects entire failure families before Apollo/Hunter: multi-job roundup pages, malformed or expired postings, non-standard work programs, clearance/federal-delivery roles, outsourcing/BPO intermediaries, and contextual role collisions.
+- Fixed semantic collisions including PR Account Executive vs. sales Account Executive, inventory/catalog work vs. Product Support, and static graphic design mislabeled as Video Editor.
+- Fixed geography parsing so `REMOTE OK` and `PR Account Executive` cannot become Oklahoma or Puerto Rico, while explicit `City, ST`, `United States`, `Remote US`, and delimiter-bounded `- US` evidence remain eligible.
+- Added safe employer normalization for ATS wrappers without allowing job boards or ATS domains to become the employer.
+- Expanded staffing, outsourcing, event, nonprofit, and hidden freelance/project-based controls using corroborated business-model evidence rather than one-off title blocks.
+- Added target-aware adaptive lookback: the daily catalog remains at `NUM_PAGES=1`, reserves up to 16 of the existing 150 request units, and uses a one-week diversified query only when the first pass produces fewer than 60 pre-enrichment candidates.
+- Added 28 focused regression tests; complete suite now passes 159 tests.
+- Offline replay of 1,356 saved postings used no external APIs and reduced the current-code candidate set from 55 to 48 while recovering safe US-scope false negatives such as titles ending in `- US`.
+
 # Intent-Based Outbound 2.0 — July Week 3
 
 - Added `role_catalog.py` as the single source of truth for 118 canonical target roles, function buckets, hiring-manager routing, aliases, and safe focus fallbacks.

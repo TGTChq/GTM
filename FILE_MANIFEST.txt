@@ -43,3 +43,6 @@
 ./tests/test_paid_test_quality_recovery.py
 ./tests/test_identity_volume_hardening.py
 ./tests/test_remote_volume_optimization.py
+./job_quality.py
+./tests/test_definitive_quality_and_volume.py
+./QUALITY_HARDENING_REPORT.md

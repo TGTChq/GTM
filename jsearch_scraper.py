@@ -16,6 +16,7 @@ from typing import Dict, List, Optional
 
 import config
 from job_filter import assess_pre_enrichment_viability
+from job_quality import normalize_job_identity
 from http_utils import QuotaExhaustedError, request_with_retry, safe_json
 from pipeline_state import SeenJobsRegistry
 from role_catalog import canonical_role_for_search, role_specificity
@@ -83,16 +84,19 @@ def _quota_snapshot(headers) -> Dict[str, object]:
     }
 
 
-def build_search_query(role: str) -> str:
+def build_search_query(role: str, *, intent_variant: bool = False) -> str:
     """Build a remote-biased US query without changing the canonical role."""
     cleaned = str(role or "").strip()
+    if intent_variant:
+        return f"{cleaned} remote jobs hiring in United States"
     if config.JSEARCH_REMOTE_QUERY_BIAS and not re.search(r"\bremote\b", cleaned, re.I):
         return f"remote {cleaned} in United States"
     return f"{cleaned} in United States"
 
 
 def fetch_jobs_for_role(
-    role: str, *, page: int = 1, num_pages: Optional[int] = None
+    role: str, *, page: int = 1, num_pages: Optional[int] = None,
+    date_posted: Optional[str] = None, intent_variant: bool = False,
 ) -> JSearchFetchResult:
     headers = {
         "x-rapidapi-key": config.RAPIDAPI_KEY,
@@ -100,10 +104,10 @@ def fetch_jobs_for_role(
         "Content-Type": "application/json",
     }
     params = {
-        "query": build_search_query(role),
+        "query": build_search_query(role, intent_variant=intent_variant),
         "page": str(max(1, int(page))),
         "num_pages": str(config.NUM_PAGES if num_pages is None else max(1, int(num_pages))),
-        "date_posted": config.DATE_POSTED,
+        "date_posted": date_posted or config.DATE_POSTED,
         "country": config.COUNTRY,
     }
     if config.JSEARCH_REMOTE_JOBS_ONLY:
@@ -156,6 +160,10 @@ def validate_preflight() -> None:
         raise ValueError("JSEARCH_ADAPTIVE_MAX_EXTRA_QUERIES cannot be negative")
     if config.JSEARCH_ADAPTIVE_MIN_PREFILTER_VIABLE < 0:
         raise ValueError("JSEARCH_ADAPTIVE_MIN_PREFILTER_VIABLE cannot be negative")
+    if config.JSEARCH_ADAPTIVE_LOOKBACK_MAX_QUERIES < 0:
+        raise ValueError("JSEARCH_ADAPTIVE_LOOKBACK_MAX_QUERIES cannot be negative")
+    if config.JSEARCH_TARGET_PREFILTER_VIABLE < 0:
+        raise ValueError("JSEARCH_TARGET_PREFILTER_VIABLE cannot be negative")
     if not 0 <= config.MAX_ROLE_FAILURE_RATE <= 1:
         raise ValueError("MAX_ROLE_FAILURE_RATE must be between 0 and 1")
 
@@ -217,6 +225,10 @@ def _merge_quota_snapshot(stats: Dict, quota: Dict[str, object]) -> Optional[int
 
 def _prefilter_metric_name(stat_name: str) -> str:
     mapping = {
+        "excluded_posting_integrity": "prefilter_rejected_posting_integrity",
+        "excluded_restricted_role": "prefilter_rejected_restricted_role",
+        "excluded_outsourcing": "prefilter_rejected_outsourcing",
+        "excluded_contextual_mismatch": "prefilter_rejected_contextual_mismatch",
         "excluded_aggregator": "prefilter_rejected_aggregator",
         "excluded_stale": "prefilter_rejected_stale",
         "excluded_staffing": "prefilter_rejected_staffing",
@@ -249,6 +261,10 @@ def _ingest_query_jobs(
         "prefilter_viable_candidates": 0,
         "new_prefilter_viable_candidates": 0,
         "prefilter_rejected_candidates": 0,
+        "prefilter_rejected_posting_integrity": 0,
+        "prefilter_rejected_restricted_role": 0,
+        "prefilter_rejected_outsourcing": 0,
+        "prefilter_rejected_contextual_mismatch": 0,
         "prefilter_rejected_aggregator": 0,
         "prefilter_rejected_stale": 0,
         "prefilter_rejected_staffing": 0,
@@ -274,6 +290,7 @@ def _ingest_query_jobs(
             continue
 
         already_seen_in_run = job_id in candidates_by_job_id
+        normalize_job_identity(job)
         assessment = assess_role(job, canonical_role)
         candidate = dict(job)
         candidate["_matched_role"] = canonical_role
@@ -380,6 +397,7 @@ def _adaptive_deepening_is_enabled(
         and config.JSEARCH_MAX_EXTRA_PAGES_PER_ROLE > 0
         and search_roles is None
         and max_queries is None
+        and len(planned_roles) >= 50
         and not effective_max
         and len(planned_roles) >= 100
     )
@@ -412,6 +430,14 @@ def run_daily_scrape(
     zero_result_roles: List[str] = []
     raw_role_counts: Dict[str, int] = {}
     canonical_roles = [canonical_role_for_search(role) for role in roles_to_query]
+    lookback_enabled = bool(
+        config.JSEARCH_ADAPTIVE_LOOKBACK
+        and config.PRODUCTION
+        and search_roles is None
+        and max_queries is None
+        and len(planned_roles) >= 100
+        and not effective_max
+    )
     stats = {
         "queries_planned": len(planned_roles),
         "queries_scheduled": len(roles_to_query),
@@ -436,6 +462,11 @@ def run_daily_scrape(
         "adaptive_prefilter_viable_added": 0,
         "adaptive_zero_yield_roles": [],
         "adaptive_stop_reason": "",
+        "adaptive_lookback_enabled": lookback_enabled,
+        "adaptive_lookback_queries": 0,
+        "adaptive_lookback_roles": [],
+        "adaptive_lookback_prefilter_viable_added": 0,
+        "adaptive_lookback_date_posted": config.JSEARCH_ADAPTIVE_LOOKBACK_DATE_POSTED,
         "queries_failed": 0,
         "query_plan_truncated": len(roles_to_query) < len(planned_roles),
         "query_stop_reason": (
@@ -550,7 +581,13 @@ def run_daily_scrape(
             max(0, unit_budget - estimated_request_units) if unit_budget > 0 else 0
         )
         configured_cap = config.JSEARCH_ADAPTIVE_MAX_EXTRA_QUERIES
-        remaining_units = min(budget_remaining, configured_cap) if configured_cap > 0 else 0
+        lookback_reserve = (
+            min(config.JSEARCH_ADAPTIVE_LOOKBACK_MAX_QUERIES, budget_remaining)
+            if lookback_enabled
+            else 0
+        )
+        page2_budget = max(0, budget_remaining - lookback_reserve)
+        remaining_units = min(page2_budget, configured_cap) if configured_cap > 0 else 0
         role_order = {role: index for index, role in enumerate(roles_to_query)}
         eligible_roles = [
             role
@@ -686,6 +723,97 @@ def run_daily_scrape(
             if not active_roles:
                 stats["adaptive_stop_reason"] = "no_roles_with_incremental_prefilter_yield"
                 break
+
+    # A second, diversified pass uses the reserved budget only when the first
+    # pass did not produce enough zero-credit viable inventory. It widens the
+    # posting window for the best-yielding roles instead of weakening filters or
+    # fetching page 2 for all 118 roles. In-run job-id dedupe removes overlap.
+    viable_ids = {
+        job_id
+        for job_id, candidates in candidates_by_job_id.items()
+        if any(
+            item.get("_role_relevance_status") in {"accept", "review"}
+            and item.get("_prefilter_viable")
+            for item in candidates
+        )
+    }
+    unit_budget = config.JSEARCH_MAX_ESTIMATED_UNITS_PER_RUN
+    budget_remaining = max(0, unit_budget - stats["estimated_request_units"]) if unit_budget > 0 else 0
+    if (
+        lookback_enabled
+        and budget_remaining > 0
+        and len(viable_ids) < config.JSEARCH_TARGET_PREFILTER_VIABLE
+        and not stats.get("query_stop_reason")
+    ):
+        role_order = {role: index for index, role in enumerate(roles_to_query)}
+        lookback_roles = _balanced_adaptive_role_order(
+            list(roles_to_query), stats["query_metrics"], role_order
+        )
+        lookback_cap = min(
+            budget_remaining, config.JSEARCH_ADAPTIVE_LOOKBACK_MAX_QUERIES
+        )
+        for search_role in lookback_roles[:lookback_cap]:
+            canonical_role = canonical_role_for_search(search_role)
+            stats["queries_attempted"] += 1
+            stats["queries_succeeded"] += 0
+            stats["adaptive_lookback_queries"] += 1
+            stats["estimated_request_units"] += 1
+            fetch_meta = JSearchFetchResult(jobs=[], duration_seconds=0.0, quota={})
+            try:
+                fetch_meta = _coerce_fetch_result(
+                    fetch_jobs_for_role(
+                        search_role,
+                        page=1,
+                        num_pages=1,
+                        date_posted=config.JSEARCH_ADAPTIVE_LOOKBACK_DATE_POSTED,
+                        intent_variant=True,
+                    )
+                )
+                raw_jobs = fetch_meta.jobs
+                stats["queries_succeeded"] += 1
+            except QuotaExhaustedError:
+                raise
+            except Exception as exc:
+                logger.exception("[%s] Adaptive lookback failed: %s", search_role, exc)
+                raw_jobs = []
+                failed_roles.append(f"{search_role} (lookback)")
+                stats["queries_failed"] += 1
+            remaining = _merge_quota_snapshot(stats, fetch_meta.quota or {})
+            query_ingest = _ingest_query_jobs(
+                raw_jobs=raw_jobs,
+                search_role=search_role,
+                canonical_role=canonical_role,
+                registry=registry,
+                candidates_by_job_id=candidates_by_job_id,
+                stats=stats,
+            )
+            added = int(query_ingest.get("new_prefilter_viable_candidates", 0))
+            stats["adaptive_lookback_prefilter_viable_added"] += added
+            stats["adaptive_lookback_roles"].append(search_role)
+            metric = stats["query_metrics"][search_role]
+            metric["raw_jobs"] += len(raw_jobs)
+            for key, value in query_ingest.items():
+                metric[key] = int(metric.get(key, 0)) + value
+            metric["pages"].append({
+                "page": 1,
+                "mode": "lookback",
+                "date_posted": config.JSEARCH_ADAPTIVE_LOOKBACK_DATE_POSTED,
+                "raw_jobs": len(raw_jobs),
+                "quota_remaining_after": remaining,
+                **query_ingest,
+            })
+            viable_ids = {
+                job_id
+                for job_id, candidates in candidates_by_job_id.items()
+                if any(
+                    item.get("_role_relevance_status") in {"accept", "review"}
+                    and item.get("_prefilter_viable")
+                    for item in candidates
+                )
+            }
+            if len(viable_ids) >= config.JSEARCH_TARGET_PREFILTER_VIABLE:
+                break
+            time.sleep(config.SEARCH_DELAY_SECONDS)
 
     stats["queries_scheduled"] = stats["queries_attempted"]
 

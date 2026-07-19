@@ -157,6 +157,43 @@ under `data/replay/`. It does not call JSearch, Apollo, Hunter, Airtable, or
 Instantly.
 
 
+## Definitive quality and controlled-volume layer
+
+The pipeline now applies a shared zero-credit pre-enrichment decision layer in
+both scraping and final filtering. It addresses failure families rather than
+individual company names:
+
+- posting integrity: roundup pages, generic employers, malformed titles, and
+  expired embedded application deadlines;
+- employment quality: SkillBridge, internships, externships, apprenticeships,
+  fellowships, freelance/project work, and hidden non-full-time arrangements;
+- restricted delivery: security-clearance roles and work explicitly supporting
+  federal agencies or government programs;
+- employer integrity: staffing, BPO/outsourcing, ATS wrappers, excluded
+  industries, and mission-driven nonprofit `.org` organizations when the
+  description corroborates that business model;
+- role semantics: sales vs. public relations Account Executives, customer
+  Product Support vs. inventory/catalog operations, and video vs. static design;
+- geography: explicit US evidence is accepted without treating ordinary tokens
+  such as `OK` or `PR` as state abbreviations.
+
+Volume is recovered without lowering those standards. Keep `NUM_PAGES=1`. When
+the normal catalog and selective page-2 queries remain below 60 viable jobs, a
+reserved portion of the same 150-unit budget runs up to 16 diversified one-week
+lookback queries. Duplicate job IDs are removed before role selection.
+
+The offline regression benchmark is reproducible:
+
+```powershell
+$env:PRODUCTION="0"
+python run_filter_replay.py --accepted data/replay/jobs_filtered_2026-07-17.json --rejected data/replay/jobs_rejected_2026-07-17.json --output-dir data/replay/definitive
+```
+
+It processes 1,356 saved postings with no JSearch, Apollo, Hunter, Airtable, or
+Instantly calls. The 30-lead setting remains a production target, not a promise:
+actual reviewable output still depends on live job inventory, firmographics,
+hiring-manager availability, and verified email coverage.
+
 ## Paid-test quality recovery
 
 The production filter is quality-first even with the full 118-role catalog:
