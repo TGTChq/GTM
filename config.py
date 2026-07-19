@@ -82,16 +82,17 @@ JSEARCH_HOST = os.getenv("JSEARCH_HOST", "jsearch.p.rapidapi.com")
 JSEARCH_ENDPOINT = os.getenv("JSEARCH_ENDPOINT", "https://jsearch.p.rapidapi.com/search-v2")
 DATE_POSTED = os.getenv("DATE_POSTED", "today")
 COUNTRY = os.getenv("COUNTRY", "us")
-NUM_PAGES = _env_int("NUM_PAGES", 1)
+NUM_PAGES = _env_int("NUM_PAGES", 3)
 SEARCH_DELAY_SECONDS = _env_float("SEARCH_DELAY_SECONDS", 0.8)
 # Operational controls keep the complete Brett-approved catalog active while
 # bounding request-unit usage. Zero disables only the corresponding guard.
 JSEARCH_MAX_QUERIES_PER_RUN = _env_int("JSEARCH_MAX_QUERIES_PER_RUN", 0)
 # Guard the estimated request units before the first API call. JSearch charges
-# approximately one request unit per requested page; 118 roles x 1 page = 118.
-# Set to 0 only for an intentional, supervised deep diagnostic.
+# approximately one request unit per requested page; 118 roles x 3 pages = 354.
+# The 370-unit default leaves 16 units for diversified lookback queries. Set to
+# 0 only for an intentional, supervised deep diagnostic.
 JSEARCH_MAX_ESTIMATED_UNITS_PER_RUN = _env_int(
-    "JSEARCH_MAX_ESTIMATED_UNITS_PER_RUN", 150
+    "JSEARCH_MAX_ESTIMATED_UNITS_PER_RUN", 370
 )
 JSEARCH_STOP_ON_LOW_QUOTA = _env_bool("JSEARCH_STOP_ON_LOW_QUOTA", True)
 JSEARCH_MIN_REMAINING_REQUESTS = _env_int("JSEARCH_MIN_REMAINING_REQUESTS", 500)
@@ -101,9 +102,23 @@ JSEARCH_MIN_REMAINING_REQUESTS = _env_int("JSEARCH_MIN_REMAINING_REQUESTS", 500)
 # makes the final work-arrangement decision.
 JSEARCH_REMOTE_JOBS_ONLY = _env_bool("JSEARCH_REMOTE_JOBS_ONLY", True)
 JSEARCH_REMOTE_QUERY_BIAS = _env_bool("JSEARCH_REMOTE_QUERY_BIAS", True)
-# After one-page coverage of the full role catalog, use only the remaining
-# request-unit budget on page 2 for roles whose page-1 results already survive
-# the local pre-enrichment gates. Diagnostic/smoke runs never deepen automatically.
+# JSearch /search-v2 officially exposes ``work_from_home=true`` for remote-only
+# inventory. The previous ``remote_jobs_only`` name was not part of the current
+# provider contract and could be ignored, allowing avoidable onsite inventory.
+JSEARCH_REMOTE_FILTER_PARAMETER = os.getenv(
+    "JSEARCH_REMOTE_FILTER_PARAMETER", "work_from_home"
+).strip()
+# Diversify the reserved lookback budget across publisher-scoped queries instead
+# of repeating the same broad query. JSearch supports ``via <publisher>`` in the
+# query string. The final local gates remain authoritative.
+JSEARCH_LOOKBACK_QUERY_VARIANTS = _env_json(
+    "JSEARCH_LOOKBACK_QUERY_VARIANTS",
+    ["linkedin", "indeed", "glassdoor", "hiring"],
+)
+# When one-page mode is intentionally configured, use only the remaining
+# request-unit budget on deeper pages for roles whose first-page results survive
+# the local pre-enrichment gates. Three-page production coverage disables this
+# redundant deepening path automatically. Diagnostic runs remain deterministic.
 JSEARCH_ADAPTIVE_DEEPENING = _env_bool("JSEARCH_ADAPTIVE_DEEPENING", True)
 JSEARCH_MAX_EXTRA_PAGES_PER_ROLE = _env_int(
     "JSEARCH_MAX_EXTRA_PAGES_PER_ROLE", 1
@@ -117,9 +132,9 @@ JSEARCH_ADAPTIVE_MIN_PREFILTER_VIABLE = _env_int(
 JSEARCH_ADAPTIVE_BUCKET_BALANCING = _env_bool(
     "JSEARCH_ADAPTIVE_BUCKET_BALANCING", True
 )
-# Reserve part of the 150-unit budget for a diversified, wider-window pass.
-# This improves qualified inventory without blindly fetching page 2 for all 118
-# roles or weakening any quality gate.
+# After three-page base coverage, reserve the remaining 16-unit budget for a
+# diversified, wider-window pass. This improves qualified inventory without
+# weakening any quality gate.
 JSEARCH_ADAPTIVE_LOOKBACK = _env_bool("JSEARCH_ADAPTIVE_LOOKBACK", True)
 JSEARCH_ADAPTIVE_LOOKBACK_DATE_POSTED = os.getenv(
     "JSEARCH_ADAPTIVE_LOOKBACK_DATE_POSTED", "week"
@@ -143,6 +158,13 @@ REJECT_NON_ACTIVE_HIRING_SIGNALS = _env_bool(
 )
 REQUIRE_EXPLICIT_US_REMOTE_SCOPE = _env_bool(
     "REQUIRE_EXPLICIT_US_REMOTE_SCOPE", True
+)
+# Treat JSearch's structured US country + remote signals as sufficient when no
+# explicit foreign/global contradiction exists. This prevents generic "Remote"
+# listings from being discarded merely because the body omits the phrase
+# "United States", while retaining explicit non-US/global hard rejects.
+ALLOW_PROVIDER_CONFIRMED_US_REMOTE = _env_bool(
+    "ALLOW_PROVIDER_CONFIRMED_US_REMOTE", True
 )
 
 ROLES = _env_json("ROLES_JSON", list(DEFAULT_SEARCH_ROLES))
@@ -356,6 +378,13 @@ IN_PERSON_DESCRIPTION_PATTERNS = [
     r"\bfield[- ]based position\b",
     r"\bhybrid (?:work model|schedule|position|role)\b",
     r"\bin office (?:monday|tuesday|wednesday|thursday|friday|[1-5] days?)\b",
+    # Covers reversed constructions such as "working from our Mountain View
+    # office three days a week" that a provider may still label as remote.
+    r"\b(?:work(?:ing)?|be|report(?:ing)?) from (?:the|our) [^.\n]{0,100}\boffice\b[^.\n]{0,80}\b(?:one|two|three|four|five|[1-5]) days? (?:a|per) week\b",
+    r"\b(?:one|two|three|four|five|[1-5]) days? (?:a|per) week[^.\n]{0,80}\b(?:in|at|from) (?:the|our) [^.\n]{0,80}\boffice\b",
+    r"\b(?:option|flexibility) (?:of|to) work(?:ing)? remotely for the remainder of the week\b",
+    r"\b(?:required|mandatory|expected) in[- ]office (?:work|days?|attendance)\b",
+    r"\b(?:monday|tuesday|wednesday|thursday|friday)(?:\s*,\s*(?:monday|tuesday|wednesday|thursday|friday))+(?:\s+and\s+(?:monday|tuesday|wednesday|thursday|friday))?[^.\n]{0,100}\b(?:office|on[- ]site|onsite)\b",
     r"\btravel (?:approximately |up to |minimum |at least )?(?:2[5-9]|[3-9]\d|100)%\b",
     r"\bfrequent travel\b",
     r"\btravel regularly to (?:client|customer) sites\b",
@@ -368,6 +397,7 @@ FOREIGN_ONLY_ELIGIBILITY_PATTERNS = [
     r"\b(?:eu|european union|uk|canadian|australian) residents only\b",
     r"\bmust be (?:based|located|resident) in (?:the )?(?:eu|european union|uk|canada|australia|india|philippines|latam)\b",
     r"\bopen only to candidates (?:based|located) in (?:the )?(?:eu|european union|uk|canada|australia|india|philippines|latam)\b",
+    r"\b(?:open|available) only to candidates in (?:the )?(?:eu|european union|uk|canada|australia|india|philippines|latam)\b",
     r"\bavailable only (?:to|for) (?:the )?(?:eu|european union|uk|canada|australia|india|philippines|latam)\b",
     r"\b(?:role|position|job) (?:is )?(?:fully )?remote (?:role )?based (?:with teams )?in (?:the )?(?:philippines|india|canada|australia|uk|europe|eu|latam)\b",
     r"\bfully remote role based (?:with teams )?in (?:the )?(?:philippines|india|canada|australia|uk|europe|eu|latam)\b",
@@ -587,6 +617,10 @@ OUTSOURCING_DESCRIPTION_PATTERNS = [
     r"\bour (?:business process outsourcing|outsourcing) services\b",
     r"\bwe provide (?:virtual assistant|outsourced staffing|offshore staffing) services\b",
     r"\boutsourcing and offshoring consulting\b",
+    r"\bwe (?:provide|deliver|offer) (?:outsourced )?(?:call|contact) center services\b",
+    r"\bwe (?:provide|deliver|offer) outsourced (?:customer support|customer service|back[- ]office) services\b",
+    r"\b(?:our|the) (?:agents?|representatives?|support teams?) (?:serve|support|are assigned to) (?:multiple |our )?clients?\b",
+    r"\bmanaged (?:customer support|customer service|contact center) services for clients?\b",
 ]
 
 KNOWN_STAFFING_EMPLOYERS = [

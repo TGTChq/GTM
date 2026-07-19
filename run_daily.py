@@ -74,14 +74,24 @@ def run_pipeline() -> dict:
     if config.PRODUCTION and not scrape.success:
         return _fail(summary, "scrape", scrape.errors)
     logger.info(
-        "JSearch strategy: remote_only=%s remote_query_bias=%s base_units=%d "
-        "adaptive_queries=%d adaptive_prefilter_viable_added=%d buckets=%s",
+        "JSearch strategy: remote_only=%s remote_filter=%s remote_query_bias=%s "
+        "base_units=%d adaptive_queries=%d adaptive_viable_added=%d "
+        "lookback_queries=%d lookback_viable_added=%d estimated_units=%d buckets=%s",
         config.JSEARCH_REMOTE_JOBS_ONLY,
+        config.JSEARCH_REMOTE_FILTER_PARAMETER,
         config.JSEARCH_REMOTE_QUERY_BIAS,
         scrape.stats.get("base_estimated_request_units", 0),
         scrape.stats.get("adaptive_extra_queries", 0),
         scrape.stats.get("adaptive_prefilter_viable_added", 0),
+        scrape.stats.get("adaptive_lookback_queries", 0),
+        scrape.stats.get("adaptive_lookback_prefilter_viable_added", 0),
+        scrape.stats.get("estimated_request_units", 0),
         scrape.stats.get("adaptive_bucket_counts", {}),
+    )
+    logger.info(
+        "JSearch query variants: lookback_counts=%s yield=%s",
+        scrape.stats.get("adaptive_lookback_variant_counts", {}),
+        scrape.stats.get("query_variant_metrics", {}),
     )
 
     logger.info("=== STEP 2: FILTER ===")
@@ -96,12 +106,17 @@ def run_pipeline() -> dict:
         "errors": filtered.errors,
     }
     logger.info(
-        "Filter funnel: input=%d kept=%d rejected=%d | aggregator=%d staffing=%d "
-        "industry=%d in_person=%d non_active=%d non_full_time=%d non_us=%d "
-        "crm=%d duplicate=%d previously_seen=%d",
+        "Filter funnel: input=%d kept=%d rejected=%d | integrity=%d restricted=%d "
+        "outsourcing=%d contextual=%d aggregator=%d staffing=%d industry=%d "
+        "in_person=%d non_active=%d non_full_time=%d non_us=%d crm=%d "
+        "duplicate=%d previously_seen=%d seniority=%d stale=%d role_mismatch=%d non_paying=%d",
         filtered.stats.get("input_total", 0),
         filtered.kept_count,
         filtered.rejected_count,
+        filtered.stats.get("excluded_posting_integrity", 0),
+        filtered.stats.get("excluded_restricted_role", 0),
+        filtered.stats.get("excluded_outsourcing", 0),
+        filtered.stats.get("excluded_contextual_mismatch", 0),
         filtered.stats.get("excluded_aggregator", 0),
         filtered.stats.get("excluded_staffing", 0),
         filtered.stats.get("excluded_industry", 0),
@@ -112,6 +127,10 @@ def run_pipeline() -> dict:
         filtered.stats.get("excluded_crm", 0),
         filtered.stats.get("excluded_duplicate", 0),
         filtered.stats.get("excluded_previously_seen", 0),
+        scrape.stats.get("excluded_by_seniority", 0),
+        filtered.stats.get("excluded_stale", 0),
+        filtered.stats.get("excluded_role_mismatch", 0),
+        filtered.stats.get("excluded_non_paying", 0),
     )
     if config.PRODUCTION and not filtered.success:
         return _fail(summary, "filter", filtered.errors)
@@ -186,6 +205,18 @@ def run_pipeline() -> dict:
         enriched.stats.get("selection_tier_direct_functional_leader", 0),
         enriched.stats.get("selection_tier_functional_executive", 0),
         enriched.stats.get("selection_tier_founder_fallback", 0),
+    )
+    company_reason_counts = {
+        key.removeprefix("company_criteria_reason__"): value
+        for key, value in enriched.stats.items()
+        if key.startswith("company_criteria_reason__") and value
+    }
+    logger.info(
+        "Company eligibility diagnostics: reasons=%s unresolved_domain_companies=%d "
+        "missing_domain_buckets=%d",
+        company_reason_counts,
+        enriched.stats.get("company_domain_unresolved", 0),
+        enriched.stats.get("missing_company_domain_buckets", 0),
     )
     if config.PRODUCTION and not enriched.success:
         return _fail(summary, "hiring_manager", enriched.errors)

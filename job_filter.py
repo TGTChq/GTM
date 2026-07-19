@@ -225,6 +225,38 @@ def is_staffing_company(job: Dict) -> Tuple[bool, str]:
     if any(normalize_text(phrase) in description for phrase in config.STAFFING_NEGATION_PHRASES):
         return False, ""
 
+    # Detect the intermediary business model, not just literal employer names.
+    # Third-person descriptions are common on aggregators ("Arcadia is a ..."),
+    # while direct employers usually describe an internal recruiting function.
+    decisive_business_model_patterns = [
+        (
+            r"\b(?:we are|[a-z0-9][a-z0-9 ]{1,70} is) (?:a |an )?"
+            r"(?:high performance |global |specialist |boutique )?"
+            r"(?:recruitment|recruiting|staffing|executive search|talent search|hiring) "
+            r"(?:firm|agency|company|business|consultancy)\b"
+        ),
+        r"\bstaffing(?: and)? recruiting\b",
+        r"\b(?:recruitment|staffing|executive search) services (?:for|to) clients\b",
+    ]
+    for pattern in decisive_business_model_patterns:
+        if re.search(pattern, description, re.I):
+            return True, f"staffing_business_model:{pattern}"
+
+    corroborating_patterns = [
+        r"\b360 (?:recruitment )?desk\b",
+        r"\b(?:win|grow|manage|own) client accounts?\b",
+        r"\b(?:deliver|make|close) placements?\b",
+        r"\b(?:source|pitch|close) (?:top tier )?candidates?\b",
+        r"\b(?:clients? and candidates?|candidates? and clients?)\b",
+        r"\b(?:desk|placement) billings?\b",
+        r"\b(?:business development|new business)[^ ]*(?: [^ ]+){0,8} recruitment\b",
+    ]
+    corroborating_hits = [
+        pattern for pattern in corroborating_patterns if re.search(pattern, description, re.I)
+    ]
+    if len(corroborating_hits) >= 2:
+        return True, "staffing_business_model_signals:" + "|".join(corroborating_hits)
+
     employer_is_vague = any(
         normalize_text(signal) in employer_norm for signal in config.VAGUE_EMPLOYER_SIGNALS
     )
@@ -485,6 +517,32 @@ def assess_us_eligibility(job: Dict) -> GeographyEvidence:
     if country and country not in config.US_COUNTRY_CODES:
         return GeographyEvidence(False, f"non_us_country:{country}", location or "Remote", "foreign")
 
+    structured_arrangement = normalize_text(
+        job.get("work_arrangement")
+        or job.get("job_work_arrangement")
+        or job.get("remote_work_model")
+        or ""
+    )
+    provider_remote = bool(
+        job.get("job_is_remote") is True
+        or structured_arrangement in {"remote", "fully remote", "work from home", "wfh"}
+    )
+    query_country = normalize_text(job.get("_jsearch_country_filter") or "")
+    query_remote_only = job.get("_jsearch_remote_filter_applied") is True
+    if (
+        config.ALLOW_PROVIDER_CONFIRMED_US_REMOTE
+        and query_country in config.US_COUNTRY_CODES
+        and query_remote_only
+        and country in config.US_COUNTRY_CODES
+        and provider_remote
+    ):
+        return GeographyEvidence(
+            True,
+            "provider_confirmed_us_remote",
+            _extract_display_location(job, explicit_us=True),
+            "us_provider_confirmed",
+        )
+
     if config.REQUIRE_EXPLICIT_US_REMOTE_SCOPE:
         reason = (
             "ambiguous_remote_location_without_us_evidence"
@@ -542,6 +600,19 @@ def classify_work_arrangement(job: Dict) -> WorkArrangementEvidence:
             return WorkArrangementEvidence(
                 "remote", f"remote_description:{pattern}"
             )
+
+    # Newer JSearch responses expose a normalized work_arrangement field. It is
+    # useful structured evidence, but it remains below explicit posting text so
+    # a provider label can never override mandatory office language.
+    structured_arrangement = normalize_text(job.get("work_arrangement") or "")
+    if structured_arrangement in {"hybrid", "onsite", "on site", "in person"}:
+        return WorkArrangementEvidence(
+            "in_person", f"jsearch_work_arrangement:{structured_arrangement}"
+        )
+    if structured_arrangement in {"remote", "work from home", "wfh"}:
+        return WorkArrangementEvidence(
+            "remote", f"jsearch_work_arrangement:{structured_arrangement}"
+        )
 
     remote_flag = job.get("job_is_remote")
     if remote_flag is True:

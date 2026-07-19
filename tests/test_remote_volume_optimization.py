@@ -27,7 +27,7 @@ class RemoteSearchRequestTests(unittest.TestCase):
             jsearch_scraper.fetch_jobs_for_role("Accountant")
 
         params = request.call_args.kwargs["params"]
-        self.assertEqual(params["remote_jobs_only"], "true")
+        self.assertEqual(params["work_from_home"], "true")
         self.assertEqual(params["query"], "remote Accountant in United States")
 
     def test_remote_role_is_not_double_prefixed(self):
@@ -36,6 +36,37 @@ class RemoteSearchRequestTests(unittest.TestCase):
                 jsearch_scraper.build_search_query("Remote QA Engineer"),
                 "Remote QA Engineer in United States",
             )
+
+    def test_publisher_scoped_query_uses_supported_via_syntax(self):
+        with patch.object(config, "JSEARCH_REMOTE_QUERY_BIAS", True):
+            self.assertEqual(
+                jsearch_scraper.build_search_query(
+                    "Accountant", query_variant="linkedin"
+                ),
+                "remote Accountant in United States via linkedin",
+            )
+
+
+class ThreePageProductionBudgetTests(unittest.TestCase):
+    def test_full_catalog_three_pages_fits_370_unit_budget(self):
+        with (
+            patch.object(config, "NUM_PAGES", 3),
+            patch.object(config, "JSEARCH_MAX_ESTIMATED_UNITS_PER_RUN", 370),
+        ):
+            self.assertEqual(jsearch_scraper.validate_query_budget(118), 354)
+
+    def test_three_page_base_disables_redundant_adaptive_deepening(self):
+        with (
+            patch.object(config, "NUM_PAGES", 3),
+            patch.object(config, "JSEARCH_ADAPTIVE_DEEPENING", True),
+        ):
+            enabled = jsearch_scraper._adaptive_deepening_is_enabled(
+                search_roles=None,
+                max_queries=None,
+                effective_max=0,
+                planned_roles=list(DEFAULT_SEARCH_ROLES),
+            )
+        self.assertFalse(enabled)
 
 
 class SharedPrefilterTests(unittest.TestCase):
@@ -67,6 +98,38 @@ class SharedPrefilterTests(unittest.TestCase):
         assessment = job_filter.assess_pre_enrichment_viability(job)
         self.assertFalse(assessment.eligible)
         self.assertEqual(assessment.stat_name, "excluded_in_person")
+
+    def test_structured_hybrid_field_overrides_true_remote_flag(self):
+        job = {
+            "job_id": "hybrid-structured-1",
+            "job_title": "Accountant",
+            "job_description": "Full-time position.",
+            "job_location": "United States",
+            "job_country": "US",
+            "job_is_remote": True,
+            "work_arrangement": "hybrid",
+            "employer_name": "Acme",
+            "_matched_role": "Accountant",
+        }
+        assessment = job_filter.assess_pre_enrichment_viability(job)
+        self.assertFalse(assessment.eligible)
+        self.assertEqual(assessment.stat_name, "excluded_in_person")
+
+    def test_structured_remote_field_is_used_when_legacy_flag_is_missing(self):
+        job = {
+            "job_id": "remote-structured-1",
+            "job_title": "Accountant - US",
+            "job_description": "Full-time position.",
+            "job_location": "United States",
+            "job_country": "US",
+            "job_is_remote": None,
+            "work_arrangement": "remote",
+            "employer_name": "Acme",
+            "_matched_role": "Accountant",
+        }
+        assessment = job_filter.assess_pre_enrichment_viability(job)
+        self.assertTrue(assessment.eligible)
+        self.assertEqual(assessment.work_arrangement.status, "remote")
 
 
 class AdaptiveRemoteYieldTests(unittest.TestCase):
