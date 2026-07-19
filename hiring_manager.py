@@ -125,6 +125,14 @@ def _name_matches_blocklist(name: str, values: List[str]) -> Optional[str]:
     return None
 
 
+def _reason_family(reason: str) -> str:
+    """Collapse detailed company decisions into stable observable families."""
+    value = str(reason or "unknown").strip().lower()
+    value = value.split(":", 1)[0]
+    value = re.sub(r"[^a-z0-9]+", "_", value).strip("_")
+    return value or "unknown"
+
+
 def passes_company_criteria(
     org: apollo.OrgEnrichment, company_name: str = ""
 ) -> Tuple[bool, str, bool]:
@@ -349,6 +357,10 @@ def process_company(company_jobs: List[Dict]) -> Tuple[List[Dict], Dict]:
         stats["company_domain_unresolved"] += 1
 
     eligible, company_reason, company_needs_review = passes_company_criteria(org, company_name)
+    reason_family = _reason_family(company_reason)
+    stats[f"company_criteria_reason__{reason_family}"] += 1
+    if company_needs_review:
+        stats[f"company_manual_review_reason__{reason_family}"] += 1
 
     jobs_by_bucket: Dict[str, List[Dict]] = defaultdict(list)
     for job in company_jobs:
@@ -389,6 +401,7 @@ def process_company(company_jobs: List[Dict]) -> Tuple[List[Dict], Dict]:
                 )
             )
             stats[f"bucket_{bucket}_not_found"] += 1
+            stats["missing_company_domain_buckets"] += 1
             continue
 
         target_titles = get_target_titles_for_jobs(bucket_jobs, org.employee_count)

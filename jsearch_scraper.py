@@ -25,6 +25,8 @@ from role_relevance import assess_role, normalize_relevance_score
 
 logger = logging.getLogger(__name__)
 
+_QUERY_VARIANTS = {"base", "hiring", "linkedin", "indeed", "glassdoor"}
+
 
 @dataclass(frozen=True)
 class JSearchFetchResult:
@@ -84,19 +86,34 @@ def _quota_snapshot(headers) -> Dict[str, object]:
     }
 
 
-def build_search_query(role: str, *, intent_variant: bool = False) -> str:
-    """Build a remote-biased US query without changing the canonical role."""
+def build_search_query(
+    role: str, *, intent_variant: bool = False, query_variant: Optional[str] = None
+) -> str:
+    """Build a remote-biased US query without changing the canonical role.
+
+    The reserved lookback pass can use publisher-scoped variants supported by
+    JSearch (``via linkedin``, ``via indeed``, ``via glassdoor``). These improve
+    retrieval diversity without weakening any local quality gate.
+    """
     cleaned = str(role or "").strip()
-    if intent_variant:
-        return f"{cleaned} remote jobs hiring in United States"
+    variant = str(query_variant or ("hiring" if intent_variant else "base")).strip().lower()
+    if variant not in _QUERY_VARIANTS:
+        raise ValueError(f"Unsupported JSearch query variant: {variant!r}")
+
+    remote_role = cleaned
     if config.JSEARCH_REMOTE_QUERY_BIAS and not re.search(r"\bremote\b", cleaned, re.I):
-        return f"remote {cleaned} in United States"
-    return f"{cleaned} in United States"
+        remote_role = f"remote {cleaned}"
+    if variant == "hiring":
+        return f"{remote_role} jobs hiring in United States"
+    if variant in {"linkedin", "indeed", "glassdoor"}:
+        return f"{remote_role} in United States via {variant}"
+    return f"{remote_role} in United States"
 
 
 def fetch_jobs_for_role(
     role: str, *, page: int = 1, num_pages: Optional[int] = None,
     date_posted: Optional[str] = None, intent_variant: bool = False,
+    query_variant: Optional[str] = None,
 ) -> JSearchFetchResult:
     headers = {
         "x-rapidapi-key": config.RAPIDAPI_KEY,
@@ -104,14 +121,16 @@ def fetch_jobs_for_role(
         "Content-Type": "application/json",
     }
     params = {
-        "query": build_search_query(role, intent_variant=intent_variant),
+        "query": build_search_query(
+            role, intent_variant=intent_variant, query_variant=query_variant
+        ),
         "page": str(max(1, int(page))),
         "num_pages": str(config.NUM_PAGES if num_pages is None else max(1, int(num_pages))),
         "date_posted": date_posted or config.DATE_POSTED,
         "country": config.COUNTRY,
     }
     if config.JSEARCH_REMOTE_JOBS_ONLY:
-        params["remote_jobs_only"] = "true"
+        params[config.JSEARCH_REMOTE_FILTER_PARAMETER] = "true"
     started = time.perf_counter()
     response = request_with_retry(
         "GET",
@@ -164,6 +183,19 @@ def validate_preflight() -> None:
         raise ValueError("JSEARCH_ADAPTIVE_LOOKBACK_MAX_QUERIES cannot be negative")
     if config.JSEARCH_TARGET_PREFILTER_VIABLE < 0:
         raise ValueError("JSEARCH_TARGET_PREFILTER_VIABLE cannot be negative")
+    if not re.fullmatch(r"[a-zA-Z_][a-zA-Z0-9_]*", config.JSEARCH_REMOTE_FILTER_PARAMETER):
+        raise ValueError("JSEARCH_REMOTE_FILTER_PARAMETER must be a valid parameter name")
+    if not isinstance(config.JSEARCH_LOOKBACK_QUERY_VARIANTS, list):
+        raise ValueError("JSEARCH_LOOKBACK_QUERY_VARIANTS must be a JSON list")
+    invalid_variants = [
+        value for value in config.JSEARCH_LOOKBACK_QUERY_VARIANTS
+        if str(value).strip().lower() not in _QUERY_VARIANTS - {"base"}
+    ]
+    if invalid_variants:
+        raise ValueError(
+            "Unsupported JSEARCH_LOOKBACK_QUERY_VARIANTS: "
+            + ", ".join(map(str, invalid_variants))
+        )
     if not 0 <= config.MAX_ROLE_FAILURE_RATE <= 1:
         raise ValueError("MAX_ROLE_FAILURE_RATE must be between 0 and 1")
 
@@ -183,8 +215,8 @@ def validate_query_budget(query_count: int) -> int:
             "Estimated JSearch usage "
             f"({query_count} queries x {config.NUM_PAGES} pages = {estimated_units} units) "
             f"exceeds JSEARCH_MAX_ESTIMATED_UNITS_PER_RUN={budget}. "
-            "Set NUM_PAGES=1 for the daily 118-role catalog, reduce the query cap, "
-            "or explicitly raise the budget for a supervised diagnostic."
+            "Raise JSEARCH_MAX_ESTIMATED_UNITS_PER_RUN to at least "
+            "query_count x NUM_PAGES, or reduce NUM_PAGES/query count."
         )
     return estimated_units
 
@@ -290,6 +322,13 @@ def _ingest_query_jobs(
             continue
 
         already_seen_in_run = job_id in candidates_by_job_id
+        # Preserve the request constraints that produced this row. The provider's
+        # returned country/remote fields alone may be query echoes, but agreement
+        # between the explicit request constraints and the returned structured
+        # fields is useful corroboration when no foreign/global contradiction is
+        # present.
+        job["_jsearch_country_filter"] = config.COUNTRY
+        job["_jsearch_remote_filter_applied"] = bool(config.JSEARCH_REMOTE_JOBS_ONLY)
         normalize_job_identity(job)
         assessment = assess_role(job, canonical_role)
         candidate = dict(job)
@@ -327,6 +366,42 @@ def _ingest_query_jobs(
                 metrics["prefilter_rejected_candidates"] += 1
                 metrics[_prefilter_metric_name(prefilter.stat_name)] += 1
     return metrics
+
+
+def _record_query_variant(
+    stats: Dict,
+    *,
+    variant: str,
+    raw_jobs: List[Dict],
+    ingest: Dict[str, int],
+    duration_seconds: float,
+    success: bool,
+) -> None:
+    """Aggregate yield by query formulation for evidence-based tuning."""
+    metric = stats["query_variant_metrics"].setdefault(
+        variant,
+        {
+            "queries": 0,
+            "queries_succeeded": 0,
+            "raw_jobs": 0,
+            "new_unique_candidates": 0,
+            "new_prefilter_viable_candidates": 0,
+            "prefilter_rejected_candidates": 0,
+            "duration_seconds": 0.0,
+        },
+    )
+    metric["queries"] += 1
+    metric["queries_succeeded"] += int(success)
+    metric["raw_jobs"] += len(raw_jobs)
+    metric["duration_seconds"] = round(
+        float(metric.get("duration_seconds", 0.0)) + duration_seconds, 3
+    )
+    for key in (
+        "new_unique_candidates",
+        "new_prefilter_viable_candidates",
+        "prefilter_rejected_candidates",
+    ):
+        metric[key] += int(ingest.get(key, 0))
 
 
 def _adaptive_role_score(role: str, query_metrics: Dict[str, Dict], role_order: Dict[str, int]):
@@ -473,6 +548,9 @@ def run_daily_scrape(
             f"max_queries={effective_max}" if len(roles_to_query) < len(planned_roles) else ""
         ),
         "query_metrics": {},
+        "query_variant_metrics": {},
+        "adaptive_lookback_variant_counts": {},
+        "adaptive_lookback_query_details": [],
         "quota": {
             "limit": None,
             "remaining": None,
@@ -540,6 +618,8 @@ def run_daily_scrape(
             "quota_remaining_after": remaining,
             "pages": [{
                 "page": 1,
+                "query_variant": "base",
+                "query": build_search_query(search_role),
                 "raw_jobs": len(raw_jobs),
                 "duration_seconds": fetch_meta.duration_seconds,
                 "quota_remaining_after": remaining,
@@ -547,6 +627,14 @@ def run_daily_scrape(
             }],
             **query_ingest,
         }
+        _record_query_variant(
+            stats,
+            variant="base",
+            raw_jobs=raw_jobs,
+            ingest=query_ingest,
+            duration_seconds=fetch_meta.duration_seconds,
+            success=query_status == "ok",
+        )
 
         # A successful query with zero matches is a valid market observation,
         # not an API failure. Track it separately so a broad role catalog does
@@ -679,11 +767,21 @@ def run_daily_scrape(
                     metric[key] = int(metric.get(key, 0)) + value
                 metric["pages"].append({
                     "page": page_number,
+                    "query_variant": "base",
+                    "query": build_search_query(search_role),
                     "raw_jobs": len(raw_jobs),
                     "duration_seconds": fetch_meta.duration_seconds,
                     "quota_remaining_after": remaining,
                     **query_ingest,
                 })
+                _record_query_variant(
+                    stats,
+                    variant="base",
+                    raw_jobs=raw_jobs,
+                    ingest=query_ingest,
+                    duration_seconds=fetch_meta.duration_seconds,
+                    success=query_status == "ok",
+                )
                 stats["adaptive_deepened_roles"].append(search_role)
                 bucket_counts = stats["adaptive_bucket_counts"]
                 bucket_counts[role_bucket] = int(bucket_counts.get(role_bucket, 0)) + 1
@@ -752,7 +850,13 @@ def run_daily_scrape(
         lookback_cap = min(
             budget_remaining, config.JSEARCH_ADAPTIVE_LOOKBACK_MAX_QUERIES
         )
-        for search_role in lookback_roles[:lookback_cap]:
+        lookback_variants = [
+            str(value).strip().lower()
+            for value in config.JSEARCH_LOOKBACK_QUERY_VARIANTS
+            if str(value).strip()
+        ] or ["hiring"]
+        for lookback_index, search_role in enumerate(lookback_roles[:lookback_cap]):
+            query_variant = lookback_variants[lookback_index % len(lookback_variants)]
             canonical_role = canonical_role_for_search(search_role)
             stats["queries_attempted"] += 1
             stats["queries_succeeded"] += 0
@@ -766,7 +870,8 @@ def run_daily_scrape(
                         page=1,
                         num_pages=1,
                         date_posted=config.JSEARCH_ADAPTIVE_LOOKBACK_DATE_POSTED,
-                        intent_variant=True,
+                        intent_variant=query_variant == "hiring",
+                        query_variant=query_variant,
                     )
                 )
                 raw_jobs = fetch_meta.jobs
@@ -790,6 +895,25 @@ def run_daily_scrape(
             added = int(query_ingest.get("new_prefilter_viable_candidates", 0))
             stats["adaptive_lookback_prefilter_viable_added"] += added
             stats["adaptive_lookback_roles"].append(search_role)
+            variant_counts = stats["adaptive_lookback_variant_counts"]
+            variant_counts[query_variant] = int(variant_counts.get(query_variant, 0)) + 1
+            stats["adaptive_lookback_query_details"].append({
+                "role": search_role,
+                "query_variant": query_variant,
+                "query": build_search_query(search_role, query_variant=query_variant),
+                "raw_jobs": len(raw_jobs),
+                "new_prefilter_viable_candidates": added,
+            })
+            _record_query_variant(
+                stats,
+                variant=query_variant,
+                raw_jobs=raw_jobs,
+                ingest=query_ingest,
+                duration_seconds=fetch_meta.duration_seconds,
+                success=not any(
+                    failed == f"{search_role} (lookback)" for failed in failed_roles
+                ),
+            )
             metric = stats["query_metrics"][search_role]
             metric["raw_jobs"] += len(raw_jobs)
             for key, value in query_ingest.items():
@@ -797,6 +921,8 @@ def run_daily_scrape(
             metric["pages"].append({
                 "page": 1,
                 "mode": "lookback",
+                "query_variant": query_variant,
+                "query": build_search_query(search_role, query_variant=query_variant),
                 "date_posted": config.JSEARCH_ADAPTIVE_LOOKBACK_DATE_POSTED,
                 "raw_jobs": len(raw_jobs),
                 "quota_remaining_after": remaining,

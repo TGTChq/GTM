@@ -4,6 +4,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+import apollo_client as apollo
 import hiring_manager
 
 
@@ -128,6 +129,35 @@ class DailyThroughputTests(unittest.TestCase):
             self.assertTrue(result.target_reached)
             self.assertEqual(result.eligible_companies, 2)
             self.assertEqual(result.stop_reason, "eligible_company_target_reached")
+
+
+
+
+class CompanyEligibilityObservabilityTests(unittest.TestCase):
+    def test_reason_family_is_stable(self):
+        self.assertEqual(
+            hiring_manager._reason_family("excluded_apollo_industry:Staffing and Recruiting"),
+            "excluded_apollo_industry",
+        )
+        self.assertEqual(hiring_manager._reason_family("too_large:1200"), "too_large")
+
+    def test_missing_domain_bucket_is_counted(self):
+        job = {
+            "job_id": "missing-domain",
+            "employer_name": "No Domain Co",
+            "employer_website": "",
+            "job_title": "Account Executive",
+            "_matched_role": "Account Executive",
+        }
+        org = apollo.OrgEnrichment(found=False, name="No Domain Co")
+        with (
+            patch.object(hiring_manager.apollo, "enrich_organization", return_value=org),
+            patch.object(hiring_manager.time, "sleep"),
+        ):
+            leads, stats = hiring_manager.process_company([job])
+        self.assertEqual(leads[0]["_step3_reason"], "missing_company_domain")
+        self.assertEqual(stats["missing_company_domain_buckets"], 1)
+        self.assertEqual(stats["company_criteria_reason__unknown_org_data"], 1)
 
 
 if __name__ == "__main__":
