@@ -18,6 +18,7 @@ from company_identity import safe_company_domain
 from domain_utils import normalize_company_domain
 
 import config
+from job_quality import assess_quality_guard, normalize_job_identity
 from job_signal import classify_freshness
 from pipeline_state import SeenJobsRegistry
 
@@ -270,10 +271,23 @@ def is_excluded_industry(job: Dict) -> Tuple[bool, str]:
         if _contains_keyword(employer_norm, keyword):
             return True, f"excluded_industry_media_production:{keyword}"
 
-    description = (job.get("job_description") or "")[:3000]
+    description = (job.get("job_description") or "")[:5000]
     for pattern in config.EXCLUDED_INDUSTRY_DESCRIPTION_PATTERNS:
         if re.search(pattern, description, re.I):
             return True, f"excluded_industry_description:{pattern}"
+
+    # High-confidence nonprofit/religious organization signal. A .org domain
+    # alone is not enough; it must be corroborated by mission/nonprofit language.
+    website_domain = extract_domain(website)
+    mission_signal = re.search(
+        r"\b(?:501\(c\)\(3\)|non[- ]?profit|not[- ]for[- ]profit|faith[- ]based|"
+        r"religious organization|statement of faith|ministry|mission alignment|"
+        r"mission[- ]driven organization)\b",
+        description,
+        re.I,
+    )
+    if website_domain.endswith(".org") and mission_signal:
+        return True, "excluded_industry_mission_driven_org"
 
     return False, ""
 
@@ -303,6 +317,31 @@ def _raw_us_state_abbreviations(text: str) -> List[str]:
     return list(dict.fromkeys(re.findall(rf"(?<![A-Za-z])({abbreviations})(?![A-Za-z])", text)))
 
 
+def _extract_title_city_state(title: str) -> str:
+    """Extract only an explicit ``City, ST`` phrase from a title.
+
+    Bare tokens are deliberately ignored: ``REMOTE OK`` is not Oklahoma and
+    ``PR Account Executive`` is not Puerto Rico.
+    """
+    if not title:
+        return ""
+    abbreviations = "|".join(sorted((value.upper() for value in config.US_STATE_ABBREVS), key=len, reverse=True))
+    city = r"[A-Z][A-Za-z.'-]*(?:\s+[A-Z][A-Za-z.'-]*){0,4}"
+    patterns = (
+        rf"\bin\s+({city},\s*(?:{abbreviations}))(?:,\s*(?:U\.?S\.?A?\.?|United States))?\b",
+        rf"(?:^|[-–—|(/])\s*({city},\s*(?:{abbreviations}))(?:,\s*(?:U\.?S\.?A?\.?|United States))?(?=$|[)\]|/| -])",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, title)
+        if not match:
+            continue
+        value = match.group(1).strip()
+        city_value = normalize_text(value.split(",", 1)[0])
+        if city_value not in config.GENERIC_REMOTE_LOCATIONS:
+            return value
+    return ""
+
+
 def _extract_display_location(job: Dict, explicit_us: bool) -> str:
     raw_location = str(job.get("job_location") or "").strip()
     normalized_location = normalize_text(raw_location)
@@ -317,16 +356,14 @@ def _extract_display_location(job: Dict, explicit_us: bool) -> str:
         return state
 
     title = str(job.get("job_title") or "")
-    city_state = re.search(
-        r"\bin\s+([A-Za-z][A-Za-z .'-]{1,50},\s*(?:[A-Z]{2})(?:\b|\s+\d{5}))",
-        title,
-    )
+    city_state = _extract_title_city_state(title)
     if city_state:
-        return city_state.group(1).strip()
+        return city_state
 
-    states = _raw_us_state_abbreviations(title)
-    if states:
-        return "Remote, " + ", ".join(states)
+    # Never infer a state from a bare two-letter token in the title. Tokens
+    # such as "REMOTE OK" and "PR Account Executive" are semantic text, not
+    # Oklahoma/Puerto Rico. Structured city/state fields or an explicit
+    # "in City, ST" phrase are required.
     return "Remote, United States" if explicit_us else (raw_location or "Remote")
 
 
@@ -361,6 +398,11 @@ def assess_us_eligibility(job: Dict) -> GeographyEvidence:
         if token and re.search(rf"(?:^|-)({re.escape(token)})(?:-|$)", url_tokens):
             return GeographyEvidence(False, f"non_us_apply_link_marker:{marker}", location or "Remote", "foreign")
 
+    explicit_us_url_pattern = next(
+        (pattern for pattern in config.US_APPLY_LINK_SCOPE_PATTERNS if re.search(pattern, apply_link, re.I)),
+        None,
+    )
+
     for marker in config.NON_US_LOCATION_MARKERS:
         normalized_marker = normalize_text(marker)
         if normalized_marker and _location_contains_marker(normalized_location_source, normalized_marker):
@@ -374,7 +416,26 @@ def assess_us_eligibility(job: Dict) -> GeographyEvidence:
         (pattern for pattern in config.US_REMOTE_SCOPE_PATTERNS if re.search(pattern, source_text, re.I)),
         None,
     )
-    explicit_us = explicit_us_pattern is not None
+    # A delimiter-bounded US/USA suffix in a title (for example "AI Engineer - US")
+    # is explicit scope. Matching remains case-sensitive for US/USA so the pronoun
+    # "us" cannot become geographic evidence.
+    title_has_explicit_us = bool(
+        re.search(r"(?:^|[-–—|(/])\s*(?:U\.?S\.?A?\.?)\s*(?=$|[)\]|/| -])", title)
+        or re.search(
+            r"(?:^|[-–—|(/])\s*United States\s*(?=$|[)\]|/| -])",
+            title,
+            re.I,
+        )
+    )
+    # A structured job_location of "United States" is independent geographic
+    # evidence; a query-echoed job_country=US by itself is not.
+    location_is_explicit_us = normalized_location in config.US_COUNTRY_CODES
+    explicit_us = bool(
+        explicit_us_pattern is not None
+        or title_has_explicit_us
+        or location_is_explicit_us
+        or explicit_us_url_pattern is not None
+    )
 
     state_norm = normalize_text(state_raw)
     state_is_us = bool(
@@ -385,24 +446,39 @@ def assess_us_eligibility(job: Dict) -> GeographyEvidence:
     if state_norm == "georgia":
         state_is_us = False
 
-    state_tokens = _raw_us_state_abbreviations("\n".join([title, location, state_raw]))
+    state_tokens = _raw_us_state_abbreviations("\n".join([location, state_raw]))
+    title_city_state = _extract_title_city_state(title)
     location_has_us_state_name = any(
         state_name != "georgia" and _location_contains_marker(normalize_text(location), state_name)
         for state_name in config.US_STATE_NAMES
     )
-    explicit_state = bool(state_is_us or state_tokens or location_has_us_state_name)
+    explicit_state = bool(
+        state_is_us or state_tokens or title_city_state or location_has_us_state_name
+    )
 
     if explicit_us or explicit_state:
         display = _extract_display_location(job, explicit_us=True)
-        reason = (
-            "country_field"
-            if explicit_us_pattern and explicit_us_pattern.startswith(r"\bavailable") and country in config.US_COUNTRY_CODES
-            else (
-                f"explicit_us_scope:{explicit_us_pattern}"
-                if explicit_us_pattern
-                else "explicit_us_state"
-            )
-        )
+        if (
+            explicit_us_url_pattern
+            and not explicit_us_pattern
+            and not title_has_explicit_us
+            and not location_is_explicit_us
+        ):
+            reason = f"explicit_us_apply_link:{explicit_us_url_pattern}"
+        elif title_has_explicit_us and not explicit_us_pattern:
+            reason = "explicit_us_title"
+        elif location_is_explicit_us and not explicit_us_pattern:
+            reason = "explicit_us_location"
+        elif (
+            explicit_us_pattern
+            and explicit_us_pattern.startswith(r"\bavailable")
+            and country in config.US_COUNTRY_CODES
+        ):
+            reason = "country_field"
+        elif explicit_us_pattern:
+            reason = f"explicit_us_scope:{explicit_us_pattern}"
+        else:
+            reason = "explicit_us_state"
         return GeographyEvidence(True, reason, display, "us_explicit")
 
     generic_remote = normalized_location in config.GENERIC_REMOTE_LOCATIONS
@@ -644,10 +720,24 @@ def assess_pre_enrichment_viability(job: Dict) -> PreEnrichmentAssessment:
     same logic used by Step 2, so adaptive JSearch deepening rewards jobs that can
     actually reach enrichment instead of merely matching a title.
     """
+    normalize_job_identity(job)
+    quality = assess_quality_guard(job)
     arrangement = classify_work_arrangement(job)
     geography = assess_us_eligibility(job)
     employment = assess_employment_quality(job)
     employer_domain, employer_domain_source = get_safe_employer_domain(job)
+
+    if not quality.eligible:
+        return PreEnrichmentAssessment(
+            eligible=False,
+            stat_name=quality.stat_name,
+            reason=quality.reason,
+            work_arrangement=arrangement,
+            geography=geography,
+            employment=employment,
+            employer_domain=employer_domain,
+            employer_domain_source=employer_domain_source,
+        )
 
     checks = [
         ("excluded_aggregator", is_job_aggregator_or_publisher),
@@ -732,6 +822,10 @@ def run_filter(
     stats = {
         "input_total": len(jobs),
         "kept": 0,
+        "excluded_posting_integrity": 0,
+        "excluded_restricted_role": 0,
+        "excluded_outsourcing": 0,
+        "excluded_contextual_mismatch": 0,
         "excluded_aggregator": 0,
         "excluded_stale": 0,
         "excluded_staffing": 0,
@@ -748,6 +842,7 @@ def run_filter(
     }
 
     for job in jobs:
+        normalize_job_identity(job)
         assessment = assess_pre_enrichment_viability(job)
         candidate = {
             **job,

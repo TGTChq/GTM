@@ -91,6 +91,10 @@ JSEARCH_MAX_EXTRA_PAGES_PER_ROLE=1
 JSEARCH_ADAPTIVE_MAX_EXTRA_QUERIES=32
 JSEARCH_ADAPTIVE_MIN_PREFILTER_VIABLE=1
 JSEARCH_ADAPTIVE_BUCKET_BALANCING=1
+JSEARCH_ADAPTIVE_LOOKBACK=1
+JSEARCH_ADAPTIVE_LOOKBACK_DATE_POSTED=week
+JSEARCH_ADAPTIVE_LOOKBACK_MAX_QUERIES=16
+JSEARCH_TARGET_PREFILTER_VIABLE=60
 MAX_ROLE_FAILURE_RATE=0.10
 ```
 
@@ -102,6 +106,15 @@ explicitly raised for a supervised diagnostic.
 Hard monthly/subscription quota errors fail fast and do not retry the remaining
 catalog. `run_scrape_test.py` still records quota headers, runtime, raw results,
 and selected results when the API provides them.
+
+
+The lookback does not weaken quality rules and does not set `NUM_PAGES=2`. It
+reserves at most 16 units inside the existing 150-unit run budget, uses a
+one-week window only for a diversified subset of the strongest role queries,
+and stops as soon as 60 jobs have survived every zero-credit pre-enrichment
+gate. These variables are defaults in code, so deployment does not depend on
+adding them immediately; setting them explicitly in Railway makes the operating
+policy visible.
 
 The remote-only request and remote query bias prevent onsite inventory from
 consuming most of the daily budget. Adaptive page-2 calls now require at least

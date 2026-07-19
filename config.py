@@ -117,6 +117,19 @@ JSEARCH_ADAPTIVE_MIN_PREFILTER_VIABLE = _env_int(
 JSEARCH_ADAPTIVE_BUCKET_BALANCING = _env_bool(
     "JSEARCH_ADAPTIVE_BUCKET_BALANCING", True
 )
+# Reserve part of the 150-unit budget for a diversified, wider-window pass.
+# This improves qualified inventory without blindly fetching page 2 for all 118
+# roles or weakening any quality gate.
+JSEARCH_ADAPTIVE_LOOKBACK = _env_bool("JSEARCH_ADAPTIVE_LOOKBACK", True)
+JSEARCH_ADAPTIVE_LOOKBACK_DATE_POSTED = os.getenv(
+    "JSEARCH_ADAPTIVE_LOOKBACK_DATE_POSTED", "week"
+)
+JSEARCH_ADAPTIVE_LOOKBACK_MAX_QUERIES = _env_int(
+    "JSEARCH_ADAPTIVE_LOOKBACK_MAX_QUERIES", 16
+)
+JSEARCH_TARGET_PREFILTER_VIABLE = _env_int(
+    "JSEARCH_TARGET_PREFILTER_VIABLE", 60
+)
 # Reject only clearly stale job-intent signals before enrichment. Unknown or
 # conflicting dates remain eligible; the oldest parseable source date is used.
 MAX_JOB_AGE_DAYS = _env_int("MAX_JOB_AGE_DAYS", 30)
@@ -144,6 +157,7 @@ EXCLUDED_TITLE_KEYWORDS = [
     "internship",
     "senior",
     "sr",
+    "head of",
     "event marketing",
     "field marketing",
 ]
@@ -297,7 +311,10 @@ REMOTE_TITLE_LOCATION_PATTERNS = [
 ]
 
 REMOTE_DESCRIPTION_PATTERNS = [
-    r"\bthis is (?:a )?(?:full(?:y)? |100% )?remote (?:job|position|role|opportunity)\b",
+    r"\bthis is (?:a )?(?:full[- ]time,? |full(?:y)? |100% )?remote (?:job|position|role|opportunity)\b",
+    r"\b(?:work|working) in a fully remote environment\b",
+    r"\bthe (?:role|position) is fully remote\b",
+    r"\bremote\s*[—–-]\s*full[- ]time\b",
     r"\b(?:job|work) location\s*:\s*(?:100% |fully )?remote\b",
     r"\blocation\s*:\s*(?:100% |fully )?remote\b",
     r"\bremote anywhere in (?:the )?united states\b",
@@ -381,6 +398,10 @@ NON_FULL_TIME_TITLE_PATTERNS = [
 ]
 NON_FULL_TIME_DESCRIPTION_PATTERNS = [
     r"\bthis is (?:a )?part[- ]time (?:role|position|job)\b",
+    r"\b(?:seeking|hiring|looking for) (?:an? )?freelance(?:r)?\b",
+    r"\bthis is (?:an? )?(?:freelance|independent contractor|project[- ]based|temporary) (?:role|position|job|engagement)\b",
+    r"\b(?:independent contractor|freelance) position\b",
+    r"\b(?:flexible )?project[- ]based work\b",
     r"\b(?:up to|at least|approximately|minimum of)?\s*\d{1,2}\+?\s*(?:hours|hrs)(?:\s+per|/)\s*(?:week|wk)\b",
     r"\b\d{1,2}\s*[-–]\s*\d{1,2}\s*(?:hours|hrs)(?:\s+per|/)\s*(?:week|wk)\b",
 ]
@@ -462,6 +483,7 @@ KNOWN_JOB_AGGREGATOR_EMPLOYERS = [
     "power to fly",
     "dice",
     "freelanceshop",
+    "onlinejobs ph client",
     "freelance shop",
 ]
 
@@ -551,6 +573,22 @@ INTERMEDIARY_JOB_DOMAINS = [
     "wellfound.com",
 ]
 
+KNOWN_OUTSOURCING_EMPLOYERS = [
+    "concentrix", "teleperformance", "foundever", "sitel", "ttec",
+    "alorica", "taskus", "transcom", "genpact", "wns", "conduent",
+    "supportninja", "helpware", "cloudstaff", "bruntwork", "cyberbacker",
+    "wing assistant", "wing assistants", "outsourced doers", "boldr",
+    "remote staff", "athena", "somewhere", "agileengine",
+    "anomaly squared", "cognizant", "brillio", "boldly", "cleardesk",
+]
+
+OUTSOURCING_DESCRIPTION_PATTERNS = [
+    r"\bwe are (?:a|an) (?:global )?(?:business process outsourcing|bpo) (?:company|provider)\b",
+    r"\bour (?:business process outsourcing|outsourcing) services\b",
+    r"\bwe provide (?:virtual assistant|outsourced staffing|offshore staffing) services\b",
+    r"\boutsourcing and offshoring consulting\b",
+]
+
 KNOWN_STAFFING_EMPLOYERS = [
     "teksystems",
     "tek systems",
@@ -615,6 +653,9 @@ KNOWN_STAFFING_EMPLOYERS = [
     "remote talent cloud",
     "blueline search",
     "atomus partners",
+    "inspyr solutions",
+    "vmysmartpros",
+    "jackson james",
 ]
 
 VAGUE_EMPLOYER_SIGNALS = [
@@ -697,6 +738,10 @@ EXCLUDED_INDUSTRY_EMPLOYER_KEYWORDS = [
     "blue cross",
     "steris",
     "event planning",
+    "consumer shows",
+    "home shows",
+    "bridal expo",
+    "wedding expo",
     "event management company",
     "events company",
     "news network",
@@ -719,6 +764,9 @@ EXCLUDED_MEDIA_PRODUCTION_KEYWORDS = [
 EXCLUDED_INDUSTRY_DESCRIPTION_PATTERNS = [
     r"\bwe are (?:a|an) (?:501\(c\)\(3\) |non[- ]?profit |nonprofit )?(?:organization|charity|foundation)\b",
     r"\bour (?:non[- ]?profit|nonprofit) organization\b",
+    r"\b(?:a|an) national not[- ]for[- ]profit organization\b",
+    r"\bmission[- ]driven (?:non[- ]?profit|ministry|religious organization)\b",
+    r"\b(?:christian|faith[- ]based) ministry\b",
     r"\bregistered 501\(c\)\(3\)\b",
 ]
 
@@ -757,6 +805,10 @@ GENERIC_REMOTE_LOCATIONS = {
 }
 US_REMOTE_SCOPE_PATTERNS = [
     r"\bremote[ ,(/-]*(?:u\.?s\.?|usa|united states)\b",
+    r"\bremote work within (?:the )?(?:u\.?s\.?|usa|united states)\b",
+    r"\bremote role within (?:the )?(?:u\.?s\.?|usa|united states)\b",
+    r"\bopen to candidates in (?:the )?(?:u\.?s\.?|usa|united states)\b",
+    r"\b(?:continental|contiguous) (?:u\.?s\.?|usa|united states)\b",
     r"\b(?:u\.?s\.?|usa|united states)[ -]based\b",
     r"\bremote anywhere in (?:the )?united states\b",
     r"\bwork remotely from anywhere in (?:the )?united states\b",
@@ -798,6 +850,11 @@ US_STATE_ABBREVS = {
     "nh", "nj", "nm", "ny", "nc", "nd", "oh", "ok", "or", "pa", "ri", "sc", "sd", "tn",
     "tx", "ut", "vt", "va", "wa", "wv", "wi", "wy", "dc", "pr",
 }
+US_APPLY_LINK_SCOPE_PATTERNS = [
+    r"(?:--|/)united-states(?:--|/|$)",
+    r"(?:--|/)[a-z0-9-]+-(?:al|ak|az|ar|ca|co|ct|de|fl|ga|hi|id|il|in|ia|ks|ky|la|me|md|ma|mi|mn|ms|mo|mt|ne|nv|nh|nj|nm|ny|nc|nd|oh|ok|or|pa|ri|sc|sd|tn|tx|ut|vt|va|wa|wv|wi|wy|dc)(?:--|/|\?|$)",
+]
+
 FOREIGN_COUNTRY_URL_SLUGS = [
     "germany", "canada", "mexico", "india", "france", "spain", "brazil",
     "philippines", "australia", "united-kingdom", "italy", "netherlands",
