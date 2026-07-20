@@ -7,10 +7,11 @@ from dataclasses import dataclass
 from typing import Optional
 
 import config
-from http_utils import request_with_retry, safe_json
+from http_utils import QuotaExhaustedError, RetryWindowTooLong, request_with_retry, safe_json
 
 logger = logging.getLogger(__name__)
 HUNTER_BASE_URL = "https://api.hunter.io/v2"
+_hunter_quota_exhausted_for_run = False
 
 
 @dataclass
@@ -22,8 +23,28 @@ class HunterResult:
     source: Optional[str] = None
 
 
+def _quota_exhausted(exc: Exception) -> bool:
+    response = getattr(exc, "response", None)
+    if response is None or getattr(response, "status_code", None) != 429:
+        return False
+    body = str(getattr(response, "text", "") or "").lower()
+    return any(token in body for token in (
+        "billing period", "monthly quota", "quota exceeded",
+        "request limit", "credits exhausted", "upgrade your plan",
+    )) or isinstance(exc, (QuotaExhaustedError, RetryWindowTooLong))
+
+
+def _disable_for_run(exc: Exception) -> bool:
+    global _hunter_quota_exhausted_for_run
+    if not _quota_exhausted(exc):
+        return False
+    _hunter_quota_exhausted_for_run = True
+    logger.warning("Hunter quota exhausted; skipping Hunter for the remainder of this run.")
+    return True
+
+
 def verify_email(email: str) -> HunterResult:
-    if not email or not config.HUNTER_API_KEY:
+    if not email or not config.HUNTER_API_KEY or _hunter_quota_exhausted_for_run:
         return HunterResult(found=False)
     try:
         response = request_with_retry(
@@ -34,6 +55,8 @@ def verify_email(email: str) -> HunterResult:
         )
         data = safe_json(response).get("data") or {}
     except Exception as exc:
+        if _disable_for_run(exc):
+            return HunterResult(found=False)
         logger.error("Hunter verification failed for %s: %s", email, exc)
         raise
 
@@ -47,7 +70,7 @@ def verify_email(email: str) -> HunterResult:
 
 
 def find_email(first_name: str, last_name: str, domain: str) -> HunterResult:
-    if not all((first_name, last_name, domain, config.HUNTER_API_KEY)):
+    if _hunter_quota_exhausted_for_run or not all((first_name, last_name, domain, config.HUNTER_API_KEY)):
         return HunterResult(found=False)
     try:
         response = request_with_retry(
@@ -63,6 +86,8 @@ def find_email(first_name: str, last_name: str, domain: str) -> HunterResult:
         )
         data = safe_json(response).get("data") or {}
     except Exception as exc:
+        if _disable_for_run(exc):
+            return HunterResult(found=False)
         logger.error("Hunter finder failed for %s %s: %s", first_name, last_name, exc)
         raise
 

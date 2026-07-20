@@ -15,6 +15,7 @@ from typing import Dict, Iterable, Optional, Tuple
 from urllib.parse import urlparse
 
 import config
+from company_identity import company_names_compatible
 
 
 @dataclass(frozen=True)
@@ -283,6 +284,77 @@ def assess_posting_integrity(job: Dict) -> QualityAssessment:
     if len(title) < 4 or re.fullmatch(r"[\W_]+", title):
         return QualityAssessment(False, "excluded_posting_integrity", "malformed_job_title")
 
+    # Reject corrupted syndication shells structurally. These records replace
+    # company names with placeholders, prices, dates, or deployment hostnames;
+    # they cannot produce a trustworthy employer identity for Apollo.
+    employer_norm = _normalized_name(employer)
+    employer_host = _url_host(employer)
+    placeholder_count = len(re.findall(r"\breputed company\b", description, re.I))
+    shell_name = bool(
+        ("." in employer and employer_host)
+        or re.search(r"\bposted on 20\d{2}[-/]\d{2}[-/]\d{2}\b", employer, re.I)
+        or re.fullmatch(r"[$£€]?\d+(?:[.,]\d+)?", employer.strip())
+        or employer_norm in {"this", "company", "the company", "employer"}
+    )
+    if placeholder_count >= 3:
+        return QualityAssessment(False, "excluded_posting_integrity", "corrupted_syndication_placeholders")
+    if shell_name:
+        return QualityAssessment(False, "excluded_posting_integrity", "untrustworthy_employer_identity")
+
+    safe_hosts = _safe_company_hosts(job)
+    employer_mentions = len(re.findall(r"\b" + re.escape(employer) + r"\b", description, re.I)) if employer else 0
+    first_party_identity = bool(
+        employer and re.search(
+            r"(?:^|[.!?]\s+)(?:about\s+)?" + re.escape(employer) +
+            r"\s+(?:is|builds|provides|offers|helps|serves)\b",
+            description, re.I,
+        )
+    )
+    title_identity = bool(employer and re.search(r"@\s*" + re.escape(employer) + r"\b", title, re.I))
+    source_hosts = [host for _value, host in _candidate_urls(job)]
+    publisher = str(job.get("job_publisher") or "")
+    syndicated_source = bool(
+        any(_is_intermediary_host(host) or _is_generic_host(host) for host in source_hosts)
+        or _known_aggregator_name(publisher)
+        or _generic_publisher_name(publisher)
+    )
+    if (
+        syndicated_source
+        and not _known_aggregator_name(employer)
+        and not _generic_publisher_name(employer)
+        and not safe_hosts
+        and employer_mentions < 2
+        and not first_party_identity
+        and not title_identity
+    ):
+        return QualityAssessment(False, "excluded_posting_integrity", "insufficient_direct_employer_evidence")
+    if (
+        syndicated_source
+        and not _known_aggregator_name(employer)
+        and not _generic_publisher_name(employer)
+        and not safe_hosts
+        and len(_clean_space(description)) < 900
+    ):
+        return QualityAssessment(False, "excluded_posting_integrity", "thin_syndicated_posting_without_company_domain")
+
+    claimed = re.search(
+        r"(?:about the company|company overview(?:\s+at)?|who we are)\s+"
+        r"([A-Z][A-Za-z0-9&.'’() +-]{2,60}?)(?:,\s*[^,\n]{1,90},)?\s+is\s+(?:a|an|the)\b",
+        description[:3500],
+        re.I,
+    )
+    if not claimed:
+        claimed = re.search(
+            r"(?:^|[.!?]\s+)([A-Z][A-Za-z0-9&.'’() +-]{2,60})"
+            r"\s+is\s+(?:a|an|the)\b",
+            description[:3500],
+        )
+    if claimed:
+        claimed_name = _clean_employer_candidate(claimed.group(1))
+        if claimed_name and not company_names_compatible(employer, claimed_name):
+            if len(re.findall(r"\b" + re.escape(claimed_name) + r"\b", description, re.I)) >= 2:
+                return QualityAssessment(False, "excluded_posting_integrity", "description_employer_identity_conflict")
+
     deadline = re.search(
         r"\bapplication deadline\s*:\s*(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)?\s*,?\s*"
         r"([A-Za-z]{3,9})\s+(\d{1,2}),?\s+(20\d{2})\b",
@@ -313,6 +385,22 @@ def assess_restricted_work(job: Dict) -> QualityAssessment:
     text = _text(job)
 
     title = str(job.get("job_title") or "")
+    seniority_patterns = (
+        r"\b(?:principal|staff)\s+(?:[a-z0-9&/-]+\s+){0,3}(?:engineer|developer|designer|analyst|scientist|administrator)\b",
+        r"\blead\s+(?!generation\b)(?:[a-z0-9&/-]+\s+){0,5}(?:engineer|developer|designer|analyst|scientist|administrator|manager)\b",
+        r"\b(?:engineer|developer|designer|analyst|scientist|administrator)\s+lead\b",
+    )
+    for pattern in seniority_patterns:
+        if re.search(pattern, title, re.I):
+            return QualityAssessment(False, "excluded_restricted_role", "seniority_outside_target_scope")
+
+    if re.search(r"\b(?:federal|public sector|coast guard|department of homeland security|dhs)\b", title, re.I):
+        return QualityAssessment(False, "excluded_restricted_role", "government_or_public_sector_title")
+
+    publisher = str(job.get("job_publisher") or "")
+    if re.search(r"\bclearance jobs?\b", publisher, re.I):
+        return QualityAssessment(False, "excluded_restricted_role", "clearance_job_board")
+
     description_head = str(job.get("job_description") or "")[:2500]
     program_patterns = {
         "skillbridge_or_transition_program": r"\b(?:skillbridge|military spouse fellowship|career transition program)\b",
@@ -461,6 +549,20 @@ def assess_outsourcing_intermediary(job: Dict) -> QualityAssessment:
         return QualityAssessment(
             False, "excluded_outsourcing", "corroborated_outsourcing_service_model"
         )
+
+    intermediary_patterns = (
+        r"\b(?:one of )?our staffing partners?\b[^.\n]{0,160}\b(?:hire|hiring|role|position)\b",
+        r"\b(?:integrated workforce management|contingent workforce|vendor management system|managed service provider)\b",
+        r"\b(?:msp|vms) program\b",
+        r"\b(?:the|our) client\b[^.\n]{0,140}\b(?:is seeking|is hiring|has engaged us|needs)\b",
+        r"\bnearshore\b[^.\n]{0,100}\b(?:talent|staffing|team|developer|engineer)\b",
+        r"\bconnect(?:s|ing)? (?:skilled )?(?:professionals|talent|candidates) with [^.\n]{0,45}\b(?:teams|companies|employers)\b",
+        r"\b(?:help|helps|helping) (?:you|professionals|talent|candidates) (?:discover|find) (?:meaningful |the right |the best )?(?:work|role|job|opportunity)\b",
+        r"\bfind(?:ing)? (?:the )?(?:right|best) (?:remote )?(?:role|job|opportunity) for (?:professionals|talent|candidates)\b",
+    )
+    for pattern in intermediary_patterns:
+        if re.search(pattern, description, re.I):
+            return QualityAssessment(False, "excluded_outsourcing", f"intermediary_delivery_model:{pattern}")
     return QualityAssessment(True)
 
 
