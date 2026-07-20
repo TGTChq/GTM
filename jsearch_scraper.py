@@ -992,20 +992,31 @@ def run_daily_scrape(
         round(len(set(failed_roles)) / attempted, 4) if attempted else 0.0
     )
 
-    output_path = str(Path(config.OUTPUT_DIR) / f"jobs_{datetime.now():%Y-%m-%d}.json")
-    Path(output_path).write_text(
-        json.dumps(
-            {
-                "scrape_date": datetime.now().isoformat(),
-                "date_posted_window": config.DATE_POSTED,
-                "total_jobs": len(selected_jobs),
-                "stats": stats,
-                "jobs": selected_jobs,
-            },
-            indent=2,
-        ),
-        encoding="utf-8",
+    completed_at = datetime.now()
+    payload = {
+        "scrape_date": completed_at.isoformat(),
+        "date_posted_window": config.DATE_POSTED,
+        "total_jobs": len(selected_jobs),
+        "stats": stats,
+        "jobs": selected_jobs,
+    }
+    serialized_payload = json.dumps(payload, indent=2)
+
+    # Keep the stable daily path used by the remaining pipeline steps.
+    output_path = str(
+        Path(config.OUTPUT_DIR) / f"jobs_{completed_at:%Y-%m-%d}.json"
     )
+    Path(output_path).write_text(serialized_payload, encoding="utf-8")
+
+    # Preserve every complete scrape independently so same-day diagnostics and
+    # smoke tests cannot overwrite the production corpus.
+    archive_dir = Path(config.OUTPUT_DIR) / "history"
+    archive_dir.mkdir(parents=True, exist_ok=True)
+    archive_path = archive_dir / (
+        f"jobs_{completed_at:%Y-%m-%d_%H-%M-%S_%f}.json"
+    )
+    archive_path.write_text(serialized_payload, encoding="utf-8")
+    logger.info("Immutable raw scrape archive saved to %s", archive_path)
 
     roles_with_results = sum(
         1 for count in stats["selected_role_counts"].values() if count > 0
