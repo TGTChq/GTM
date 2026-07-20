@@ -146,6 +146,30 @@ JSEARCH_ADAPTIVE_LOOKBACK_MAX_QUERIES = _env_int(
 JSEARCH_TARGET_PREFILTER_VIABLE = _env_int(
     "JSEARCH_TARGET_PREFILTER_VIABLE", 60
 )
+# Closed-loop inventory top-up. Production starts with one page across the full
+# catalog, enriches that inventory, then spends the remaining JSearch budget on
+# the roles that actually produce reviewable contacts. Every bound is finite;
+# the loop stops at the reviewable target, the unit budget, the round cap, or a
+# zero-yield round. Existing Railway environments need no new variables because
+# these defaults are intentionally production-safe.
+JSEARCH_REVIEWABLE_TOPUP_ENABLED = _env_bool(
+    "JSEARCH_REVIEWABLE_TOPUP_ENABLED", True
+)
+JSEARCH_TOPUP_INITIAL_PAGES = _env_int("JSEARCH_TOPUP_INITIAL_PAGES", 1)
+JSEARCH_TOPUP_MAX_ROUNDS = _env_int("JSEARCH_TOPUP_MAX_ROUNDS", 3)
+JSEARCH_TOPUP_MAX_UNITS_PER_ROUND = _env_int(
+    "JSEARCH_TOPUP_MAX_UNITS_PER_ROUND", 84
+)
+JSEARCH_TOPUP_PAGES_PER_QUERY = _env_int(
+    "JSEARCH_TOPUP_PAGES_PER_QUERY", 3
+)
+JSEARCH_TOPUP_MAX_PAGE = _env_int("JSEARCH_TOPUP_MAX_PAGE", 4)
+JSEARCH_TOPUP_PREFILTER_MULTIPLIER = _env_float(
+    "JSEARCH_TOPUP_PREFILTER_MULTIPLIER", 4.0
+)
+JSEARCH_TOPUP_MIN_PREFILTER_TARGET = _env_int(
+    "JSEARCH_TOPUP_MIN_PREFILTER_TARGET", 20
+)
 # Reject only clearly stale job-intent signals before enrichment. Unknown or
 # conflicting dates remain eligible; the oldest parseable source date is used.
 MAX_JOB_AGE_DAYS = _env_int("MAX_JOB_AGE_DAYS", 30)
