@@ -50,13 +50,18 @@ REQUEST_TIMEOUT_SECONDS = _env_int("REQUEST_TIMEOUT_SECONDS", 30)
 MAX_HTTP_RETRIES = _env_int("MAX_HTTP_RETRIES", 3)
 
 # ---------- Paths ----------
-OUTPUT_DIR = str(BASE_DIR / "data" / "raw")
-FILTERED_OUTPUT_DIR = str(BASE_DIR / "data" / "filtered")
-STEP3_OUTPUT_DIR = str(BASE_DIR / "data" / "enriched")
-LOG_DIR = str(BASE_DIR / "logs")
+# Runtime state remains in data/state. Large run artifacts can be redirected to
+# the Railway volume without changing local development paths.
 STATE_DIR = str(BASE_DIR / "data" / "state")
-RUN_SUMMARY_DIR = str(BASE_DIR / "logs" / "runs")
-SEEN_JOBS_FILE = str(BASE_DIR / "data" / "state" / "seen_jobs.json")
+ARTIFACT_ROOT = Path(
+    os.getenv("PIPELINE_ARTIFACT_ROOT", str(BASE_DIR / "data"))
+)
+OUTPUT_DIR = str(ARTIFACT_ROOT / "raw")
+FILTERED_OUTPUT_DIR = str(ARTIFACT_ROOT / "filtered")
+STEP3_OUTPUT_DIR = str(ARTIFACT_ROOT / "enriched")
+LOG_DIR = str(ARTIFACT_ROOT / "logs")
+RUN_SUMMARY_DIR = str(ARTIFACT_ROOT / "logs" / "runs")
+SEEN_JOBS_FILE = str(Path(STATE_DIR) / "seen_jobs.json")
 CRM_EXCLUSION_FILE = os.getenv(
     "CRM_EXCLUSION_FILE", str(BASE_DIR / "data" / "exclusions" / "crm_companies.csv")
 )
