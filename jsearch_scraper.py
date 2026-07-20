@@ -8,7 +8,7 @@ import math
 import re
 import sys
 import time
-from collections import defaultdict
+from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -183,6 +183,20 @@ def validate_preflight() -> None:
         raise ValueError("JSEARCH_ADAPTIVE_LOOKBACK_MAX_QUERIES cannot be negative")
     if config.JSEARCH_TARGET_PREFILTER_VIABLE < 0:
         raise ValueError("JSEARCH_TARGET_PREFILTER_VIABLE cannot be negative")
+    if config.JSEARCH_TOPUP_INITIAL_PAGES < 1:
+        raise ValueError("JSEARCH_TOPUP_INITIAL_PAGES must be at least 1")
+    if config.JSEARCH_TOPUP_MAX_ROUNDS < 0:
+        raise ValueError("JSEARCH_TOPUP_MAX_ROUNDS cannot be negative")
+    if config.JSEARCH_TOPUP_MAX_UNITS_PER_ROUND < 0:
+        raise ValueError("JSEARCH_TOPUP_MAX_UNITS_PER_ROUND cannot be negative")
+    if config.JSEARCH_TOPUP_PAGES_PER_QUERY < 1:
+        raise ValueError("JSEARCH_TOPUP_PAGES_PER_QUERY must be at least 1")
+    if config.JSEARCH_TOPUP_MAX_PAGE < 1:
+        raise ValueError("JSEARCH_TOPUP_MAX_PAGE must be at least 1")
+    if config.JSEARCH_TOPUP_PREFILTER_MULTIPLIER <= 0:
+        raise ValueError("JSEARCH_TOPUP_PREFILTER_MULTIPLIER must be positive")
+    if config.JSEARCH_TOPUP_MIN_PREFILTER_TARGET < 0:
+        raise ValueError("JSEARCH_TOPUP_MIN_PREFILTER_TARGET cannot be negative")
     if not re.fullmatch(r"[a-zA-Z_][a-zA-Z0-9_]*", config.JSEARCH_REMOTE_FILTER_PARAMETER):
         raise ValueError("JSEARCH_REMOTE_FILTER_PARAMETER must be a valid parameter name")
     if not isinstance(config.JSEARCH_LOOKBACK_QUERY_VARIANTS, list):
@@ -207,16 +221,19 @@ def estimate_query_units(query_count: int, num_pages: Optional[int] = None) -> i
     return max(0, int(query_count)) * max(1, int(pages))
 
 
-def validate_query_budget(query_count: int) -> int:
-    estimated_units = estimate_query_units(query_count)
+def validate_query_budget(
+    query_count: int, num_pages: Optional[int] = None
+) -> int:
+    pages = config.NUM_PAGES if num_pages is None else max(1, int(num_pages))
+    estimated_units = estimate_query_units(query_count, pages)
     budget = config.JSEARCH_MAX_ESTIMATED_UNITS_PER_RUN
     if budget > 0 and estimated_units > budget:
         raise ValueError(
             "Estimated JSearch usage "
-            f"({query_count} queries x {config.NUM_PAGES} pages = {estimated_units} units) "
+            f"({query_count} queries x {pages} pages = {estimated_units} units) "
             f"exceeds JSEARCH_MAX_ESTIMATED_UNITS_PER_RUN={budget}. "
             "Raise JSEARCH_MAX_ESTIMATED_UNITS_PER_RUN to at least "
-            "query_count x NUM_PAGES, or reduce NUM_PAGES/query count."
+            "query_count x pages, or reduce the page/query count."
         )
     return estimated_units
 
@@ -283,6 +300,7 @@ def _ingest_query_jobs(
     registry: SeenJobsRegistry,
     candidates_by_job_id: Dict[str, List[Dict]],
     stats: Dict,
+    exclude_job_ids: Optional[set[str]] = None,
 ) -> Dict[str, int]:
     metrics = {
         "accepted_candidates": 0,
@@ -313,6 +331,11 @@ def _ingest_query_jobs(
         job_id = _candidate_key(job)
         if not job_id:
             stats["missing_job_id_skipped"] += 1
+            continue
+        if exclude_job_ids and job_id in exclude_job_ids:
+            stats["in_run_existing_job_ids_removed"] = (
+                int(stats.get("in_run_existing_job_ids_removed", 0)) + 1
+            )
             continue
         if registry.has_job_id(job_id):
             stats["previously_seen_removed"] += 1
@@ -404,6 +427,60 @@ def _record_query_variant(
         metric[key] += int(ingest.get(key, 0))
 
 
+def _select_best_jobs(
+    candidates_by_job_id: Dict[str, List[Dict]], stats: Dict
+) -> List[Dict]:
+    """Collapse multi-query matches to one strongest role assignment per job."""
+    selected_jobs: List[Dict] = []
+    for job_id, candidates in candidates_by_job_id.items():
+        if len(candidates) > 1:
+            stats["query_duplicates"] = int(stats.get("query_duplicates", 0)) + len(candidates) - 1
+        candidates.sort(
+            key=lambda item: (
+                item.get("_role_relevance_status") == "accept",
+                item.get("_role_relevance_score", 0),
+                item.get("_role_specificity", 0),
+            ),
+            reverse=True,
+        )
+        best = candidates[0]
+        best["_query_roles"] = list(dict.fromkeys(
+            item["_matched_role"] for item in candidates
+        ))
+        best["_query_search_titles"] = list(dict.fromkeys(
+            item.get("_search_role", item["_matched_role"]) for item in candidates
+        ))
+        best["_query_role_scores"] = {
+            item.get("_search_role", item["_matched_role"]): item.get("_role_relevance_score", 0)
+            for item in candidates
+        }
+        best["_query_role_points"] = {
+            item.get("_search_role", item["_matched_role"]): item.get("_role_relevance_points", 0)
+            for item in candidates
+        }
+        if best.get("_role_relevance_status") == "reject":
+            stats["excluded_role_mismatch"] = int(stats.get("excluded_role_mismatch", 0)) + 1
+            continue
+        if best.get("_role_relevance_status") == "review":
+            stats["ambiguous_role_matches"] = int(stats.get("ambiguous_role_matches", 0)) + 1
+        matched_role = best["_matched_role"]
+        stats.setdefault("selected_role_counts", {})
+        stats["selected_role_counts"][matched_role] = (
+            int(stats["selected_role_counts"].get(matched_role, 0)) + 1
+        )
+        selected_search_role = best.get("_search_role", matched_role)
+        stats.setdefault("selected_query_counts", {})
+        stats["selected_query_counts"][selected_search_role] = (
+            int(stats["selected_query_counts"].get(selected_search_role, 0)) + 1
+        )
+        selected_jobs.append(best)
+
+    for search_role, selected_count in stats.get("selected_query_counts", {}).items():
+        if search_role in stats.get("query_metrics", {}):
+            stats["query_metrics"][search_role]["selected_jobs"] = selected_count
+    return selected_jobs
+
+
 def _adaptive_role_score(role: str, query_metrics: Dict[str, Dict], role_order: Dict[str, int]):
     metric = query_metrics[role]
     return (
@@ -464,11 +541,16 @@ def _adaptive_deepening_is_enabled(
     max_queries: Optional[int],
     effective_max: Optional[int],
     planned_roles: List[str],
+    num_pages: Optional[int] = None,
+    allow_adaptive: Optional[bool] = None,
 ) -> bool:
     # Keep smoke tests and intentionally limited diagnostics deterministic.
+    pages = config.NUM_PAGES if num_pages is None else max(1, int(num_pages))
+    if allow_adaptive is False:
+        return False
     return bool(
         config.JSEARCH_ADAPTIVE_DEEPENING
-        and config.NUM_PAGES == 1
+        and pages == 1
         and config.JSEARCH_MAX_EXTRA_PAGES_PER_ROLE > 0
         and search_roles is None
         and max_queries is None
@@ -483,6 +565,8 @@ def run_daily_scrape(
     *,
     search_roles: Optional[List[str]] = None,
     max_queries: Optional[int] = None,
+    base_num_pages: Optional[int] = None,
+    allow_adaptive: Optional[bool] = None,
 ) -> ScrapeResult:
     """Query target roles, then assign each posting to its strongest role match.
 
@@ -498,7 +582,12 @@ def run_daily_scrape(
     if effective_max is not None and effective_max < 0:
         raise ValueError("max_queries cannot be negative")
     roles_to_query = planned_roles[:effective_max] if effective_max else planned_roles
-    estimated_request_units = validate_query_budget(len(roles_to_query))
+    base_pages = (
+        config.NUM_PAGES if base_num_pages is None else max(1, int(base_num_pages))
+    )
+    estimated_request_units = validate_query_budget(
+        len(roles_to_query), num_pages=base_pages
+    )
 
     candidates_by_job_id: Dict[str, List[Dict]] = {}
     failed_roles: List[str] = []
@@ -506,7 +595,8 @@ def run_daily_scrape(
     raw_role_counts: Dict[str, int] = {}
     canonical_roles = [canonical_role_for_search(role) for role in roles_to_query]
     lookback_enabled = bool(
-        config.JSEARCH_ADAPTIVE_LOOKBACK
+        allow_adaptive is not False
+        and config.JSEARCH_ADAPTIVE_LOOKBACK
         and config.PRODUCTION
         and search_roles is None
         and max_queries is None
@@ -518,7 +608,7 @@ def run_daily_scrape(
         "queries_scheduled": len(roles_to_query),
         "queries_attempted": 0,
         "queries_succeeded": 0,
-        "num_pages_per_query": config.NUM_PAGES,
+        "num_pages_per_query": base_pages,
         "base_estimated_request_units": estimated_request_units,
         "estimated_request_units": estimated_request_units,
         "estimated_unit_budget": config.JSEARCH_MAX_ESTIMATED_UNITS_PER_RUN,
@@ -527,6 +617,8 @@ def run_daily_scrape(
             max_queries=max_queries,
             effective_max=effective_max,
             planned_roles=planned_roles,
+            num_pages=base_pages,
+            allow_adaptive=allow_adaptive,
         ),
         "adaptive_extra_queries": 0,
         "adaptive_extra_units": 0,
@@ -567,6 +659,7 @@ def run_daily_scrape(
         "ambiguous_role_matches": 0,
         "query_duplicates": 0,
         "previously_seen_removed": 0,
+        "in_run_existing_job_ids_removed": 0,
         "missing_job_id_skipped": 0,
     }
 
@@ -576,7 +669,11 @@ def run_daily_scrape(
         logger.info("[%s] Searching JSearch...", search_role)
         fetch_meta = JSearchFetchResult(jobs=[], duration_seconds=0.0, quota={})
         try:
-            fetch_meta = _coerce_fetch_result(fetch_jobs_for_role(search_role))
+            fetch_meta = _coerce_fetch_result(
+                fetch_jobs_for_role(search_role)
+                if base_num_pages is None
+                else fetch_jobs_for_role(search_role, num_pages=base_pages)
+            )
             raw_jobs = fetch_meta.jobs
             stats["queries_succeeded"] += 1
             logger.info("[%s] Fetched %d raw postings", search_role, len(raw_jobs))
@@ -618,6 +715,8 @@ def run_daily_scrape(
             "quota_remaining_after": remaining,
             "pages": [{
                 "page": 1,
+                "num_pages": base_pages,
+                "last_page": base_pages,
                 "query_variant": "base",
                 "query": build_search_query(search_role),
                 "raw_jobs": len(raw_jobs),
@@ -943,47 +1042,7 @@ def run_daily_scrape(
 
     stats["queries_scheduled"] = stats["queries_attempted"]
 
-    selected_jobs: List[Dict] = []
-    for job_id, candidates in candidates_by_job_id.items():
-        if len(candidates) > 1:
-            stats["query_duplicates"] += len(candidates) - 1
-        candidates.sort(
-            key=lambda item: (
-                item.get("_role_relevance_status") == "accept",
-                item.get("_role_relevance_score", 0),
-                item.get("_role_specificity", 0),
-            ),
-            reverse=True,
-        )
-        best = candidates[0]
-        best["_query_roles"] = list(dict.fromkeys(
-            item["_matched_role"] for item in candidates
-        ))
-        best["_query_search_titles"] = list(dict.fromkeys(
-            item.get("_search_role", item["_matched_role"]) for item in candidates
-        ))
-        best["_query_role_scores"] = {
-            item.get("_search_role", item["_matched_role"]): item.get("_role_relevance_score", 0)
-            for item in candidates
-        }
-        best["_query_role_points"] = {
-            item.get("_search_role", item["_matched_role"]): item.get("_role_relevance_points", 0)
-            for item in candidates
-        }
-        if best.get("_role_relevance_status") == "reject":
-            stats["excluded_role_mismatch"] += 1
-            continue
-        if best.get("_role_relevance_status") == "review":
-            stats["ambiguous_role_matches"] += 1
-        stats["selected_role_counts"][best["_matched_role"]] += 1
-        selected_search_role = best.get("_search_role", best["_matched_role"])
-        stats["selected_query_counts"].setdefault(selected_search_role, 0)
-        stats["selected_query_counts"][selected_search_role] += 1
-        selected_jobs.append(best)
-
-    for search_role, selected_count in stats["selected_query_counts"].items():
-        if search_role in stats["query_metrics"]:
-            stats["query_metrics"][search_role]["selected_jobs"] = selected_count
+    selected_jobs = _select_best_jobs(candidates_by_job_id, stats)
 
     attempted = stats["queries_attempted"]
     allowed_failures = _allowed_role_failures(attempted)
@@ -1046,6 +1105,419 @@ def run_daily_scrape(
         failed_roles=sorted(set(failed_roles)),
         roles_with_results=roles_with_results,
         success=success,
+        errors=errors,
+    )
+
+
+def _query_page_last(detail: Dict) -> int:
+    page = max(1, int(detail.get("page") or 1))
+    pages = max(1, int(detail.get("num_pages") or 1))
+    return max(page, int(detail.get("last_page") or (page + pages - 1)))
+
+
+def _next_topup_query_spec(
+    metric: Dict,
+    *,
+    unit_budget_remaining: int,
+) -> Optional[Dict[str, object]]:
+    """Choose a non-overlapping page window for one targeted role query."""
+    if unit_budget_remaining <= 0:
+        return None
+    pages_per_query = min(
+        config.JSEARCH_TOPUP_PAGES_PER_QUERY, unit_budget_remaining
+    )
+    max_page = config.JSEARCH_TOPUP_MAX_PAGE
+    page_details = list(metric.get("pages") or [])
+
+    base_details = [
+        detail for detail in page_details
+        if str(detail.get("query_variant") or "base").lower() == "base"
+        and str(detail.get("mode") or "").lower() != "lookback"
+    ]
+    next_base_page = 1 + max(
+        (_query_page_last(detail) for detail in base_details), default=0
+    )
+    if next_base_page <= max_page:
+        batch = min(pages_per_query, max_page - next_base_page + 1)
+        return {
+            "page": next_base_page,
+            "num_pages": batch,
+            "last_page": next_base_page + batch - 1,
+            "query_variant": "base",
+            "date_posted": config.DATE_POSTED,
+            "mode": "topup_deep_page",
+        }
+
+    variants = [
+        str(value).strip().lower()
+        for value in config.JSEARCH_LOOKBACK_QUERY_VARIANTS
+        if str(value).strip()
+    ] or ["hiring"]
+    candidates: List[tuple[int, int, str]] = []
+    for variant_index, variant in enumerate(variants):
+        variant_details = [
+            detail for detail in page_details
+            if str(detail.get("query_variant") or "").lower() == variant
+            and str(detail.get("mode") or "").lower() in {"lookback", "topup_lookback"}
+        ]
+        next_page = 1 + max(
+            (_query_page_last(detail) for detail in variant_details), default=0
+        )
+        if next_page <= max_page:
+            candidates.append((next_page, variant_index, variant))
+    if not candidates:
+        return None
+    next_page, _variant_index, variant = min(candidates)
+    batch = min(pages_per_query, max_page - next_page + 1)
+    return {
+        "page": next_page,
+        "num_pages": batch,
+        "last_page": next_page + batch - 1,
+        "query_variant": variant,
+        "date_posted": config.JSEARCH_ADAPTIVE_LOOKBACK_DATE_POSTED,
+        "mode": "topup_lookback",
+    }
+
+
+def _targeted_topup_role_order(
+    prior_query_metrics: Dict[str, Dict],
+    preferred_search_roles: Optional[List[str]] = None,
+) -> List[str]:
+    """Prioritize roles that produced reviewable contacts, then viable jobs."""
+    preferred = Counter(str(role) for role in (preferred_search_roles or []) if role)
+    configured_order = {role: index for index, role in enumerate(config.ROLES)}
+    roles = list(dict.fromkeys([
+        *prior_query_metrics.keys(),
+        *config.ROLES,
+    ]))
+
+    def metric_for(role: str) -> Dict:
+        return prior_query_metrics.get(role, {})
+
+    def score(role: str) -> tuple:
+        metric = metric_for(role)
+        return (
+            int(preferred.get(role, 0)),
+            int(metric.get("new_prefilter_viable_candidates", 0)),
+            int(metric.get("prefilter_viable_candidates", 0)),
+            int(metric.get("selected_jobs", 0)),
+            int(metric.get("new_unique_candidates", 0)),
+            int(metric.get("raw_jobs", 0)),
+            -configured_order.get(role, len(configured_order) + 1),
+        )
+
+    productive = [
+        role for role in roles
+        if preferred.get(role, 0)
+        or int(metric_for(role).get("new_prefilter_viable_candidates", 0)) > 0
+        or int(metric_for(role).get("prefilter_viable_candidates", 0)) > 0
+    ]
+    if len(productive) < 12:
+        productive.extend(
+            role for role in roles
+            if role not in productive and int(metric_for(role).get("raw_jobs", 0)) > 0
+        )
+    if not productive:
+        productive = roles
+
+    by_bucket: Dict[str, List[str]] = defaultdict(list)
+    for role in productive:
+        canonical = metric_for(role).get("canonical_role") or canonical_role_for_search(role)
+        by_bucket[get_bucket_name(canonical)].append(role)
+    for bucket_roles in by_bucket.values():
+        bucket_roles.sort(key=score, reverse=True)
+    bucket_order = sorted(
+        by_bucket,
+        key=lambda bucket: max((score(role) for role in by_bucket[bucket]), default=()),
+        reverse=True,
+    )
+    ordered: List[str] = []
+    while any(by_bucket[bucket] for bucket in bucket_order):
+        for bucket in bucket_order:
+            if by_bucket[bucket]:
+                ordered.append(by_bucket[bucket].pop(0))
+    return ordered
+
+
+def run_targeted_topup_scrape(
+    *,
+    registry: SeenJobsRegistry,
+    prior_query_metrics: Dict[str, Dict],
+    exclude_job_ids: Optional[set[str]] = None,
+    preferred_search_roles: Optional[List[str]] = None,
+    unit_budget: int,
+    target_prefilter_viable: int,
+    round_number: int,
+) -> ScrapeResult:
+    """Spend a bounded unit budget on the roles with the strongest live yield.
+
+    This is intentionally a separate pass from the full-catalog scrape. It never
+    weakens quality gates and never repeats a page/query window already recorded
+    in ``prior_query_metrics``. The caller decides whether another round is useful
+    after seeing real Apollo contactability.
+    """
+    validate_preflight()
+    unit_budget = max(0, int(unit_budget))
+    target_prefilter_viable = max(0, int(target_prefilter_viable))
+    round_number = max(1, int(round_number))
+    ordered_roles = _targeted_topup_role_order(
+        prior_query_metrics, preferred_search_roles
+    )
+    candidates_by_job_id: Dict[str, List[Dict]] = {}
+    failed_roles: List[str] = []
+    raw_role_counts: Dict[str, int] = {}
+    canonical_roles = [canonical_role_for_search(role) for role in ordered_roles]
+    stats: Dict = {
+        "mode": "reviewable_topup",
+        "topup_round": round_number,
+        "queries_planned": len(ordered_roles),
+        "queries_scheduled": 0,
+        "queries_attempted": 0,
+        "queries_succeeded": 0,
+        "queries_failed": 0,
+        "estimated_request_units": 0,
+        "estimated_unit_budget": unit_budget,
+        "topup_target_prefilter_viable": target_prefilter_viable,
+        "topup_new_prefilter_viable": 0,
+        "topup_stop_reason": "",
+        "query_metrics": {},
+        "query_variant_metrics": {},
+        "quota": {
+            "limit": None,
+            "remaining": None,
+            "lowest_remaining": None,
+            "reset": None,
+            "used": None,
+        },
+        "raw_role_counts": raw_role_counts,
+        "selected_role_counts": {role: 0 for role in dict.fromkeys(canonical_roles)},
+        "selected_query_counts": {role: 0 for role in ordered_roles},
+        "zero_result_roles": [],
+        "excluded_by_seniority": 0,
+        "excluded_role_mismatch": 0,
+        "ambiguous_role_matches": 0,
+        "query_duplicates": 0,
+        "previously_seen_removed": 0,
+        "in_run_existing_job_ids_removed": 0,
+        "missing_job_id_skipped": 0,
+    }
+
+    planning_metrics = json.loads(json.dumps(prior_query_metrics or {}))
+    for search_role in ordered_roles:
+        remaining_units = unit_budget - int(stats["estimated_request_units"])
+        if remaining_units <= 0:
+            stats["topup_stop_reason"] = "topup_unit_budget_exhausted"
+            break
+        if (
+            target_prefilter_viable > 0
+            and int(stats["topup_new_prefilter_viable"]) >= target_prefilter_viable
+        ):
+            stats["topup_stop_reason"] = "topup_prefilter_target_reached"
+            break
+
+        planning_metric = planning_metrics.setdefault(
+            search_role,
+            {
+                "canonical_role": canonical_role_for_search(search_role),
+                "pages": [],
+            },
+        )
+        spec = _next_topup_query_spec(
+            planning_metric, unit_budget_remaining=remaining_units
+        )
+        if spec is None:
+            continue
+        canonical_role = canonical_role_for_search(search_role)
+        page = int(spec["page"])
+        num_pages = int(spec["num_pages"])
+        query_variant = str(spec["query_variant"])
+        date_posted = str(spec["date_posted"])
+        mode = str(spec["mode"])
+
+        stats["queries_attempted"] += 1
+        stats["queries_scheduled"] += 1
+        stats["estimated_request_units"] += num_pages
+        logger.info(
+            "[%s] Reviewable top-up round %d: %s pages %d-%d (%s)",
+            search_role,
+            round_number,
+            mode,
+            page,
+            int(spec["last_page"]),
+            query_variant,
+        )
+        fetch_meta = JSearchFetchResult(jobs=[], duration_seconds=0.0, quota={})
+        query_status = "ok"
+        query_error = ""
+        try:
+            fetch_meta = _coerce_fetch_result(
+                fetch_jobs_for_role(
+                    search_role,
+                    page=page,
+                    num_pages=num_pages,
+                    date_posted=date_posted,
+                    intent_variant=query_variant == "hiring",
+                    query_variant=query_variant,
+                )
+            )
+            raw_jobs = fetch_meta.jobs
+            stats["queries_succeeded"] += 1
+        except QuotaExhaustedError:
+            stats["topup_stop_reason"] = "jsearch_quota_exhausted"
+            raise
+        except Exception as exc:
+            logger.exception("[%s] Reviewable top-up query failed: %s", search_role, exc)
+            raw_jobs = []
+            failed_roles.append(
+                f"{search_role} ({mode} {query_variant} pages {page}-{spec['last_page']})"
+            )
+            stats["queries_failed"] += 1
+            query_status = "error"
+            query_error = str(exc)
+
+        remaining = _merge_quota_snapshot(stats, fetch_meta.quota or {})
+        query_ingest = _ingest_query_jobs(
+            raw_jobs=raw_jobs,
+            search_role=search_role,
+            canonical_role=canonical_role,
+            registry=registry,
+            candidates_by_job_id=candidates_by_job_id,
+            stats=stats,
+            exclude_job_ids=exclude_job_ids,
+        )
+        raw_role_counts[search_role] = len(raw_jobs)
+        added = int(query_ingest.get("new_prefilter_viable_candidates", 0))
+        stats["topup_new_prefilter_viable"] += added
+        detail = {
+            "page": page,
+            "num_pages": num_pages,
+            "last_page": int(spec["last_page"]),
+            "mode": mode,
+            "query_variant": query_variant,
+            "query": build_search_query(search_role, query_variant=query_variant),
+            "date_posted": date_posted,
+            "raw_jobs": len(raw_jobs),
+            "duration_seconds": fetch_meta.duration_seconds,
+            "quota_remaining_after": remaining,
+            **query_ingest,
+        }
+        metric = stats["query_metrics"].setdefault(
+            search_role,
+            {
+                "canonical_role": canonical_role,
+                "status": "ok",
+                "error": "",
+                "raw_jobs": 0,
+                "duration_seconds": 0.0,
+                "quota_remaining_after": remaining,
+                "pages": [],
+            },
+        )
+        if query_status == "error":
+            metric["status"] = "error"
+            metric["error"] = query_error
+        metric["raw_jobs"] += len(raw_jobs)
+        metric["duration_seconds"] = round(
+            float(metric.get("duration_seconds", 0.0)) + fetch_meta.duration_seconds, 3
+        )
+        metric["quota_remaining_after"] = remaining
+        for key, value in query_ingest.items():
+            metric[key] = int(metric.get(key, 0)) + value
+        metric["pages"].append(detail)
+        _record_query_variant(
+            stats,
+            variant=query_variant,
+            raw_jobs=raw_jobs,
+            ingest=query_ingest,
+            duration_seconds=fetch_meta.duration_seconds,
+            success=query_status == "ok",
+        )
+        planning_metric.setdefault("pages", []).append(detail)
+        for key, value in query_ingest.items():
+            planning_metric[key] = int(planning_metric.get(key, 0)) + value
+        planning_metric["raw_jobs"] = int(planning_metric.get("raw_jobs", 0)) + len(raw_jobs)
+
+        if not raw_jobs and query_status == "ok":
+            stats["zero_result_roles"].append(search_role)
+        if (
+            config.JSEARCH_STOP_ON_LOW_QUOTA
+            and config.JSEARCH_MIN_REMAINING_REQUESTS > 0
+            and isinstance(remaining, int)
+            and remaining <= config.JSEARCH_MIN_REMAINING_REQUESTS
+        ):
+            stats["topup_stop_reason"] = (
+                f"quota_remaining={remaining} <= JSEARCH_MIN_REMAINING_REQUESTS="
+                f"{config.JSEARCH_MIN_REMAINING_REQUESTS}"
+            )
+            break
+        time.sleep(config.SEARCH_DELAY_SECONDS)
+
+    if not stats["topup_stop_reason"]:
+        if int(stats["estimated_request_units"]) >= unit_budget:
+            stats["topup_stop_reason"] = "topup_unit_budget_exhausted"
+        elif not stats["queries_attempted"]:
+            stats["topup_stop_reason"] = "no_unused_query_windows"
+        else:
+            stats["topup_stop_reason"] = "topup_role_plan_exhausted"
+
+    selected_jobs = _select_best_jobs(candidates_by_job_id, stats)
+    attempted = int(stats["queries_attempted"])
+    allowed_failures = _allowed_role_failures(attempted)
+    stats["allowed_role_failures"] = allowed_failures
+    stats["role_failure_rate"] = (
+        round(len(set(failed_roles)) / attempted, 4) if attempted else 0.0
+    )
+
+    saved_at = datetime.now()
+    payload = {
+        "scrape_date": saved_at.isoformat(),
+        "date_posted_window": "reviewable_topup",
+        "total_jobs": len(selected_jobs),
+        "stats": stats,
+        "jobs": selected_jobs,
+    }
+    serialized = json.dumps(payload, indent=2)
+    output_path = str(
+        Path(config.OUTPUT_DIR)
+        / f"jobs_topup_{saved_at:%Y-%m-%d_%H-%M-%S}_r{round_number}.json"
+    )
+    Path(output_path).write_text(serialized, encoding="utf-8")
+    history_dir = Path(config.OUTPUT_DIR) / "history"
+    history_dir.mkdir(parents=True, exist_ok=True)
+    history_path = history_dir / (
+        f"jobs_topup_{saved_at:%Y-%m-%d_%H-%M-%S_%f}_r{round_number}.json"
+    )
+    history_path.write_text(serialized, encoding="utf-8")
+    logger.info("Immutable top-up scrape archive saved to %s", history_path)
+
+    roles_with_results = sum(
+        1 for count in stats["selected_role_counts"].values() if count > 0
+    )
+    failed_count = len(set(failed_roles))
+    errors: List[str] = []
+    if failed_count > allowed_failures:
+        errors.append(
+            f"{failed_count} top-up searches failed "
+            f"(maximum {allowed_failures} for {attempted} attempted queries)"
+        )
+    logger.info(
+        "Reviewable top-up round %d complete: %d jobs, %d viable additions, "
+        "%d units from %d/%d successful queries -> %s",
+        round_number,
+        len(selected_jobs),
+        stats["topup_new_prefilter_viable"],
+        stats["estimated_request_units"],
+        stats["queries_succeeded"],
+        stats["queries_attempted"],
+        output_path,
+    )
+    return ScrapeResult(
+        output_path=output_path,
+        total_jobs=len(selected_jobs),
+        stats=stats,
+        failed_roles=sorted(set(failed_roles)),
+        roles_with_results=roles_with_results,
+        success=not errors,
         errors=errors,
     )
 

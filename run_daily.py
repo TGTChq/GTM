@@ -19,6 +19,7 @@ import config
 from audit_filter import run_audit
 from hiring_manager import run_hiring_manager_identification
 from jsearch_scraper import run_daily_scrape
+from reviewable_topup import run_reviewable_topup
 from job_filter import run_filter
 from pipeline_state import SeenJobsRegistry
 
@@ -61,7 +62,20 @@ def run_pipeline() -> dict:
     }
 
     logger.info("=== STEP 1: SCRAPE ===")
-    scrape = run_daily_scrape(registry=registry)
+    topup_enabled = bool(
+        config.JSEARCH_REVIEWABLE_TOPUP_ENABLED
+        and config.JSEARCH_TOPUP_MAX_ROUNDS > 0
+        and config.TARGET_REVIEWABLE_LEADS_PER_RUN > 0
+    )
+    scrape = run_daily_scrape(
+        registry=registry,
+        base_num_pages=(
+            config.JSEARCH_TOPUP_INITIAL_PAGES if topup_enabled else None
+        ),
+        # Closed-loop mode reserves the post-filter budget for queries selected
+        # using actual Apollo contactability instead of spending it blindly.
+        allow_adaptive=False if topup_enabled else None,
+    )
     summary["steps"]["scrape"] = {
         "success": scrape.success,
         "total_jobs": scrape.total_jobs,
@@ -157,7 +171,33 @@ def run_pipeline() -> dict:
         filtered.output_path,
         target_reviewable_leads=config.TARGET_REVIEWABLE_LEADS_PER_RUN,
         max_eligible_companies=config.MAX_ELIGIBLE_COMPANIES_PER_RUN,
+        output_suffix="initial",
     )
+    summary["steps"]["topup"] = {
+        "enabled": topup_enabled,
+        "rounds": [],
+        "initial_reviewable_leads": enriched.reviewable_leads,
+        "target_reviewable_leads": config.TARGET_REVIEWABLE_LEADS_PER_RUN,
+    }
+    if topup_enabled:
+        enriched, topup_summary = run_reviewable_topup(
+            initial_scrape=scrape,
+            initial_enriched=enriched,
+            registry=registry,
+            target_reviewable_leads=config.TARGET_REVIEWABLE_LEADS_PER_RUN,
+            max_eligible_companies=config.MAX_ELIGIBLE_COMPANIES_PER_RUN,
+        )
+        summary["steps"]["topup"] = topup_summary
+        logger.info(
+            "Reviewable top-up final: rounds=%d query_units=%d total_query_units=%d "
+            "reviewable=%d/%d stop_reason=%s",
+            len(topup_summary.get("rounds", [])),
+            topup_summary.get("topup_query_units", 0),
+            topup_summary.get("total_query_units", 0),
+            enriched.reviewable_leads,
+            config.TARGET_REVIEWABLE_LEADS_PER_RUN,
+            topup_summary.get("stop_reason", ""),
+        )
     summary["steps"]["hiring_manager"] = {
         "success": enriched.success,
         "input_jobs": enriched.total_input_jobs,

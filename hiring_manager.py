@@ -58,6 +58,7 @@ class Step3Result:
     eligible_company_limit_reached: bool = False
     target_reached: bool = True
     stop_reason: str = "candidate_pool_exhausted"
+    processed_company_keys: List[str] = field(default_factory=list)
     stats: Dict = field(default_factory=dict)
     success: bool = True
     errors: List[str] = field(default_factory=list)
@@ -112,6 +113,11 @@ def _best_input_domain(job: Dict) -> str:
     if annotated:
         return annotated
     return get_safe_employer_domain(job)[0] or _domain_from_apply_link(job)
+
+
+def company_key_for_job(job: Dict) -> str:
+    """Return the stable domain-or-name key used for company-level enrichment."""
+    return _best_input_domain(job) or normalize_text(job.get("employer_name") or "unknown")
 
 
 def _name_matches_blocklist(name: str, values: List[str]) -> Optional[str]:
@@ -618,6 +624,8 @@ def run_hiring_manager_identification(
     target_eligible_companies: Optional[int] = None,
     target_reviewable_leads: Optional[int] = None,
     max_eligible_companies: Optional[int] = None,
+    exclude_company_keys: Optional[set[str]] = None,
+    output_suffix: Optional[str] = None,
 ) -> Step3Result:
     """Run Step 3 with optional controlled-test and production stop conditions.
 
@@ -647,14 +655,29 @@ def run_hiring_manager_identification(
     jobs = payload.get("jobs", [])
 
     jobs_by_company: Dict[str, List[Dict]] = defaultdict(list)
+    excluded_company_keys = {str(value) for value in (exclude_company_keys or set()) if value}
+    skipped_existing_company_keys: set[str] = set()
+    skipped_existing_job_rows: List[Dict] = []
+    skipped_existing_jobs = 0
     for job in jobs:
-        domain = _best_input_domain(job)
-        company_key = domain or normalize_text(job.get("employer_name") or "unknown")
+        company_key = company_key_for_job(job)
+        if company_key in excluded_company_keys:
+            skipped_existing_company_keys.add(company_key)
+            skipped_existing_job_rows.append(job)
+            skipped_existing_jobs += 1
+            continue
         jobs_by_company[company_key].append(job)
 
     all_leads: List[Dict] = []
-    processed_jobs: List[Dict] = []
+    # Same-run company duplicates are intentionally consumed even though they do
+    # not trigger another Apollo search; otherwise their new job IDs would recur
+    # on the next day and waste top-up budget again.
+    processed_jobs: List[Dict] = list(skipped_existing_job_rows)
     total_stats = defaultdict(int)
+    total_stats["topup_skipped_previously_considered_companies"] = len(
+        skipped_existing_company_keys
+    )
+    total_stats["topup_skipped_previously_considered_jobs"] = skipped_existing_jobs
     companies_considered = 0
     eligible_companies = 0
     excluded_companies = 0
@@ -662,11 +685,13 @@ def run_hiring_manager_identification(
     company_items.sort(key=_company_priority, reverse=True)
     total_candidate_companies = len(company_items)
     stop_reason = "candidate_pool_exhausted"
+    processed_company_keys: List[str] = []
 
     for index, (company_key, company_jobs) in enumerate(company_items, 1):
         logger.info("[%d/%d] Enriching %s", index, total_candidate_companies, company_key)
         leads, stats = process_company(company_jobs)
         companies_considered += 1
+        processed_company_keys.append(company_key)
         processed_jobs.extend(company_jobs)
         all_leads.extend(leads)
         for key, value in stats.items():
@@ -756,7 +781,12 @@ def run_hiring_manager_identification(
         else eligible_target_reached
     )
 
-    output_path = str(Path(config.STEP3_OUTPUT_DIR) / f"jobs_enriched_{datetime.now():%Y-%m-%d}.json")
+    suffix = re.sub(r"[^a-zA-Z0-9_-]+", "_", str(output_suffix or "").strip())
+    suffix_part = f"_{suffix}" if suffix else ""
+    output_path = str(
+        Path(config.STEP3_OUTPUT_DIR)
+        / f"jobs_enriched_{datetime.now():%Y-%m-%d}{suffix_part}.json"
+    )
     Path(output_path).write_text(
         json.dumps(
             {
@@ -788,6 +818,7 @@ def run_hiring_manager_identification(
                 # Jobs left unprocessed because a daily target/cap was reached
                 # remain eligible for a later run.
                 "processed_job_refs": [_job_state_ref(job) for job in processed_jobs],
+                "processed_company_keys": processed_company_keys,
                 # Backward-compatible aliases.
                 "hiring_manager_found": identified,
                 "hiring_manager_not_found": not_identified,
@@ -829,6 +860,7 @@ def run_hiring_manager_identification(
         eligible_company_limit_reached=eligible_company_limit_reached,
         target_reached=target_reached,
         stop_reason=stop_reason,
+        processed_company_keys=processed_company_keys,
         stats=dict(total_stats),
         success=not errors,
         errors=errors,
