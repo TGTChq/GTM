@@ -221,6 +221,12 @@ def is_staffing_company(job: Dict) -> Tuple[bool, str]:
         if _contains_keyword(employer_norm, keyword):
             return True, f"staffing_keyword_in_employer:{keyword}"
 
+    title = normalize_text(job.get("job_title") or "")
+    if re.search(r"\bstaffing industry\b|\brecruitment agency\b|\bstaffing agency\b", title, re.I):
+        return True, "staffing_business_model_in_title"
+    if re.search(r"\brecruit\b|\bsearch group\b", employer_norm, re.I):
+        return True, "staffing_identity_pattern"
+
     description = normalize_text(job.get("job_description") or "")
     if any(normalize_text(phrase) in description for phrase in config.STAFFING_NEGATION_PHRASES):
         return False, ""
@@ -533,7 +539,7 @@ def assess_us_eligibility(job: Dict) -> GeographyEvidence:
         config.ALLOW_PROVIDER_CONFIRMED_US_REMOTE
         and query_country in config.US_COUNTRY_CODES
         and query_remote_only
-        and country in config.US_COUNTRY_CODES
+        and (not country or country in config.US_COUNTRY_CODES)
         and provider_remote
     ):
         return GeographyEvidence(
@@ -633,21 +639,34 @@ def is_explicitly_in_person(job: Dict) -> Tuple[bool, str]:
 
 
 def is_obvious_role_mismatch(job: Dict) -> Tuple[bool, str]:
-    """Reject high-confidence catalog leakage that should never reach enrichment."""
-    matched_role = job.get("_matched_role") or ""
-    if matched_role not in {"Automation Specialist", "AI Automation Engineer"}:
-        return False, ""
+    """Reject clear title-role leakage before any enrichment credits are used."""
+    matched_role = str(job.get("_matched_role") or "")
+    status = str(job.get("_role_relevance_status") or "").lower()
+    try:
+        points = int(job.get("_role_relevance_points") or 0)
+    except (TypeError, ValueError):
+        points = 0
+
+    # Description-only matches are too noisy for automated enrichment. Strong
+    # title matches remain eligible; uncertain matches belong upstream, not in
+    # Apollo's paid queue.
+    if status == "review" and points < 4:
+        return True, "role_relevance_review_below_title_threshold"
+    if status == "reject":
+        return True, "role_relevance_rejected"
+
     text = "\n".join([
         job.get("job_title") or "",
         (job.get("job_description") or "")[:6000],
     ])
-    patterns = [
-        r"\b(?:industrial|manufacturing) automation\b",
-        r"\b(?:plc|scada|controls engineer|instrumentation)\b",
-    ]
-    for pattern in patterns:
-        if re.search(pattern, text, re.I):
-            return True, f"obvious_role_mismatch:{pattern}"
+    if matched_role in {"Automation Specialist", "AI Automation Engineer"}:
+        patterns = [
+            r"\b(?:industrial|manufacturing) automation\b",
+            r"\b(?:plc|scada|controls engineer|instrumentation)\b",
+        ]
+        for pattern in patterns:
+            if re.search(pattern, text, re.I):
+                return True, f"obvious_role_mismatch:{pattern}"
     return False, ""
 
 def is_non_paying_role(job: Dict) -> Tuple[bool, str]:

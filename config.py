@@ -50,12 +50,8 @@ REQUEST_TIMEOUT_SECONDS = _env_int("REQUEST_TIMEOUT_SECONDS", 30)
 MAX_HTTP_RETRIES = _env_int("MAX_HTTP_RETRIES", 3)
 
 # ---------- Paths ----------
-# Runtime state remains in data/state. Large run artifacts can be redirected to
-# the Railway volume without changing local development paths.
 STATE_DIR = str(BASE_DIR / "data" / "state")
-ARTIFACT_ROOT = Path(
-    os.getenv("PIPELINE_ARTIFACT_ROOT", str(BASE_DIR / "data"))
-)
+ARTIFACT_ROOT = Path(os.getenv("PIPELINE_ARTIFACT_ROOT", str(BASE_DIR / "data")))
 OUTPUT_DIR = str(ARTIFACT_ROOT / "raw")
 FILTERED_OUTPUT_DIR = str(ARTIFACT_ROOT / "filtered")
 STEP3_OUTPUT_DIR = str(ARTIFACT_ROOT / "enriched")
@@ -428,6 +424,12 @@ NON_FULL_TIME_TITLE_PATTERNS = [
     r"\bfreelance(?:r)?\b",
     r"\bseasonal\b",
     r"\bper diem\b",
+    r"\bfixed[- ]term\b",
+    r"\b\d{1,2}[- ]month contract\b",
+    r"\bcontract[- ]to[- ]hire\b",
+    r"\bretainer\b",
+    r"\btemporary\b",
+    r"\bcontract\b",
     r"\b(?:up to|at least|approximately|minimum of)?\s*\d{1,2}\+?\s*(?:hours|hrs)(?:\s+per|/)\s*(?:week|wk)\b",
     r"\b\d{1,2}\s*[-–]\s*\d{1,2}\s*(?:hours|hrs)(?:\s+per|/)\s*(?:week|wk)\b",
 ]
@@ -606,6 +608,25 @@ INTERMEDIARY_JOB_DOMAINS = [
     "flexjobs.com",
     "remote.co",
     "wellfound.com",
+    "railway.app",
+    "unaux.com",
+    "remotejobs.org",
+    "mysmartpros.com",
+    "clickclickjob.com",
+    "tealhq.com",
+    "learn4good.com",
+    "himalayas.app",
+    "dailyremote.com",
+    "up2staff.com",
+    "mediabistro.com",
+    "recruit.net",
+    "remoteleaf.com",
+    "theladders.com",
+    "climatetechlist.com",
+    "liveblog365.com",
+    "goparalegals.com",
+    "dynamitejobs.com",
+    "remotive.com",
 ]
 
 KNOWN_OUTSOURCING_EMPLOYERS = [
@@ -822,6 +843,7 @@ GOVERNMENT_WEBSITE_MARKERS = [".gov"]
 FREELANCE_MARKETPLACE_EMPLOYERS = [
     "upwork",
     "fiverr",
+    "toptal",
     "freelancer com",
     "peopleperhour",
     "mercor",
@@ -902,6 +924,8 @@ FOREIGN_COUNTRY_URL_SLUGS = [
 NON_US_LOCATION_MARKERS = [
     "canada", "mexico", "india", "united kingdom", "europe", "latam",
     "philippines", "australia", "italy", "germany", "france", "spain", "brazil",
+    "malaysia", "belize", "ecuador", "western cape", "south africa",
+    "poland", "apac", "emea",
 ]
 NON_US_WEBSITE_TLDS = (
     ".it", ".de", ".fr", ".es", ".co.uk", ".ca", ".mx", ".in", ".au", ".br", ".nl", ".pl",
