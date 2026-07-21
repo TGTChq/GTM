@@ -687,6 +687,18 @@ def assess_employment_quality(job: Dict) -> EmploymentEvidence:
     employment_type = normalize_text(employment_type_raw)
 
     if config.REJECT_NON_ACTIVE_HIRING_SIGNALS:
+        title_future_pattern = (
+            r"(?:^|[-–—|:/()]\s*)"
+            r"(?:future openings?|future opportunities|general application|"
+            r"expression of interest|talent pipeline)"
+            r"\s*(?:$|[)])"
+        )
+        if re.search(title_future_pattern, title, re.I):
+            return EmploymentEvidence(
+                False,
+                f"non_active_hiring_title:{title_future_pattern}",
+                "non_active",
+            )
         for pattern in config.NON_ACTIVE_HIRING_SIGNAL_PATTERNS:
             if re.search(pattern, f"{title}\n{description}", re.I):
                 return EmploymentEvidence(False, f"non_active_hiring_signal:{pattern}", "non_active")

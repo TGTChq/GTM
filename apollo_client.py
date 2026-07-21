@@ -82,6 +82,13 @@ class PersonMatch:
     email: Optional[str] = None
     email_status: Optional[str] = None
     email_source: Optional[str] = None
+    headline: Optional[str] = None
+    city: Optional[str] = None
+    state: Optional[str] = None
+    country: Optional[str] = None
+    seniority: Optional[str] = None
+    departments: Optional[List[str]] = None
+    functions: Optional[List[str]] = None
     raw: Optional[Dict[str, Any]] = None
 
 
@@ -364,6 +371,13 @@ def match_person(person: Dict[str, Any]) -> PersonMatch:
         linkedin_url=person.get("linkedin_url"),
         organization_name=org.get("name") or person.get("organization_name"),
         organization_domain=_person_org_domain(person) or None,
+        headline=person.get("headline"),
+        city=person.get("city"),
+        state=person.get("state"),
+        country=person.get("country"),
+        seniority=person.get("seniority"),
+        departments=person.get("departments") or [],
+        functions=person.get("functions") or [],
         raw=person,
     )
     if not person_id:
@@ -433,5 +447,12 @@ def match_person(person: Dict[str, Any]) -> PersonMatch:
         email=email,
         email_status=enriched.get("email_status") or enriched.get("contact_email_status"),
         email_source="apollo" if email else None,
+        headline=enriched.get("headline") or base.headline,
+        city=enriched.get("city") or base.city,
+        state=enriched.get("state") or base.state,
+        country=enriched.get("country") or base.country,
+        seniority=enriched.get("seniority") or base.seniority,
+        departments=enriched.get("departments") or base.departments or [],
+        functions=enriched.get("functions") or base.functions or [],
         raw=enriched,
     )

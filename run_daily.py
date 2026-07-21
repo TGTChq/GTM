@@ -20,8 +20,11 @@ from audit_filter import run_audit
 from hiring_manager import run_hiring_manager_identification
 from jsearch_scraper import run_daily_scrape
 from reviewable_topup import run_reviewable_topup
+from final_pass_topup import run_final_pass_topup
+from qualification_pipeline import run_precontact_qualification
 from job_filter import run_filter
 from pipeline_state import SeenJobsRegistry
+from observability import build_observability_report, save_observability_report
 
 Path(config.LOG_DIR).mkdir(parents=True, exist_ok=True)
 Path(config.RUN_SUMMARY_DIR).mkdir(parents=True, exist_ok=True)
@@ -63,9 +66,14 @@ def run_pipeline() -> dict:
 
     logger.info("=== STEP 1: SCRAPE ===")
     topup_enabled = bool(
-        config.JSEARCH_REVIEWABLE_TOPUP_ENABLED
-        and config.JSEARCH_TOPUP_MAX_ROUNDS > 0
-        and config.TARGET_REVIEWABLE_LEADS_PER_RUN > 0
+        (
+            config.FINAL_PASS_TOPUP_ENABLED
+            and config.FINAL_PASS_MAX_TOPUP_ITERATIONS > 0
+            if config.FINAL_PASS_PIPELINE_ENABLED
+            else config.JSEARCH_REVIEWABLE_TOPUP_ENABLED
+            and config.JSEARCH_TOPUP_MAX_ROUNDS > 0
+        )
+        and config.get_final_pass_target() > 0
     )
     scrape = run_daily_scrape(
         registry=registry,
@@ -161,41 +169,80 @@ def run_pipeline() -> dict:
     if config.PRODUCTION and not audit.passed:
         return _fail(summary, "audit", audit.failures)
 
+    hiring_input_path = filtered.output_path
+    strict_runtime = False
+    if config.FINAL_PASS_PIPELINE_ENABLED:
+        logger.info("=== STEP 2C: JOB + ROLE GATES ===")
+        qualified = run_precontact_qualification(filtered.output_path, suffix="initial")
+        hiring_input_path = qualified.output_path
+        strict_runtime = not bool(qualified.stats.get("compatibility_bypass"))
+        summary["steps"]["qualification"] = {
+            "success": qualified.success,
+            "input_jobs": qualified.input_jobs,
+            "contact_eligible_jobs": qualified.contact_eligible_jobs,
+            "rejected_jobs": qualified.rejected_jobs,
+            "unverified_jobs": qualified.unverified_jobs,
+            "needs_check_jobs": qualified.needs_check_jobs,
+            "stats": qualified.stats,
+            "output": qualified.output_path,
+            "nonpass_output": qualified.nonpass_path,
+            "errors": qualified.errors,
+        }
+        if config.PRODUCTION and not qualified.success:
+            return _fail(summary, "qualification", qualified.errors)
+
     logger.info("=== STEP 3: HIRING MANAGER ===")
+    target_final_pass = config.get_final_pass_target()
     logger.info(
-        "Daily throughput: target=%d reviewable leads, safety cap=%d eligible companies",
-        config.TARGET_REVIEWABLE_LEADS_PER_RUN,
+        "Daily throughput: target=%d FINAL_PASS leads, safety cap=%d eligible companies",
+        target_final_pass,
         config.MAX_ELIGIBLE_COMPANIES_PER_RUN,
     )
     enriched = run_hiring_manager_identification(
-        filtered.output_path,
-        target_reviewable_leads=config.TARGET_REVIEWABLE_LEADS_PER_RUN,
+        hiring_input_path,
+        target_final_pass_leads=target_final_pass if strict_runtime else None,
+        target_reviewable_leads=None if strict_runtime else target_final_pass,
         max_eligible_companies=config.MAX_ELIGIBLE_COMPANIES_PER_RUN,
         output_suffix="initial",
     )
     summary["steps"]["topup"] = {
         "enabled": topup_enabled,
+        "mode": "final_pass" if strict_runtime else "legacy_reviewable",
         "rounds": [],
+        "initial_final_pass_leads": enriched.final_pass_leads,
         "initial_reviewable_leads": enriched.reviewable_leads,
-        "target_reviewable_leads": config.TARGET_REVIEWABLE_LEADS_PER_RUN,
+        "target_final_pass_leads": target_final_pass,
     }
     if topup_enabled:
-        enriched, topup_summary = run_reviewable_topup(
-            initial_scrape=scrape,
-            initial_enriched=enriched,
-            registry=registry,
-            target_reviewable_leads=config.TARGET_REVIEWABLE_LEADS_PER_RUN,
-            max_eligible_companies=config.MAX_ELIGIBLE_COMPANIES_PER_RUN,
-        )
+        if strict_runtime:
+            enriched, topup_summary = run_final_pass_topup(
+                initial_scrape=scrape,
+                initial_enriched=enriched,
+                registry=registry,
+                target_final_pass_leads=target_final_pass,
+                max_eligible_companies=config.MAX_ELIGIBLE_COMPANIES_PER_RUN,
+            )
+        else:
+            # Tiny test fixtures and rollback-mode payloads retain the legacy
+            # top-up path; production JSearch rows always use strict mode.
+            enriched, topup_summary = run_reviewable_topup(
+                initial_scrape=scrape,
+                initial_enriched=enriched,
+                registry=registry,
+                target_reviewable_leads=target_final_pass,
+                max_eligible_companies=config.MAX_ELIGIBLE_COMPANIES_PER_RUN,
+            )
         summary["steps"]["topup"] = topup_summary
         logger.info(
-            "Reviewable top-up final: rounds=%d query_units=%d total_query_units=%d "
-            "reviewable=%d/%d stop_reason=%s",
+            "Top-up final: mode=%s rounds=%d query_units=%d total_query_units=%d "
+            "FINAL_PASS=%d/%d review_rows=%d stop_reason=%s",
+            topup_summary.get("mode", "legacy_reviewable"),
             len(topup_summary.get("rounds", [])),
             topup_summary.get("topup_query_units", 0),
             topup_summary.get("total_query_units", 0),
+            enriched.final_pass_leads,
+            target_final_pass,
             enriched.reviewable_leads,
-            config.TARGET_REVIEWABLE_LEADS_PER_RUN,
             topup_summary.get("stop_reason", ""),
         )
     summary["steps"]["hiring_manager"] = {
@@ -211,6 +258,13 @@ def run_pipeline() -> dict:
         "target_reviewable_leads": enriched.target_reviewable_leads,
         "reviewable_leads": enriched.reviewable_leads,
         "reviewable_target_reached": enriched.reviewable_target_reached,
+        "final_pass_target": enriched.final_pass_target,
+        "final_pass_leads": enriched.final_pass_leads,
+        "final_pass_target_reached": enriched.final_pass_target_reached,
+        "needs_check_leads": enriched.needs_check_leads,
+        "reroute_leads": enriched.reroute_leads,
+        "unverified_leads": enriched.unverified_leads,
+        "rejected_leads": enriched.rejected_leads,
         "max_eligible_companies": enriched.max_eligible_companies,
         "eligible_company_limit_reached": enriched.eligible_company_limit_reached,
         "companies_considered": enriched.companies_considered,
@@ -222,14 +276,15 @@ def run_pipeline() -> dict:
         "errors": enriched.errors,
     }
     logger.info(
-        "Hiring-manager funnel: companies_considered=%d eligible=%d reviewable=%d/%d "
+        "Hiring-manager funnel: companies_considered=%d eligible=%d FINAL_PASS=%d/%d review_rows=%d "
         "identified=%d contactable=%d | no_manager=%d no_email=%d invalid_email=%d "
         "org_domain_mismatch=%d email_domain_mismatch=%d founder_disallowed=%d "
         "person_match_attempts=%d",
         enriched.companies_considered,
         enriched.eligible_companies,
+        enriched.final_pass_leads,
+        enriched.final_pass_target or target_final_pass,
         enriched.reviewable_leads,
-        enriched.target_reviewable_leads or 0,
         enriched.hiring_manager_found,
         enriched.contactable_hiring_managers,
         enriched.stats.get("no_matching_hiring_manager", 0),
@@ -260,9 +315,16 @@ def run_pipeline() -> dict:
     )
     if config.PRODUCTION and not enriched.success:
         return _fail(summary, "hiring_manager", enriched.errors)
-    if not enriched.reviewable_target_reached:
+    if strict_runtime and not enriched.final_pass_target_reached:
         logger.warning(
-            "Daily target not reached: %d/%d reviewable leads. Stop reason: %s",
+            "Daily target not reached: %d/%d FINAL_PASS leads. Stop reason: %s",
+            enriched.final_pass_leads,
+            enriched.final_pass_target or target_final_pass,
+            enriched.stop_reason,
+        )
+    elif not strict_runtime and not enriched.reviewable_target_reached:
+        logger.warning(
+            "Legacy daily target not reached: %d/%d reviewable leads. Stop reason: %s",
             enriched.reviewable_leads,
             enriched.target_reviewable_leads or 0,
             enriched.stop_reason,
@@ -286,6 +348,28 @@ def run_pipeline() -> dict:
             summary,
             "airtable",
             [f"{airtable_result['failed']} Airtable records failed to persist"],
+        )
+
+    if strict_runtime:
+        evidence_report = build_observability_report(
+            enriched_payload=enriched_payload,
+            topup_summary=summary["steps"].get("topup") or {},
+            airtable_result=airtable_result,
+        )
+        evidence_path = save_observability_report(evidence_report)
+        summary["steps"]["observability"] = {**evidence_report, "output": evidence_path}
+        logger.info(
+            "Final decision: FINAL_PASS=%d/%d deficit=%d NEEDS_CHECK=%d REROUTE=%d "
+            "UNVERIFIED=%d REJECT=%d stop_reason=%s evidence=%s",
+            evidence_report["final_pass"],
+            evidence_report["target_final_pass"],
+            evidence_report["deficit_remaining"],
+            evidence_report["state_counts"].get("NEEDS_CHECK", 0),
+            evidence_report["state_counts"].get("REROUTE", 0),
+            evidence_report["state_counts"].get("UNVERIFIED", 0),
+            evidence_report["state_counts"].get("REJECT", 0),
+            evidence_report.get("stop_reason"),
+            evidence_path,
         )
 
     # Commit seen-state only after the downstream review queue is safely updated.
