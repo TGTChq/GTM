@@ -16,6 +16,14 @@ from urllib.parse import parse_qs, unquote, urlparse
 import apollo_client as apollo
 import config
 import hunter_client as hunter
+from account_gate import AccountGate
+from contact_gate import ContactGate
+from decision_engine import annotate_final_decision
+from decision_types import GateDecision, GateState, gate_decision_from_dict
+from email_gate import EmailGate
+from evidence_types import EvidenceBundle
+from reason_codes import ReasonCode
+from reroute_state import RerouteRegistry
 from company_identity import (
     company_names_compatible,
     domains_equivalent,
@@ -54,6 +62,13 @@ class Step3Result:
     target_reviewable_leads: Optional[int] = None
     reviewable_leads: int = 0
     reviewable_target_reached: bool = True
+    final_pass_target: Optional[int] = None
+    final_pass_leads: int = 0
+    needs_check_leads: int = 0
+    reroute_leads: int = 0
+    unverified_leads: int = 0
+    rejected_leads: int = 0
+    final_pass_target_reached: bool = False
     max_eligible_companies: Optional[int] = None
     eligible_company_limit_reached: bool = False
     target_reached: bool = True
@@ -339,7 +354,7 @@ def _build_no_contact_lead(
     return lead
 
 
-def process_company(company_jobs: List[Dict]) -> Tuple[List[Dict], Dict]:
+def _process_company_legacy(company_jobs: List[Dict]) -> Tuple[List[Dict], Dict]:
     stats = defaultdict(int)
     first = company_jobs[0]
     input_domain = _best_input_domain(first)
@@ -576,8 +591,314 @@ def process_company(company_jobs: List[Dict]) -> Tuple[List[Dict], Dict]:
     return leads, dict(stats)
 
 
+
+def _strict_gate_from_job(job: Dict, field: str, gate: str) -> GateDecision:
+    payload = job.get(field)
+    if isinstance(payload, dict):
+        return gate_decision_from_dict(payload, gate=gate)
+    state = job.get(f"_{gate}_gate_state") or GateState.UNVERIFIED.value
+    reason = job.get(f"_{gate}_gate_reason") or f"UNVERIFIED_{gate.upper()}_GATE"
+    return GateDecision(gate, state, reason, retryable=False, next_action="discard_and_replace")
+
+
+def _strict_base_lead(
+    primary: Dict,
+    bucket_jobs: List[Dict],
+    bucket: str,
+    org: apollo.OrgEnrichment,
+    account_decision: GateDecision,
+) -> Dict:
+    role_focus = extract_role_focus(primary, primary.get("_matched_role", ""))
+    lead = dict(primary)
+    lead.update(
+        {
+            "_role_bucket": bucket,
+            "_hiring_manager_buckets": sorted({
+                get_hiring_manager_bucket_for_job(job) for job in bucket_jobs
+            }),
+            "_company_criteria_reason": (
+                account_decision.primary_reason.value
+                if hasattr(account_decision.primary_reason, "value")
+                else str(account_decision.primary_reason)
+            ),
+            "_company_needs_review": False,
+            "_account_gate_state": account_decision.state_value,
+            "_account_gate_reason": (
+                account_decision.primary_reason.value
+                if hasattr(account_decision.primary_reason, "value")
+                else str(account_decision.primary_reason)
+            ),
+            "_account_gate_decision": account_decision.to_dict(),
+            "related_open_roles": sorted({
+                j.get("canonical_job_title") or j.get("job_title", "")
+                for j in bucket_jobs
+                if j.get("canonical_job_title") or j.get("job_title")
+            }),
+            "related_job_ids": [j.get("job_id") for j in bucket_jobs if j.get("job_id")],
+            "role_focus": role_focus.text,
+            "role_focus_quality": role_focus.quality,
+            "role_focus_evidence": role_focus.evidence,
+            "company_domain": account_decision.metadata.get("canonical_domain"),
+            "company_employee_count": org.employee_count,
+            "company_founded_year": org.founded_year,
+            "company_industry": org.industry,
+            "company_business_model": account_decision.metadata.get("business_model"),
+            "canonical_company_name": account_decision.metadata.get("canonical_company_name"),
+            "campaign_id": config.resolve_campaign_id(bucket, org.employee_count),
+        }
+    )
+    return lead
+
+
+def _process_company_strict(company_jobs: List[Dict]) -> Tuple[List[Dict], Dict]:
+    """Run Account, Contact, Email and final gates for prequalified jobs."""
+    stats = defaultdict(int)
+    first = company_jobs[0]
+    input_domain = _best_input_domain(first)
+    company_name = str(first.get("canonical_employer_name") or first.get("employer_name") or "")
+    enrichment_website = f"https://{input_domain}" if input_domain else ""
+    org = apollo.enrich_organization(
+        domain=input_domain, name=company_name, website=enrichment_website
+    )
+    time.sleep(config.APOLLO_RATE_LIMIT_DELAY)
+
+    account_decision = AccountGate().evaluate(
+        org=org,
+        input_company_name=company_name,
+        input_domain=input_domain,
+        jobs=company_jobs,
+    )
+    stats[f"account_{account_decision.state_value.lower()}"] += 1
+    stats[f"account_reason__{_reason_family(str(account_decision.primary_reason))}"] += 1
+
+    jobs_by_bucket: Dict[str, List[Dict]] = defaultdict(list)
+    for job in company_jobs:
+        jobs_by_bucket[get_bucket_name_for_job(job)].append(job)
+
+    leads: List[Dict] = []
+    for bucket, bucket_jobs in jobs_by_bucket.items():
+        primary = _primary_job(bucket_jobs)
+        job_decision = _strict_gate_from_job(primary, "_job_gate_decision", "job")
+        role_decision = _strict_gate_from_job(primary, "_role_gate_decision", "role")
+        lead = _strict_base_lead(primary, bucket_jobs, bucket, org, account_decision)
+
+        if account_decision.state_value != GateState.PASS.value:
+            final = annotate_final_decision(
+                lead,
+                {"job": job_decision, "role": role_decision, "account": account_decision},
+            )
+            final["_step3_status"] = (
+                "excluded" if final.get("_final_state") == "REJECT" else "unverified"
+            )
+            final["_step3_reason"] = final.get("_final_primary_reason")
+            final["hiring_manager_confidence"] = "none"
+            leads.append(final)
+            stats[f"final_{str(final.get('_final_state')).lower()}"] += 1
+            continue
+
+        search_domain = str(account_decision.metadata.get("canonical_domain") or "")
+        target_titles = get_target_titles_for_jobs(bucket_jobs, org.employee_count)
+        people = apollo.search_people_at_company(search_domain, target_titles)
+        time.sleep(config.APOLLO_RATE_LIMIT_DELAY)
+        ranked_candidates = rank_candidates(people, target_titles)
+        account_bucket_key = f"{search_domain}|{bucket}"
+        reroute_registry = RerouteRegistry()
+        attempted_before = reroute_registry.attempted_ids(account_bucket_key)
+        ranked_candidates = [
+            item for item in ranked_candidates
+            if str(item.get("id") or item.get("person_id") or "") not in attempted_before
+        ]
+
+        company_domains = _organization_domains(org)
+        company_domains.add(search_domain)
+        selected_person: Optional[apollo.PersonMatch] = None
+        selected_hunter: Optional[hunter.HunterResult] = None
+        selected_contact_decision: Optional[GateDecision] = None
+        selected_email_decision: Optional[GateDecision] = None
+        last_contact_decision: Optional[GateDecision] = None
+        last_email_decision: Optional[GateDecision] = None
+        attempted_ids: List[str] = []
+        hunter_attempts = 0
+        founder_allowed = bool(
+            org.employee_count is not None
+            and org.employee_count <= config.FOUNDER_FALLBACK_MAX_EMPLOYEES
+        )
+        max_attempts = min(
+            max(1, config.CONTACT_MAX_REROUTE_ATTEMPTS_PER_BUCKET),
+            max(1, len(ranked_candidates)),
+        )
+
+        for candidate in ranked_candidates[:max_attempts]:
+            candidate_id = str(candidate.get("id") or candidate.get("person_id") or "")
+            if candidate_id:
+                attempted_ids.append(candidate_id)
+            stats["person_match_attempts"] += 1
+            person = apollo.match_person(candidate)
+            time.sleep(config.APOLLO_RATE_LIMIT_DELAY)
+            contact_decision = ContactGate().evaluate(
+                person=person,
+                target_titles=target_titles,
+                company_domains=company_domains,
+                company_name=company_name,
+                intent_market="us_market",
+                founder_allowed=founder_allowed,
+            )
+            last_contact_decision = contact_decision
+            if contact_decision.state_value != GateState.PASS.value:
+                stats[f"contact_reason__{_reason_family(str(contact_decision.primary_reason))}"] += 1
+                continue
+
+            allowed_domains = set(company_domains)
+            if person.organization_domain:
+                allowed_domains.add(person.organization_domain)
+            hunter_result: Optional[hunter.HunterResult] = None
+            if person.email and config.VERIFY_WITH_HUNTER and config.HUNTER_API_KEY:
+                hunter_result = hunter.verify_email(person.email)
+                time.sleep(config.HUNTER_RATE_LIMIT_DELAY)
+            elif (
+                not person.email
+                and person.first_name
+                and person.last_name
+                and config.HUNTER_API_KEY
+                and hunter_attempts < config.HUNTER_MAX_FALLBACK_ATTEMPTS_PER_BUCKET
+            ):
+                hunter_attempts += 1
+                stats["hunter_fallback_attempts"] += 1
+                hunter_result = hunter.find_email(
+                    person.first_name, person.last_name, search_domain
+                )
+                time.sleep(config.HUNTER_RATE_LIMIT_DELAY)
+                if hunter_result.found and hunter_result.email:
+                    person.email = hunter_result.email
+                    person.email_found = True
+                    person.email_source = "hunter"
+
+            email_decision = EmailGate().evaluate(
+                person=person,
+                hunter_result=hunter_result,
+                company_domains=allowed_domains,
+            )
+            last_email_decision = email_decision
+            if email_decision.state_value != GateState.PASS.value:
+                stats[f"email_reason__{_reason_family(str(email_decision.primary_reason))}"] += 1
+                continue
+
+            selected_person = person
+            selected_hunter = hunter_result
+            selected_contact_decision = contact_decision
+            selected_email_decision = email_decision
+            break
+
+        if selected_person and selected_contact_decision and selected_email_decision:
+            person = selected_person
+            lead.update(
+                {
+                    "_step3_status": "found",
+                    "_step3_reason": "strict_contact_and_email_pass",
+                    "hiring_manager_name": " ".join(
+                        part for part in (person.first_name, person.last_name) if part
+                    ) or None,
+                    "hiring_manager_first_name": person.first_name,
+                    "hiring_manager_last_name": person.last_name,
+                    "hiring_manager_title": person.title,
+                    "hiring_manager_linkedin": person.linkedin_url,
+                    "hiring_manager_email": person.email,
+                    "hiring_manager_email_source": person.email_source,
+                    "apollo_email_status": person.email_status,
+                    "hunter_email_status": selected_hunter.status if selected_hunter else None,
+                    "hiring_manager_confidence": "verified",
+                    "hiring_manager_selection_tier": _selection_tier(person.title),
+                }
+            )
+            lead["lead_key"] = _lead_key(search_domain, str(person.email), bucket)
+            final = annotate_final_decision(
+                lead,
+                {
+                    "job": job_decision,
+                    "role": role_decision,
+                    "account": account_decision,
+                    "contact": selected_contact_decision,
+                    "email": selected_email_decision,
+                },
+            )
+            reroute_registry.clear(account_bucket_key)
+        else:
+            if ranked_candidates and last_contact_decision and last_contact_decision.state_value == GateState.REROUTE.value:
+                contact_decision = last_contact_decision
+                gates = {
+                    "job": job_decision,
+                    "role": role_decision,
+                    "account": account_decision,
+                    "contact": contact_decision,
+                }
+            elif last_contact_decision and last_contact_decision.state_value == GateState.PASS.value and last_email_decision:
+                gates = {
+                    "job": job_decision,
+                    "role": role_decision,
+                    "account": account_decision,
+                    "contact": last_contact_decision,
+                    "email": last_email_decision,
+                }
+            else:
+                contact_decision = GateDecision(
+                    "contact", GateState.UNVERIFIED,
+                    ReasonCode.UNVERIFIED_NO_VALID_CONTACT,
+                    retryable=True, next_action="retry_contact_reroute_then_replace",
+                )
+                gates = {
+                    "job": job_decision,
+                    "role": role_decision,
+                    "account": account_decision,
+                    "contact": contact_decision,
+                }
+            final = annotate_final_decision(lead, gates)
+            final["_step3_status"] = (
+                "reroute" if final.get("_final_state") == "REROUTE" else "unverified"
+            )
+            final["_step3_reason"] = final.get("_final_primary_reason")
+            final["hiring_manager_confidence"] = "none"
+            if attempted_ids:
+                reroute_registry.record(
+                    account_bucket_key,
+                    attempted_ids,
+                    str(final.get("_final_primary_reason") or ""),
+                )
+
+        final = annotate_job(final, probe_url=False)
+        leads.append(final)
+        stats[f"bucket_{bucket}_{final.get('_step3_status')}"] += 1
+        stats[f"final_{str(final.get('_final_state')).lower()}"] += 1
+
+    return leads, dict(stats)
+
+
+def process_company(company_jobs: List[Dict]) -> Tuple[List[Dict], Dict]:
+    strict = bool(
+        config.FINAL_PASS_PIPELINE_ENABLED
+        and company_jobs
+        and all(job.get("_job_gate_state") for job in company_jobs)
+    )
+    if strict:
+        return _process_company_strict(company_jobs)
+    return _process_company_legacy(company_jobs)
+
+
+def _is_final_pass_lead(lead: Dict) -> bool:
+    return bool(
+        lead.get("_final_state") == "FINAL_PASS"
+        and lead.get("hiring_manager_email")
+        and lead.get("lead_key")
+    )
+
+
 def _is_reviewable_lead(lead: Dict) -> bool:
-    """Mirror Airtable's reviewable-lead gate without making an API call."""
+    """Return Airtable-surface candidates, with legacy-fixture compatibility."""
+    if lead.get("_final_state"):
+        return bool(
+            lead.get("_final_state") in {"FINAL_PASS", "NEEDS_CHECK"}
+            and lead.get("hiring_manager_email")
+            and lead.get("lead_key")
+        )
     return bool(
         lead.get("_step3_status") == "found"
         and lead.get("hiring_manager_confidence") in {"high", "medium", "low"}
@@ -587,13 +908,20 @@ def _is_reviewable_lead(lead: Dict) -> bool:
 
 
 def _count_unique_reviewable_leads(leads: List[Dict]) -> int:
-    return len(
-        {
-            str(lead.get("lead_key"))
-            for lead in leads
-            if _is_reviewable_lead(lead)
-        }
-    )
+    return len({str(lead.get("lead_key")) for lead in leads if _is_reviewable_lead(lead)})
+
+
+def _count_unique_final_pass_leads(leads: List[Dict]) -> int:
+    return len({str(lead.get("lead_key")) for lead in leads if _is_final_pass_lead(lead)})
+
+
+def _final_state_counts(leads: List[Dict]) -> Dict[str, int]:
+    counts = {name: 0 for name in ("FINAL_PASS", "NEEDS_CHECK", "REROUTE", "UNVERIFIED", "REJECT")}
+    for lead in leads:
+        state = str(lead.get("_final_state") or "")
+        if state in counts:
+            counts[state] += 1
+    return counts
 
 
 def _company_priority(item: Tuple[str, List[Dict]]) -> Tuple[int, int, int]:
@@ -623,28 +951,23 @@ def run_hiring_manager_identification(
     *,
     target_eligible_companies: Optional[int] = None,
     target_reviewable_leads: Optional[int] = None,
+    target_final_pass_leads: Optional[int] = None,
     max_eligible_companies: Optional[int] = None,
     exclude_company_keys: Optional[set[str]] = None,
     output_suffix: Optional[str] = None,
 ) -> Step3Result:
-    """Run Step 3 with optional controlled-test and production stop conditions.
+    """Enrich prequalified accounts and stop on the applicable daily target.
 
-    ``target_eligible_companies`` is used by the controlled test runner, where
-    ``--companies 10`` means ten eligible companies after firmographic checks.
-
-    ``target_reviewable_leads`` is the daily production goal. A reviewable lead
-    is a unique company/bucket contact that passes the same gate used by the
-    Airtable writer: usable email, confidence, and lead key.
-
-    ``max_eligible_companies`` is a production safety cap. It bounds enrichment
-    usage on days when contactability is low. The target is a goal, not a hard
-    promise: the available filtered market may produce fewer leads, and a final
-    company with multiple buckets can make the count slightly exceed the target.
+    Strict payloads (those annotated by the Job Gate) stop only on
+    ``target_final_pass_leads``.  The legacy reviewable argument remains for
+    controlled tests and rollback compatibility, but it does not determine
+    production success in final-pass mode.
     """
     validate_preflight()
     for name, value in (
         ("target_eligible_companies", target_eligible_companies),
         ("target_reviewable_leads", target_reviewable_leads),
+        ("target_final_pass_leads", target_final_pass_leads),
         ("max_eligible_companies", max_eligible_companies),
     ):
         if value is not None and value < 1:
@@ -653,6 +976,16 @@ def run_hiring_manager_identification(
     input_path = input_path or config.STEP2_KEPT_FILE
     payload = json.loads(Path(input_path).read_text(encoding="utf-8"))
     jobs = payload.get("jobs", [])
+    strict_input = bool(
+        config.FINAL_PASS_PIPELINE_ENABLED
+        and any(job.get("_job_gate_state") for job in jobs)
+    )
+    if strict_input and target_final_pass_leads is None:
+        target_final_pass_leads = (
+            target_reviewable_leads
+            if target_reviewable_leads is not None
+            else config.get_final_pass_target()
+        )
 
     jobs_by_company: Dict[str, List[Dict]] = defaultdict(list)
     excluded_company_keys = {str(value) for value in (exclude_company_keys or set()) if value}
@@ -669,14 +1002,9 @@ def run_hiring_manager_identification(
         jobs_by_company[company_key].append(job)
 
     all_leads: List[Dict] = []
-    # Same-run company duplicates are intentionally consumed even though they do
-    # not trigger another Apollo search; otherwise their new job IDs would recur
-    # on the next day and waste top-up budget again.
     processed_jobs: List[Dict] = list(skipped_existing_job_rows)
     total_stats = defaultdict(int)
-    total_stats["topup_skipped_previously_considered_companies"] = len(
-        skipped_existing_company_keys
-    )
+    total_stats["topup_skipped_previously_considered_companies"] = len(skipped_existing_company_keys)
     total_stats["topup_skipped_previously_considered_jobs"] = skipped_existing_jobs
     companies_considered = 0
     eligible_companies = 0
@@ -697,64 +1025,66 @@ def run_hiring_manager_identification(
         for key, value in stats.items():
             total_stats[key] += value
 
-        company_is_excluded = bool(leads) and all(
-            lead.get("_step3_status") == "excluded" for lead in leads
-        )
-        if company_is_excluded:
-            excluded_companies += 1
+        if strict_input:
+            company_account_pass = any(
+                lead.get("_account_gate_state") == GateState.PASS.value for lead in leads
+            )
+            if company_account_pass:
+                eligible_companies += 1
+            else:
+                excluded_companies += 1
         else:
-            eligible_companies += 1
+            company_is_excluded = bool(leads) and all(
+                lead.get("_step3_status") == "excluded" for lead in leads
+            )
+            if company_is_excluded:
+                excluded_companies += 1
+            else:
+                eligible_companies += 1
 
         reviewable_leads = _count_unique_reviewable_leads(all_leads)
+        final_pass_leads = _count_unique_final_pass_leads(all_leads)
 
         if (
-            target_reviewable_leads is not None
+            strict_input
+            and target_final_pass_leads is not None
+            and final_pass_leads >= target_final_pass_leads
+        ):
+            stop_reason = "final_pass_target_reached"
+            logger.info(
+                "Reached daily target of %d FINAL_PASS leads after considering %d companies",
+                target_final_pass_leads,
+                companies_considered,
+            )
+            break
+        if (
+            not strict_input
+            and target_reviewable_leads is not None
             and reviewable_leads >= target_reviewable_leads
         ):
             stop_reason = "reviewable_lead_target_reached"
             logger.info(
-                "Reached daily target of %d reviewable leads after considering %d "
-                "companies (%d eligible)",
+                "Reached legacy target of %d reviewable leads after considering %d companies",
                 target_reviewable_leads,
                 companies_considered,
-                eligible_companies,
             )
             break
-
-        if (
-            target_eligible_companies is not None
-            and eligible_companies >= target_eligible_companies
-        ):
+        if target_eligible_companies is not None and eligible_companies >= target_eligible_companies:
             stop_reason = "eligible_company_target_reached"
-            logger.info(
-                "Reached controlled-test target of %d eligible companies after "
-                "considering %d companies",
-                target_eligible_companies,
-                companies_considered,
-            )
             break
-
-        if (
-            max_eligible_companies is not None
-            and eligible_companies >= max_eligible_companies
-        ):
+        if max_eligible_companies is not None and eligible_companies >= max_eligible_companies:
             stop_reason = "eligible_company_safety_cap_reached"
             logger.warning(
-                "Reached safety cap of %d eligible companies with %d reviewable "
-                "leads after considering %d companies",
+                "Reached safety cap of %d eligible companies with %d FINAL_PASS and %d review rows",
                 max_eligible_companies,
+                final_pass_leads,
                 reviewable_leads,
-                companies_considered,
             )
             break
 
     excluded_buckets = sum(1 for lead in all_leads if lead.get("_step3_status") == "excluded")
     eligible_leads = [lead for lead in all_leads if lead.get("_step3_status") != "excluded"]
     eligible_buckets = len(eligible_leads)
-
-    # "Hiring manager identified" and "usable email found" are separate
-    # success metrics. A person can be correctly identified even when Apollo and
-    # Hunter cannot reveal a deliverable email.
     identified = sum(1 for lead in eligible_leads if lead.get("hiring_manager_name"))
     not_identified = eligible_buckets - identified
     contactable = sum(1 for lead in eligible_leads if lead.get("_step3_status") == "found")
@@ -762,24 +1092,28 @@ def run_hiring_manager_identification(
     match_rate = identified / eligible_buckets if eligible_buckets else 0.0
     contactable_rate = contactable / eligible_buckets if eligible_buckets else 0.0
     reviewable_leads = _count_unique_reviewable_leads(all_leads)
+    final_pass_leads = _count_unique_final_pass_leads(all_leads)
+    state_counts = _final_state_counts(all_leads)
 
     reviewable_target_reached = (
-        target_reviewable_leads is None
-        or reviewable_leads >= target_reviewable_leads
+        target_reviewable_leads is None or reviewable_leads >= target_reviewable_leads
+    )
+    final_pass_target_reached = (
+        target_final_pass_leads is not None
+        and final_pass_leads >= target_final_pass_leads
     )
     eligible_target_reached = (
-        target_eligible_companies is None
-        or eligible_companies >= target_eligible_companies
+        target_eligible_companies is None or eligible_companies >= target_eligible_companies
     )
     eligible_company_limit_reached = (
-        max_eligible_companies is not None
-        and eligible_companies >= max_eligible_companies
+        max_eligible_companies is not None and eligible_companies >= max_eligible_companies
     )
-    target_reached = (
-        reviewable_target_reached
-        if target_reviewable_leads is not None
-        else eligible_target_reached
-    )
+    if strict_input:
+        target_reached = final_pass_target_reached
+    elif target_reviewable_leads is not None:
+        target_reached = reviewable_target_reached
+    else:
+        target_reached = eligible_target_reached
 
     suffix = re.sub(r"[^a-zA-Z0-9_-]+", "_", str(output_suffix or "").strip())
     suffix_part = f"_{suffix}" if suffix else ""
@@ -787,55 +1121,55 @@ def run_hiring_manager_identification(
         Path(config.STEP3_OUTPUT_DIR)
         / f"jobs_enriched_{datetime.now():%Y-%m-%d}{suffix_part}.json"
     )
-    Path(output_path).write_text(
-        json.dumps(
-            {
-                "run_date": datetime.now().isoformat(),
-                "source_file": input_path,
-                "source_total_jobs": len(jobs),
-                "total_input_jobs": len(processed_jobs),
-                "total_output_leads": len(all_leads),
-                "companies_considered": companies_considered,
-                "eligible_companies": eligible_companies,
-                "company_criteria_excluded_companies": excluded_companies,
-                "target_eligible_companies": target_eligible_companies,
-                "target_reviewable_leads": target_reviewable_leads,
-                "reviewable_leads": reviewable_leads,
-                "reviewable_target_reached": reviewable_target_reached,
-                "max_eligible_companies": max_eligible_companies,
-                "eligible_company_limit_reached": eligible_company_limit_reached,
-                "stop_reason": stop_reason,
-                "target_reached": target_reached,
-                "company_criteria_excluded": excluded_buckets,
-                "eligible_company_buckets": eligible_buckets,
-                "hiring_manager_identified": identified,
-                "hiring_manager_not_identified": not_identified,
-                "hiring_manager_identification_rate": round(match_rate, 4),
-                "contactable_hiring_managers": contactable,
-                "uncontactable_hiring_managers": uncontactable,
-                "contactable_rate": round(contactable_rate, 4),
-                # Only these processed jobs should enter cross-day seen-state.
-                # Jobs left unprocessed because a daily target/cap was reached
-                # remain eligible for a later run.
-                "processed_job_refs": [_job_state_ref(job) for job in processed_jobs],
-                "processed_company_keys": processed_company_keys,
-                # Backward-compatible aliases.
-                "hiring_manager_found": identified,
-                "hiring_manager_not_found": not_identified,
-                "match_rate": round(match_rate, 4),
-                "stats": dict(total_stats),
-                "jobs": all_leads,
-            },
-            indent=2,
-        ),
-        encoding="utf-8",
-    )
+    output_payload = {
+        "run_date": datetime.now().isoformat(),
+        "validation_version": config.VALIDATION_VERSION,
+        "strict_final_pass_mode": strict_input,
+        "source_file": input_path,
+        "source_total_jobs": len(jobs),
+        "total_input_jobs": len(processed_jobs),
+        "total_output_leads": len(all_leads),
+        "companies_considered": companies_considered,
+        "eligible_companies": eligible_companies,
+        "company_criteria_excluded_companies": excluded_companies,
+        "target_eligible_companies": target_eligible_companies,
+        "target_reviewable_leads": target_reviewable_leads,
+        "reviewable_leads": reviewable_leads,
+        "reviewable_target_reached": reviewable_target_reached,
+        "final_pass_target": target_final_pass_leads,
+        "final_pass_leads": final_pass_leads,
+        "final_pass_target_reached": final_pass_target_reached,
+        "needs_check_leads": state_counts["NEEDS_CHECK"],
+        "reroute_leads": state_counts["REROUTE"],
+        "unverified_leads": state_counts["UNVERIFIED"],
+        "rejected_leads": state_counts["REJECT"],
+        "final_state_counts": state_counts,
+        "max_eligible_companies": max_eligible_companies,
+        "eligible_company_limit_reached": eligible_company_limit_reached,
+        "stop_reason": stop_reason,
+        "target_reached": target_reached,
+        "company_criteria_excluded": excluded_buckets,
+        "eligible_company_buckets": eligible_buckets,
+        "hiring_manager_identified": identified,
+        "hiring_manager_not_identified": not_identified,
+        "hiring_manager_identification_rate": round(match_rate, 4),
+        "contactable_hiring_managers": contactable,
+        "uncontactable_hiring_managers": uncontactable,
+        "contactable_rate": round(contactable_rate, 4),
+        "processed_job_refs": [_job_state_ref(job) for job in processed_jobs],
+        "processed_company_keys": processed_company_keys,
+        "hiring_manager_found": identified,
+        "hiring_manager_not_found": not_identified,
+        "match_rate": round(match_rate, 4),
+        "stats": dict(total_stats),
+        "jobs": all_leads,
+    }
+    Path(output_path).write_text(json.dumps(output_payload, indent=2), encoding="utf-8")
 
     errors: List[str] = []
     if config.ENFORCE_HM_MATCH_RATE and eligible_buckets and match_rate < config.MIN_HIRING_MANAGER_MATCH_RATE:
         errors.append(
-            f"Hiring-manager match rate {match_rate:.1%} is below "
-            f"{config.MIN_HIRING_MANAGER_MATCH_RATE:.1%}"
+            f"Hiring-manager match rate {match_rate:.1%} is below {config.MIN_HIRING_MANAGER_MATCH_RATE:.1%}"
         )
 
     return Step3Result(
@@ -856,6 +1190,13 @@ def run_hiring_manager_identification(
         target_reviewable_leads=target_reviewable_leads,
         reviewable_leads=reviewable_leads,
         reviewable_target_reached=reviewable_target_reached,
+        final_pass_target=target_final_pass_leads,
+        final_pass_leads=final_pass_leads,
+        needs_check_leads=state_counts["NEEDS_CHECK"],
+        reroute_leads=state_counts["REROUTE"],
+        unverified_leads=state_counts["UNVERIFIED"],
+        rejected_leads=state_counts["REJECT"],
+        final_pass_target_reached=final_pass_target_reached,
         max_eligible_companies=max_eligible_companies,
         eligible_company_limit_reached=eligible_company_limit_reached,
         target_reached=target_reached,

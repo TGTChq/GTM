@@ -29,15 +29,32 @@ Create a table named `Leads` (or set `AIRTABLE_TABLE_NAME` to your table name) w
 | Email Source | Single select or text | `apollo`, `hunter` |
 | Apollo Email Status | Single line text | |
 | Hunter Email Status | Single line text | |
-| Confidence | Single select | `high`, `medium`, `low` |
+| Confidence | Single select | `verified` for strict `FINAL_PASS`/`NEEDS_CHECK`; legacy values may remain on old rows |
 | Employees | Number | Integer |
 | Size Band | Single select | `small`, `mid`, `large`, `unknown` |
 | Founded | Number | Integer |
 | Industry | Single line text | |
 | Campaign ID | Single line text | Instantly campaign UUID selected by routing |
 | Job ID | Single line text | |
+| Final Decision | Single select | `FINAL_PASS`, `NEEDS_CHECK` (only these are written) |
+| Decision Reason | Single line text | Stable primary reason code |
+| Secondary Reasons | Long text | Additional reason codes |
+| Official Source | URL | ATS/careers source used by Job Gate |
+| Evidence Status | Single select or text | Job Gate state |
+| Firmographics Status | Single select or text | Account Gate state |
+| Contact Alignment | Single select or text | Contact Gate state |
+| Email Validation | Single select or text | Email Gate state |
+| Validation Version | Single line text | Example: `tgtc-final-pass-v0.2` |
+| Evidence Bundle | Long text | Machine-readable JSON for audit |
 | Status | Single select | `Pending`, `Approved`, `Rejected`, `Enrolled`, `Error` |
 | Error | Long text | Enrollment errors are written here |
+
+Strict output boundary:
+
+- `FINAL_PASS` is written with `Relevance = accept`.
+- `NEEDS_CHECK` is written with `Relevance = review` and does not count toward the daily target.
+- `REJECT`, `UNVERIFIED`, and unresolved `REROUTE` never create Airtable rows.
+- `run_approved.py` enrolls only Approved rows whose `Final Decision = FINAL_PASS` and `Validation Version` is present.
 
 Recommended views:
 

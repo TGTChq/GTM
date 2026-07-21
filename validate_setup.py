@@ -111,11 +111,32 @@ def static_checks() -> Dict:
         errors.append("FOUNDER_FALLBACK_MAX_EMPLOYEES must be at least 1")
     if not config.AIRTABLE_SUPPRESS_EXISTING_COMPANY:
         warnings.append("AIRTABLE_SUPPRESS_EXISTING_COMPANY=0 can create uncoordinated duplicate-account outreach")
-    if config.MAX_ELIGIBLE_COMPANIES_PER_RUN < config.TARGET_REVIEWABLE_LEADS_PER_RUN:
+    final_target = config.get_final_pass_target()
+    if final_target < 1:
+        errors.append("TARGET_FINAL_PASS_LEADS_PER_RUN must be at least 1")
+    if config.MAX_ELIGIBLE_COMPANIES_PER_RUN < final_target:
         warnings.append(
-            "MAX_ELIGIBLE_COMPANIES_PER_RUN is below TARGET_REVIEWABLE_LEADS_PER_RUN; "
-            "the daily target cannot be reached unless every eligible company converts"
+            "MAX_ELIGIBLE_COMPANIES_PER_RUN is below TARGET_FINAL_PASS_LEADS_PER_RUN; "
+            "the daily target cannot be reached even if every eligible company converts"
         )
+    if config.FINAL_PASS_PIPELINE_ENABLED:
+        if not config.JOB_SOURCE_FETCH_ENABLED:
+            warnings.append(
+                "JOB_SOURCE_FETCH_ENABLED=0 forces official-source candidates to abstain "
+                "unless a test injects verified source snapshots"
+            )
+        if not config.COMPANY_SOURCE_FETCH_ENABLED:
+            warnings.append(
+                "COMPANY_SOURCE_FETCH_ENABLED=0 can increase UNVERIFIED business-model decisions"
+            )
+        if config.FINAL_PASS_MICROBATCH_QUERY_UNITS < 1:
+            errors.append("FINAL_PASS_MICROBATCH_QUERY_UNITS must be at least 1")
+        if config.FINAL_PASS_MAX_TOPUP_ITERATIONS < 1:
+            errors.append("FINAL_PASS_MAX_TOPUP_ITERATIONS must be at least 1")
+        if config.FINAL_PASS_MAX_RUNTIME_SECONDS < 60:
+            errors.append("FINAL_PASS_MAX_RUNTIME_SECONDS must be at least 60")
+        if config.CONTACT_MAX_REROUTE_ATTEMPTS_PER_BUCKET < 1:
+            errors.append("CONTACT_MAX_REROUTE_ATTEMPTS_PER_BUCKET must be at least 1")
     if not 0 <= config.MAX_ROLE_FAILURE_RATE <= 1:
         errors.append("MAX_ROLE_FAILURE_RATE must be between 0 and 1")
     if config.JSEARCH_STOP_ON_LOW_QUOTA and config.JSEARCH_MIN_REMAINING_REQUESTS <= 0:

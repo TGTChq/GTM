@@ -1,68 +1,44 @@
-TGTC V3.2 - Airtable fields required
-====================================
+TGTC FINAL_PASS v0.2 - Airtable migration
+========================================
 
-Before running the patched pipeline, add these five fields to the existing
-Leads table. Field names must match exactly.
+Before running the final-pass pipeline, add these fields to the existing Leads table.
+Field names must match exactly.
 
-1. Job Freshness
-   Type: Single select
-   Options:
-   - fresh
-   - aging
-   - stale_review
-   - unknown_review
+Existing job-signal fields
+--------------------------
+1. Job Freshness - Single select: fresh, aging, stale_review, unknown_review
+2. Job Age Days - Number (integer)
+3. Job URL Status - Single line text or single select
+4. Job URL Source - Single line text
+5. Job Signal Notes - Long text
 
-2. Job Age Days
-   Type: Number
-   Precision: integer / 0 decimals
+New final-decision fields
+-------------------------
+6. Final Decision - Single select: FINAL_PASS, NEEDS_CHECK
+7. Decision Reason - Single line text
+8. Secondary Reasons - Long text
+9. Official Source - URL
+10. Evidence Status - Single line text or single select: PASS, NEEDS_CHECK
+11. Firmographics Status - Single line text or single select: PASS
+12. Contact Alignment - Single line text or single select: PASS
+13. Email Validation - Single line text or single select: PASS
+14. Validation Version - Single line text
+15. Evidence Bundle - Long text
 
-3. Job URL Status
-   Type: Single select
-   Options:
-   - verified
-   - fallback_used
-   - aggregator_review
-   - unverified_review
-   - broken
+Required behavior
+-----------------
+- FINAL_PASS -> Relevance=accept and counts toward the target of 30.
+- NEEDS_CHECK -> Relevance=review and never reduces the deficit.
+- REJECT, UNVERIFIED, and REROUTE remain in internal evidence artifacts only.
+- Aggregator-only postings cannot create Airtable rows.
+- Low/risky/accept-all/unknown email states cannot create Airtable rows.
+- The approved-lead worker blocks any Approved record that is not a validated FINAL_PASS.
 
-4. Job URL Source
-   Type: Single line text
-
-5. Job Signal Notes
-   Type: Long text
-
-Behavior
---------
-- fresh: posted 0-7 days ago
-- aging: posted 8-29 days ago
-- stale_review: posted 30+ days ago, or explicit expiration is in the past
-- unknown_review: posting date is missing/unparseable
-
-- verified: selected URL returned a normal 2xx/3xx response
-- fallback_used: a better/working company, ATS, LinkedIn, Indeed, or other URL
-  replaced the original Job URL
-- aggregator_review: only an aggregator URL is available; the lead is kept
-- unverified_review: a likely-good URL could not be machine-verified (for
-  example a bot block, 403, 429, timeout, or server error)
-- broken: no usable URL was found or all candidates returned strong dead-link
-  evidence such as 404/410
-
-Instantly safeguard
--------------------
-run_approved.py blocks enrollment when:
-- Job Freshness is stale_review or unknown_review
-- Job URL Status is broken, aggregator_review, or unverified_review
-
-After manual review, the reviewer can override the gate by:
-- changing Job Freshness to fresh or aging after confirming the role is active
-- replacing/verifying Job URL and changing Job URL Status to verified or
-  fallback_used
-- then setting Status to Approved
-
-Backfill existing Airtable rows
--------------------------------
-Run in CMD from C:\TGTC\tgtc_pipeline:
-
-python repair_airtable_job_signals.py
-
-Then refresh Airtable.
+Rollout
+-------
+1. Add all fields.
+2. Keep Instantly campaigns paused.
+3. Run validate_setup.py --live.
+4. Run the pipeline in shadow mode / dry validation first.
+5. Inspect the observability artifact and Airtable rows.
+6. Approve production enrollment only after the benchmark and review are accepted.

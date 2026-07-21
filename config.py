@@ -57,6 +57,10 @@ FILTERED_OUTPUT_DIR = str(ARTIFACT_ROOT / "filtered")
 STEP3_OUTPUT_DIR = str(ARTIFACT_ROOT / "enriched")
 LOG_DIR = str(ARTIFACT_ROOT / "logs")
 RUN_SUMMARY_DIR = str(ARTIFACT_ROOT / "logs" / "runs")
+EVIDENCE_OUTPUT_DIR = str(ARTIFACT_ROOT / "evidence")
+SOURCE_CACHE_DIR = str(Path(STATE_DIR) / "source_cache")
+ORGANIZATION_CACHE_DIR = str(Path(STATE_DIR) / "organization_cache")
+REROUTE_STATE_FILE = str(Path(STATE_DIR) / "reroute_state.json")
 SEEN_JOBS_FILE = str(Path(STATE_DIR) / "seen_jobs.json")
 CRM_EXCLUSION_FILE = os.getenv(
     "CRM_EXCLUSION_FILE", str(BASE_DIR / "data" / "exclusions" / "crm_companies.csv")
@@ -74,8 +78,31 @@ for directory in (
     LOG_DIR,
     STATE_DIR,
     RUN_SUMMARY_DIR,
+    EVIDENCE_OUTPUT_DIR,
+    SOURCE_CACHE_DIR,
+    ORGANIZATION_CACHE_DIR,
 ):
     Path(directory).mkdir(parents=True, exist_ok=True)
+
+# ---------- Final-pass architecture ----------
+FINAL_PASS_PIPELINE_ENABLED = _env_bool("FINAL_PASS_PIPELINE_ENABLED", True)
+VALIDATION_VERSION = os.getenv("VALIDATION_VERSION", "tgtc-final-pass-v0.2")
+# Source and company-site retrieval is bounded and cached.  Disabling fetches is
+# intended only for deterministic offline replay; it does not relax any gate.
+JOB_SOURCE_FETCH_ENABLED = _env_bool("JOB_SOURCE_FETCH_ENABLED", True)
+JOB_SOURCE_MAX_CANDIDATES = _env_int("JOB_SOURCE_MAX_CANDIDATES", 8)
+JOB_SOURCE_MAX_REDIRECTS = _env_int("JOB_SOURCE_MAX_REDIRECTS", 5)
+JOB_SOURCE_ATTEMPTS_PER_URL = _env_int("JOB_SOURCE_ATTEMPTS_PER_URL", 2)
+JOB_SOURCE_TIMEOUT_SECONDS = _env_int("JOB_SOURCE_TIMEOUT_SECONDS", 12)
+JOB_SOURCE_CACHE_TTL_HOURS = _env_int("JOB_SOURCE_CACHE_TTL_HOURS", 24)
+COMPANY_SOURCE_FETCH_ENABLED = _env_bool("COMPANY_SOURCE_FETCH_ENABLED", True)
+COMPANY_SOURCE_MAX_PAGES = _env_int("COMPANY_SOURCE_MAX_PAGES", 3)
+COMPANY_SOURCE_TIMEOUT_SECONDS = _env_int("COMPANY_SOURCE_TIMEOUT_SECONDS", 10)
+COMPANY_SOURCE_CACHE_TTL_HOURS = _env_int("COMPANY_SOURCE_CACHE_TTL_HOURS", 168)
+FINAL_PASS_MICROBATCH_QUERY_UNITS = _env_int("FINAL_PASS_MICROBATCH_QUERY_UNITS", 6)
+FINAL_PASS_MAX_TOPUP_ITERATIONS = _env_int("FINAL_PASS_MAX_TOPUP_ITERATIONS", 50)
+FINAL_PASS_MAX_RUNTIME_SECONDS = _env_int("FINAL_PASS_MAX_RUNTIME_SECONDS", 3300)
+DRIFT_AUDIT_SAMPLE_SIZE = _env_int("DRIFT_AUDIT_SAMPLE_SIZE", 10)
 
 # ---------- JSearch ----------
 RAPIDAPI_KEY = os.getenv("RAPIDAPI_KEY", "")
@@ -146,14 +173,16 @@ JSEARCH_ADAPTIVE_LOOKBACK_MAX_QUERIES = _env_int(
 JSEARCH_TARGET_PREFILTER_VIABLE = _env_int(
     "JSEARCH_TARGET_PREFILTER_VIABLE", 60
 )
-# Closed-loop inventory top-up. Production starts with one page across the full
-# catalog, enriches that inventory, then spends the remaining JSearch budget on
-# the roles that actually produce reviewable contacts. Every bound is finite;
-# the loop stops at the reviewable target, the unit budget, the round cap, or a
-# zero-yield round. Existing Railway environments need no new variables because
-# these defaults are intentionally production-safe.
+# Legacy closed-loop inventory controls remain for rollback compatibility. In
+# strict mode the final-pass loop uses small bounded micro-batches, validates
+# every candidate fully and counts only FINAL_PASS.
 JSEARCH_REVIEWABLE_TOPUP_ENABLED = _env_bool(
     "JSEARCH_REVIEWABLE_TOPUP_ENABLED", True
+)
+# New strict-mode switch. It inherits the legacy flag when absent so current
+# Railway environments migrate without silently disabling recovery.
+FINAL_PASS_TOPUP_ENABLED = _env_bool(
+    "FINAL_PASS_TOPUP_ENABLED", JSEARCH_REVIEWABLE_TOPUP_ENABLED
 )
 JSEARCH_TOPUP_INITIAL_PAGES = _env_int("JSEARCH_TOPUP_INITIAL_PAGES", 1)
 JSEARCH_TOPUP_MAX_ROUNDS = _env_int("JSEARCH_TOPUP_MAX_ROUNDS", 3)
@@ -219,10 +248,24 @@ MAX_ROLE_FAILURE_RATE = _env_float("MAX_ROLE_FAILURE_RATE", 0.10)
 MIN_HIRING_MANAGER_MATCH_RATE = _env_float("MIN_HIRING_MANAGER_MATCH_RATE", 0.70)
 ENFORCE_HM_MATCH_RATE = _env_bool("ENFORCE_HM_MATCH_RATE", False)
 
-# Daily production throughput controls. The pipeline stops enrichment after it
-# reaches the reviewable-lead target, with an eligible-company safety cap to
-# bound Apollo/Hunter usage on low-contactability days.
+# Daily production throughput controls. Strict mode stops only after the
+# FINAL_PASS target, with an eligible-company safety cap to bound Apollo/Hunter
+# usage on low-yield days.
+# Legacy name remains readable during migration.  The dynamic helper below
+# allows existing environments/tests that still set TARGET_REVIEWABLE... to
+# control the new target until TARGET_FINAL_PASS... is explicitly configured.
 TARGET_REVIEWABLE_LEADS_PER_RUN = _env_int("TARGET_REVIEWABLE_LEADS_PER_RUN", 30)
+_TARGET_FINAL_PASS_EXPLICIT = os.getenv("TARGET_FINAL_PASS_LEADS_PER_RUN")
+TARGET_FINAL_PASS_LEADS_PER_RUN = (
+    int(_TARGET_FINAL_PASS_EXPLICIT)
+    if _TARGET_FINAL_PASS_EXPLICIT not in (None, "")
+    else TARGET_REVIEWABLE_LEADS_PER_RUN
+)
+
+def get_final_pass_target() -> int:
+    if _TARGET_FINAL_PASS_EXPLICIT not in (None, ""):
+        return TARGET_FINAL_PASS_LEADS_PER_RUN
+    return TARGET_REVIEWABLE_LEADS_PER_RUN
 MAX_ELIGIBLE_COMPANIES_PER_RUN = _env_int("MAX_ELIGIBLE_COMPANIES_PER_RUN", 90)
 SEEN_JOBS_RETENTION_DAYS = _env_int("SEEN_JOBS_RETENTION_DAYS", 30)
 CRM_MIN_MATCH_LENGTH = _env_int("CRM_MIN_MATCH_LENGTH", 4)
@@ -273,6 +316,10 @@ APOLLO_MAX_PERSON_MATCH_ATTEMPTS_PER_BUCKET = _env_int(
 HUNTER_MAX_FALLBACK_ATTEMPTS_PER_BUCKET = _env_int(
     "HUNTER_MAX_FALLBACK_ATTEMPTS_PER_BUCKET", 2
 )
+CONTACT_MAX_REROUTE_ATTEMPTS_PER_BUCKET = _env_int(
+    "CONTACT_MAX_REROUTE_ATTEMPTS_PER_BUCKET", 8
+)
+REROUTE_STATE_TTL_DAYS = _env_int("REROUTE_STATE_TTL_DAYS", 7)
 # Founders remain a legitimate fallback for genuinely small companies, but not
 # for mid-market accounts where a functional leader should exist.
 FOUNDER_FALLBACK_MAX_EMPLOYEES = _env_int(
@@ -471,14 +518,12 @@ NON_FULL_TIME_EMPLOYMENT_TYPES = {
     "temp", "freelance", "internship", "seasonal", "per diem",
 }
 NON_ACTIVE_HIRING_SIGNAL_PATTERNS = [
-    r"\bfuture openings?\b",
-    r"\bfuture opportunities\b",
+    r"(?m)^\s*(?:future openings?|future opportunities|talent pool|talent pipeline|expression of interest|general application)\s*$",
+    r"\b(?:this|the) (?:posting|role|position|application) (?:is|exists|serves)\b[^.\n]{0,120}\b(?:future openings?|future opportunities|talent pool|talent pipeline|expression of interest|general application)\b",
+    r"\bwe (?:are )?(?:accepting|collecting|inviting) (?:applications|interest)\b[^.\n]{0,120}\b(?:future openings?|future opportunities|talent pool|talent pipeline)\b",
+    r"\bnot (?:an|a) active (?:opening|role|position)\b",
     r"\bevergreen (?:role|position|opening)\b",
-    r"\btalent pool\b",
-    r"\btalent pipeline\b",
-    r"\bexpression of interest\b",
-    r"\bgeneral application\b",
-    r"\bregister your interest\b",
+    r"\bregister your interest for future\b",
 ]
 
 # ---------- Filtering dictionaries ----------

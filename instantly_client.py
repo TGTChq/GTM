@@ -48,6 +48,15 @@ def _flat(value):
 def airtable_record_to_lead(record: Dict) -> Dict:
     fields = record.get("fields") or {}
 
+    # Defense in depth: the Airtable poller already filters to FINAL_PASS, but
+    # a direct call must never enroll an explicitly non-passing strict record.
+    final_decision = str(fields.get("Final Decision") or "").strip()
+    validation_version = str(fields.get("Validation Version") or "").strip()
+    if final_decision and final_decision != "FINAL_PASS":
+        raise ValueError(f"Approved row is not FINAL_PASS: {final_decision}")
+    if final_decision == "FINAL_PASS" and not validation_version:
+        raise ValueError("Approved FINAL_PASS row is missing Validation Version")
+
     signal_block = enrollment_block_reason(fields)
     if signal_block:
         raise ValueError(signal_block)

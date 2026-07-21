@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import time
 from pathlib import Path
@@ -56,6 +57,16 @@ REQUIRED_FIELDS = [
     "Industry",
     "Campaign ID",
     "Job ID",
+    "Final Decision",
+    "Decision Reason",
+    "Secondary Reasons",
+    "Official Source",
+    "Evidence Status",
+    "Firmographics Status",
+    "Contact Alignment",
+    "Email Validation",
+    "Validation Version",
+    "Evidence Bundle",
     "Status",
     "Error",
 ]
@@ -89,31 +100,56 @@ def _clean_fields(fields: Dict) -> Dict:
     return {key: value for key, value in fields.items() if value not in (None, "", [])}
 
 
+def _gate_state(job: Dict, gate: str) -> str:
+    decision = (job.get("_gate_decisions") or {}).get(gate) or {}
+    return str(decision.get("state") or job.get(f"_{gate}_gate_state") or "")
+
+
+def _evidence_bundle_text(job: Dict) -> str:
+    payload = {
+        "final_state": job.get("_final_state"),
+        "primary_reason": job.get("_final_primary_reason"),
+        "secondary_reasons": job.get("_final_secondary_reasons") or [],
+        "gate_decisions": job.get("_gate_decisions") or {},
+        "validation_version": job.get("_validation_version") or config.VALIDATION_VERSION,
+    }
+    return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))[:95000]
+
+
 def _job_to_fields(job: Dict) -> Dict:
     related_roles = job.get("related_open_roles") or []
     relevance_reasons = job.get("_role_relevance_reasons") or []
+    strict_state = str(job.get("_final_state") or "")
+    relevance = job.get("_airtable_relevance") if strict_state else job.get("_role_relevance_status")
+    official_source = (
+        job.get("canonical_source_url")
+        or job.get("official_source_url")
+        or job.get("job_url_selected")
+        or job.get("job_apply_link")
+        or job.get("job_google_link")
+    )
     fields = {
         "Lead Key": job.get("lead_key"),
-        "Company": job.get("employer_name"),
+        "Company": job.get("canonical_company_name") or job.get("canonical_employer_name") or job.get("employer_name"),
         "Website": (
             f"https://{job.get('company_domain')}"
             if job.get("company_domain")
             else job.get("employer_website")
         ),
-        "Open Role": job.get("job_title"),
+        "Open Role": job.get("canonical_job_title") or job.get("job_title"),
         "Open Roles": " | ".join(related_roles),
         "Role Focus": job.get("role_focus"),
         "Focus Quality": job.get("role_focus_quality"),
         "Focus Evidence": " | ".join(job.get("role_focus_evidence") or []),
         "Matched Role": job.get("_matched_role"),
         "Role Bucket": job.get("_role_bucket"),
-        "Job URL": job.get("job_url_selected") or job.get("job_apply_link") or job.get("job_google_link"),
-        "Job Source": job.get("job_publisher"),
-        "Posted At": job.get("job_posted_at_datetime_utc") or job.get("job_posted_at_timestamp"),
+        "Job URL": official_source,
+        "Job Source": job.get("canonical_source_type") or job.get("job_publisher"),
+        "Posted At": job.get("canonical_published_at") or job.get("job_posted_at_datetime_utc") or job.get("job_posted_at_timestamp"),
         "Job Freshness": job.get("job_freshness"),
         "Job Age Days": job.get("job_age_days"),
-        "Job URL Status": job.get("job_url_status"),
-        "Job URL Source": job.get("job_url_source"),
+        "Job URL Status": job.get("canonical_active_status") or job.get("job_url_status"),
+        "Job URL Source": job.get("canonical_source_type") or job.get("job_url_source"),
         "Job Signal Notes": " | ".join(
             part for part in (
                 job.get("job_signal_notes"),
@@ -121,9 +157,9 @@ def _job_to_fields(job: Dict) -> Dict:
                 f"employment={job.get('_employment_quality_reason')}" if job.get("_employment_quality_reason") else "",
             ) if part
         ),
-        "Location": job.get("_normalized_location") or job.get("job_location"),
-        "Employment Type": job.get("job_employment_type"),
-        "Relevance": job.get("_role_relevance_status"),
+        "Location": job.get("canonical_location") or job.get("_normalized_location") or job.get("job_location"),
+        "Employment Type": job.get("canonical_employment_type") or job.get("job_employment_type"),
+        "Relevance": relevance,
         "Relevance Score": job.get("_role_relevance_score"),
         "Relevance Reason": " | ".join(relevance_reasons),
         "Hiring Manager": job.get("hiring_manager_name"),
@@ -139,7 +175,17 @@ def _job_to_fields(job: Dict) -> Dict:
         "Founded": job.get("company_founded_year"),
         "Industry": job.get("company_industry"),
         "Campaign ID": job.get("campaign_id"),
-        "Job ID": job.get("job_id"),
+        "Job ID": job.get("canonical_job_id") or job.get("job_id"),
+        "Final Decision": strict_state,
+        "Decision Reason": job.get("_final_primary_reason"),
+        "Secondary Reasons": " | ".join(job.get("_final_secondary_reasons") or []),
+        "Official Source": official_source,
+        "Evidence Status": _gate_state(job, "job"),
+        "Firmographics Status": _gate_state(job, "account"),
+        "Contact Alignment": _gate_state(job, "contact"),
+        "Email Validation": _gate_state(job, "email"),
+        "Validation Version": job.get("_validation_version") or (config.VALIDATION_VERSION if strict_state else None),
+        "Evidence Bundle": _evidence_bundle_text(job) if strict_state else None,
         "Status": config.AIRTABLE_STATUS_PENDING,
     }
     return _clean_fields(fields)
@@ -243,13 +289,24 @@ def _ensure_job_signal(job: Dict) -> Dict:
 
 def push_leads(jobs: List[Dict], batch_size: int = 10) -> Dict:
     validate_preflight()
-    reviewable = [
-        _ensure_job_signal(job) for job in jobs
-        if job.get("_step3_status") == "found"
-        and job.get("hiring_manager_confidence") in {"high", "medium", "low"}
-        and job.get("hiring_manager_email")
-        and job.get("lead_key")
-    ]
+    strict_mode = any(job.get("_final_state") for job in jobs)
+    if strict_mode:
+        reviewable = [
+            dict(job) for job in jobs
+            if job.get("_final_state") in {"FINAL_PASS", "NEEDS_CHECK"}
+            and job.get("_airtable_relevance") in {"accept", "review"}
+            and job.get("hiring_manager_email")
+            and job.get("lead_key")
+        ]
+    else:
+        # Legacy compatibility is retained only for rollback-mode fixtures.
+        reviewable = [
+            _ensure_job_signal(job) for job in jobs
+            if job.get("_step3_status") == "found"
+            and job.get("hiring_manager_confidence") in {"high", "medium", "low"}
+            and job.get("hiring_manager_email")
+            and job.get("lead_key")
+        ]
 
     # One contact/company/bucket record only, even if upstream data is duplicated.
     unique_by_key = {job["lead_key"]: job for job in reviewable}
@@ -380,6 +437,9 @@ def push_leads(jobs: List[Dict], batch_size: int = 10) -> Dict:
         "failed_lead_keys": failed_lead_keys,
         "skipped_no_contact": skipped_no_contact,
         "reviewable": len(unique_by_key),
+        "final_pass": sum(job.get("_final_state") == "FINAL_PASS" for job in unique_by_key.values()),
+        "needs_check": sum(job.get("_final_state") == "NEEDS_CHECK" for job in unique_by_key.values()),
+        "strict_mode": strict_mode,
         "job_signal_review_required": signal_review_required,
     }
 
@@ -538,6 +598,20 @@ def get_approved_leads() -> List[Dict]:
         if not offset:
             break
         time.sleep(config.AIRTABLE_RATE_LIMIT_DELAY)
+
+    if config.FINAL_PASS_PIPELINE_ENABLED:
+        safe_records = [
+            record for record in records
+            if str((record.get("fields") or {}).get("Final Decision") or "").strip() == "FINAL_PASS"
+            and str((record.get("fields") or {}).get("Validation Version") or "").strip()
+        ]
+        skipped = len(records) - len(safe_records)
+        if skipped:
+            logger.error(
+                "Blocked %d Approved Airtable row(s) without a validated FINAL_PASS decision",
+                skipped,
+            )
+        return safe_records
     return records
 
 
