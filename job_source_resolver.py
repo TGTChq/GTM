@@ -128,7 +128,10 @@ def _clean_url(value: str) -> str:
     value = html.unescape(str(value or "")).strip()
     if not value.startswith(("http://", "https://")):
         return ""
-    parsed = urlparse(value)
+    try:
+        parsed = urlparse(value)
+    except (TypeError, ValueError):
+        return ""
     if parsed.netloc.lower().endswith("google.com"):
         query = parse_qs(parsed.query)
         for key in ("q", "url", "u"):
@@ -137,6 +140,14 @@ def _clean_url(value: str) -> str:
                 if candidate.startswith(("http://", "https://")):
                     return candidate
     return value
+
+
+def _safe_join_url(base_url: str, raw_url: str) -> str:
+    """Join and normalize untrusted HTML URL values without aborting a run."""
+    try:
+        return _clean_url(urljoin(str(base_url or ""), str(raw_url or "")))
+    except (TypeError, ValueError):
+        return ""
 
 
 def candidate_urls(job: Dict) -> List[str]:
@@ -401,7 +412,7 @@ def _extract_links(body: str, base_url: str) -> List[Tuple[str, str]]:
         return []
     output: List[Tuple[str, str]] = []
     for href, text in parser.links:
-        url = _clean_url(urljoin(base_url, href))
+        url = _safe_join_url(base_url, href)
         if url:
             output.append((url, text))
     return output
@@ -426,7 +437,7 @@ def _extract_embedded_urls(body: str, base_url: str) -> List[Tuple[str, str]]:
     )
     for raw in [*absolute, *relative]:
         raw = raw.rstrip("),.;]}")
-        url = _clean_url(urljoin(base_url, raw))
+        url = _safe_join_url(base_url, raw)
         if not url:
             continue
         text = unquote(urlparse(url).path).replace("-", " ").replace("_", " ")

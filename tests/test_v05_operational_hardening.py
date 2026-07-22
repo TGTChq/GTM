@@ -14,7 +14,12 @@ from approved_revalidation import revalidate_approved_record
 from contact_gate import ContactGate
 from decision_types import GateState
 from job_gate import JobGate
-from job_source_resolver import JobSourceResolver, ResolvedJobSource
+from job_source_resolver import (
+    JobSourceResolver,
+    ResolvedJobSource,
+    _extract_embedded_urls,
+    _extract_links,
+)
 from pipeline_checkpoint import PipelineCheckpoint
 from recovery_inventory import FinalPassInventory, RecoverableJobQueue
 from reroute_state import RerouteRegistry
@@ -451,6 +456,50 @@ class SchedulerBoundaryTests(unittest.TestCase):
         mark_error.assert_called_once_with(["rec1"], "stale job")
         self.assertEqual(result["revalidation_failed"], 1)
         self.assertEqual(result["failed"], 1)
+
+
+class MalformedUrlResilienceTests(unittest.TestCase):
+    def test_embedded_invalid_ipv6_url_is_skipped_without_losing_valid_candidate(self):
+        body = (
+            '<script>const broken="https://[invalid/careers/job";</script>'
+            '<script>const valid="/careers/staff-accountant-123";</script>'
+        )
+        found = _extract_embedded_urls(body, "https://example.com/careers")
+        self.assertIn((
+            "https://example.com/careers/staff-accountant-123",
+            "/careers/staff accountant 123",
+        ), found)
+        self.assertEqual(len(found), 1)
+
+    def test_invalid_ipv6_href_is_skipped_without_aborting_link_extraction(self):
+        body = (
+            '<a href="https://[invalid/jobs/123">Broken</a>'
+            '<a href="/careers/staff-accountant-123">Staff Accountant</a>'
+        )
+        found = _extract_links(body, "https://example.com/careers")
+        self.assertEqual(found, [(
+            "https://example.com/careers/staff-accountant-123",
+            "Staff Accountant",
+        )])
+
+
+class CheckpointResumeTests(unittest.TestCase):
+    def test_checkpoint_resume_creates_raw_artifact_without_query_units(self):
+        import run_daily
+
+        jobs = [
+            {"job_id": "j1", "_search_role": "Staff Accountant"},
+            {"job_id": "j2", "_search_role": "Data Analyst"},
+        ]
+        with tempfile.TemporaryDirectory() as temp, patch.object(config, "OUTPUT_DIR", temp):
+            result = run_daily._resume_scrape_from_checkpoint(jobs, {"Staff Accountant": {"raw_jobs": 10}})
+            payload = json.loads(Path(result.output_path).read_text(encoding="utf-8"))
+
+        self.assertEqual(result.total_jobs, 2)
+        self.assertEqual(result.roles_with_results, 2)
+        self.assertTrue(result.stats["checkpoint_resumed"])
+        self.assertEqual(result.stats["estimated_request_units"], 0)
+        self.assertEqual(payload["jobs"], jobs)
 
 
 if __name__ == "__main__":

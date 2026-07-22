@@ -18,7 +18,7 @@ import airtable_client
 import config
 from audit_filter import run_audit
 from hiring_manager import run_hiring_manager_identification
-from jsearch_scraper import run_daily_scrape
+from jsearch_scraper import ScrapeResult, run_daily_scrape
 from reviewable_topup import _merge_query_metrics, run_reviewable_topup
 from final_pass_topup import run_final_pass_topup
 from qualification_pipeline import run_precontact_qualification
@@ -54,6 +54,32 @@ def _fail(summary: dict, step: str, errors: list[str]) -> dict:
     summary["finished_at"] = datetime.now().isoformat()
     return summary
 
+
+
+def _resume_scrape_from_checkpoint(jobs: list[dict], query_metrics: dict) -> ScrapeResult:
+    """Create a raw artifact from crash-checkpoint jobs without repeating JSearch."""
+    output_dir = Path(config.OUTPUT_DIR)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    path = output_dir / f"jobs_checkpoint_resume_{datetime.now():%Y-%m-%d_%H-%M-%S}.json"
+    roles = {str(job.get("_search_role") or "").strip() for job in jobs if job.get("_search_role")}
+    stats = {
+        "checkpoint_resumed": True,
+        "checkpoint_jobs": len(jobs),
+        "query_metrics": dict(query_metrics or {}),
+        "base_estimated_request_units": 0,
+        "estimated_request_units": 0,
+        "query_variant_metrics": {"checkpoint_resume": {"jobs": len(jobs)}},
+    }
+    path.write_text(
+        json.dumps({"jobs": jobs, "total_jobs": len(jobs), "stats": stats}, indent=2),
+        encoding="utf-8",
+    )
+    return ScrapeResult(
+        output_path=str(path),
+        total_jobs=len(jobs),
+        roles_with_results=len(roles),
+        stats=stats,
+    )
 
 
 def _merge_recovery_jobs(scrape, recovery_jobs: list[dict]):
@@ -110,6 +136,9 @@ def run_pipeline() -> dict:
     }
 
     logger.info("=== STEP 1: SCRAPE ===")
+    checkpoint_jobs = checkpoint.pending_jobs()
+    checkpoint_metrics = checkpoint.query_metrics()
+    due_recovery_jobs = recovery_queue.due_jobs()
     topup_enabled = bool(
         (
             config.FINAL_PASS_TOPUP_ENABLED
@@ -119,25 +148,29 @@ def run_pipeline() -> dict:
         )
         and config.get_final_pass_target() > 0
     )
-    scrape = run_daily_scrape(
-        registry=registry,
-        base_num_pages=(
-            config.JSEARCH_TOPUP_INITIAL_PAGES if topup_enabled else None
-        ),
-        # Closed-loop mode reserves the post-filter budget for queries selected
-        # using actual Apollo contactability instead of spending it blindly.
-        allow_adaptive=False if topup_enabled else None,
-    )
-    due_recovery_jobs = recovery_queue.due_jobs()
-    checkpoint_jobs = checkpoint.pending_jobs()
-    checkpoint_metrics = checkpoint.query_metrics()
-    if checkpoint_metrics:
-        scrape.stats["query_metrics"] = _merge_query_metrics(
-            checkpoint_metrics,
-            scrape.stats.get("query_metrics", {}),
+    if checkpoint_jobs:
+        logger.warning(
+            "Resuming %d checkpoint jobs; skipping duplicate base JSearch scrape",
+            len(checkpoint_jobs),
         )
-        scrape.stats["resumed_query_metric_roles"] = len(checkpoint_metrics)
-    scrape = _merge_recovery_jobs(scrape, [*checkpoint_jobs, *due_recovery_jobs])
+        scrape = _resume_scrape_from_checkpoint(checkpoint_jobs, checkpoint_metrics)
+    else:
+        scrape = run_daily_scrape(
+            registry=registry,
+            base_num_pages=(
+                config.JSEARCH_TOPUP_INITIAL_PAGES if topup_enabled else None
+            ),
+            # Closed-loop mode reserves the post-filter budget for queries selected
+            # using actual Apollo contactability instead of spending it blindly.
+            allow_adaptive=False if topup_enabled else None,
+        )
+        if checkpoint_metrics:
+            scrape.stats["query_metrics"] = _merge_query_metrics(
+                checkpoint_metrics,
+                scrape.stats.get("query_metrics", {}),
+            )
+            scrape.stats["resumed_query_metric_roles"] = len(checkpoint_metrics)
+    scrape = _merge_recovery_jobs(scrape, due_recovery_jobs)
     initial_raw_payload = json.loads(Path(scrape.output_path).read_text(encoding="utf-8"))
     checkpoint.append_jobs(
         initial_raw_payload.get("jobs", []),
