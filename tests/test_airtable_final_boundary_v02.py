@@ -100,6 +100,23 @@ class AirtableFinalBoundaryTests(unittest.TestCase):
         self.assertEqual(fields["Validation Version"], config.VALIDATION_VERSION)
         self.assertIn("gate_decisions", fields["Evidence Bundle"])
 
+    def test_airtable_prefers_verified_official_job_source(self):
+        lead = self._lead("FINAL_PASS", "pass")
+        lead.update({
+            "job_apply_link": "https://aggregator.example/job/123",
+            "job_url_selected": "https://aggregator.example/job/123",
+            "job_url_status": "unverified_review",
+            "job_url_source": "aggregator",
+            "official_job_url": "https://jobs.example.com/positions/123",
+            "official_job_source_type": "ats",
+            "official_job_status": "ACTIVE_VERIFIED",
+        })
+        fields = airtable_client._job_to_fields(lead)
+        self.assertEqual(fields["Job URL"], "https://jobs.example.com/positions/123")
+        self.assertEqual(fields["Official Source"], "https://jobs.example.com/positions/123")
+        self.assertEqual(fields["Job URL Source"], "ats")
+        self.assertEqual(fields["Job URL Status"], "verified")
+
 
 if __name__ == "__main__":
     unittest.main()

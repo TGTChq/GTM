@@ -57,8 +57,25 @@ def static_checks() -> Dict:
         if not value:
             errors.append(f"Missing {name}")
 
+    signing_key = str(config.VALIDATION_SIGNING_KEY or "")
+    if config.PRODUCTION and (
+        not signing_key
+        or signing_key == "replace-with-a-long-random-secret"
+        or len(signing_key) < 32
+    ):
+        errors.append(
+            "VALIDATION_SIGNING_KEY must be a unique secret of at least 32 characters in production"
+        )
+
     if config.VERIFY_WITH_HUNTER and not config.HUNTER_API_KEY:
         warnings.append("VERIFY_WITH_HUNTER=1 but HUNTER_API_KEY is missing")
+    if config.PRODUCTION and not config.VALIDATION_SIGNING_KEY:
+        errors.append(
+            "VALIDATION_SIGNING_KEY is required in production to prevent "
+            "Airtable edits from bypassing approval revalidation"
+        )
+    elif config.VALIDATION_SIGNING_KEY and len(config.VALIDATION_SIGNING_KEY) < 32:
+        warnings.append("VALIDATION_SIGNING_KEY should contain at least 32 characters")
 
     if config.JSEARCH_MAX_QUERIES_PER_RUN < 0:
         errors.append("JSEARCH_MAX_QUERIES_PER_RUN cannot be negative")
@@ -114,7 +131,10 @@ def static_checks() -> Dict:
     final_target = config.get_final_pass_target()
     if final_target < 1:
         errors.append("TARGET_FINAL_PASS_LEADS_PER_RUN must be at least 1")
-    if config.MAX_ELIGIBLE_COMPANIES_PER_RUN < final_target:
+    if (
+        config.MAX_ELIGIBLE_COMPANIES_PER_RUN > 0
+        and config.MAX_ELIGIBLE_COMPANIES_PER_RUN < final_target
+    ):
         warnings.append(
             "MAX_ELIGIBLE_COMPANIES_PER_RUN is below TARGET_FINAL_PASS_LEADS_PER_RUN; "
             "the daily target cannot be reached even if every eligible company converts"
@@ -131,12 +151,32 @@ def static_checks() -> Dict:
             )
         if config.FINAL_PASS_MICROBATCH_QUERY_UNITS < 1:
             errors.append("FINAL_PASS_MICROBATCH_QUERY_UNITS must be at least 1")
-        if config.FINAL_PASS_MAX_TOPUP_ITERATIONS < 1:
-            errors.append("FINAL_PASS_MAX_TOPUP_ITERATIONS must be at least 1")
-        if config.FINAL_PASS_MAX_RUNTIME_SECONDS < 60:
-            errors.append("FINAL_PASS_MAX_RUNTIME_SECONDS must be at least 60")
+        if config.FINAL_PASS_MAX_TOPUP_ITERATIONS < 0:
+            errors.append("FINAL_PASS_MAX_TOPUP_ITERATIONS cannot be negative; 0 means exhaustive")
+        if 0 < config.FINAL_PASS_MAX_RUNTIME_SECONDS < 60:
+            errors.append("FINAL_PASS_MAX_RUNTIME_SECONDS must be 0 or at least 60")
+        if config.FINAL_PASS_MAX_EMPTY_QUERY_CYCLES < 1:
+            errors.append("FINAL_PASS_MAX_EMPTY_QUERY_CYCLES must be at least 1")
+        if config.JOB_SOURCE_DISCOVERY_MAX_PAGES < 1:
+            errors.append("JOB_SOURCE_DISCOVERY_MAX_PAGES must be at least 1")
+        if config.JOB_SOURCE_DISCOVERY_MAX_BOARD_PAGES < 1:
+            errors.append("JOB_SOURCE_DISCOVERY_MAX_BOARD_PAGES must be at least 1")
         if config.CONTACT_MAX_REROUTE_ATTEMPTS_PER_BUCKET < 1:
             errors.append("CONTACT_MAX_REROUTE_ATTEMPTS_PER_BUCKET must be at least 1")
+        if not config.REQUIRE_CURRENT_EMPLOYMENT_EVIDENCE:
+            errors.append("REQUIRE_CURRENT_EMPLOYMENT_EVIDENCE must be enabled in strict FINAL_PASS mode")
+        if not config.REQUIRE_CONTACT_LINKEDIN:
+            errors.append("REQUIRE_CONTACT_LINKEDIN must be enabled in strict FINAL_PASS mode")
+        if not config.REQUIRE_US_CONTACT_TERRITORY:
+            warnings.append(
+                "REQUIRE_US_CONTACT_TERRITORY=0 allows contacts without positive US/global ownership evidence"
+            )
+        if not config.APPROVED_REVALIDATE_JOB_SOURCE:
+            errors.append("APPROVED_REVALIDATE_JOB_SOURCE must be enabled before Instantly enrollment")
+        if not config.SLA_REQUIRE_NET_NEW_AIRTABLE:
+            warnings.append("SLA_REQUIRE_NET_NEW_AIRTABLE=0 can report target success before Airtable persistence")
+        if config.RECOVERABLE_JOB_TTL_DAYS < 1 or config.RECOVERABLE_JOB_MAX_ATTEMPTS < 1:
+            errors.append("Recoverable job queue TTL and max attempts must both be positive")
     if not 0 <= config.MAX_ROLE_FAILURE_RATE <= 1:
         errors.append("MAX_ROLE_FAILURE_RATE must be between 0 and 1")
     if config.JSEARCH_STOP_ON_LOW_QUOTA and config.JSEARCH_MIN_REMAINING_REQUESTS <= 0:
@@ -193,14 +233,21 @@ def live_checks() -> Dict:
     # Read-only Airtable check.
     try:
         airtable_client.validate_preflight()
+        field_params = [("pageSize", 1)] + [
+            ("fields[]", field_name) for field_name in airtable_client.REQUIRED_FIELDS
+        ]
         response = request_with_retry(
             "GET",
             airtable_client._base_url(),  # intentional setup diagnostic
             headers=airtable_client._headers(),
-            params={"pageSize": 1},
+            params=field_params,
         )
         data = safe_json(response)
-        results["airtable"] = {"ok": True, "records_returned": len(data.get("records", []))}
+        results["airtable"] = {
+            "ok": True,
+            "records_returned": len(data.get("records", [])),
+            "required_fields_checked": len(airtable_client.REQUIRED_FIELDS),
+        }
     except Exception as exc:
         results["airtable"] = {"ok": False, "error": str(exc)}
 

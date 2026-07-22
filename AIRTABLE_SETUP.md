@@ -17,6 +17,11 @@ Create a table named `Leads` (or set `AIRTABLE_TABLE_NAME` to your table name) w
 | Job URL | URL | |
 | Job Source | Single line text | |
 | Posted At | Single line text or date | Single line text is safest across source formats |
+| Job Freshness | Single line text | Freshness classification used at review/enrollment |
+| Job Age Days | Number | Integer |
+| Job URL Status | Single line text | `verified`, `broken`, or `unverified_review` |
+| Job URL Source | Single line text | `company`, `ats`, etc. |
+| Job Signal Notes | Long text | Source and eligibility diagnostics |
 | Location | Single line text | |
 | Employment Type | Single line text | |
 | Relevance | Single select | `accept`, `review` |
@@ -25,6 +30,7 @@ Create a table named `Leads` (or set `AIRTABLE_TABLE_NAME` to your table name) w
 | Hiring Manager | Single line text | |
 | HM Title | Single line text | |
 | LinkedIn | URL | |
+| Apollo Person ID | Single line text | Required for current-employment revalidation before Instantly |
 | Email | Email | |
 | Email Source | Single select or text | `apollo`, `hunter` |
 | Apollo Email Status | Single line text | |
@@ -44,7 +50,9 @@ Create a table named `Leads` (or set `AIRTABLE_TABLE_NAME` to your table name) w
 | Firmographics Status | Single select or text | Account Gate state |
 | Contact Alignment | Single select or text | Contact Gate state |
 | Email Validation | Single select or text | Email Gate state |
-| Validation Version | Single line text | Example: `tgtc-final-pass-v0.2` |
+| Validation Version | Single line text | Example: `tgtc-final-pass-v0.5` |
+| Validated At | Single line text | ISO timestamp; keep as text to preserve timezone |
+| Validation Fingerprint | Single line text | HMAC integrity check; do not edit manually |
 | Evidence Bundle | Long text | Machine-readable JSON for audit |
 | Status | Single select | `Pending`, `Approved`, `Rejected`, `Enrolled`, `Error` |
 | Error | Long text | Enrollment errors are written here |
@@ -54,7 +62,8 @@ Strict output boundary:
 - `FINAL_PASS` is written with `Relevance = accept`.
 - `NEEDS_CHECK` is written with `Relevance = review` and does not count toward the daily target.
 - `REJECT`, `UNVERIFIED`, and unresolved `REROUTE` never create Airtable rows.
-- `run_approved.py` enrolls only Approved rows whose `Final Decision = FINAL_PASS` and `Validation Version` is present.
+- `run_approved.py` enrolls only Approved rows whose `Final Decision = FINAL_PASS`, validation timestamp is fresh, and fingerprint still matches.
+- Editing a signed field such as Email, Campaign ID, Role Focus, company, job URL, or contact identity invalidates the fingerprint and blocks enrollment until the lead is requalified.
 
 Recommended views:
 

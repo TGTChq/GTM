@@ -28,6 +28,11 @@ ATS_DOMAINS = {
     "breezy.hr", "workable.com", "recruitee.com", "applytojob.com",
     "adp.com", "oraclecloud.com", "successfactors.com", "bamboohr.com",
     "personio.com", "rippling.com", "eightfold.ai", "phenompeople.com",
+    "teamtailor.com", "careers-page.com", "comeet.co", "pinpointhq.com",
+    "paylocity.com", "dayforcehcm.com", "ultipro.com", "ukg.com",
+    "jobsoid.com", "jazz.co", "clearcompany.com", "applicantpro.com",
+    "hiringthing.com", "isolvedhire.com", "avature.net", "csod.com",
+    "taleo.net", "paycomonline.net", "paycomonline.com", "myworkdaysite.com",
 }
 
 AGGREGATOR_DOMAINS = {
@@ -35,7 +40,10 @@ AGGREGATOR_DOMAINS = {
     "lensa.com", "bebee.com", "jooble.org", "talent.com", "jora.com",
     "whatjobs.com", "grabjobs.co", "adzuna.com", "careerbuilder.com",
     "ziprecruiter.com", "glassdoor.com", "simplyhired.com", "dice.com",
-    "builtin.com", "remoteok.com", "remoterocketship.com",
+    "builtin.com", "builtinsf.com", "builtinnyc.com", "builtinla.com",
+    "builtinaustin.com", "builtinboston.com", "builtinchicago.org",
+    "builtincolorado.com", "builtinseattle.com", "remoteok.com",
+    "remoterocketship.com",
 }
 
 # These sites can return HTTP 200 while still being unreliable review links in
@@ -371,6 +379,11 @@ def _candidate_urls(job: Dict) -> List[Tuple[str, str, bool]]:
         indexes[url] = len(candidates)
         candidates.append((url, label, bool(is_direct)))
 
+    # Job Gate canonical fields are authoritative when present. They must not be
+    # displaced later by the raw provider/aggregator URL during lead building.
+    add(job.get("canonical_source_url"), "canonical_source", True)
+    add(job.get("official_job_url"), "official_job_url", True)
+
     add(
         job.get("job_apply_link"),
         "job_apply_link",
@@ -459,6 +472,28 @@ def select_job_url(
     source, then a working aggregator. Google Jobs viewer URLs and known
     unreliable partner mirrors are never saved as the primary ``Job URL``.
     """
+    canonical_url = str(
+        job.get("canonical_source_url") or job.get("official_job_url") or ""
+    ).strip()
+    canonical_state = str(job.get("official_job_status") or "").strip()
+    canonical_type = str(
+        job.get("canonical_source_type") or job.get("official_job_source_type") or ""
+    ).strip()
+    if canonical_url and canonical_state == "ACTIVE_VERIFIED":
+        return (
+            _clean_candidate_url(canonical_url),
+            "verified",
+            canonical_type or classify_url_source(canonical_url, company_domain),
+            "verified_by_job_gate",
+        )
+    if canonical_url and canonical_state == "INACTIVE_VERIFIED":
+        return (
+            _clean_candidate_url(canonical_url),
+            "broken",
+            canonical_type or classify_url_source(canonical_url, company_domain),
+            "inactive_by_job_gate",
+        )
+
     raw_primary = str(job.get("job_apply_link") or "").strip()
     original_reference = _clean_candidate_url(raw_primary) if re.match(r"^https?://", raw_primary, re.I) else ""
     candidates = _candidate_urls(job)

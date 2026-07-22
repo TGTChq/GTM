@@ -46,8 +46,8 @@ class StrictHiringManagerV02Tests(unittest.TestCase):
             {"id": "us", "title": "Controller", "organization": {"name": "Acme", "domain": "acme.com"}},
         ]
         people = [
-            PersonMatch(True, person_id="emea", first_name="E", last_name="Mea", title="Controller EMEA", organization_name="Acme", organization_domain="acme.com", email="e@acme.com", email_status="verified", country="United Kingdom"),
-            PersonMatch(True, person_id="us", first_name="U", last_name="S", title="Controller", organization_name="Acme", organization_domain="acme.com", email="u@acme.com", email_status="verified", country="United States"),
+            PersonMatch(True, person_id="emea", first_name="E", last_name="Mea", title="Controller EMEA", organization_name="Acme", organization_domain="acme.com", email="e@acme.com", email_status="verified", country="United Kingdom", linkedin_url="https://linkedin.com/in/emea", raw={"current_organization": {"name": "Acme", "domain": "acme.com"}}),
+            PersonMatch(True, person_id="us", first_name="U", last_name="S", title="Controller", organization_name="Acme", organization_domain="acme.com", email="u@acme.com", email_status="verified", country="United States", linkedin_url="https://linkedin.com/in/us", raw={"current_organization": {"name": "Acme", "domain": "acme.com"}}),
         ]
         with tempfile.TemporaryDirectory() as temp:
             with (

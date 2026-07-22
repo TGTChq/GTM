@@ -113,7 +113,16 @@ class AccountGate:
         )
         if model.state == "EXCLUDED":
             reason = getattr(ReasonCode, model.reason_code, ReasonCode.REJECT_EXCLUDED_BUSINESS_MODEL)
-            bundle.add(FactValue("business_model", model.category, EvidenceStatus.VERIFIED_OFFICIAL, model.evidence))
+            evidence_statuses = {
+                item.status.value if hasattr(item.status, "value") else str(item.status)
+                for item in model.evidence
+            }
+            model_status = (
+                EvidenceStatus.VERIFIED_OFFICIAL
+                if EvidenceStatus.VERIFIED_OFFICIAL.value in evidence_statuses
+                else EvidenceStatus.VERIFIED_CROSS_SOURCE
+            )
+            bundle.add(FactValue("business_model", model.category, model_status, model.evidence))
             return self._reject(reason, bundle, metadata={"company_source": source.to_dict()})
         if model.state == "UNKNOWN":
             return self._unknown(
@@ -121,8 +130,14 @@ class AccountGate:
                 retryable=source.retryable,
                 metadata={"company_source": source.to_dict()},
             )
+        evidence_statuses = {
+            item.status.value if hasattr(item.status, "value") else str(item.status)
+            for item in model.evidence
+        }
         model_status = (
-            EvidenceStatus.VERIFIED_OFFICIAL if source.text else EvidenceStatus.VERIFIED_CROSS_SOURCE
+            EvidenceStatus.VERIFIED_OFFICIAL
+            if EvidenceStatus.VERIFIED_OFFICIAL.value in evidence_statuses
+            else EvidenceStatus.VERIFIED_CROSS_SOURCE
         )
         bundle.add(FactValue("business_model", model.category, model_status, model.evidence))
         return GateDecision(

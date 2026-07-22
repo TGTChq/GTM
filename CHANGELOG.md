@@ -1,3 +1,14 @@
+# FINAL_PASS v0.5 production hardening — July 22, 2026
+
+- Added strict ATS employer identity, positive job-activity proof, multi-URL evaluation, and public Greenhouse, Lever, and Ashby board adapters.
+- Separated official and provider evidence provenance; provider-only contradictions no longer masquerade as official evidence.
+- Added current-employment and US/global ownership validation for hiring managers, with reason-specific temporary and permanent reroute expiration.
+- Added recoverable-job inventory, FINAL_PASS persistence safety, and crash/query-progress checkpoints.
+- Added HMAC validation fingerprints and full job/account/contact/email revalidation immediately before Instantly enrollment.
+- Split technical completion from daily SLA success; net Airtable creation controls SLA and a miss exits with code 2.
+- Added 21 focused v0.5 regression tests. Full suite: 297 tests plus 135 catalog subtests.
+- Offline replay keeps PTP unverified, rejects Hoplite and Benzinga, and safely recovers GradeBuzz from captured evidence.
+
 # Definitive lead-quality and controlled-volume hardening — July 19, 2026
 
 - Added a zero-credit quality layer that rejects entire failure families before Apollo/Hunter: multi-job roundup pages, malformed or expired postings, non-standard work programs, clearance/federal-delivery roles, outsourcing/BPO intermediaries, and contextual role collisions.

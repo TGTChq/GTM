@@ -12,7 +12,9 @@ from urllib.parse import quote
 import config
 from company_identity import normalize_company_name
 from domain_utils import normalize_company_domain
+from job_filter import normalize_text
 from job_signal import annotate_job
+from validation_integrity import validation_fingerprint, utc_now_iso
 from http_utils import request_with_retry, safe_json
 
 logger = logging.getLogger(__name__)
@@ -46,6 +48,7 @@ REQUIRED_FIELDS = [
     "Hiring Manager",
     "HM Title",
     "LinkedIn",
+    "Apollo Person ID",
     "Email",
     "Email Source",
     "Apollo Email Status",
@@ -66,6 +69,8 @@ REQUIRED_FIELDS = [
     "Contact Alignment",
     "Email Validation",
     "Validation Version",
+    "Validated At",
+    "Validation Fingerprint",
     "Evidence Bundle",
     "Status",
     "Error",
@@ -124,10 +129,25 @@ def _job_to_fields(job: Dict) -> Dict:
     official_source = (
         job.get("canonical_source_url")
         or job.get("official_source_url")
+        or job.get("official_job_url")
         or job.get("job_url_selected")
         or job.get("job_apply_link")
         or job.get("job_google_link")
     )
+    official_source_type = (
+        job.get("canonical_source_type")
+        or job.get("official_job_source_type")
+        or job.get("job_url_source")
+    )
+    source_state = str(job.get("official_job_status") or "")
+    canonical_active_status = job.get("canonical_active_status")
+    if not canonical_active_status and source_state:
+        canonical_active_status = {
+            "ACTIVE_VERIFIED": "verified",
+            "INACTIVE_VERIFIED": "broken",
+            "SOURCE_TEMPORARILY_UNAVAILABLE": "unverified_review",
+            "SOURCE_UNRESOLVED": "unverified_review",
+        }.get(source_state, source_state.lower())
     fields = {
         "Lead Key": job.get("lead_key"),
         "Company": job.get("canonical_company_name") or job.get("canonical_employer_name") or job.get("employer_name"),
@@ -144,12 +164,12 @@ def _job_to_fields(job: Dict) -> Dict:
         "Matched Role": job.get("_matched_role"),
         "Role Bucket": job.get("_role_bucket"),
         "Job URL": official_source,
-        "Job Source": job.get("canonical_source_type") or job.get("job_publisher"),
+        "Job Source": official_source_type or job.get("job_publisher"),
         "Posted At": job.get("canonical_published_at") or job.get("job_posted_at_datetime_utc") or job.get("job_posted_at_timestamp"),
         "Job Freshness": job.get("job_freshness"),
         "Job Age Days": job.get("job_age_days"),
-        "Job URL Status": job.get("canonical_active_status") or job.get("job_url_status"),
-        "Job URL Source": job.get("canonical_source_type") or job.get("job_url_source"),
+        "Job URL Status": canonical_active_status or job.get("job_url_status"),
+        "Job URL Source": official_source_type,
         "Job Signal Notes": " | ".join(
             part for part in (
                 job.get("job_signal_notes"),
@@ -165,6 +185,7 @@ def _job_to_fields(job: Dict) -> Dict:
         "Hiring Manager": job.get("hiring_manager_name"),
         "HM Title": job.get("hiring_manager_title"),
         "LinkedIn": job.get("hiring_manager_linkedin"),
+        "Apollo Person ID": job.get("hiring_manager_person_id"),
         "Email": job.get("hiring_manager_email"),
         "Email Source": job.get("hiring_manager_email_source"),
         "Apollo Email Status": job.get("apollo_email_status"),
@@ -185,10 +206,14 @@ def _job_to_fields(job: Dict) -> Dict:
         "Contact Alignment": _gate_state(job, "contact"),
         "Email Validation": _gate_state(job, "email"),
         "Validation Version": job.get("_validation_version") or (config.VALIDATION_VERSION if strict_state else None),
+        "Validated At": job.get("_validation_timestamp") or (utc_now_iso() if strict_state else None),
         "Evidence Bundle": _evidence_bundle_text(job) if strict_state else None,
         "Status": config.AIRTABLE_STATUS_PENDING,
     }
-    return _clean_fields(fields)
+    cleaned = _clean_fields(fields)
+    if strict_state:
+        cleaned["Validation Fingerprint"] = validation_fingerprint(cleaned)
+    return cleaned
 
 
 def _get_existing_leads() -> Dict[str, Dict]:
@@ -280,6 +305,35 @@ def _active_existing_company_keys(existing: Dict[str, Dict]) -> Set[str]:
     return keys
 
 
+def get_active_existing_company_keys_for_pipeline() -> Set[str]:
+    """Return company keys in the same format used by hiring_manager.
+
+    The daily target is a target of *new* Airtable accounts.  Suppressing a
+    company only after reaching 30 upstream can leave fewer than 30 created
+    rows, so active Airtable accounts are excluded before Apollo and before the
+    FINAL_PASS counter is evaluated.
+    """
+    validate_preflight()
+    existing = _get_existing_leads()
+    result: Set[str] = set()
+    retryable_statuses = {
+        str(config.AIRTABLE_STATUS_ERROR).strip().lower(),
+        str(config.AIRTABLE_STATUS_REJECTED).strip().lower(),
+    }
+    for record in existing.values():
+        fields = record.get("fields") or {}
+        status = str(fields.get("Status") or "").strip().lower()
+        if status in retryable_statuses:
+            continue
+        domain = normalize_company_domain(fields.get("Website"))
+        if domain:
+            result.add(domain)
+        company = normalize_text(fields.get("Company") or "")
+        if company:
+            result.add(company)
+    return result
+
+
 def _ensure_job_signal(job: Dict) -> Dict:
     required = ("job_freshness", "job_url_status", "job_url_selected")
     if all(job.get(key) not in (None, "") for key in required):
@@ -354,10 +408,12 @@ def push_leads(jobs: List[Dict], batch_size: int = 10) -> Dict:
             })
 
         if not existing_fields.get("Job URL Status"):
+            canonical_fields = _job_to_fields(job)
             patch_fields.update({
-                "Job URL": job.get("job_url_selected") or existing_fields.get("Job URL"),
-                "Job URL Status": job.get("job_url_status"),
-                "Job URL Source": job.get("job_url_source"),
+                "Job URL": canonical_fields.get("Job URL") or existing_fields.get("Job URL"),
+                "Job URL Status": canonical_fields.get("Job URL Status"),
+                "Job URL Source": canonical_fields.get("Job URL Source"),
+                "Official Source": canonical_fields.get("Official Source"),
                 "Job Signal Notes": job.get("job_signal_notes"),
             })
 

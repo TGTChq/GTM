@@ -99,6 +99,7 @@ class RunDailyFinalPassV02Tests(unittest.TestCase):
                 patch.object(run_daily, "run_audit", return_value=audit),
                 patch.object(run_daily, "run_precontact_qualification", return_value=qualification),
                 patch.object(run_daily, "run_hiring_manager_identification", return_value=enriched) as hm_mock,
+                patch.object(run_daily.airtable_client, "get_active_existing_company_keys_for_pipeline", return_value={"old.com"}),
                 patch.object(run_daily.airtable_client, "push_leads", return_value=airtable),
                 patch.object(run_daily, "save_observability_report", return_value=str(root / "evidence.json")),
             ):
@@ -110,6 +111,7 @@ class RunDailyFinalPassV02Tests(unittest.TestCase):
         self.assertEqual(registry.marked, [{"job_id": "j1"}])
         self.assertEqual(hm_mock.call_args.kwargs["target_final_pass_leads"], 1)
         self.assertIsNone(hm_mock.call_args.kwargs["target_reviewable_leads"])
+        self.assertEqual(hm_mock.call_args.kwargs["exclude_company_keys"], {"old.com"})
 
 
 if __name__ == "__main__":

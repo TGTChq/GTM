@@ -9,6 +9,8 @@ from evidence_types import EvidenceBundle, EvidenceItem, EvidenceStatus, FactVal
 from job_fact_extractor import extract_job_facts
 from job_quality import assess_quality_guard, normalize_job_identity
 from job_source_resolver import JobSourceResolver, ResolvedJobSource, title_materially_differs
+from job_signal import classify_url_source
+from domain_utils import normalize_company_domain
 from reason_codes import ReasonCode
 
 
@@ -70,11 +72,19 @@ class JobGate:
                 retryable=True, next_action="retry_source_then_replace",
                 metadata={"source": source.to_dict()},
             )
-        if source.state != "ACTIVE_VERIFIED" or not source.official:
+        company_domain = normalize_company_domain(candidate.get("employer_website") or "")
+        resolved_source_type = classify_url_source(source.source_url, company_domain)
+        if (
+            source.state != "ACTIVE_VERIFIED"
+            or not source.official
+            or resolved_source_type == "aggregator"
+        ):
+            source_payload = source.to_dict()
+            source_payload["defense_source_type"] = resolved_source_type
             return GateDecision(
                 "job", GateState.UNVERIFIED, ReasonCode.UNVERIFIED_OFFICIAL_SOURCE,
                 retryable=source.retryable, next_action="retry_source_then_replace",
-                metadata={"source": source.to_dict()},
+                metadata={"source": source_payload},
             )
 
         facts = extract_job_facts(candidate, source)
@@ -89,11 +99,15 @@ class JobGate:
         if not active.verified:
             return _unknown("job", ReasonCode.UNVERIFIED_JOB_STATUS, bundle, source)
         if active.value is False:
-            return _reject(ReasonCode.REJECT_JOB_INACTIVE, bundle, source, secondary)
+            if active.verified:
+                return _reject(ReasonCode.REJECT_JOB_INACTIVE, bundle, source, secondary)
+            return _unknown("job", ReasonCode.UNVERIFIED_JOB_STATUS, bundle, source, secondary)
 
         employment = facts["employment_type"]
         if employment.value in _EMPLOYMENT_REASONS:
-            return _reject(_EMPLOYMENT_REASONS[employment.value], bundle, source, secondary)
+            if employment.verified:
+                return _reject(_EMPLOYMENT_REASONS[employment.value], bundle, source, secondary)
+            return _unknown("job", ReasonCode.UNVERIFIED_EMPLOYMENT_TYPE, bundle, source, secondary)
         if not employment.verified or employment.value != "full_time":
             return _unknown("job", ReasonCode.UNVERIFIED_EMPLOYMENT_TYPE, bundle, source, secondary)
         duration = facts["employment_duration"]
@@ -102,22 +116,32 @@ class JobGate:
 
         arrangement = facts["work_arrangement"]
         if arrangement.value in _ARRANGEMENT_REASONS:
-            return _reject(_ARRANGEMENT_REASONS[arrangement.value], bundle, source, secondary)
+            if arrangement.verified:
+                return _reject(_ARRANGEMENT_REASONS[arrangement.value], bundle, source, secondary)
+            return _unknown("job", ReasonCode.UNVERIFIED_WORK_ARRANGEMENT, bundle, source, secondary)
         if not arrangement.verified or arrangement.value != "remote":
             return _unknown("job", ReasonCode.UNVERIFIED_WORK_ARRANGEMENT, bundle, source, secondary)
 
         market = facts["intent_market"]
         if market.value == "foreign_only":
-            return _reject(ReasonCode.REJECT_NON_US_SCOPE, bundle, source, secondary)
+            if market.verified:
+                return _reject(ReasonCode.REJECT_NON_US_SCOPE, bundle, source, secondary)
+            return _unknown("job", ReasonCode.UNVERIFIED_INTENT_MARKET, bundle, source, secondary)
         if not market.verified or market.value != "us_market":
             return _unknown("job", ReasonCode.UNVERIFIED_INTENT_MARKET, bundle, source, secondary)
 
         if facts["security_clearance"].value == "required":
-            return _reject(ReasonCode.REJECT_SECURITY_CLEARANCE_REQUIRED, bundle, source, secondary)
+            if facts["security_clearance"].verified:
+                return _reject(ReasonCode.REJECT_SECURITY_CLEARANCE_REQUIRED, bundle, source, secondary)
+            return _unknown("job", ReasonCode.UNVERIFIED_SOURCE_CONFLICT, bundle, source, secondary)
         if facts["professional_license"].value == "required":
-            return _reject(ReasonCode.REJECT_MANDATORY_PROFESSIONAL_LICENSE, bundle, source, secondary)
+            if facts["professional_license"].verified:
+                return _reject(ReasonCode.REJECT_MANDATORY_PROFESSIONAL_LICENSE, bundle, source, secondary)
+            return _unknown("job", ReasonCode.UNVERIFIED_SOURCE_CONFLICT, bundle, source, secondary)
         if facts["physical_facility"].value == "required":
-            return _reject(ReasonCode.REJECT_PHYSICAL_FACILITY_REQUIREMENT, bundle, source, secondary)
+            if facts["physical_facility"].verified:
+                return _reject(ReasonCode.REJECT_PHYSICAL_FACILITY_REQUIREMENT, bundle, source, secondary)
+            return _unknown("job", ReasonCode.UNVERIFIED_SOURCE_CONFLICT, bundle, source, secondary)
 
         return GateDecision(
             "job", GateState.PASS, "JOB_PASS", secondary,
@@ -140,6 +164,19 @@ class JobGate:
                 "official_job_url": source.get("source_url") or "",
                 "official_job_source_type": source.get("source_type") or "",
                 "official_job_status": source.get("state") or "",
+                # Canonical aliases are retained for downstream consumers that
+                # predate the explicit official_job_* field names.
+                "canonical_source_url": source.get("source_url") or "",
+                "canonical_source_type": source.get("source_type") or "",
+                "canonical_active_status": (
+                    "verified"
+                    if source.get("state") == "ACTIVE_VERIFIED"
+                    else "broken"
+                    if source.get("state") == "INACTIVE_VERIFIED"
+                    else "unverified_review"
+                    if source.get("state")
+                    else ""
+                ),
                 "official_job_description": source.get("description") or "",
             }
         )
@@ -178,7 +215,14 @@ def _reject(reason, bundle, source, secondary=None):
 
 
 def _unknown(gate, reason, bundle, source, secondary=None):
+    weak_provider_signal = any(
+        str(getattr(fact.status, "value", fact.status)) == EvidenceStatus.WEAK_PROVIDER_SIGNAL.value
+        for fact in bundle.facts.values()
+    )
+    retryable = bool(source.retryable or weak_provider_signal)
     return GateDecision(
         gate, GateState.UNVERIFIED, reason, list(secondary or []), bundle,
-        retryable=False, next_action="discard_and_replace", metadata={"source": source.to_dict()},
+        retryable=retryable,
+        next_action="retry_source_then_replace" if retryable else "discard_and_replace",
+        metadata={"source": source.to_dict(), "weak_provider_signal": weak_provider_signal},
     )

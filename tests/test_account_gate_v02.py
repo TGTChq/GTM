@@ -80,6 +80,18 @@ class AccountGateV02Tests(unittest.TestCase):
         self.assertEqual(decision.state, GateState.REJECT)
         self.assertEqual(str(decision.primary_reason.value), "REJECT_GOVERNMENT")
 
+    def test_online_media_industry_rejects(self):
+        decision = AccountGate(_Resolver(
+            "We publish real-time financial news and market information for investors."
+        )).evaluate(
+            org=org(industry="Online Media"),
+            input_company_name="Example Corp",
+            input_domain="example.com",
+            jobs=[],
+        )
+        self.assertEqual(decision.state, GateState.REJECT)
+        self.assertEqual(str(decision.primary_reason.value), "REJECT_EXCLUDED_INDUSTRY")
+
 
 if __name__ == "__main__":
     unittest.main()

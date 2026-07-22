@@ -61,6 +61,9 @@ EVIDENCE_OUTPUT_DIR = str(ARTIFACT_ROOT / "evidence")
 SOURCE_CACHE_DIR = str(Path(STATE_DIR) / "source_cache")
 ORGANIZATION_CACHE_DIR = str(Path(STATE_DIR) / "organization_cache")
 REROUTE_STATE_FILE = str(Path(STATE_DIR) / "reroute_state.json")
+RECOVERABLE_JOBS_FILE = str(Path(STATE_DIR) / "recoverable_jobs.json")
+FINAL_PASS_INVENTORY_FILE = str(Path(STATE_DIR) / "final_pass_inventory.json")
+PIPELINE_CHECKPOINT_FILE = str(Path(STATE_DIR) / "pipeline_checkpoint.json")
 SEEN_JOBS_FILE = str(Path(STATE_DIR) / "seen_jobs.json")
 CRM_EXCLUSION_FILE = os.getenv(
     "CRM_EXCLUSION_FILE", str(BASE_DIR / "data" / "exclusions" / "crm_companies.csv")
@@ -86,15 +89,21 @@ for directory in (
 
 # ---------- Final-pass architecture ----------
 FINAL_PASS_PIPELINE_ENABLED = _env_bool("FINAL_PASS_PIPELINE_ENABLED", True)
-VALIDATION_VERSION = os.getenv("VALIDATION_VERSION", "tgtc-final-pass-v0.2")
+VALIDATION_VERSION = os.getenv("VALIDATION_VERSION", "tgtc-final-pass-v0.5")
+VALIDATION_SIGNING_KEY = os.getenv("VALIDATION_SIGNING_KEY", "")
 # Source and company-site retrieval is bounded and cached.  Disabling fetches is
 # intended only for deterministic offline replay; it does not relax any gate.
 JOB_SOURCE_FETCH_ENABLED = _env_bool("JOB_SOURCE_FETCH_ENABLED", True)
 JOB_SOURCE_MAX_CANDIDATES = _env_int("JOB_SOURCE_MAX_CANDIDATES", 8)
+JOB_SOURCE_DISCOVERY_MAX_PAGES = _env_int("JOB_SOURCE_DISCOVERY_MAX_PAGES", 8)
+JOB_SOURCE_DISCOVERY_MAX_BOARD_PAGES = _env_int(
+    "JOB_SOURCE_DISCOVERY_MAX_BOARD_PAGES", 4
+)
 JOB_SOURCE_MAX_REDIRECTS = _env_int("JOB_SOURCE_MAX_REDIRECTS", 5)
 JOB_SOURCE_ATTEMPTS_PER_URL = _env_int("JOB_SOURCE_ATTEMPTS_PER_URL", 2)
 JOB_SOURCE_TIMEOUT_SECONDS = _env_int("JOB_SOURCE_TIMEOUT_SECONDS", 12)
 JOB_SOURCE_CACHE_TTL_HOURS = _env_int("JOB_SOURCE_CACHE_TTL_HOURS", 24)
+JOB_SOURCE_MAX_ACTIVE_AGE_DAYS = _env_int("JOB_SOURCE_MAX_ACTIVE_AGE_DAYS", 45)
 COMPANY_SOURCE_FETCH_ENABLED = _env_bool("COMPANY_SOURCE_FETCH_ENABLED", True)
 COMPANY_SOURCE_MAX_PAGES = _env_int("COMPANY_SOURCE_MAX_PAGES", 3)
 COMPANY_SOURCE_TIMEOUT_SECONDS = _env_int("COMPANY_SOURCE_TIMEOUT_SECONDS", 10)
@@ -102,6 +111,9 @@ COMPANY_SOURCE_CACHE_TTL_HOURS = _env_int("COMPANY_SOURCE_CACHE_TTL_HOURS", 168)
 FINAL_PASS_MICROBATCH_QUERY_UNITS = _env_int("FINAL_PASS_MICROBATCH_QUERY_UNITS", 6)
 FINAL_PASS_MAX_TOPUP_ITERATIONS = _env_int("FINAL_PASS_MAX_TOPUP_ITERATIONS", 50)
 FINAL_PASS_MAX_RUNTIME_SECONDS = _env_int("FINAL_PASS_MAX_RUNTIME_SECONDS", 3300)
+FINAL_PASS_MAX_EMPTY_QUERY_CYCLES = _env_int(
+    "FINAL_PASS_MAX_EMPTY_QUERY_CYCLES", 2
+)
 DRIFT_AUDIT_SAMPLE_SIZE = _env_int("DRIFT_AUDIT_SAMPLE_SIZE", 10)
 
 # ---------- JSearch ----------
@@ -142,6 +154,10 @@ JSEARCH_REMOTE_FILTER_PARAMETER = os.getenv(
 JSEARCH_LOOKBACK_QUERY_VARIANTS = _env_json(
     "JSEARCH_LOOKBACK_QUERY_VARIANTS",
     ["linkedin", "indeed", "glassdoor", "hiring"],
+)
+JSEARCH_TOPUP_DATE_WINDOWS = _env_json(
+    "JSEARCH_TOPUP_DATE_WINDOWS",
+    ["week", "month", "all"],
 )
 # When one-page mode is intentionally configured, use only the remaining
 # request-unit budget on deeper pages for roles whose first-page results survive
@@ -297,6 +313,12 @@ APOLLO_EXCLUDED_INDUSTRY_KEYWORDS = [
     "outsourcing/offshoring",
     "events services",
     "broadcast media",
+    "online media",
+    "internet news",
+    "news media",
+    "media production",
+    "digital news",
+    "financial news",
     "newspapers",
     "book publishing",
     "chemicals",
@@ -320,6 +342,11 @@ CONTACT_MAX_REROUTE_ATTEMPTS_PER_BUCKET = _env_int(
     "CONTACT_MAX_REROUTE_ATTEMPTS_PER_BUCKET", 8
 )
 REROUTE_STATE_TTL_DAYS = _env_int("REROUTE_STATE_TTL_DAYS", 7)
+REROUTE_TEMPORARY_TTL_HOURS = _env_int("REROUTE_TEMPORARY_TTL_HOURS", 12)
+REROUTE_PERMANENT_TTL_DAYS = _env_int("REROUTE_PERMANENT_TTL_DAYS", 30)
+REQUIRE_CURRENT_EMPLOYMENT_EVIDENCE = _env_bool("REQUIRE_CURRENT_EMPLOYMENT_EVIDENCE", True)
+REQUIRE_CONTACT_LINKEDIN = _env_bool("REQUIRE_CONTACT_LINKEDIN", True)
+REQUIRE_US_CONTACT_TERRITORY = _env_bool("REQUIRE_US_CONTACT_TERRITORY", True)
 # Founders remain a legitimate fallback for genuinely small companies, but not
 # for mid-market accounts where a functional leader should exist.
 FOUNDER_FALLBACK_MAX_EMPLOYEES = _env_int(
@@ -341,6 +368,12 @@ AIRTABLE_STATUS_APPROVED = os.getenv("AIRTABLE_STATUS_APPROVED", "Approved")
 AIRTABLE_STATUS_REJECTED = os.getenv("AIRTABLE_STATUS_REJECTED", "Rejected")
 AIRTABLE_STATUS_ENROLLED = os.getenv("AIRTABLE_STATUS_ENROLLED", "Enrolled")
 AIRTABLE_STATUS_ERROR = os.getenv("AIRTABLE_STATUS_ERROR", "Error")
+APPROVED_REVALIDATION_MAX_AGE_HOURS = _env_int("APPROVED_REVALIDATION_MAX_AGE_HOURS", 24)
+APPROVED_REVALIDATE_JOB_SOURCE = _env_bool("APPROVED_REVALIDATE_JOB_SOURCE", True)
+SLA_REQUIRE_NET_NEW_AIRTABLE = _env_bool("SLA_REQUIRE_NET_NEW_AIRTABLE", True)
+RECOVERABLE_JOB_TTL_DAYS = _env_int("RECOVERABLE_JOB_TTL_DAYS", 7)
+RECOVERABLE_JOB_MAX_ATTEMPTS = _env_int("RECOVERABLE_JOB_MAX_ATTEMPTS", 5)
+FINAL_PASS_INVENTORY_TTL_DAYS = _env_int("FINAL_PASS_INVENTORY_TTL_DAYS", 7)
 
 # ---------- Instantly ----------
 INSTANTLY_API_KEY = os.getenv("INSTANTLY_API_KEY", "")
@@ -664,6 +697,7 @@ INTERMEDIARY_JOB_DOMAINS = [
     "builtinaustin.com",
     "builtincolorado.com",
     "builtinseattle.com",
+    "builtinsf.com",
     "bebee.com",
     "jobleads.com",
     "salutemyjob.com",
@@ -1001,7 +1035,7 @@ NON_US_WEBSITE_TLDS = (
 )
 TRUSTED_US_JOB_BOARD_DOMAINS = [
     "builtinchicago.org", "builtinboston.com", "builtinnyc.com", "builtinla.com",
-    "builtinaustin.com", "builtincolorado.com", "builtinseattle.com", "builtin.com",
+    "builtinaustin.com", "builtincolorado.com", "builtinseattle.com", "builtinsf.com", "builtin.com",
 ]
 
 # Approximate bounding box for the 50 US states + DC. Puerto Rico is handled by text fields.

@@ -15,6 +15,7 @@ from pathlib import Path
 import airtable_client
 import config
 import instantly_client
+from approved_revalidation import revalidate_approved_record
 
 Path(config.LOG_DIR).mkdir(parents=True, exist_ok=True)
 logging.basicConfig(
@@ -38,13 +39,33 @@ def run() -> dict:
         logger.info("No approved leads waiting")
         return result
 
-    result = instantly_client.enroll_approved_leads(approved)
+    safe_records = []
+    revalidation_failures = []
+    for record in approved:
+        try:
+            valid, reason = revalidate_approved_record(record)
+        except Exception as exc:
+            valid, reason = False, f"Approved revalidation error: {exc}"
+        if valid:
+            safe_records.append(record)
+        else:
+            revalidation_failures.append({
+                "record_id": record.get("id", ""),
+                "email": (record.get("fields") or {}).get("Email", ""),
+                "error": reason,
+            })
+            airtable_client.mark_error([record.get("id", "")], reason)
+
+    result = instantly_client.enroll_approved_leads(safe_records)
     if result["enrolled_record_ids"]:
         airtable_client.mark_enrolled(result["enrolled_record_ids"])
 
     for failure in result["failures"]:
         airtable_client.mark_error([failure["record_id"]], failure["error"])
 
+    result["failures"] = [*revalidation_failures, *result["failures"]]
+    result["failed"] = len(result["failures"])
+    result["revalidation_failed"] = len(revalidation_failures)
     result["approved"] = len(approved)
     logger.info("Enrollment result: %s", json.dumps(result, indent=2))
     return result

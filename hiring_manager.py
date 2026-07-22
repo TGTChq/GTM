@@ -802,6 +802,7 @@ def _process_company_strict(company_jobs: List[Dict]) -> Tuple[List[Dict], Dict]
                     "hiring_manager_last_name": person.last_name,
                     "hiring_manager_title": person.title,
                     "hiring_manager_linkedin": person.linkedin_url,
+                    "hiring_manager_person_id": person.person_id,
                     "hiring_manager_email": person.email,
                     "hiring_manager_email_source": person.email_source,
                     "apollo_email_status": person.email_status,
@@ -1013,7 +1014,7 @@ def run_hiring_manager_identification(
     company_items.sort(key=_company_priority, reverse=True)
     total_candidate_companies = len(company_items)
     stop_reason = "candidate_pool_exhausted"
-    processed_company_keys: List[str] = []
+    processed_company_keys: List[str] = sorted(skipped_existing_company_keys)
 
     for index, (company_key, company_jobs) in enumerate(company_items, 1):
         logger.info("[%d/%d] Enriching %s", index, total_candidate_companies, company_key)

@@ -26,7 +26,13 @@ EXCLUDED_INDUSTRY_PATTERNS = {
     "chemical_manufacturing": [r"\bchemical manufacturing\b", r"\bmanufacturer of (?:specialty )?chemicals\b"],
     "book_publishing": [r"\bbook publish(?:er|ing)\b"],
     "events_services": [r"\bevent production company\b", r"\bevents services\b"],
-    "media_broadcasting_news": [r"\bbroadcast(?:ing| media) company\b", r"\binternet news (?:company|publisher)\b", r"\bmedia production studio\b"],
+    "media_broadcasting_news": [
+        r"\bbroadcast(?:ing| media) company\b",
+        r"\b(?:online|internet|digital|financial) news (?:company|publisher|platform|site|outlet)\b",
+        r"\b(?:online|news|digital|financial) media (?:company|publisher|platform|outlet)\b",
+        r"\bmedia production (?:studio|company|services)\b",
+        r"\bfinancial news and (?:data|media|information)\b",
+    ],
 }
 
 STAFFING_PATTERNS = [
@@ -73,6 +79,8 @@ ALLOWED_MODEL_PATTERNS = [
     r"\bwe (?:build|develop|create|make|manufacture|sell|operate|provide|offer|deliver)\b[^.\n]{0,180}\b(?:software|platform|products?|services?|solutions?|technology|tools?|equipment|consumer goods|financial services|logistics|education|training|analytics|security)\b",
     r"\bour (?:software|platform|product|service|solution|technology|tools?|business)\b[^.\n]{0,180}\b(?:helps?|enables?|supports?|serves?|provides?|automates?|connects?|protects?|manages?|delivers?)\b",
     r"\b(?:SaaS|software|technology|cybersecurity|analytics|e[- ]commerce|retail|manufacturing|logistics|financial services|education) (?:company|platform|provider|business|product|solutions?)\b",
+    r"\b(?:is|are) (?:an? |the )?(?:global |leading |independent )?(?:SaaS|software|technology|cybersecurity|analytics|e[- ]commerce|retail|manufacturing|logistics|financial services|education|training) (?:company|platform|provider|business)\b",
+    r"\bprovides?\b[^.\n]{0,180}\b(?:software|platform|products?|services?|solutions?|technology|tools?|equipment|financial services|logistics|education|training|analytics|security)\b",
 ]
 
 GENERIC_INDUSTRIES = {
@@ -93,14 +101,58 @@ def _find(patterns: List[str], text: str) -> List[str]:
     return evidence
 
 
-def _items(category: str, excerpts: List[str], source_url: str) -> List[EvidenceItem]:
+def _items(
+    category: str,
+    excerpts: List[str],
+    source_url: str,
+    *,
+    status: EvidenceStatus = EvidenceStatus.VERIFIED_OFFICIAL,
+    source_type: str = "company_website",
+    confidence: float = 0.97,
+) -> List[EvidenceItem]:
     return [
         EvidenceItem(
-            "business_model", category, EvidenceStatus.VERIFIED_OFFICIAL,
-            "company_website", source_url, excerpt, 0.97,
+            "business_model", category, status,
+            source_type, source_url, excerpt, confidence,
         )
         for excerpt in excerpts[:4]
     ]
+
+
+def _evidence_from_sources(
+    category: str,
+    patterns: List[str],
+    *,
+    official: str,
+    apollo: str,
+    job_text: str,
+    source_url: str,
+) -> List[EvidenceItem]:
+    evidence: List[EvidenceItem] = []
+    official_hits = _find(patterns, official)
+    if official_hits:
+        evidence.extend(_items(category, official_hits, source_url))
+    apollo_hits = _find(patterns, apollo)
+    if apollo_hits:
+        evidence.extend(_items(
+            category,
+            apollo_hits,
+            "",
+            status=EvidenceStatus.VERIFIED_CROSS_SOURCE,
+            source_type="apollo",
+            confidence=0.90,
+        ))
+    job_hits = _find(patterns, job_text)
+    if job_hits:
+        evidence.extend(_items(
+            category,
+            job_hits,
+            "",
+            status=EvidenceStatus.VERIFIED_CROSS_SOURCE,
+            source_type="job_provider",
+            confidence=0.86,
+        ))
+    return evidence
 
 
 def classify_business_model(
@@ -113,7 +165,6 @@ def classify_business_model(
 ) -> BusinessModelResult:
     official = re.sub(r"\s+", " ", str(company_text or "")).strip()
     apollo = re.sub(r"\s+", " ", f"{apollo_industry}. {apollo_description}").strip()
-    combined = f"{official}\n{apollo}\n{job_text}"[:250_000]
 
     for category, patterns, reason in (
         ("staffing_recruiting", STAFFING_PATTERNS, "REJECT_STAFFING"),
@@ -122,16 +173,30 @@ def classify_business_model(
         ("healthcare_delivery", HEALTHCARE_CORE_PATTERNS, "REJECT_HEALTHCARE"),
         ("government_delivery", GOVERNMENT_PATTERNS, "REJECT_GOVERNMENT"),
     ):
-        excerpts = _find(patterns, combined)
-        if excerpts:
-            return BusinessModelResult("EXCLUDED", category, reason, _items(category, excerpts, source_url))
+        evidence = _evidence_from_sources(
+            category,
+            patterns,
+            official=official,
+            apollo=apollo,
+            job_text=job_text,
+            source_url=source_url,
+        )
+        if evidence:
+            return BusinessModelResult("EXCLUDED", category, reason, evidence)
 
     for category, patterns in EXCLUDED_INDUSTRY_PATTERNS.items():
-        excerpts = _find(patterns, combined)
-        if excerpts:
+        evidence = _evidence_from_sources(
+            category,
+            patterns,
+            official=official,
+            apollo=apollo,
+            job_text=job_text,
+            source_url=source_url,
+        )
+        if evidence:
             return BusinessModelResult(
                 "EXCLUDED", category, "REJECT_EXCLUDED_INDUSTRY",
-                _items(category, excerpts, source_url),
+                evidence,
             )
 
     # Fail closed: arbitrary first-party page text is not a verified business
@@ -145,13 +210,24 @@ def classify_business_model(
             _items("commercial_product_or_service", allowed_excerpts, source_url),
         )
 
-    industry_norm = apollo_industry.strip().lower()
-    if len(apollo_description.strip()) >= 120 and industry_norm not in GENERIC_INDUSTRIES:
-        item = EvidenceItem(
-            "business_model", "commercial_product_or_service",
-            EvidenceStatus.VERIFIED_CROSS_SOURCE, "apollo",
-            excerpt=apollo_description[:700], confidence=0.82,
+    # Apollo can corroborate a business model only when its description contains
+    # an affirmative own-offering clause. Description length plus a non-generic
+    # industry is not evidence by itself; that permissive fallback allowed
+    # Benzinga to pass merely because its profile was detailed.
+    apollo_allowed = _find(ALLOWED_MODEL_PATTERNS, apollo_description)
+    if apollo_allowed:
+        return BusinessModelResult(
+            "ALLOWED",
+            "commercial_product_or_service",
+            "",
+            _items(
+                "commercial_product_or_service",
+                apollo_allowed,
+                "",
+                status=EvidenceStatus.VERIFIED_CROSS_SOURCE,
+                source_type="apollo",
+                confidence=0.88,
+            ),
         )
-        return BusinessModelResult("ALLOWED", "commercial_product_or_service", "", [item])
 
     return BusinessModelResult("UNKNOWN", "unknown", "UNVERIFIED_BUSINESS_MODEL", [])

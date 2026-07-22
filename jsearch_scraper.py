@@ -1153,28 +1153,35 @@ def _next_topup_query_spec(
         for value in config.JSEARCH_LOOKBACK_QUERY_VARIANTS
         if str(value).strip()
     ] or ["hiring"]
-    candidates: List[tuple[int, int, str]] = []
-    for variant_index, variant in enumerate(variants):
-        variant_details = [
-            detail for detail in page_details
-            if str(detail.get("query_variant") or "").lower() == variant
-            and str(detail.get("mode") or "").lower() in {"lookback", "topup_lookback"}
-        ]
-        next_page = 1 + max(
-            (_query_page_last(detail) for detail in variant_details), default=0
-        )
-        if next_page <= max_page:
-            candidates.append((next_page, variant_index, variant))
+    date_windows = [
+        str(value).strip().lower()
+        for value in config.JSEARCH_TOPUP_DATE_WINDOWS
+        if str(value).strip()
+    ] or [config.JSEARCH_ADAPTIVE_LOOKBACK_DATE_POSTED]
+    candidates: List[tuple[int, int, int, str, str]] = []
+    for window_index, date_window in enumerate(date_windows):
+        for variant_index, variant in enumerate(variants):
+            variant_details = [
+                detail for detail in page_details
+                if str(detail.get("query_variant") or "").lower() == variant
+                and str(detail.get("date_posted") or "").lower() == date_window
+                and str(detail.get("mode") or "").lower() in {"lookback", "topup_lookback"}
+            ]
+            next_page = 1 + max(
+                (_query_page_last(detail) for detail in variant_details), default=0
+            )
+            if next_page <= max_page:
+                candidates.append((next_page, window_index, variant_index, variant, date_window))
     if not candidates:
         return None
-    next_page, _variant_index, variant = min(candidates)
+    next_page, _window_index, _variant_index, variant, date_window = min(candidates)
     batch = min(pages_per_query, max_page - next_page + 1)
     return {
         "page": next_page,
         "num_pages": batch,
         "last_page": next_page + batch - 1,
         "query_variant": variant,
-        "date_posted": config.JSEARCH_ADAPTIVE_LOOKBACK_DATE_POSTED,
+        "date_posted": date_window,
         "mode": "topup_lookback",
     }
 
@@ -1182,6 +1189,7 @@ def _next_topup_query_spec(
 def _targeted_topup_role_order(
     prior_query_metrics: Dict[str, Dict],
     preferred_search_roles: Optional[List[str]] = None,
+    exclude_search_roles: Optional[set[str]] = None,
 ) -> List[str]:
     """Prioritize roles that produced reviewable contacts, then viable jobs."""
     preferred = Counter(str(role) for role in (preferred_search_roles or []) if role)
@@ -1212,13 +1220,14 @@ def _targeted_topup_role_order(
         or int(metric_for(role).get("new_prefilter_viable_candidates", 0)) > 0
         or int(metric_for(role).get("prefilter_viable_candidates", 0)) > 0
     ]
-    if len(productive) < 12:
-        productive.extend(
-            role for role in roles
-            if role not in productive and int(metric_for(role).get("raw_jobs", 0)) > 0
-        )
-    if not productive:
-        productive = roles
+    productive.extend(
+        role for role in roles
+        if role not in productive and int(metric_for(role).get("raw_jobs", 0)) > 0
+    )
+    # Low-yield first pages are not proof that a role has no valid inventory.
+    # Keep the entire approved catalog in the breadth cycle, after the live-yield
+    # leaders, so deeper pages and wider date windows are eventually explored.
+    productive.extend(role for role in roles if role not in productive)
 
     by_bucket: Dict[str, List[str]] = defaultdict(list)
     for role in productive:
@@ -1236,7 +1245,8 @@ def _targeted_topup_role_order(
         for bucket in bucket_order:
             if by_bucket[bucket]:
                 ordered.append(by_bucket[bucket].pop(0))
-    return ordered
+    excluded = {str(role) for role in (exclude_search_roles or set()) if role}
+    return [role for role in ordered if role not in excluded]
 
 
 def run_targeted_topup_scrape(
@@ -1245,6 +1255,7 @@ def run_targeted_topup_scrape(
     prior_query_metrics: Dict[str, Dict],
     exclude_job_ids: Optional[set[str]] = None,
     preferred_search_roles: Optional[List[str]] = None,
+    exclude_search_roles: Optional[set[str]] = None,
     unit_budget: int,
     target_prefilter_viable: int,
     round_number: int,
@@ -1261,7 +1272,7 @@ def run_targeted_topup_scrape(
     target_prefilter_viable = max(0, int(target_prefilter_viable))
     round_number = max(1, int(round_number))
     ordered_roles = _targeted_topup_role_order(
-        prior_query_metrics, preferred_search_roles
+        prior_query_metrics, preferred_search_roles, exclude_search_roles
     )
     candidates_by_job_id: Dict[str, List[Dict]] = {}
     failed_roles: List[str] = []
@@ -1271,6 +1282,8 @@ def run_targeted_topup_scrape(
         "mode": "reviewable_topup",
         "topup_round": round_number,
         "queries_planned": len(ordered_roles),
+        "planned_search_roles": list(ordered_roles),
+        "queried_search_roles": [],
         "queries_scheduled": 0,
         "queries_attempted": 0,
         "queries_succeeded": 0,
@@ -1336,6 +1349,7 @@ def run_targeted_topup_scrape(
 
         stats["queries_attempted"] += 1
         stats["queries_scheduled"] += 1
+        stats["queried_search_roles"].append(search_role)
         stats["estimated_request_units"] += num_pages
         logger.info(
             "[%s] Reviewable top-up round %d: %s pages %d-%d (%s)",

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Dict, Iterable
 
+from validation_integrity import utc_now_iso
+
 from decision_types import FinalDecision, FinalState, GateDecision, GateState, stable_unique
 from reason_codes import ReasonCode
 
@@ -105,6 +107,7 @@ def annotate_final_decision(lead: dict, gates: Dict[str, GateDecision]) -> dict:
             "_counts_toward_target": payload["counts_toward_target"],
             "_airtable_relevance": payload["airtable_relevance"],
             "_validation_version": payload["validation_version"],
+            "_validation_timestamp": lead.get("_validation_timestamp") or utc_now_iso(),
             "_gate_decisions": payload["gate_decisions"],
         }
     )

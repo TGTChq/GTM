@@ -139,6 +139,7 @@ class RunDailyTopupIntegrationTests(unittest.TestCase):
                     "total_query_units": 4,
                     "stop_reason": "reviewable_lead_target_reached",
                 })) as topup_mock,
+                patch.object(run_daily.airtable_client, "get_active_existing_company_keys_for_pipeline", return_value=set()),
                 patch.object(run_daily.airtable_client, "push_leads", return_value=airtable_result) as push_mock,
             ):
                 summary = run_daily.run_pipeline()

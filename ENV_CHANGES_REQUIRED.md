@@ -149,4 +149,76 @@ or talent-pool posts, and generic `Anywhere` records that have no independent US
 hiring evidence. Founder/CEO fallback is limited to companies with at most 99
 employees, and Airtable suppresses an account already present under another
 contact or role bucket when its lifecycle is still active. Rejected and Error
-records may re-enter. No new Airtable columns are required.
+records may re-enter. FINAL_PASS v0.5 adds the integrity columns documented above.
+
+
+## FINAL_PASS v0.5 operational hardening
+
+Add these variables to the Railway service before restoring the production start command:
+
+```env
+VALIDATION_SIGNING_KEY=<long random secret, at least 32 characters>
+JOB_SOURCE_MAX_ACTIVE_AGE_DAYS=45
+REROUTE_TEMPORARY_TTL_HOURS=12
+REROUTE_PERMANENT_TTL_DAYS=30
+REQUIRE_CURRENT_EMPLOYMENT_EVIDENCE=1
+REQUIRE_CONTACT_LINKEDIN=1
+REQUIRE_US_CONTACT_TERRITORY=1
+APPROVED_REVALIDATION_MAX_AGE_HOURS=24
+APPROVED_REVALIDATE_JOB_SOURCE=1
+SLA_REQUIRE_NET_NEW_AIRTABLE=1
+RECOVERABLE_JOB_TTL_DAYS=7
+RECOVERABLE_JOB_MAX_ATTEMPTS=5
+FINAL_PASS_INVENTORY_TTL_DAYS=7
+```
+
+Generate `VALIDATION_SIGNING_KEY` locally and store it only in Railway. Do not commit it or paste it into chat. A suitable PowerShell command is:
+
+```powershell
+[Convert]::ToHexString([Security.Cryptography.RandomNumberGenerator]::GetBytes(32)).ToLower()
+```
+
+The Airtable table now requires three additional integrity fields: `Apollo Person ID`, `Validated At`, and `Validation Fingerprint`. It also validates all fields listed in `AIRTABLE_SETUP.md` during `python validate_setup.py --live`.
+
+For exhaustive top-up, `0` means no arbitrary local cap; the search still terminates when the finite strategy space is exhausted and persists checkpoints between interrupted runs:
+
+```env
+JSEARCH_MAX_QUERIES_PER_RUN=0
+JSEARCH_MAX_ESTIMATED_UNITS_PER_RUN=0
+FINAL_PASS_MAX_TOPUP_ITERATIONS=0
+FINAL_PASS_MAX_RUNTIME_SECONDS=0
+MAX_ELIGIBLE_COMPANIES_PER_RUN=0
+```
+
+This does not guarantee that the market contains 30 valid new companies every day. It guarantees that an SLA miss is reported separately from technical success, recoverable candidates are retained, and a single empty microbatch cannot masquerade as full inventory exhaustion.
+## FINAL_PASS v0.5 production hardening
+
+Add these variables before deploying v0.5. Generate a unique signing secret; do not use the placeholder from `.env.example`.
+
+```env
+VALIDATION_VERSION=tgtc-final-pass-v0.5
+VALIDATION_SIGNING_KEY=<unique random secret of at least 32 characters>
+TARGET_FINAL_PASS_LEADS_PER_RUN=30
+JSEARCH_MAX_ESTIMATED_UNITS_PER_RUN=0
+MAX_ELIGIBLE_COMPANIES_PER_RUN=0
+FINAL_PASS_MICROBATCH_QUERY_UNITS=60
+FINAL_PASS_MAX_TOPUP_ITERATIONS=500
+FINAL_PASS_MAX_RUNTIME_SECONDS=10800
+FINAL_PASS_MAX_EMPTY_QUERY_CYCLES=2
+JOB_SOURCE_MAX_ACTIVE_AGE_DAYS=45
+REQUIRE_CURRENT_EMPLOYMENT_EVIDENCE=1
+REQUIRE_CONTACT_LINKEDIN=1
+REQUIRE_US_CONTACT_TERRITORY=1
+REROUTE_TEMPORARY_TTL_HOURS=12
+REROUTE_PERMANENT_TTL_DAYS=30
+APPROVED_REVALIDATION_MAX_AGE_HOURS=24
+APPROVED_REVALIDATE_JOB_SOURCE=1
+SLA_REQUIRE_NET_NEW_AIRTABLE=1
+RECOVERABLE_JOB_TTL_DAYS=7
+RECOVERABLE_JOB_MAX_ATTEMPTS=5
+FINAL_PASS_INVENTORY_TTL_DAYS=7
+```
+
+`0` for the JSearch and eligible-company caps means the pipeline is controlled by quota visibility, the finite search-plan state, the 500-iteration guard, and the three-hour runtime guard rather than the old arbitrary 370-unit/90-company ceiling. A missed target exits with code `2` and retains the checkpoint instead of reporting business success.
+
+Create these Airtable fields before the first v0.5 run: `Apollo Person ID` (single line text), `Validated At` (date with time), and `Validation Fingerprint` (single line text).

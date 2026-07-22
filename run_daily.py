@@ -19,12 +19,14 @@ import config
 from audit_filter import run_audit
 from hiring_manager import run_hiring_manager_identification
 from jsearch_scraper import run_daily_scrape
-from reviewable_topup import run_reviewable_topup
+from reviewable_topup import _merge_query_metrics, run_reviewable_topup
 from final_pass_topup import run_final_pass_topup
 from qualification_pipeline import run_precontact_qualification
-from job_filter import run_filter
+from job_filter import dedup_key, run_filter
 from pipeline_state import SeenJobsRegistry
+from pipeline_checkpoint import PipelineCheckpoint
 from observability import build_observability_report, save_observability_report
+from recovery_inventory import FinalPassInventory, RecoverableJobQueue
 
 Path(config.LOG_DIR).mkdir(parents=True, exist_ok=True)
 Path(config.RUN_SUMMARY_DIR).mkdir(parents=True, exist_ok=True)
@@ -53,22 +55,64 @@ def _fail(summary: dict, step: str, errors: list[str]) -> dict:
     return summary
 
 
+
+def _merge_recovery_jobs(scrape, recovery_jobs: list[dict]):
+    if not recovery_jobs:
+        return scrape
+    path = Path(scrape.output_path)
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    jobs = list(payload.get("jobs", []))
+    seen = {
+        (str(job.get("job_id") or ""), dedup_key(job))
+        for job in jobs
+    }
+    added = 0
+    for job in recovery_jobs:
+        marker = (str(job.get("job_id") or ""), dedup_key(job))
+        if marker in seen:
+            continue
+        jobs.append(job)
+        seen.add(marker)
+        added += 1
+    payload["jobs"] = jobs
+    payload["total_jobs"] = len(jobs)
+    payload.setdefault("stats", {})["recoverable_jobs_reinjected"] = added
+    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    scrape.total_jobs = len(jobs)
+    scrape.stats["recoverable_jobs_reinjected"] = added
+    return scrape
+
+
+def _lead_is_retryable(lead: dict) -> bool:
+    if str(lead.get("_final_state") or "") in {"REROUTE", "UNVERIFIED", "NEEDS_CHECK"}:
+        return True
+    return any(
+        bool((decision or {}).get("retryable"))
+        for decision in (lead.get("_gate_decisions") or {}).values()
+        if isinstance(decision, dict)
+    )
+
+
 def run_pipeline() -> dict:
     started = datetime.now()
     registry = SeenJobsRegistry()
+    recovery_queue = RecoverableJobQueue()
+    final_pass_inventory = FinalPassInventory()
+    checkpoint = PipelineCheckpoint()
     summary = {
         "started_at": started.isoformat(),
         "production_mode": config.PRODUCTION,
         "date_posted": config.DATE_POSTED,
         "steps": {},
         "success": False,
+        "technical_success": False,
+        "sla_success": False,
     }
 
     logger.info("=== STEP 1: SCRAPE ===")
     topup_enabled = bool(
         (
             config.FINAL_PASS_TOPUP_ENABLED
-            and config.FINAL_PASS_MAX_TOPUP_ITERATIONS > 0
             if config.FINAL_PASS_PIPELINE_ENABLED
             else config.JSEARCH_REVIEWABLE_TOPUP_ENABLED
             and config.JSEARCH_TOPUP_MAX_ROUNDS > 0
@@ -83,6 +127,21 @@ def run_pipeline() -> dict:
         # Closed-loop mode reserves the post-filter budget for queries selected
         # using actual Apollo contactability instead of spending it blindly.
         allow_adaptive=False if topup_enabled else None,
+    )
+    due_recovery_jobs = recovery_queue.due_jobs()
+    checkpoint_jobs = checkpoint.pending_jobs()
+    checkpoint_metrics = checkpoint.query_metrics()
+    if checkpoint_metrics:
+        scrape.stats["query_metrics"] = _merge_query_metrics(
+            checkpoint_metrics,
+            scrape.stats.get("query_metrics", {}),
+        )
+        scrape.stats["resumed_query_metric_roles"] = len(checkpoint_metrics)
+    scrape = _merge_recovery_jobs(scrape, [*checkpoint_jobs, *due_recovery_jobs])
+    initial_raw_payload = json.loads(Path(scrape.output_path).read_text(encoding="utf-8"))
+    checkpoint.append_jobs(
+        initial_raw_payload.get("jobs", []),
+        query_metrics=scrape.stats.get("query_metrics", {}),
     )
     summary["steps"]["scrape"] = {
         "success": scrape.success,
@@ -193,16 +252,37 @@ def run_pipeline() -> dict:
 
     logger.info("=== STEP 3: HIRING MANAGER ===")
     target_final_pass = config.get_final_pass_target()
+    existing_airtable_company_keys: set[str] = set()
+    if config.AIRTABLE_SUPPRESS_EXISTING_COMPANY:
+        try:
+            existing_airtable_company_keys = (
+                airtable_client.get_active_existing_company_keys_for_pipeline()
+            )
+            logger.info(
+                "Pre-excluding %d active Airtable company keys before FINAL_PASS counting",
+                len(existing_airtable_company_keys),
+            )
+        except Exception as exc:
+            logger.exception("Could not load existing Airtable companies")
+            if config.PRODUCTION:
+                return _fail(summary, "airtable_existing_companies", [str(exc)])
     logger.info(
-        "Daily throughput: target=%d FINAL_PASS leads, safety cap=%d eligible companies",
+        "Daily throughput: target=%d FINAL_PASS leads, eligible-company cap=%s",
         target_final_pass,
-        config.MAX_ELIGIBLE_COMPANIES_PER_RUN,
+        str(config.MAX_ELIGIBLE_COMPANIES_PER_RUN)
+        if config.MAX_ELIGIBLE_COMPANIES_PER_RUN > 0
+        else "unlimited",
     )
     enriched = run_hiring_manager_identification(
         hiring_input_path,
         target_final_pass_leads=target_final_pass if strict_runtime else None,
         target_reviewable_leads=None if strict_runtime else target_final_pass,
-        max_eligible_companies=config.MAX_ELIGIBLE_COMPANIES_PER_RUN,
+        max_eligible_companies=(
+            config.MAX_ELIGIBLE_COMPANIES_PER_RUN
+            if config.MAX_ELIGIBLE_COMPANIES_PER_RUN > 0
+            else None
+        ),
+        exclude_company_keys=existing_airtable_company_keys,
         output_suffix="initial",
     )
     summary["steps"]["topup"] = {
@@ -221,6 +301,7 @@ def run_pipeline() -> dict:
                 registry=registry,
                 target_final_pass_leads=target_final_pass,
                 max_eligible_companies=config.MAX_ELIGIBLE_COMPANIES_PER_RUN,
+                exclude_company_keys=existing_airtable_company_keys,
             )
         else:
             # Tiny test fixtures and rollback-mode payloads retain the legacy
@@ -332,7 +413,24 @@ def run_pipeline() -> dict:
 
     logger.info("=== STEP 4: AIRTABLE REVIEW QUEUE ===")
     enriched_payload = json.loads(Path(enriched.output_path).read_text(encoding="utf-8"))
-    airtable_result = airtable_client.push_leads(enriched_payload.get("jobs", []))
+    enriched_jobs = list(enriched_payload.get("jobs", []))
+    recoverable_jobs = [job for job in enriched_jobs if _lead_is_retryable(job)]
+    terminal_jobs = [
+        job for job in enriched_jobs
+        if str(job.get("_final_state") or "") in {"FINAL_PASS", "REJECT"}
+    ]
+    recovery_queue.upsert(recoverable_jobs)
+    recovery_queue.remove(terminal_jobs)
+    current_final_pass = [
+        job for job in enriched_jobs if str(job.get("_final_state") or "") == "FINAL_PASS"
+    ]
+    final_pass_inventory.stage(current_final_pass)
+    inventory_leads = final_pass_inventory.valid_leads()
+    airtable_candidates = list({
+        str(job.get("lead_key") or f"{job.get('employer_name')}|{job.get('job_id')}"): job
+        for job in [*inventory_leads, *enriched_jobs]
+    }.values())
+    airtable_result = airtable_client.push_leads(airtable_candidates)
     summary["steps"]["airtable"] = airtable_result
     logger.info(
         "Airtable result: reviewable=%d created=%d skipped_existing=%d "
@@ -349,6 +447,8 @@ def run_pipeline() -> dict:
             "airtable",
             [f"{airtable_result['failed']} Airtable records failed to persist"],
         )
+
+    final_pass_inventory.remove(inventory_leads)
 
     if strict_runtime:
         evidence_report = build_observability_report(
@@ -376,16 +476,57 @@ def run_pipeline() -> dict:
     # When the daily throughput target/cap stops enrichment early, mark only the
     # jobs that were actually processed. Unprocessed jobs remain eligible for a
     # later run instead of disappearing from the queue.
+    # Only terminal outcomes enter seen-state in strict mode. Legacy mode has no
+    # final-state annotations, so retain its historical processed-ref behavior.
     processed_job_refs = enriched_payload.get("processed_job_refs", [])
-    if not processed_job_refs:
-        logger.warning(
-            "Step 3 output did not include processed_job_refs; falling back to "
-            "the full filtered set for backward compatibility"
-        )
-        filtered_payload = json.loads(Path(filtered.output_path).read_text(encoding="utf-8"))
-        processed_job_refs = filtered_payload.get("jobs", [])
-    registry.mark_jobs(processed_job_refs)
+    if strict_runtime:
+        terminal_ids = {
+            str(job.get("job_id") or job.get("canonical_job_id") or "")
+            for job in terminal_jobs
+            if job.get("job_id") or job.get("canonical_job_id")
+        }
+        refs_to_mark = [
+            ref for ref in processed_job_refs
+            if str(ref.get("job_id") or ref.get("canonical_job_id") or "") in terminal_ids
+        ]
+    else:
+        refs_to_mark = processed_job_refs
+    registry.mark_jobs(refs_to_mark)
+    # The crash checkpoint is only for work that never reached a downstream
+    # disposition. Retryable outcomes already live in RecoverableJobQueue.
+    checkpoint.remove_jobs(processed_job_refs)
 
+    net_created = int(airtable_result.get("created", 0))
+    upstream_target_reached = bool(
+        enriched.final_pass_target_reached if strict_runtime
+        else enriched.reviewable_target_reached
+    )
+    net_target_reached = net_created >= target_final_pass
+    sla_success = upstream_target_reached and (
+        net_target_reached if config.SLA_REQUIRE_NET_NEW_AIRTABLE else True
+    )
+    summary["technical_success"] = True
+    summary["sla_success"] = sla_success
+    summary["sla"] = {
+        "target": target_final_pass,
+        "upstream_final_pass": enriched.final_pass_leads,
+        "upstream_target_reached": upstream_target_reached,
+        "net_airtable_created": net_created,
+        "net_target_reached": net_target_reached,
+        "stop_reason": enriched.stop_reason,
+    }
+    if not sla_success:
+        summary.setdefault("warnings", []).append(
+            f"SLA target not reached: upstream={enriched.final_pass_leads}/{target_final_pass}, "
+            f"net_airtable_created={net_created}/{target_final_pass}"
+        )
+        logger.error(summary["warnings"][-1])
+    if sla_success:
+        checkpoint.clear()
+    else:
+        summary.setdefault("warnings", []).append(
+            "Pipeline checkpoint retained because the daily SLA was not reached"
+        )
     summary["success"] = True
     summary["finished_at"] = datetime.now().isoformat()
     summary["duration_seconds"] = round((datetime.now() - started).total_seconds(), 2)
@@ -408,6 +549,9 @@ def main() -> int:
 
     summary_path = save_run_summary(summary)
     logger.info("Run summary: %s", summary_path)
+    if summary.get("success") and summary.get("sla_success") is False:
+        logger.error("Pipeline completed technically but missed the daily SLA")
+        return 2
     if summary.get("success"):
         logger.info("Pipeline completed successfully")
         return 0

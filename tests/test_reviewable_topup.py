@@ -167,6 +167,45 @@ class TargetedTopupScrapeTests(unittest.TestCase):
         self.assertEqual(spec["page"], 1)
         self.assertEqual(spec["last_page"], 3)
 
+    def test_query_planner_advances_to_wider_date_window(self):
+        metric = {
+            "pages": [
+                {"page": 1, "num_pages": 1, "last_page": 1, "query_variant": "base"},
+                {"page": 2, "num_pages": 3, "last_page": 4, "query_variant": "base", "mode": "topup_deep_page"},
+                {"page": 1, "num_pages": 4, "last_page": 4, "query_variant": "linkedin", "date_posted": "week", "mode": "topup_lookback"},
+            ]
+        }
+        with (
+            patch.object(config, "JSEARCH_TOPUP_PAGES_PER_QUERY", 3),
+            patch.object(config, "JSEARCH_TOPUP_MAX_PAGE", 4),
+            patch.object(config, "JSEARCH_LOOKBACK_QUERY_VARIANTS", ["linkedin"]),
+            patch.object(config, "JSEARCH_TOPUP_DATE_WINDOWS", ["week", "month"]),
+        ):
+            spec = jsearch_scraper._next_topup_query_spec(
+                metric, unit_budget_remaining=3
+            )
+        self.assertEqual(spec["query_variant"], "linkedin")
+        self.assertEqual(spec["date_posted"], "month")
+        self.assertEqual(spec["page"], 1)
+
+    def test_role_order_keeps_zero_yield_catalog_roles_for_breadth(self):
+        prior = {
+            "Accountant": {
+                "canonical_role": "Accountant",
+                "new_prefilter_viable_candidates": 3,
+                "raw_jobs": 10,
+            },
+            "Backend Developer": {
+                "canonical_role": "Backend Developer",
+                "new_prefilter_viable_candidates": 0,
+                "raw_jobs": 0,
+            },
+        }
+        with patch.object(config, "ROLES", ["Accountant", "Backend Developer"]):
+            ordered = jsearch_scraper._targeted_topup_role_order(prior)
+        self.assertIn("Accountant", ordered)
+        self.assertIn("Backend Developer", ordered)
+
 
 class HiringManagerTopupExclusionTests(unittest.TestCase):
     def test_previously_considered_company_is_skipped_before_apollo(self):
@@ -212,7 +251,7 @@ class HiringManagerTopupExclusionTests(unittest.TestCase):
                 )
 
         self.assertEqual(result.companies_considered, 1)
-        self.assertEqual(result.processed_company_keys, ["beta.com"])
+        self.assertEqual(result.processed_company_keys, ["acme.com", "beta.com"])
         self.assertEqual(
             result.stats["topup_skipped_previously_considered_companies"], 1
         )

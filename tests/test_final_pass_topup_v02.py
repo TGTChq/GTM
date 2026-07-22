@@ -118,6 +118,105 @@ class FinalPassTopupV02Tests(unittest.TestCase):
         self.assertEqual(details["rounds"][0]["final_pass_added"], 1)
         self.assertEqual(scrape_mock.call_args.kwargs["unit_budget"], 6)
 
+    def test_zero_yield_round_does_not_exhaust_other_roles(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            raw = root / "raw.json"
+            raw.write_text(json.dumps({"jobs": [{"job_id": "j1"}]}))
+            initial_path = root / "initial.json"
+            initial_path.write_text(json.dumps({
+                "jobs": [],
+                "processed_job_refs": [{"job_id": "j1"}],
+                "processed_company_keys": [],
+            }))
+            initial_result = Step3Result(
+                output_path=str(initial_path), total_input_jobs=1, total_output_leads=0,
+                company_criteria_excluded=0, hiring_manager_found=0,
+                hiring_manager_not_found=0, match_rate=0.0,
+                contactable_hiring_managers=0, uncontactable_hiring_managers=0,
+                contactable_rate=0.0, companies_considered=0,
+                eligible_companies=0, company_criteria_excluded_companies=0,
+                final_pass_target=1, final_pass_leads=0,
+                final_pass_target_reached=False, reviewable_leads=0,
+                reviewable_target_reached=False, max_eligible_companies=90,
+                stop_reason="candidate_pool_exhausted", processed_company_keys=[], stats={},
+            )
+            initial_scrape = ScrapeResult(
+                output_path=str(raw), total_jobs=1, roles_with_results=1,
+                stats={"estimated_request_units": 1, "query_metrics": {}},
+            )
+
+            zero_raw = root / "zero.json"
+            zero_raw.write_text(json.dumps({"jobs": []}))
+            zero_scrape = ScrapeResult(
+                output_path=str(zero_raw), total_jobs=0, roles_with_results=0,
+                stats={
+                    "estimated_request_units": 3,
+                    "queries_attempted": 1,
+                    "queried_search_roles": ["Machine Learning Engineer"],
+                    "topup_new_prefilter_viable": 0,
+                    "topup_stop_reason": "topup_unit_budget_exhausted",
+                    "query_metrics": {},
+                },
+            )
+            viable_raw = root / "viable.json"
+            viable_raw.write_text(json.dumps({"jobs": [{"job_id": "j2"}]}))
+            viable_scrape = ScrapeResult(
+                output_path=str(viable_raw), total_jobs=1, roles_with_results=1,
+                stats={
+                    "estimated_request_units": 3,
+                    "queries_attempted": 1,
+                    "queried_search_roles": ["Staff Accountant"],
+                    "topup_new_prefilter_viable": 1,
+                    "topup_stop_reason": "topup_unit_budget_exhausted",
+                    "query_metrics": {},
+                },
+            )
+            filtered = root / "filtered.json"
+            filtered.write_text(json.dumps({"jobs": [{"job_id": "j2"}]}))
+            qualified = root / "qualified.json"
+            qualified.write_text(json.dumps({"jobs": [{"job_id": "j2", "_job_gate_state": "PASS"}]}))
+            enriched_path = root / "enriched.json"
+            enriched_path.write_text(json.dumps({
+                "jobs": [{"job_id": "j2", "lead_key": "pass-1", "_final_state": "FINAL_PASS", "_account_gate_state": "PASS"}],
+                "processed_job_refs": [{"job_id": "j2"}],
+                "processed_company_keys": ["two.com"],
+            }))
+            enriched = self._result(enriched_path, final_pass=1, review_rows=1, company="two.com")
+
+            with (
+                patch.object(config, "STEP3_OUTPUT_DIR", str(root)),
+                patch.object(config, "FILTERED_OUTPUT_DIR", str(root)),
+                patch.object(config, "FINAL_PASS_MAX_TOPUP_ITERATIONS", 5),
+                patch.object(config, "FINAL_PASS_MAX_RUNTIME_SECONDS", 300),
+                patch.object(config, "FINAL_PASS_MICROBATCH_QUERY_UNITS", 3),
+                patch.object(config, "FINAL_PASS_MAX_EMPTY_QUERY_CYCLES", 2),
+                patch.object(config, "JSEARCH_MAX_ESTIMATED_UNITS_PER_RUN", 100),
+                patch.object(final_pass_topup, "run_targeted_topup_scrape", side_effect=[zero_scrape, viable_scrape]) as scrape_mock,
+                patch.object(final_pass_topup, "run_filter", return_value=SimpleNamespace(
+                    output_path=str(filtered), kept_count=1, rejected_count=0, success=True, errors=[]
+                )),
+                patch.object(final_pass_topup, "run_precontact_qualification", return_value=SimpleNamespace(
+                    output_path=str(qualified), contact_eligible_jobs=1, rejected_jobs=0, unverified_jobs=0
+                )),
+                patch.object(final_pass_topup, "run_hiring_manager_identification", return_value=enriched),
+            ):
+                combined, details = final_pass_topup.run_final_pass_topup(
+                    initial_scrape=initial_scrape,
+                    initial_enriched=initial_result,
+                    registry=SeenJobsRegistry(path=str(root / "seen.json")),
+                    target_final_pass_leads=1,
+                    max_eligible_companies=90,
+                )
+
+        self.assertEqual(scrape_mock.call_count, 2)
+        self.assertEqual(combined.final_pass_leads, 1)
+        self.assertEqual(details["stop_reason"], "final_pass_target_reached")
+        self.assertEqual(
+            scrape_mock.call_args_list[1].kwargs["exclude_search_roles"],
+            {"Machine Learning Engineer"},
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

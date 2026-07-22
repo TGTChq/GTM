@@ -10,11 +10,12 @@ from dataclasses import asdict, dataclass, field
 from enum import Enum
 from typing import Any, Dict, Iterable, List
 
+import config
 from evidence_types import EvidenceBundle
 from reason_codes import ReasonCode, reason_value
 
 
-VALIDATION_VERSION = "tgtc-final-pass-v0.2"
+VALIDATION_VERSION = config.VALIDATION_VERSION
 
 
 class GateState(str, Enum):

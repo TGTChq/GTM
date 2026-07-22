@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import re
-from typing import Iterable, List, Set
+from typing import Dict, Iterable, List, Set, Tuple
+
+import config
 
 from apollo_client import PersonMatch
 from company_identity import company_names_compatible, domains_equivalent, safe_company_domain
@@ -22,6 +24,7 @@ FOREIGN_TERRITORY_PATTERNS = {
     "CANADA": r"\bcanada|canadian\b",
 }
 US_TERRITORY_PATTERNS = [r"\b(?:us|u\.s\.|usa|united states|north america|americas)\b"]
+GLOBAL_SCOPE_PATTERN = r"\b(?:global|worldwide|chief (?:executive|technology|marketing|revenue|operating|people|product) officer|ceo|cto|cmo|cro|coo|founder|co[- ]?founder)\b"
 
 
 def _title_match(title: str, targets: Iterable[str]) -> bool:
@@ -57,6 +60,62 @@ def _territory_text(person: PersonMatch) -> str:
         location.get("country"),
     ]
     return " | ".join(str(value) for value in values if value)
+
+
+def _organization_matches(
+    *, name: str, domain: str, company_name: str, company_domains: Set[str]
+) -> bool:
+    normalized_domain = safe_company_domain(domain or "", [])
+    if normalized_domain and any(domains_equivalent(normalized_domain, item) for item in company_domains):
+        return True
+    return bool(name and company_names_compatible(company_name, name))
+
+
+def _current_employment_evidence(
+    person: PersonMatch, company_name: str, company_domains: Set[str]
+) -> Tuple[bool, str]:
+    raw = person.raw or {}
+    current_org = raw.get("current_organization") or raw.get("organization") or {}
+    if isinstance(current_org, dict) and _organization_matches(
+        name=str(current_org.get("name") or ""),
+        domain=str(current_org.get("primary_domain") or current_org.get("domain") or current_org.get("website_url") or ""),
+        company_name=company_name,
+        company_domains=company_domains,
+    ):
+        return True, "apollo_current_organization"
+
+    histories = raw.get("employment_history") or raw.get("employment_histories") or []
+    if isinstance(histories, dict):
+        histories = [histories]
+    for item in histories:
+        if not isinstance(item, dict):
+            continue
+        is_current = item.get("current") is True or (not item.get("end_date") and not item.get("ended_at"))
+        organization = item.get("organization") or {}
+        name = str(item.get("organization_name") or organization.get("name") or "")
+        domain = str(
+            item.get("organization_domain")
+            or organization.get("primary_domain")
+            or organization.get("domain")
+            or ""
+        )
+        if is_current and _organization_matches(
+            name=name, domain=domain, company_name=company_name, company_domains=company_domains
+        ):
+            return True, "apollo_current_employment_history"
+
+    # Apollo's enriched top-level organization is explicitly the current org.
+    # Require a LinkedIn profile as an additional stable identity anchor in
+    # strict mode instead of trusting a bare name/domain pair.
+    top_level_match = _organization_matches(
+        name=str(person.organization_name or ""),
+        domain=str(person.organization_domain or ""),
+        company_name=company_name,
+        company_domains=company_domains,
+    )
+    if top_level_match and (person.linkedin_url or not config.REQUIRE_CONTACT_LINKEDIN):
+        return True, "apollo_top_level_current_org_with_identity_anchor"
+    return False, "current_employment_not_positively_verified"
 
 
 class ContactGate:
@@ -95,11 +154,12 @@ class ContactGate:
             )
 
         person_domain = safe_company_domain(person.organization_domain or "", [])
-        identity_verified = False
-        if person_domain:
-            identity_verified = any(domains_equivalent(person_domain, domain) for domain in company_domains)
-        if not identity_verified and person.organization_name:
-            identity_verified = company_names_compatible(company_name, person.organization_name)
+        identity_verified = _organization_matches(
+            name=str(person.organization_name or ""),
+            domain=str(person.organization_domain or ""),
+            company_name=company_name,
+            company_domains=company_domains,
+        )
         if not identity_verified:
             reason = (
                 ReasonCode.REROUTE_WRONG_ORGANIZATION
@@ -110,16 +170,37 @@ class ContactGate:
                 "contact", GateState.REROUTE, reason,
                 evidence=bundle, retryable=True, next_action="try_next_contact",
             )
+        current_verified, current_reason = _current_employment_evidence(
+            person, company_name, company_domains
+        )
+        if config.REQUIRE_CURRENT_EMPLOYMENT_EVIDENCE and not current_verified:
+            return GateDecision(
+                "contact", GateState.REROUTE, ReasonCode.REROUTE_NOT_CURRENT_EMPLOYEE,
+                evidence=bundle, retryable=True, next_action="try_next_contact",
+                metadata={"current_employment_reason": current_reason},
+            )
         bundle.add(FactValue(
             "current_employment", True, EvidenceStatus.VERIFIED_CROSS_SOURCE,
-            [EvidenceItem("current_employment", True, EvidenceStatus.VERIFIED_CROSS_SOURCE, "apollo", excerpt=person.organization_name or person.organization_domain or "", confidence=0.94)]
+            [EvidenceItem(
+                "current_employment", True, EvidenceStatus.VERIFIED_CROSS_SOURCE,
+                "apollo_current_employment", person.linkedin_url or "",
+                excerpt=f"{person.organization_name or person.organization_domain or ''} | {current_reason}",
+                confidence=0.96,
+            )]
         ))
 
         territory = _territory_text(person)
+        role_scope = " | ".join(
+            str(value) for value in (person.title, person.headline, (person.raw or {}).get("headline"))
+            if value
+        )
         if intent_market == "us_market":
             foreign = [name for name, pattern in FOREIGN_TERRITORY_PATTERNS.items() if re.search(pattern, territory, re.I)]
+            role_foreign = [name for name, pattern in FOREIGN_TERRITORY_PATTERNS.items() if re.search(pattern, role_scope, re.I)]
+            role_has_us = any(re.search(pattern, role_scope, re.I) for pattern in US_TERRITORY_PATTERNS)
+            role_global = bool(re.search(GLOBAL_SCOPE_PATTERN, role_scope, re.I))
             has_us = any(re.search(pattern, territory, re.I) for pattern in US_TERRITORY_PATTERNS)
-            if foreign and not has_us:
+            if (role_foreign and not role_has_us) or (foreign and not has_us and not role_global):
                 bundle.add(FactValue(
                     "contact_territory", foreign, EvidenceStatus.VERIFIED_CROSS_SOURCE,
                     [EvidenceItem("contact_territory", foreign, EvidenceStatus.VERIFIED_CROSS_SOURCE, "apollo", excerpt=territory, confidence=0.95)]
@@ -129,9 +210,25 @@ class ContactGate:
                     evidence=bundle, retryable=True, next_action="try_next_contact",
                     metadata={"detected_territories": foreign},
                 )
+        if intent_market == "us_market" and config.REQUIRE_US_CONTACT_TERRITORY and not has_us and not role_global:
+            return GateDecision(
+                "contact", GateState.REROUTE, ReasonCode.REROUTE_TERRITORY_UNVERIFIED,
+                evidence=bundle, retryable=True, next_action="try_next_contact",
+                metadata={"territory_text": territory},
+            )
+        territory_value = (
+            "us_or_americas_verified" if has_us
+            else "global_scope_verified" if role_global
+            else "compatible_global"
+        )
         bundle.add(FactValue(
-            "contact_territory", "compatible_or_global", EvidenceStatus.VERIFIED_CROSS_SOURCE,
-            [EvidenceItem("contact_territory", "compatible_or_global", EvidenceStatus.VERIFIED_CROSS_SOURCE, "apollo", excerpt=territory, confidence=0.82)]
+            "contact_territory", territory_value,
+            EvidenceStatus.VERIFIED_CROSS_SOURCE,
+            [EvidenceItem(
+                "contact_territory", territory_value,
+                EvidenceStatus.VERIFIED_CROSS_SOURCE, "apollo", excerpt=territory,
+                confidence=0.95 if has_us else 0.9 if role_global else 0.75,
+            )]
         ))
         return GateDecision(
             "contact", GateState.PASS, "CONTACT_PASS", evidence=bundle,

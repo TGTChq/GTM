@@ -18,7 +18,9 @@ class ContactEmailGateV02Tests(unittest.TestCase):
             organization_domain="example.com",
             email="a@example.com",
             email_status="verified",
-            raw={},
+            linkedin_url="https://linkedin.com/in/a-buyer",
+            country="United States",
+            raw={"current_organization": {"name": "Example Corp", "domain": "example.com"}},
         )
         values.update(overrides)
         return PersonMatch(**values)

@@ -10,13 +10,14 @@ from collections import Counter, defaultdict
 from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Iterable, List, Tuple
+from typing import Dict, Iterable, List, Optional, Tuple
 
 import config
 from hiring_manager import Step3Result, company_key_for_job, run_hiring_manager_identification
 from job_filter import run_filter
 from jsearch_scraper import ScrapeResult, run_targeted_topup_scrape
 from pipeline_state import SeenJobsRegistry
+from pipeline_checkpoint import PipelineCheckpoint
 from qualification_pipeline import run_precontact_qualification
 from reviewable_topup import (
     _dedupe_job_refs,
@@ -74,7 +75,7 @@ def _combine(
     results: List[Step3Result],
     payloads: List[Dict],
     target: int,
-    max_eligible_companies: int,
+    max_eligible_companies: Optional[int],
     stop_reason: str,
     topup_stats: Dict,
 ) -> Step3Result:
@@ -107,7 +108,9 @@ def _combine(
     eligible_companies = sum(result.eligible_companies for result in results)
     excluded_companies = sum(result.company_criteria_excluded_companies for result in results)
     target_reached = pass_count >= target
-    limit_reached = eligible_companies >= max_eligible_companies
+    limit_reached = bool(
+        max_eligible_companies and eligible_companies >= max_eligible_companies
+    )
 
     output_path = str(Path(config.STEP3_OUTPUT_DIR) / f"jobs_enriched_{datetime.now():%Y-%m-%d}_final_pass_combined.json")
     payload = {
@@ -192,14 +195,23 @@ def run_final_pass_topup(
     registry: SeenJobsRegistry,
     target_final_pass_leads: int,
     max_eligible_companies: int,
+    exclude_company_keys: Optional[set[str]] = None,
 ) -> tuple[Step3Result, Dict]:
     """Run reroute-first, bounded micro-batches until the FINAL_PASS target."""
     started = time.monotonic()
+    checkpoint = PipelineCheckpoint()
     initial_payload = _load(initial_enriched.output_path)
     payloads = [initial_payload]
     results = [initial_enriched]
     all_leads = list(initial_payload.get("jobs", []))
-    considered_company_keys = set(initial_enriched.processed_company_keys)
+    considered_company_keys = {
+        str(value)
+        for value in [
+            *(exclude_company_keys or set()),
+            *initial_enriched.processed_company_keys,
+        ]
+        if value
+    }
     selected_job_ids = {
         str(job.get("job_id"))
         for job in _load(initial_scrape.output_path).get("jobs", [])
@@ -219,6 +231,8 @@ def run_final_pass_topup(
         "errors": [],
     }
     stop_reason = initial_enriched.stop_reason
+    attempted_role_cycle: set[str] = set()
+    empty_query_cycles = 0
 
     if len(_final_pass_keys(all_leads)) >= target_final_pass_leads:
         stop_reason = "final_pass_target_reached_initial_pass"
@@ -234,7 +248,9 @@ def run_final_pass_topup(
                 rerouted = run_hiring_manager_identification(
                     str(reroute_input),
                     target_final_pass_leads=max(1, target_final_pass_leads - before),
-                    max_eligible_companies=max_eligible_companies,
+                    max_eligible_companies=(
+                        max_eligible_companies if max_eligible_companies > 0 else None
+                    ),
                     output_suffix="reroute",
                 )
                 reroute_payload = _load(rerouted.output_path)
@@ -247,17 +263,32 @@ def run_final_pass_topup(
                 logger.exception("Reroute recovery failed")
                 details["errors"].append(f"reroute: {exc}")
 
-        for iteration in range(1, config.FINAL_PASS_MAX_TOPUP_ITERATIONS + 1):
+        iteration = 0
+        while True:
+            iteration += 1
+            if (
+                config.FINAL_PASS_MAX_TOPUP_ITERATIONS > 0
+                and iteration > config.FINAL_PASS_MAX_TOPUP_ITERATIONS
+            ):
+                stop_reason = "topup_iteration_limit_reached"
+                break
             current = len(_final_pass_keys(_dedupe_leads_prefer_stronger(all_leads)))
             if current >= target_final_pass_leads:
                 stop_reason = "final_pass_target_reached"
                 break
-            if time.monotonic() - started >= config.FINAL_PASS_MAX_RUNTIME_SECONDS:
+            if (
+                config.FINAL_PASS_MAX_RUNTIME_SECONDS > 0
+                and time.monotonic() - started >= config.FINAL_PASS_MAX_RUNTIME_SECONDS
+            ):
                 stop_reason = "runtime_limit_reached"
                 break
             eligible_used = sum(result.eligible_companies for result in results)
-            eligible_remaining = max_eligible_companies - eligible_used
-            if eligible_remaining <= 0:
+            eligible_remaining = (
+                max_eligible_companies - eligible_used
+                if max_eligible_companies > 0
+                else None
+            )
+            if eligible_remaining is not None and eligible_remaining <= 0:
                 stop_reason = "eligible_company_safety_cap_reached"
                 break
             total_budget = config.JSEARCH_MAX_ESTIMATED_UNITS_PER_RUN
@@ -278,6 +309,7 @@ def run_final_pass_topup(
                     prior_query_metrics=query_metrics,
                     exclude_job_ids=selected_job_ids,
                     preferred_search_roles=_preferred_roles(all_leads),
+                    exclude_search_roles=set(attempted_role_cycle),
                     unit_budget=unit_budget,
                     target_prefilter_viable=target_prefilter,
                     round_number=iteration,
@@ -289,10 +321,19 @@ def run_final_pass_topup(
                 break
 
             units = int(scrape.stats.get("estimated_request_units", 0))
+            queried_roles = {
+                str(role)
+                for role in scrape.stats.get("queried_search_roles", [])
+                if role
+            }
             topup_units += units
             total_query_units += units
             query_metrics = _merge_query_metrics(query_metrics, scrape.stats.get("query_metrics", {}))
             raw_payload = _load(scrape.output_path)
+            checkpoint.append_jobs(
+                raw_payload.get("jobs", []),
+                query_metrics=query_metrics,
+            )
             selected_job_ids.update(str(job.get("job_id")) for job in raw_payload.get("jobs", []) if job.get("job_id"))
             round_detail = {
                 "round": iteration,
@@ -302,12 +343,34 @@ def run_final_pass_topup(
                 "prefilter_viable_added": scrape.stats.get("topup_new_prefilter_viable", 0),
                 "scrape_stop_reason": scrape.stats.get("topup_stop_reason", ""),
                 "scrape_output": scrape.output_path,
+                "queried_search_roles": sorted(queried_roles),
             }
-            if scrape.total_jobs <= 0 or scrape.stats.get("topup_new_prefilter_viable", 0) <= 0:
+            if int(scrape.stats.get("queries_attempted", 0)) <= 0:
                 round_detail["final_pass_added"] = 0
                 details["rounds"].append(round_detail)
-                stop_reason = "valid_inventory_exhausted"
-                break
+                if attempted_role_cycle:
+                    # Every role in the current breadth cycle has been offered a
+                    # query window. Reset the cycle so the next call can advance
+                    # all roles to deeper pages/date windows instead of repeating
+                    # only the two highest-yield roles forever.
+                    attempted_role_cycle.clear()
+                    round_detail["cycle_reset"] = True
+                    continue
+                empty_query_cycles += 1
+                if empty_query_cycles >= max(1, config.FINAL_PASS_MAX_EMPTY_QUERY_CYCLES):
+                    stop_reason = "valid_inventory_exhausted"
+                    break
+                continue
+
+            empty_query_cycles = 0
+            attempted_role_cycle.update(queried_roles)
+            if scrape.total_jobs <= 0 or scrape.stats.get("topup_new_prefilter_viable", 0) <= 0:
+                # A zero-yield micro-batch proves only that these query windows
+                # were empty. It does not prove that the other roles, deeper
+                # pages or wider date windows are exhausted.
+                round_detail["final_pass_added"] = 0
+                details["rounds"].append(round_detail)
+                continue
 
             filtered = run_filter(input_path=scrape.output_path, registry=registry)
             round_detail.update({"filter_kept": filtered.kept_count, "filter_rejected": filtered.rejected_count, "filter_output": filtered.output_path})
@@ -337,7 +400,7 @@ def run_final_pass_topup(
                 qualified.output_path,
                 target_final_pass_leads=deficit,
                 max_eligible_companies=eligible_remaining,
-                exclude_company_keys=considered_company_keys,
+                exclude_company_keys=set(considered_company_keys),
                 output_suffix=f"topup_{iteration}",
             )
             payload = _load(enriched.output_path)
