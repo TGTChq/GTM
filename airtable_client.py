@@ -146,6 +146,7 @@ def _job_to_fields(job: Dict) -> Dict:
             "ACTIVE_VERIFIED": "verified",
             "ACTIVE_CORROBORATED": "verified",
             "ACTIVE_DIRECT_STRUCTURED": "unverified_review",
+            "ACTIVE_PROVIDER_STRUCTURED": "unverified_review",
             "INACTIVE_VERIFIED": "broken",
             "SOURCE_TEMPORARILY_UNAVAILABLE": "unverified_review",
             "SOURCE_UNRESOLVED": "unverified_review",

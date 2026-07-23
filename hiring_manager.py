@@ -97,8 +97,16 @@ def _is_intermediary_domain(domain: str) -> bool:
 def _domain_from_apply_link(job: Dict) -> str:
     """Recover a company domain only from safe, direct application URLs."""
     apply_link = (job.get("job_apply_link") or "").strip()
-    if not apply_link:
+    direct_flag = job.get("job_apply_is_direct")
+    if not apply_link or direct_flag is False:
         return ""
+    if direct_flag is not True:
+        try:
+            host = urlparse(apply_link).netloc.lower().split(":", 1)[0]
+        except Exception:
+            return ""
+        if not host.startswith(("careers.", "jobs.", "apply.")):
+            return ""
 
     candidates = [apply_link]
     try:

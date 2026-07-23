@@ -184,13 +184,25 @@ def static_checks() -> Dict:
             errors.append(
                 "JOB_SOURCE_FRESH_DIRECT_MIN_DESCRIPTION_CHARS must be at least 500"
             )
+        if not 1 <= config.JOB_SOURCE_PROVIDER_STRUCTURED_MAX_AGE_DAYS <= config.MAX_JOB_AGE_DAYS:
+            errors.append(
+                "JOB_SOURCE_PROVIDER_STRUCTURED_MAX_AGE_DAYS must be between 1 and MAX_JOB_AGE_DAYS"
+            )
+        if config.JOB_SOURCE_PROVIDER_STRUCTURED_MIN_DESCRIPTION_CHARS < 500:
+            errors.append(
+                "JOB_SOURCE_PROVIDER_STRUCTURED_MIN_DESCRIPTION_CHARS must be at least 500"
+            )
         if not config.JOB_SOURCE_DIRECT_FIRST_ENABLED:
             errors.append(
                 "JOB_SOURCE_DIRECT_FIRST_ENABLED must remain enabled in READY v1.1"
             )
         if not config.JOB_SOURCE_FRESH_DIRECT_FALLBACK_ENABLED:
             errors.append(
-                "JOB_SOURCE_FRESH_DIRECT_FALLBACK_ENABLED must remain enabled in READY v1.1"
+                "JOB_SOURCE_FRESH_DIRECT_FALLBACK_ENABLED must remain enabled in READY"
+            )
+        if not config.JOB_SOURCE_PROVIDER_STRUCTURED_REVIEW_ENABLED:
+            errors.append(
+                "JOB_SOURCE_PROVIDER_STRUCTURED_REVIEW_ENABLED must remain enabled in READY v1.2"
             )
         if config.PIPELINE_FAIL_PROCESS_ON_SLA_MISS:
             warnings.append(

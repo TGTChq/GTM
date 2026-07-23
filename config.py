@@ -90,7 +90,7 @@ for directory in (
 
 # ---------- Final-pass architecture ----------
 FINAL_PASS_PIPELINE_ENABLED = _env_bool("FINAL_PASS_PIPELINE_ENABLED", True)
-VALIDATION_VERSION = os.getenv("VALIDATION_VERSION", "tgtc-ready-v1.1-source-resilience")
+VALIDATION_VERSION = os.getenv("VALIDATION_VERSION", "tgtc-ready-v1.2-identity-and-recall")
 VALIDATION_SIGNING_KEY = os.getenv("VALIDATION_SIGNING_KEY", "")
 # Source and company-site retrieval is bounded and cached.  Disabling fetches is
 # intended only for deterministic offline replay; it does not relax any gate.
@@ -127,6 +127,19 @@ JOB_SOURCE_FRESH_DIRECT_MAX_AGE_DAYS = _env_int(
 )
 JOB_SOURCE_FRESH_DIRECT_MIN_DESCRIPTION_CHARS = _env_int(
     "JOB_SOURCE_FRESH_DIRECT_MIN_DESCRIPTION_CHARS", 700
+)
+# Aggregators and professional job networks are discovery evidence, not employer
+# identity. A fresh provider record may enter human review only under this closed
+# contract. It never bypasses Account/Contact/Email gates and must be revalidated
+# against a trusted live source before Instantly enrollment.
+JOB_SOURCE_PROVIDER_STRUCTURED_REVIEW_ENABLED = _env_bool(
+    "JOB_SOURCE_PROVIDER_STRUCTURED_REVIEW_ENABLED", True
+)
+JOB_SOURCE_PROVIDER_STRUCTURED_MAX_AGE_DAYS = _env_int(
+    "JOB_SOURCE_PROVIDER_STRUCTURED_MAX_AGE_DAYS", 8
+)
+JOB_SOURCE_PROVIDER_STRUCTURED_MIN_DESCRIPTION_CHARS = _env_int(
+    "JOB_SOURCE_PROVIDER_STRUCTURED_MIN_DESCRIPTION_CHARS", 700
 )
 JOB_SOURCE_CACHE_TTL_HOURS = _env_int("JOB_SOURCE_CACHE_TTL_HOURS", 24)
 JOB_SOURCE_MAX_ACTIVE_AGE_DAYS = _env_int("JOB_SOURCE_MAX_ACTIVE_AGE_DAYS", 45)
@@ -792,6 +805,11 @@ INTERMEDIARY_JOB_DOMAINS = [
     "remoterocketship.com",
     "gradebuzz.com",
     "cosmoquick.com",
+    # Provider/publisher domains observed in the July 23 production corpus.
+    # These can host useful discovery records but are never employer domains.
+    "simplify.jobs",
+    "jobtrees.com",
+    "jobmesh.io",
 ]
 
 KNOWN_OUTSOURCING_EMPLOYERS = [

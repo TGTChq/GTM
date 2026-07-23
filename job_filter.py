@@ -133,10 +133,14 @@ def get_safe_employer_domain(job: Dict) -> Tuple[str, str]:
     candidates: List[Tuple[str, str]] = [
         (job.get("employer_website") or "", "employer_website"),
     ]
+    # A provider apply option is not employer identity unless the provider marks
+    # it direct. This prevents Simplify/LinkedIn/JobLeads domains from becoming
+    # the Apollo organization domain for the hiring company.
     for option in job.get("apply_options") or []:
-        if isinstance(option, dict):
-            candidates.append((option.get("apply_link") or "", "apply_option"))
-    candidates.append((job.get("job_apply_link") or "", "job_apply_link"))
+        if isinstance(option, dict) and option.get("is_direct") is True:
+            candidates.append((option.get("apply_link") or "", "direct_apply_option"))
+    if job.get("job_apply_is_direct") is True:
+        candidates.append((job.get("job_apply_link") or "", "direct_job_apply_link"))
 
     for value, source in candidates:
         domain = safe_company_domain(value, config.INTERMEDIARY_JOB_DOMAINS)
