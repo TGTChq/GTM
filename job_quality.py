@@ -356,7 +356,14 @@ def assess_posting_integrity(job: Dict) -> QualityAssessment:
     if claimed:
         claimed_name = _clean_employer_candidate(claimed.group(1))
         if claimed_name and not company_names_compatible(employer, claimed_name):
-            if len(re.findall(r"\b" + re.escape(claimed_name) + r"\b", description, re.I)) >= 2:
+            trusted_direct_ats_identity = bool(
+                job.get("job_apply_is_direct") is True
+                and job.get("_ats_board_identity_verified") is True
+            )
+            if (
+                not trusted_direct_ats_identity
+                and len(re.findall(r"\b" + re.escape(claimed_name) + r"\b", description, re.I)) >= 2
+            ):
                 return QualityAssessment(False, "excluded_posting_integrity", "description_employer_identity_conflict")
 
     deadline = re.search(

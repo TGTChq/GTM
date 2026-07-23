@@ -20,6 +20,7 @@ from ats_board_registry import AtsBoardRegistry, detect_board_ref, fetch_board_j
 from free_job_sources import build_adapters, default_fetcher, provider_domain
 from job_filter import assess_pre_enrichment_viability, dedup_key, get_safe_employer_domain
 from job_quality import normalize_job_identity
+from company_identity import company_names_compatible, normalize_company_name
 from jsearch_scraper import ScrapeResult, is_excluded_title
 from pipeline_state import SeenJobsRegistry
 from role_catalog import DEFAULT_SEARCH_ROLES, role_specificity
@@ -98,11 +99,10 @@ def _company_website_candidate(url: str, company: str, provider_host: str) -> bo
     )
     if any(host == item or host.endswith("." + item) for item in blocked):
         return False
-    company_key = _normalized(company)
-    domain_key = _normalized(host.split(".")[0])
-    return len(company_key) >= 4 and len(domain_key) >= 4 and (
-        company_key in domain_key or domain_key in company_key
-    )
+    domain_brand = re.sub(r"[-_]+", " ", host.split(".")[0]).strip()
+    # Substring matching can poison employer identity (for example Meta vs
+    # metabase.com). Reuse the repository's conservative organization matcher.
+    return company_names_compatible(company, domain_brand)
 
 
 def _discover_landing_links(
@@ -156,6 +156,40 @@ def _discover_landing_links(
         job["_landing_discovery_attempted"] = True
         job["_landing_discovery_role"] = matched_role
     return {"attempted": attempted, "succeeded": succeeded, "ats_links": ats_links, "company_websites": websites}
+
+
+def _propagation_company_key(value: Any) -> str:
+    # Collapse only legal suffix variants (Acme vs Acme Corporation). Avoid
+    # fuzzy grouping so unrelated short brands cannot share a domain.
+    return _normalized(normalize_company_name(str(value or "")))
+
+
+def _propagate_company_websites(jobs: List[Dict[str, Any]]) -> int:
+    domains_by_company: Dict[str, set[str]] = {}
+    website_by_domain: Dict[str, str] = {}
+    for job in jobs:
+        company_key = _propagation_company_key(job.get("employer_name"))
+        if len(company_key) < 4:
+            continue
+        domain, _source = get_safe_employer_domain(job)
+        if not domain:
+            continue
+        domains_by_company.setdefault(company_key, set()).add(domain)
+        website_by_domain.setdefault(domain, str(job.get("employer_website") or f"https://{domain}"))
+
+    propagated = 0
+    for job in jobs:
+        if job.get("employer_website"):
+            continue
+        company_key = _propagation_company_key(job.get("employer_name"))
+        domains = domains_by_company.get(company_key, set())
+        if len(domains) != 1:
+            continue
+        domain = next(iter(domains))
+        job["employer_website"] = website_by_domain[domain]
+        job["_employer_website_propagated"] = True
+        propagated += 1
+    return propagated
 
 
 def _merge_options(target: Dict[str, Any], source: Mapping[str, Any]) -> None:
@@ -310,6 +344,8 @@ def run_multi_source_acquisition(
     registry: Optional[SeenJobsRegistry] = None,
     *,
     fetcher=default_fetcher,
+    force_ats_refresh: bool = False,
+    ats_board_limit: Optional[int] = None,
 ) -> ScrapeResult:
     registry = registry or SeenJobsRegistry()
     board_registry = AtsBoardRegistry()
@@ -346,15 +382,36 @@ def run_multi_source_acquisition(
         )
 
     landing_metrics = _discover_landing_links(all_jobs, fetcher=fetcher)
+    propagated_before_ats = _propagate_company_websites(all_jobs)
     boards_from_feeds = board_registry.upsert_from_jobs(all_jobs)
 
     ats_jobs: List[Dict[str, Any]] = []
     ats_metrics: Dict[str, Dict[str, int]] = {}
+    greenhouse_detail_remaining = max(
+        0, int(getattr(config, "ATS_GREENHOUSE_DETAIL_MAX_REQUESTS_PER_RUN", 100))
+    )
     if config.ATS_DIRECT_ACQUISITION_ENABLED:
-        for board in board_registry.due_entries():
-            jobs, error = fetch_board_jobs(board, fetcher)
+        for board in board_registry.due_entries(limit=ats_board_limit, force=force_ats_refresh):
             provider = str(board.get("provider") or "unknown")
-            metric = ats_metrics.setdefault(provider, {"boards_attempted": 0, "boards_succeeded": 0, "jobs": 0, "errors": 0})
+            jobs, error = fetch_board_jobs(
+                board,
+                fetcher,
+                greenhouse_detail_budget=(
+                    greenhouse_detail_remaining if provider == "greenhouse" else None
+                ),
+            )
+            detail_requests = sum(
+                1 for job in jobs if job.get("_greenhouse_detail_request_made")
+            )
+            greenhouse_detail_remaining = max(0, greenhouse_detail_remaining - detail_requests)
+            metric = ats_metrics.setdefault(provider, {
+                "boards_attempted": 0,
+                "boards_succeeded": 0,
+                "jobs": 0,
+                "errors": 0,
+                "detail_requests": 0,
+            })
+            metric["detail_requests"] += detail_requests
             metric["boards_attempted"] += 1
             if error:
                 metric["errors"] += 1
@@ -369,9 +426,15 @@ def run_multi_source_acquisition(
             board_registry.record_result(
                 str(board.get("key") or ""), success=True, job_count=len(jobs), save=False
             )
+        if ats_jobs:
+            # Feed official ATS identity back into the registry so a weak or stale
+            # discovery label can be upgraded without manual maintenance.
+            board_registry.upsert_from_jobs(ats_jobs, save=False)
         if ats_metrics:
             board_registry.save()
     all_jobs.extend(ats_jobs)
+    propagated_after_ats = _propagate_company_websites(all_jobs)
+    propagated_websites = propagated_before_ats + propagated_after_ats
 
     normalized: List[Dict[str, Any]] = []
     stats: Dict[str, Any] = {
@@ -379,8 +442,11 @@ def run_multi_source_acquisition(
         "enabled_sources": list(config.FREE_JOB_SOURCES),
         "source_metrics": source_metrics,
         "ats_metrics": ats_metrics,
+        "ats_force_refresh": bool(force_ats_refresh),
+        "ats_board_limit": ats_board_limit,
         "history_registry_seed": history_seed,
         "landing_discovery": landing_metrics,
+        "company_websites_propagated": propagated_websites,
         "boards_discovered_from_current_feeds": boards_from_feeds,
         "boards_total": len(board_registry.entries),
         "raw_records_total": len(all_jobs),

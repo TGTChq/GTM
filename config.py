@@ -85,6 +85,15 @@ ATS_BOARD_REFRESH_INTERVAL_HOURS = _env_int(
 )
 ATS_MAX_BOARDS_PER_RUN = _env_int("ATS_MAX_BOARDS_PER_RUN", 150)
 ATS_MAX_JOBS_PER_BOARD = _env_int("ATS_MAX_JOBS_PER_BOARD", 250)
+ATS_GREENHOUSE_DETAIL_MAX_REQUESTS_PER_BOARD = _env_int(
+    "ATS_GREENHOUSE_DETAIL_MAX_REQUESTS_PER_BOARD", 25
+)
+ATS_GREENHOUSE_DETAIL_MAX_REQUESTS_PER_RUN = _env_int(
+    "ATS_GREENHOUSE_DETAIL_MAX_REQUESTS_PER_RUN", 100
+)
+ATS_SHADOW_FORCE_REFRESH_MAX_BOARDS = _env_int(
+    "ATS_SHADOW_FORCE_REFRESH_MAX_BOARDS", 25
+)
 ATS_REGISTRY_AUTO_SEED_HISTORY = _env_bool(
     "ATS_REGISTRY_AUTO_SEED_HISTORY", True
 )
@@ -139,7 +148,7 @@ for directory in (
 
 # ---------- Final-pass architecture ----------
 FINAL_PASS_PIPELINE_ENABLED = _env_bool("FINAL_PASS_PIPELINE_ENABLED", True)
-VALIDATION_VERSION = os.getenv("VALIDATION_VERSION", "tgtc-ready-v1.3-free-multi-source")
+VALIDATION_VERSION = os.getenv("VALIDATION_VERSION", "tgtc-ready-v1.3.2-preproduction-audit")
 VALIDATION_SIGNING_KEY = os.getenv("VALIDATION_SIGNING_KEY", "")
 # Source and company-site retrieval is bounded and cached.  Disabling fetches is
 # intended only for deterministic offline replay; it does not relax any gate.
@@ -1126,6 +1135,13 @@ GLOBAL_REMOTE_PATTERNS = [
     r"\bwork from anywhere in the world\b",
     r"\bworldwide remote\b",
 ]
+GLOBAL_REMOTE_LOCATION_MARKERS = {
+    "anywhere in the world",
+    "worldwide",
+    "remote worldwide",
+    "global",
+    "global remote",
+}
 # A generic ``Anywhere`` location plus the query's country echo is not proof of
 # US eligibility. These markers catch explicit foreign locations before the
 # provider country field is considered.
