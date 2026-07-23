@@ -111,5 +111,11 @@ def run_precontact_qualification(
         str(output_path), str(nonpass_path), len(jobs), len(contact_eligible),
         sum(1 for j in nonpass if j.get("_job_gate_state") == GateState.REJECT.value or j.get("_role_gate_state") == GateState.REJECT.value),
         sum(1 for j in nonpass if j.get("_job_gate_state") == GateState.UNVERIFIED.value or j.get("_role_gate_state") == GateState.UNVERIFIED.value),
-        int(stats.get("needs_check", 0)), dict(stats),
+        sum(
+            1
+            for job in nonpass
+            if job.get("_job_gate_state") == GateState.NEEDS_CHECK.value
+            or job.get("_role_gate_state") == GateState.NEEDS_CHECK.value
+        ),
+        dict(stats),
     )

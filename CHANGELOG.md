@@ -1,3 +1,17 @@
+# READY v1.3.2 cumulative preproduction audit — July 23, 2026
+
+- Includes all v1.3.1 shadow-quality fixes and supersedes the earlier v1.3.1 package.
+- Rejects exact global-remote locations before description text can imply US eligibility.
+- Runs the zero-credit Job and Role Gates inside shadow mode and labels Step-2 survivors as postings, not FINAL_PASS leads.
+- Uses conservative company/ATS identity compatibility to prevent substring collisions such as `Meta` vs `metabase`.
+- Prevents weak feed evidence from overwriting stronger ATS registry identity; records conflicts for diagnostics.
+- Re-propagates verified company domains after direct ATS acquisition and refuses propagation when multiple domains conflict.
+- Uses Greenhouse `first_published` for freshness and rejects direct Greenhouse records whose date was not checked or unavailable before paid enrichment.
+- Bounds Greenhouse detail requests globally/per board and limits forced ATS refresh during shadow runs.
+- Preserves Ashby remote/location evidence and uses source-aware evidence labels instead of JSearch-specific labels.
+- Fixes pre-contact `NEEDS_CHECK` counting and adds explicit shadow stage semantics.
+- Added ten focused audit regressions; complete suite: 388 passed.
+
 # READY v1.3 free multi-source acquisition — July 23, 2026
 
 - Replaced JSearch as the production acquisition default with five free global feeds: Himalayas, Jobicy, We Work Remotely, Remotive, and Remote OK.

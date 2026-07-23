@@ -193,12 +193,23 @@ def is_job_aggregator_or_publisher(job: Dict) -> Tuple[bool, str]:
 
 
 def is_stale_job(job: Dict) -> Tuple[bool, str]:
-    """Reject only clearly stale job-intent signals before enrichment.
+    """Reject only clearly stale or unverifiable job-intent signals before enrichment.
 
-    JSearch can occasionally surface an old syndicated listing inside a
-    recent-date query. We use the oldest parseable posting signal in the
-    payload. Missing/unparseable dates are retained rather than rejected.
+    Provider feeds can surface an old syndicated listing inside a recent-date
+    query. We use the oldest parseable posting signal in the payload. Missing
+    dates are normally retained, except for direct Greenhouse acquisition:
+    Greenhouse exposes ``first_published`` on its public job-detail endpoint,
+    so a direct record without that verified freshness signal must not consume
+    paid enrichment.
     """
+    source = str(job.get("_acquisition_source") or "").lower()
+    ats_provider = str(job.get("_ats_provider") or "").lower()
+    is_direct_greenhouse = source == "ats_greenhouse" or ats_provider == "greenhouse"
+    if is_direct_greenhouse and not job.get("job_posted_at_datetime_utc"):
+        if job.get("_greenhouse_detail_request_made"):
+            return True, "greenhouse_first_published_unavailable"
+        return True, "greenhouse_first_published_not_checked"
+
     _freshness, age_days, reason = classify_freshness(job)
     if reason == "explicit_expiration_is_in_the_past":
         return True, "expired_job_posting"
@@ -426,6 +437,10 @@ def assess_us_eligibility(job: Dict) -> GeographyEvidence:
     source_text = "\n".join([title, location, city, state_raw, description])
     normalized_location_source = normalize_text("\n".join([title, location, city, state_raw]))
     normalized_location = normalize_text(location)
+
+    global_location_markers = {normalize_text(value) for value in config.GLOBAL_REMOTE_LOCATION_MARKERS}
+    if normalized_location in global_location_markers:
+        return GeographyEvidence(False, "global_remote_location", location or "Remote", "global")
 
     for pattern in config.FOREIGN_ONLY_ELIGIBILITY_PATTERNS:
         if re.search(pattern, source_text, re.I):

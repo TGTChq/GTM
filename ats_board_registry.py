@@ -21,6 +21,7 @@ from urllib.parse import urlparse
 from xml.etree import ElementTree
 
 import config
+from company_identity import company_names_compatible
 from domain_utils import normalize_company_domain
 from free_job_sources import FetchPayload, Fetcher, default_fetcher, html_to_text
 
@@ -203,16 +204,63 @@ class AtsBoardRegistry:
         company = str(job.get("employer_name") or "").strip()
         website = str(job.get("employer_website") or "").strip()
         domain = normalize_company_domain(website)
+        source = str(job.get("_acquisition_source") or job.get("job_publisher") or "")
         changed = 0
         for ref in refs:
             existing = self.entries.get(ref.key, {})
+            existing_name = str(existing.get("company_name") or "").strip()
+            existing_domain = normalize_company_domain(existing.get("company_domain") or "")
+            existing_confidence = int(existing.get("identity_confidence", 0) or 0)
+            if existing_confidence <= 0 and existing:
+                existing_confidence = 3 if str(existing.get("discovered_from_source") or "").startswith("ats_") else 1
+
+            incoming_confidence = 1
+            if source.startswith("ats_") and job.get("_ats_board_identity_verified") is True:
+                incoming_confidence = 3
+            elif job.get("job_apply_is_direct") is True:
+                direct_ref = detect_board_ref(str(job.get("job_apply_link") or ""))
+                if direct_ref and direct_ref.key == ref.key:
+                    incoming_confidence = 2
+            if incoming_confidence < 2:
+                for option in job.get("apply_options") or []:
+                    if not isinstance(option, Mapping) or option.get("is_direct") is not True:
+                        continue
+                    direct_ref = detect_board_ref(str(option.get("apply_link") or ""))
+                    if direct_ref and direct_ref.key == ref.key:
+                        incoming_confidence = 2
+                        break
+
+            chosen_name = existing_name
+            chosen_domain = existing_domain
+            identity_conflict = False
+            if company:
+                compatible = not existing_name or company_names_compatible(existing_name, company)
+                if compatible and (not existing_name or incoming_confidence > existing_confidence):
+                    chosen_name = company
+                elif not compatible:
+                    identity_conflict = True
+                    if incoming_confidence > existing_confidence:
+                        chosen_name = company
+            if domain:
+                compatible_domain = not existing_domain or existing_domain == domain
+                if compatible_domain and (not existing_domain or incoming_confidence > existing_confidence):
+                    chosen_domain = domain
+                elif not compatible_domain:
+                    identity_conflict = True
+                    if incoming_confidence > existing_confidence:
+                        chosen_domain = domain
+
+            chosen_confidence = max(existing_confidence, incoming_confidence)
+            if incoming_confidence > existing_confidence and (company or domain):
+                chosen_confidence = incoming_confidence
             item = {
                 **existing,
                 **asdict(ref),
                 "key": ref.key,
-                "company_name": company or existing.get("company_name", ""),
-                "company_domain": domain or existing.get("company_domain", ""),
-                "discovered_from_source": str(job.get("_acquisition_source") or job.get("job_publisher") or existing.get("discovered_from_source") or ""),
+                "company_name": chosen_name,
+                "company_domain": chosen_domain,
+                "identity_confidence": chosen_confidence,
+                "discovered_from_source": source or existing.get("discovered_from_source", ""),
                 "first_seen_at": existing.get("first_seen_at") or _now_iso(),
                 "last_seen_at": _now_iso(),
                 "last_checked_at": existing.get("last_checked_at", ""),
@@ -221,6 +269,11 @@ class AtsBoardRegistry:
                 "consecutive_failures": int(existing.get("consecutive_failures", 0) or 0),
                 "last_error": existing.get("last_error", ""),
             }
+            if identity_conflict:
+                item["identity_conflicts"] = int(existing.get("identity_conflicts", 0) or 0) + 1
+                item["last_conflicting_company_name"] = company
+                item["last_conflicting_company_domain"] = domain
+                item["last_identity_conflict_at"] = _now_iso()
             if existing != item:
                 self.entries[ref.key] = item
                 changed += 1
@@ -263,7 +316,12 @@ class AtsBoardRegistry:
             self.save()
         return {"files_scanned": files_scanned, "jobs_scanned": jobs_scanned, "boards_added_or_updated": changed}
 
-    def due_entries(self, limit: Optional[int] = None) -> List[Dict[str, Any]]:
+    def due_entries(
+        self,
+        limit: Optional[int] = None,
+        *,
+        force: bool = False,
+    ) -> List[Dict[str, Any]]:
         cutoff = datetime.now(timezone.utc) - timedelta(hours=max(1, config.ATS_BOARD_REFRESH_INTERVAL_HOURS))
         due = []
         for item in self.entries.values():
@@ -271,7 +329,7 @@ class AtsBoardRegistry:
             if not company:
                 continue
             checked = _parse_iso(item.get("last_checked_at"))
-            if checked is None or checked <= cutoff:
+            if force or checked is None or checked <= cutoff:
                 due.append(dict(item))
         due.sort(key=lambda item: (
             _parse_iso(item.get("last_checked_at")) or datetime.min.replace(tzinfo=timezone.utc),
@@ -304,6 +362,20 @@ class AtsBoardRegistry:
             self.save()
 
 
+def _board_identity_verified(company_name: Any, identifier: Any) -> bool:
+    company = str(company_name or "").strip()
+    board_name = re.sub(r"[-_]+", " ", str(identifier or "")).strip()
+    if len(re.sub(r"[^a-z0-9]+", "", company.lower())) < 4:
+        return False
+    if len(re.sub(r"[^a-z0-9]+", "", board_name.lower())) < 4:
+        return False
+    # Use the repository's conservative organization-name matcher rather than
+    # substring containment. This accepts legal/generic suffix variants such as
+    # ``Acme`` vs ``acme-inc`` while rejecting collisions such as
+    # ``Meta`` vs ``metabase``.
+    return company_names_compatible(company, board_name)
+
+
 def _timestamp(value: Any) -> str:
     if value in (None, ""):
         return ""
@@ -330,6 +402,8 @@ def _direct_job(
     employment_type: Any = "",
     posted_at: Any = "",
     workplace_type: Any = "",
+    expires_at: Any = "",
+    extra: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, Any]:
     company = str(board.get("company_name") or "").strip()
     domain = str(board.get("company_domain") or "").strip()
@@ -339,7 +413,7 @@ def _direct_job(
     description_text = html_to_text(description)
     remote = workplace == "remote" or bool(re.search(r"\bremote\b", f"{location_text}\n{description_text[:3000]}", re.I))
     country = "US" if re.search(r"\b(?:united states|usa|u\.s\.|remote us|us only)\b", f"{location_text}\n{description_text[:4000]}", re.I) else ""
-    return {
+    job = {
         "job_id": f"ats:{provider}:{board.get('identifier')}:{job_id}",
         "job_title": re.sub(r"\s+", " ", str(title or "")).strip(),
         "employer_name": company,
@@ -356,11 +430,18 @@ def _direct_job(
         "job_is_remote": remote,
         "job_employment_type": str(employment_type or "").strip(),
         "job_posted_at_datetime_utc": _timestamp(posted_at),
+        "job_offer_expiration_datetime_utc": _timestamp(expires_at),
         "_acquisition_source": f"ats_{provider}",
         "_ats_provider": provider,
         "_ats_board_identifier": str(board.get("identifier") or ""),
         "_provider_record_structured": True,
+        "_ats_board_identity_verified": _board_identity_verified(
+            company, board.get("identifier")
+        ),
     }
+    if extra:
+        job.update(dict(extra))
+    return job
 
 
 def _fetch_json(fetcher: Fetcher, url: str, **kwargs: Any) -> Tuple[Optional[Any], str]:
@@ -392,7 +473,23 @@ def _personio_description(position: ElementTree.Element) -> str:
     return html_to_text("\n\n".join(parts))
 
 
-def fetch_board_jobs(board: Mapping[str, Any], fetcher: Fetcher = default_fetcher) -> Tuple[List[Dict[str, Any]], str]:
+def _greenhouse_title_may_match(title: Any) -> bool:
+    from role_catalog import DEFAULT_SEARCH_ROLES
+    from role_relevance import assess_role
+
+    job = {"job_title": str(title or ""), "job_description": ""}
+    return any(
+        assess_role(job, role).status in {"accept", "review"}
+        for role in DEFAULT_SEARCH_ROLES
+    )
+
+
+def fetch_board_jobs(
+    board: Mapping[str, Any],
+    fetcher: Fetcher = default_fetcher,
+    *,
+    greenhouse_detail_budget: Optional[int] = None,
+) -> Tuple[List[Dict[str, Any]], str]:
     provider = str(board.get("provider") or "")
     identifier = str(board.get("identifier") or "")
     if not provider or not identifier or not str(board.get("company_name") or "").strip():
@@ -400,21 +497,56 @@ def fetch_board_jobs(board: Mapping[str, Any], fetcher: Fetcher = default_fetche
     max_jobs = max(1, config.ATS_MAX_JOBS_PER_BOARD)
 
     if provider == "greenhouse":
+        board_endpoint = f"https://boards-api.greenhouse.io/v1/boards/{identifier}"
+        board_data, board_error = _fetch_json(fetcher, board_endpoint)
+        if not board_error and isinstance(board_data, dict):
+            official_name = str(board_data.get("name") or "").strip()
+            if official_name:
+                board = {**dict(board), "company_name": official_name}
+
         endpoint = f"https://boards-api.greenhouse.io/v1/boards/{identifier}/jobs"
         data, error = _fetch_json(fetcher, endpoint, params={"content": "true"})
         rows = data.get("jobs", []) if isinstance(data, dict) else []
         if error:
             return [], error
         output = []
+        per_board_budget = max(0, int(getattr(config, "ATS_GREENHOUSE_DETAIL_MAX_REQUESTS_PER_BOARD", 25)))
+        if greenhouse_detail_budget is None:
+            detail_budget = per_board_budget
+        else:
+            detail_budget = min(per_board_budget, max(0, int(greenhouse_detail_budget)))
+        detail_calls = 0
         for row in rows[:max_jobs] if isinstance(rows, list) else []:
             if not isinstance(row, dict):
                 continue
             location = row.get("location") or {}
+            title = row.get("title")
+            posted_at = ""
+            expires_at = ""
+            detail_error = ""
+            detail_requested = False
+            if detail_calls < detail_budget and _greenhouse_title_may_match(title):
+                detail_calls += 1
+                detail_requested = True
+                detail, detail_error = _fetch_json(
+                    fetcher,
+                    f"https://boards-api.greenhouse.io/v1/boards/{identifier}/jobs/{row.get('id')}",
+                )
+                if isinstance(detail, dict):
+                    posted_at = detail.get("first_published") or ""
+                    expires_at = detail.get("application_deadline") or ""
             output.append(_direct_job(
-                provider=provider, board=board, job_id=row.get("id"), title=row.get("title"),
+                provider=provider, board=board, job_id=row.get("id"), title=title,
                 description=row.get("content"), url=row.get("absolute_url") or f"https://boards.greenhouse.io/{identifier}/jobs/{row.get('id')}",
                 location=location.get("name") if isinstance(location, dict) else location,
-                employment_type="", posted_at=row.get("updated_at"),
+                employment_type="", posted_at=posted_at, expires_at=expires_at,
+                extra={
+                    "_ats_source_updated_at": _timestamp(row.get("updated_at")),
+                    "_greenhouse_detail_request_made": detail_requested,
+                    "_greenhouse_detail_checked": bool(detail_requested),
+                    "_greenhouse_first_published_verified": bool(posted_at),
+                    "_greenhouse_detail_error": detail_error,
+                },
             ))
         return output, ""
 
@@ -452,11 +584,16 @@ def fetch_board_jobs(board: Mapping[str, Any], fetcher: Fetcher = default_fetche
         for row in rows[:max_jobs] if isinstance(rows, list) else []:
             if not isinstance(row, dict) or row.get("isListed") is False:
                 continue
+            secondary = row.get("secondaryLocations") or []
+            secondary_location = ""
+            if isinstance(secondary, list) and secondary and isinstance(secondary[0], dict):
+                secondary_location = str(secondary[0].get("location") or "")
+            workplace_type = "Remote" if row.get("isRemote") is True else row.get("workplaceType")
             output.append(_direct_job(
                 provider=provider, board=board, job_id=row.get("id") or row.get("jobUrl"), title=row.get("title"),
                 description=row.get("descriptionPlain") or row.get("descriptionHtml"), url=row.get("jobUrl") or row.get("applyUrl"),
-                location=row.get("location"), employment_type=row.get("employmentType"),
-                posted_at=row.get("publishedAt") or row.get("updatedAt"), workplace_type=row.get("workplaceType"),
+                location=row.get("location") or secondary_location, employment_type=row.get("employmentType"),
+                posted_at=row.get("publishedAt") or row.get("updatedAt"), workplace_type=workplace_type,
             ))
         return output, ""
 

@@ -23,6 +23,8 @@ from free_job_sources import (
     WeWorkRemotelyAdapter,
 )
 from hiring_manager import Step3Result
+from job_filter import assess_pre_enrichment_viability
+from job_quality import assess_quality_guard
 from jsearch_scraper import ScrapeResult
 from pipeline_state import SeenJobsRegistry
 
@@ -345,6 +347,167 @@ class MultiSourceAcquisitionTests(unittest.TestCase):
         self.assertEqual(result.stats["estimated_request_units"], 0)
         self.assertEqual(result.stats["source_outcomes"]["himalayas"]["selected_as_primary"], 1)
         self.assertEqual(result.stats["source_outcomes"]["himalayas"]["prefilter_viable"], 1)
+
+
+class V131QualityHardeningTests(unittest.TestCase):
+    def _candidate_job(self, **overrides):
+        job = {
+            "job_title": "Customer Success Manager",
+            "employer_name": "Acme",
+            "employer_website": "https://acme.com",
+            "job_publisher": "We Work Remotely",
+            "job_description": (
+                "Acme is a software company. Acme is hiring a full-time remote "
+                "Customer Success Manager supporting customers in the United States."
+            ),
+            "job_apply_link": "https://weworkremotely.com/remote-jobs/acme-csm",
+            "job_location": "Remote, United States",
+            "job_country": "US",
+            "job_is_remote": True,
+            "job_employment_type": "Full Time",
+            "job_posted_at_datetime_utc": "2026-07-23T10:00:00+00:00",
+            "_matched_role": "Customer Success Manager",
+            "_role_relevance_status": "accept",
+            "_role_relevance_points": 6,
+        }
+        job.update(overrides)
+        return job
+
+    def test_anywhere_in_world_is_not_treated_as_us(self):
+        result = assess_pre_enrichment_viability(self._candidate_job(
+            job_location="Anywhere in the World",
+            job_country="",
+        ))
+        self.assertFalse(result.eligible)
+        self.assertEqual(result.stat_name, "excluded_non_us")
+        self.assertEqual(result.reason, "global_remote_location")
+
+    def test_verified_direct_ats_identity_beats_client_name_in_description(self):
+        result = assess_quality_guard(self._candidate_job(
+            employer_name="Acme",
+            job_apply_link="https://jobs.ashbyhq.com/acme/123",
+            job_apply_is_direct=True,
+            _ats_provider="ashby",
+            _ats_board_identifier="acme",
+            _ats_board_identity_verified=True,
+            job_description=(
+                "About the Company ClientCo is a leading platform. "
+                "ClientCo is seeking help from Acme for this implementation. "
+                "Acme is hiring the successful candidate directly."
+            ),
+        ))
+        self.assertTrue(result.eligible)
+
+    def test_unverified_ats_identity_still_rejects_conflict(self):
+        result = assess_quality_guard(self._candidate_job(
+            employer_name="Acme",
+            job_apply_link="https://jobs.ashbyhq.com/random-board/123",
+            job_apply_is_direct=True,
+            _ats_provider="ashby",
+            _ats_board_identifier="random-board",
+            _ats_board_identity_verified=False,
+            job_description=(
+                "About the Company ClientCo is a leading platform. "
+                "ClientCo is hiring for its customer success organization."
+            ),
+        ))
+        self.assertFalse(result.eligible)
+        self.assertEqual(result.reason, "description_employer_identity_conflict")
+
+    def test_greenhouse_uses_first_published_not_updated_at(self):
+        board = {
+            "provider": "greenhouse",
+            "identifier": "acme",
+            "company_name": "Acme",
+            "company_domain": "acme.com",
+        }
+
+        def fetcher(url, **_kwargs):
+            if url.endswith("/boards/acme"):
+                return FetchPayload(200, url, json.dumps({"name": "Acme Corporation"}))
+            if url.endswith("/boards/acme/jobs"):
+                return FetchPayload(200, url, json.dumps({"jobs": [{
+                    "id": 123,
+                    "title": "Customer Success Manager",
+                    "content": "Own onboarding, renewals, and customer health.",
+                    "updated_at": "2026-07-23T12:00:00Z",
+                    "absolute_url": "https://boards.greenhouse.io/acme/jobs/123",
+                    "location": {"name": "Remote, United States"},
+                }]}))
+            if url.endswith("/boards/acme/jobs/123"):
+                return FetchPayload(200, url, json.dumps({
+                    "first_published": "2026-07-18T09:00:00Z",
+                    "application_deadline": "2026-08-15T23:59:59Z",
+                }))
+            return FetchPayload(404, url, "")
+
+        with patch.object(config, "ATS_GREENHOUSE_DETAIL_MAX_REQUESTS_PER_BOARD", 10):
+            jobs, error = fetch_board_jobs(board, fetcher)
+
+        self.assertEqual(error, "")
+        self.assertEqual(len(jobs), 1)
+        self.assertEqual(jobs[0]["employer_name"], "Acme Corporation")
+        self.assertEqual(jobs[0]["job_posted_at_datetime_utc"], "2026-07-18T09:00:00Z")
+        self.assertEqual(jobs[0]["_ats_source_updated_at"], "2026-07-23T12:00:00Z")
+        self.assertEqual(jobs[0]["job_offer_expiration_datetime_utc"], "2026-08-15T23:59:59Z")
+
+    def test_ashby_is_remote_flag_is_preserved(self):
+        board = {
+            "provider": "ashby",
+            "identifier": "acme",
+            "company_name": "Acme",
+            "company_domain": "acme.com",
+        }
+        payload = {"jobs": [{
+            "id": "a1",
+            "title": "AI Engineer",
+            "descriptionPlain": "Build production AI systems for US customers.",
+            "jobUrl": "https://jobs.ashbyhq.com/acme/a1",
+            "location": "United States",
+            "isRemote": True,
+            "workplaceType": "OnSite",
+            "employmentType": "FullTime",
+            "publishedAt": "2026-07-23T10:00:00Z",
+            "isListed": True,
+        }]}
+        jobs, error = fetch_board_jobs(
+            board, lambda url, **_kwargs: FetchPayload(200, url, json.dumps(payload))
+        )
+        self.assertEqual(error, "")
+        self.assertTrue(jobs[0]["job_is_remote"])
+        self.assertTrue(jobs[0]["_ats_board_identity_verified"])
+
+    def test_company_website_propagates_across_same_exact_employer(self):
+        jobs = [
+            {"employer_name": "Acme", "employer_website": "https://acme.com"},
+            {"employer_name": "Acme", "employer_website": ""},
+            {"employer_name": "Other", "employer_website": ""},
+        ]
+        propagated = multi_source_acquisition._propagate_company_websites(jobs)
+        self.assertEqual(propagated, 1)
+        self.assertEqual(jobs[1]["employer_website"], "https://acme.com")
+        self.assertEqual(jobs[2]["employer_website"], "")
+
+    def test_shadow_company_metrics_distinguish_jobs_from_companies(self):
+        from run_free_source_shadow import _shadow_company_metrics
+
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "filtered.json"
+            path.write_text(json.dumps({"jobs": [
+                {"employer_name": "Coinbase", "_employer_domain_input": "coinbase.com"},
+                {"employer_name": "Coinbase", "_employer_domain_input": "coinbase.com"},
+                {"employer_name": "Acme", "_employer_domain_input": ""},
+                {"employer_name": "", "_employer_domain_input": ""},
+            ]}), encoding="utf-8")
+            metrics = _shadow_company_metrics(str(path))
+
+        self.assertEqual(metrics["unique_companies"], 2)
+        self.assertEqual(metrics["jobs_with_company_identity"], 3)
+        self.assertEqual(metrics["jobs_missing_company_identity"], 1)
+        self.assertEqual(metrics["jobs_missing_employer_domain"], 1)
+        self.assertEqual(metrics["companies_with_multiple_kept_jobs"], 1)
+        self.assertEqual(metrics["extra_jobs_above_one_per_company"], 1)
+        self.assertEqual(metrics["largest_company_clusters"][0]["company"], "Coinbase")
 
 
 class AcquisitionConfigTests(unittest.TestCase):

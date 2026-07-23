@@ -50,6 +50,17 @@ def _fact(name: str, value, source: ResolvedJobSource, excerpts: List[str], *, v
     )
 
 
+def _provider_source_label(job: Dict, prefix: str) -> str:
+    source = str(
+        job.get("_acquisition_source")
+        or job.get("job_publisher")
+        or job.get("_ats_provider")
+        or "provider"
+    ).strip().lower()
+    source = re.sub(r"[^a-z0-9_:-]+", "_", source).strip("_") or "provider"
+    return f"{prefix}:{source}"
+
+
 
 def _provider_signal_fact(name: str, value, job: Dict, excerpts: List[str]) -> FactValue:
     status = EvidenceStatus.WEAK_PROVIDER_SIGNAL
@@ -62,7 +73,7 @@ def _provider_signal_fact(name: str, value, job: Dict, excerpts: List[str]) -> F
                 name,
                 value,
                 status,
-                "jsearch_provider",
+                _provider_source_label(job, "provider_record"),
                 str(job.get("job_apply_link") or job.get("job_google_link") or ""),
                 excerpt,
                 0.55,
@@ -106,7 +117,7 @@ def _cross_source_fact(
                 name,
                 value,
                 status,
-                "jsearch_prefilter",
+                _provider_source_label(job, "prefilter"),
                 source.source_url or str(job.get("job_apply_link") or ""),
                 " | ".join(excerpts)[:700],
                 0.82,
@@ -134,7 +145,7 @@ def _cross_source_fact(
             name,
             value,
             EvidenceStatus.VERIFIED_CROSS_SOURCE,
-            "jsearch_prefilter",
+            _provider_source_label(job, "prefilter"),
             str(job.get("job_apply_link") or ""),
             " | ".join(excerpts)[:700],
             0.90,
