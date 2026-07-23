@@ -45,9 +45,10 @@ def _bucket_has_campaign(bucket: str) -> bool:
 def static_checks() -> Dict:
     errors: List[str] = []
     warnings: List[str] = []
+    acquisition_mode = str(config.ACQUISITION_MODE or "").lower()
+    jsearch_mode = acquisition_mode == "jsearch"
 
     required = {
-        "RAPIDAPI_KEY": config.RAPIDAPI_KEY,
         "APOLLO_API_KEY": config.APOLLO_API_KEY,
         "AIRTABLE_TOKEN": config.AIRTABLE_TOKEN,
         "AIRTABLE_BASE_ID": config.AIRTABLE_BASE_ID,
@@ -56,6 +57,46 @@ def static_checks() -> Dict:
     for name, value in required.items():
         if not value:
             errors.append(f"Missing {name}")
+    if jsearch_mode and not config.RAPIDAPI_KEY:
+        errors.append("Missing RAPIDAPI_KEY for ACQUISITION_MODE=jsearch")
+
+    allowed_modes = {"free_multi_source", "jsearch"}
+    if acquisition_mode not in allowed_modes:
+        errors.append(
+            f"ACQUISITION_MODE must be one of {sorted(allowed_modes)}, got {config.ACQUISITION_MODE!r}"
+        )
+    if acquisition_mode == "free_multi_source":
+        allowed_sources = {"himalayas", "jobicy", "weworkremotely", "remotive", "remoteok"}
+        configured_sources = [str(value).lower() for value in config.FREE_JOB_SOURCES]
+        unknown_sources = sorted(set(configured_sources) - allowed_sources)
+        if unknown_sources:
+            errors.append(f"Unsupported FREE_JOB_SOURCES_JSON values: {unknown_sources}")
+        if len(configured_sources) != len(set(configured_sources)):
+            errors.append("FREE_JOB_SOURCES_JSON contains duplicates")
+        if not configured_sources and not config.ATS_DIRECT_ACQUISITION_ENABLED:
+            errors.append("Free acquisition requires at least one global source or ATS direct acquisition")
+        if not 5 <= config.FREE_SOURCE_REQUEST_TIMEOUT_SECONDS <= 60:
+            errors.append("FREE_SOURCE_REQUEST_TIMEOUT_SECONDS must be between 5 and 60")
+        if config.FREE_SOURCE_MAX_RESPONSE_CHARS < 100_000:
+            errors.append("FREE_SOURCE_MAX_RESPONSE_CHARS must be at least 100000")
+        if config.FREE_SOURCE_MAX_RECORDS_PER_SOURCE < 1:
+            errors.append("FREE_SOURCE_MAX_RECORDS_PER_SOURCE must be positive")
+        if config.FREE_SOURCE_MIN_SUCCESSFUL_SOURCES < 1:
+            errors.append("FREE_SOURCE_MIN_SUCCESSFUL_SOURCES must be positive")
+        if not 1 <= config.HIMALAYAS_PAGE_SIZE <= 20:
+            errors.append("HIMALAYAS_PAGE_SIZE must be between 1 and 20")
+        if config.HIMALAYAS_MAX_PAGES < 1:
+            errors.append("HIMALAYAS_MAX_PAGES must be positive")
+        if config.FREE_SOURCE_LANDING_DISCOVERY_MAX_REQUESTS < 0:
+            errors.append("FREE_SOURCE_LANDING_DISCOVERY_MAX_REQUESTS cannot be negative")
+        if config.ATS_MAX_BOARDS_PER_RUN < 1 or config.ATS_MAX_JOBS_PER_BOARD < 1:
+            errors.append("ATS board and job limits must be positive")
+        if config.ATS_BOARD_REFRESH_INTERVAL_HOURS < 1:
+            errors.append("ATS_BOARD_REFRESH_INTERVAL_HOURS must be positive")
+        if config.FINAL_PASS_TOPUP_ENABLED:
+            warnings.append(
+                "FINAL_PASS_TOPUP_ENABLED is ignored in free_multi_source mode; JSearch top-up remains rollback-only"
+            )
 
     signing_key = str(config.VALIDATION_SIGNING_KEY or "")
     if config.PRODUCTION and (
@@ -77,16 +118,16 @@ def static_checks() -> Dict:
     elif config.VALIDATION_SIGNING_KEY and len(config.VALIDATION_SIGNING_KEY) < 32:
         warnings.append("VALIDATION_SIGNING_KEY should contain at least 32 characters")
 
-    if config.JSEARCH_MAX_QUERIES_PER_RUN < 0:
+    if jsearch_mode and config.JSEARCH_MAX_QUERIES_PER_RUN < 0:
         errors.append("JSEARCH_MAX_QUERIES_PER_RUN cannot be negative")
-    elif config.JSEARCH_MAX_QUERIES_PER_RUN:
+    elif jsearch_mode and config.JSEARCH_MAX_QUERIES_PER_RUN:
         warnings.append(
             "JSEARCH_MAX_QUERIES_PER_RUN is active and will truncate the complete "
             f"role catalog to {config.JSEARCH_MAX_QUERIES_PER_RUN} queries per run"
         )
-    if config.NUM_PAGES < 1:
+    if jsearch_mode and config.NUM_PAGES < 1:
         errors.append("NUM_PAGES must be at least 1")
-    if config.JSEARCH_MAX_ESTIMATED_UNITS_PER_RUN < 0:
+    if jsearch_mode and config.JSEARCH_MAX_ESTIMATED_UNITS_PER_RUN < 0:
         errors.append("JSEARCH_MAX_ESTIMATED_UNITS_PER_RUN cannot be negative")
     scheduled_queries = (
         min(len(config.ROLES), config.JSEARCH_MAX_QUERIES_PER_RUN)
@@ -95,7 +136,8 @@ def static_checks() -> Dict:
     )
     estimated_units = scheduled_queries * max(1, config.NUM_PAGES)
     if (
-        config.JSEARCH_MAX_ESTIMATED_UNITS_PER_RUN > 0
+        jsearch_mode
+        and config.JSEARCH_MAX_ESTIMATED_UNITS_PER_RUN > 0
         and estimated_units > config.JSEARCH_MAX_ESTIMATED_UNITS_PER_RUN
     ):
         errors.append(
@@ -105,15 +147,15 @@ def static_checks() -> Dict:
             f"{config.JSEARCH_MAX_ESTIMATED_UNITS_PER_RUN}. Set NUM_PAGES=1 "
             "for the daily full catalog or intentionally raise the budget."
         )
-    if config.JSEARCH_MIN_REMAINING_REQUESTS < 0:
+    if jsearch_mode and config.JSEARCH_MIN_REMAINING_REQUESTS < 0:
         errors.append("JSEARCH_MIN_REMAINING_REQUESTS cannot be negative")
-    if config.JSEARCH_MAX_EXTRA_PAGES_PER_ROLE < 0:
+    if jsearch_mode and config.JSEARCH_MAX_EXTRA_PAGES_PER_ROLE < 0:
         errors.append("JSEARCH_MAX_EXTRA_PAGES_PER_ROLE cannot be negative")
-    if config.JSEARCH_ADAPTIVE_MAX_EXTRA_QUERIES < 0:
+    if jsearch_mode and config.JSEARCH_ADAPTIVE_MAX_EXTRA_QUERIES < 0:
         errors.append("JSEARCH_ADAPTIVE_MAX_EXTRA_QUERIES cannot be negative")
-    if config.JSEARCH_ADAPTIVE_MIN_PREFILTER_VIABLE < 0:
+    if jsearch_mode and config.JSEARCH_ADAPTIVE_MIN_PREFILTER_VIABLE < 0:
         errors.append("JSEARCH_ADAPTIVE_MIN_PREFILTER_VIABLE cannot be negative")
-    if not config.JSEARCH_REMOTE_JOBS_ONLY:
+    if jsearch_mode and not config.JSEARCH_REMOTE_JOBS_ONLY:
         warnings.append(
             "JSEARCH_REMOTE_JOBS_ONLY=0 can substantially reduce reviewable lead volume "
             "because onsite jobs consume the same request budget"
@@ -149,20 +191,20 @@ def static_checks() -> Dict:
             warnings.append(
                 "COMPANY_SOURCE_FETCH_ENABLED=0 can increase UNVERIFIED business-model decisions"
             )
-        if config.FINAL_PASS_MICROBATCH_QUERY_UNITS < 1:
+        if jsearch_mode and config.FINAL_PASS_MICROBATCH_QUERY_UNITS < 1:
             errors.append("FINAL_PASS_MICROBATCH_QUERY_UNITS must be at least 1")
-        elif config.FINAL_PASS_MICROBATCH_QUERY_UNITS > 12:
+        elif jsearch_mode and config.FINAL_PASS_MICROBATCH_QUERY_UNITS > 12:
             errors.append("FINAL_PASS_MICROBATCH_QUERY_UNITS must be <= 12 in READY v1")
-        if config.FINAL_PASS_MAX_TOPUP_ITERATIONS < 0:
+        if jsearch_mode and config.FINAL_PASS_MAX_TOPUP_ITERATIONS < 0:
             errors.append("FINAL_PASS_MAX_TOPUP_ITERATIONS cannot be negative; 0 means exhaustive")
-        elif config.FINAL_PASS_MAX_TOPUP_ITERATIONS > 2:
+        elif jsearch_mode and config.FINAL_PASS_MAX_TOPUP_ITERATIONS > 2:
             errors.append(
                 "FINAL_PASS_MAX_TOPUP_ITERATIONS must be <= 2 in READY v1; "
                 "inventory is weekly and top-up is not an unbounded recovery mechanism"
             )
-        if 0 < config.FINAL_PASS_MAX_RUNTIME_SECONDS < 60:
+        if jsearch_mode and 0 < config.FINAL_PASS_MAX_RUNTIME_SECONDS < 60:
             errors.append("FINAL_PASS_MAX_RUNTIME_SECONDS must be 0 or at least 60")
-        if config.FINAL_PASS_MAX_EMPTY_QUERY_CYCLES < 1:
+        if jsearch_mode and config.FINAL_PASS_MAX_EMPTY_QUERY_CYCLES < 1:
             errors.append("FINAL_PASS_MAX_EMPTY_QUERY_CYCLES must be at least 1")
         if not 1 <= config.JOB_SOURCE_DISCOVERY_MAX_PAGES <= 8:
             errors.append("JOB_SOURCE_DISCOVERY_MAX_PAGES must be between 1 and 8")
@@ -215,9 +257,9 @@ def static_checks() -> Dict:
             errors.append("REQUIRE_CURRENT_EMPLOYMENT_EVIDENCE must be enabled in strict FINAL_PASS mode")
         if not config.REQUIRE_CONTACT_LINKEDIN:
             errors.append("REQUIRE_CONTACT_LINKEDIN must be enabled in strict FINAL_PASS mode")
-        if str(config.DATE_POSTED).lower() != "week":
+        if jsearch_mode and str(config.DATE_POSTED).lower() != "week":
             errors.append("DATE_POSTED must be week for the READY v1 rolling inventory")
-        if config.NUM_PAGES != 1:
+        if jsearch_mode and config.NUM_PAGES != 1:
             errors.append("NUM_PAGES must be 1; deeper acquisition is handled by bounded top-up")
         if config.READY_DAILY_DELIVERY_LIMIT < 1:
             errors.append("READY_DAILY_DELIVERY_LIMIT must be at least 1")
@@ -233,7 +275,7 @@ def static_checks() -> Dict:
             errors.append("TOPUP_MAX_ZERO_DOWNSTREAM_BATCHES must be at least 1")
         if config.PIPELINE_LOCK_STALE_HOURS < 1:
             errors.append("PIPELINE_LOCK_STALE_HOURS must be at least 1")
-        if len(config.ROLES) > 50:
+        if jsearch_mode and len(config.ROLES) > 50:
             errors.append(
                 "ROLES_JSON contains more than 50 acquisition queries; remove the legacy "
                 "118-role override and use acquisition families"
@@ -246,7 +288,7 @@ def static_checks() -> Dict:
             errors.append("Recoverable job queue TTL and max attempts must both be positive")
     if not 0 <= config.MAX_ROLE_FAILURE_RATE <= 1:
         errors.append("MAX_ROLE_FAILURE_RATE must be between 0 and 1")
-    if config.JSEARCH_STOP_ON_LOW_QUOTA and config.JSEARCH_MIN_REMAINING_REQUESTS <= 0:
+    if jsearch_mode and config.JSEARCH_STOP_ON_LOW_QUOTA and config.JSEARCH_MIN_REMAINING_REQUESTS <= 0:
         warnings.append(
             "JSEARCH_STOP_ON_LOW_QUOTA=1 has no effect unless "
             "JSEARCH_MIN_REMAINING_REQUESTS is greater than zero"

@@ -19,6 +19,7 @@ import config
 from audit_filter import run_audit
 from hiring_manager import run_hiring_manager_identification
 from jsearch_scraper import ScrapeResult, run_daily_scrape
+from multi_source_acquisition import run_multi_source_acquisition
 from reviewable_topup import _merge_query_metrics, run_reviewable_topup
 from final_pass_topup import run_final_pass_topup
 from qualification_pipeline import run_precontact_qualification
@@ -58,7 +59,7 @@ def _fail(summary: dict, step: str, errors: list[str]) -> dict:
 
 
 def _resume_scrape_from_checkpoint(jobs: list[dict], query_metrics: dict) -> ScrapeResult:
-    """Create a raw artifact from crash-checkpoint jobs without repeating JSearch."""
+    """Create a raw artifact from crash-checkpoint jobs without repeating acquisition."""
     output_dir = Path(config.OUTPUT_DIR)
     output_dir.mkdir(parents=True, exist_ok=True)
     path = output_dir / f"jobs_checkpoint_resume_{datetime.now():%Y-%m-%d_%H-%M-%S}.json"
@@ -166,6 +167,7 @@ def run_pipeline() -> dict:
         "started_at": started.isoformat(),
         "production_mode": config.PRODUCTION,
         "date_posted": config.DATE_POSTED,
+        "acquisition_mode": config.ACQUISITION_MODE,
         "steps": {},
         "success": False,
         "technical_success": False,
@@ -176,8 +178,13 @@ def run_pipeline() -> dict:
     checkpoint_jobs = checkpoint.pending_jobs()
     checkpoint_metrics = checkpoint.query_metrics()
     due_recovery_jobs = recovery_queue.due_jobs()
+    # JSearch-specific micro-batch top-up is disabled outside explicit rollback
+    # mode. Free sources and direct ATS boards are already fetched in their full
+    # bounded daily windows; invoking JSearch here would reintroduce the noisy
+    # dependency that v1.3 removes from production.
     topup_enabled = bool(
-        (
+        str(config.ACQUISITION_MODE).lower() == "jsearch"
+        and (
             config.FINAL_PASS_TOPUP_ENABLED
             if config.FINAL_PASS_PIPELINE_ENABLED
             else config.JSEARCH_REVIEWABLE_TOPUP_ENABLED
@@ -187,22 +194,23 @@ def run_pipeline() -> dict:
     )
     if checkpoint_jobs:
         logger.warning(
-            "Resuming %d checkpoint jobs; skipping duplicate base JSearch scrape",
+            "Resuming %d checkpoint jobs; skipping duplicate base acquisition",
             len(checkpoint_jobs),
         )
         scrape = _resume_scrape_from_checkpoint(checkpoint_jobs, checkpoint_metrics)
     else:
-        scrape = run_daily_scrape(
-            registry=registry,
-            base_num_pages=(
-                config.JSEARCH_TOPUP_INITIAL_PAGES if topup_enabled else None
-            ),
-            # Initial adaptive acquisition and downstream micro-batch top-up are
-            # independently bounded. Do not disable page-2/lookback merely because
-            # FINAL_PASS top-up is enabled; doing so collapses production to the 50
-            # base queries and defeats the upstream recall strategy.
-            allow_adaptive=None,
-        )
+        if str(config.ACQUISITION_MODE).lower() == "jsearch":
+            scrape = run_daily_scrape(
+                registry=registry,
+                base_num_pages=(
+                    config.JSEARCH_TOPUP_INITIAL_PAGES if topup_enabled else None
+                ),
+                # Initial adaptive acquisition and downstream micro-batch top-up are
+                # independently bounded.
+                allow_adaptive=None,
+            )
+        else:
+            scrape = run_multi_source_acquisition(registry=registry)
         if checkpoint_metrics:
             scrape.stats["query_metrics"] = _merge_query_metrics(
                 checkpoint_metrics,
@@ -226,26 +234,38 @@ def run_pipeline() -> dict:
     }
     if config.PRODUCTION and not scrape.success:
         return _fail(summary, "scrape", scrape.errors)
-    logger.info(
-        "JSearch strategy: remote_only=%s remote_filter=%s remote_query_bias=%s "
-        "base_units=%d adaptive_queries=%d adaptive_viable_added=%d "
-        "lookback_queries=%d lookback_viable_added=%d estimated_units=%d buckets=%s",
-        config.JSEARCH_REMOTE_JOBS_ONLY,
-        config.JSEARCH_REMOTE_FILTER_PARAMETER,
-        config.JSEARCH_REMOTE_QUERY_BIAS,
-        scrape.stats.get("base_estimated_request_units", 0),
-        scrape.stats.get("adaptive_extra_queries", 0),
-        scrape.stats.get("adaptive_prefilter_viable_added", 0),
-        scrape.stats.get("adaptive_lookback_queries", 0),
-        scrape.stats.get("adaptive_lookback_prefilter_viable_added", 0),
-        scrape.stats.get("estimated_request_units", 0),
-        scrape.stats.get("adaptive_bucket_counts", {}),
-    )
-    logger.info(
-        "JSearch query variants: lookback_counts=%s yield=%s",
-        scrape.stats.get("adaptive_lookback_variant_counts", {}),
-        scrape.stats.get("query_variant_metrics", {}),
-    )
+    if str(config.ACQUISITION_MODE).lower() == "jsearch":
+        logger.info(
+            "JSearch strategy: remote_only=%s remote_filter=%s remote_query_bias=%s "
+            "base_units=%d adaptive_queries=%d adaptive_viable_added=%d "
+            "lookback_queries=%d lookback_viable_added=%d estimated_units=%d buckets=%s",
+            config.JSEARCH_REMOTE_JOBS_ONLY,
+            config.JSEARCH_REMOTE_FILTER_PARAMETER,
+            config.JSEARCH_REMOTE_QUERY_BIAS,
+            scrape.stats.get("base_estimated_request_units", 0),
+            scrape.stats.get("adaptive_extra_queries", 0),
+            scrape.stats.get("adaptive_prefilter_viable_added", 0),
+            scrape.stats.get("adaptive_lookback_queries", 0),
+            scrape.stats.get("adaptive_lookback_prefilter_viable_added", 0),
+            scrape.stats.get("estimated_request_units", 0),
+            scrape.stats.get("adaptive_bucket_counts", {}),
+        )
+        logger.info(
+            "JSearch query variants: lookback_counts=%s yield=%s",
+            scrape.stats.get("adaptive_lookback_variant_counts", {}),
+            scrape.stats.get("query_variant_metrics", {}),
+        )
+    else:
+        logger.info(
+            "Multi-source strategy: sources=%s source_metrics=%s ats_metrics=%s "
+            "source_outcomes=%s boards_total=%d landing_discovery=%s",
+            scrape.stats.get("enabled_sources", []),
+            scrape.stats.get("source_metrics", {}),
+            scrape.stats.get("ats_metrics", {}),
+            scrape.stats.get("source_outcomes", {}),
+            scrape.stats.get("boards_total", 0),
+            scrape.stats.get("landing_discovery", {}),
+        )
 
     logger.info("=== STEP 2: FILTER ===")
     filtered = run_filter(input_path=scrape.output_path, registry=registry)

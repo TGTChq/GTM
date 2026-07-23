@@ -375,8 +375,27 @@ def run_final_pass_topup(
 
             filtered = run_filter(input_path=scrape.output_path, registry=registry)
             round_detail.update({"filter_kept": filtered.kept_count, "filter_rejected": filtered.rejected_count, "filter_output": filtered.output_path})
+            zero_yield_error = bool(
+                filtered.kept_count <= 0
+                and filtered.errors
+                and all(
+                    str(error) == "Filter kept zero jobs from a non-empty scrape"
+                    for error in filtered.errors
+                )
+            )
             if not filtered.success or filtered.kept_count <= 0:
                 round_detail["final_pass_added"] = 0
+                if zero_yield_error:
+                    # A top-up batch whose rows are all legitimately rejected is
+                    # zero downstream yield, not a technical filter failure. Keep
+                    # exploring the remaining bounded query windows.
+                    round_detail["filter_zero_yield"] = True
+                    details["rounds"].append(round_detail)
+                    zero_downstream_batches += 1
+                    if zero_downstream_batches >= max(1, config.TOPUP_MAX_ZERO_DOWNSTREAM_BATCHES):
+                        stop_reason = "zero_downstream_yield"
+                        break
+                    continue
                 details["rounds"].append(round_detail)
                 if not filtered.success:
                     details["errors"].extend(filtered.errors)

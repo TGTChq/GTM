@@ -89,6 +89,7 @@ class RunDailyFinalPassV02Tests(unittest.TestCase):
             }
             with (
                 patch.object(config, "PRODUCTION", True),
+                patch.object(config, "ACQUISITION_MODE", "jsearch"),
                 patch.object(config, "FINAL_PASS_PIPELINE_ENABLED", True),
                 patch.object(config, "JSEARCH_REVIEWABLE_TOPUP_ENABLED", False),
                 patch.object(config, "MAX_ELIGIBLE_COMPANIES_PER_RUN", 90),

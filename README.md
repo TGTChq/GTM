@@ -5,19 +5,22 @@ An automated outbound pipeline that identifies companies actively hiring for rol
 ## Pipeline
 
 ```text
-JSearch
-→ Role relevance
+Himalayas + Jobicy + We Work Remotely + Remotive + Remote OK
+→ automatic ATS discovery and registry
+→ Greenhouse / Lever / Ashby / Recruitee / Workable / Personio
+→ cross-source deduplication and role relevance
 → Business and ICP filters
 → Company enrichment
 → Hiring manager identification
-→ Apollo / Hunter contact enrichment
+→ Apollo / optional Hunter contact enrichment
 → Airtable human review
 → Instantly campaign enrollment
 ```
 
 ## Core Capabilities
 
-* Collects recent US job postings across the centralized Intent 2.0 role catalog
+* Collects recent remote-US job postings from five free global feeds and six public ATS families
+* Discovers and maintains ATS boards automatically; no manual company registration is required
 * Normalizes 100+ search titles into canonical roles, functions, and buyer hierarchies
 * Matches duplicate search results to the most specific relevant role and campaign
 * Excludes staffing firms, out-of-scope industries, explicit in-person/non-paying roles, non-US roles, duplicates, CRM companies, and companies outside the target employee range
@@ -39,7 +42,15 @@ JSearch
 python -u run_daily.py
 ```
 
-The daily pipeline performs scraping, qualification, enrichment, and Airtable synchronization.
+The daily pipeline performs acquisition, qualification, enrichment, and Airtable synchronization. The production default is `ACQUISITION_MODE=free_multi_source`; JSearch remains available only as an explicit rollback mode.
+
+### Free-Source Shadow Benchmark
+
+```bash
+python -u run_free_source_shadow.py
+```
+
+The shadow command calls only public job feeds and ATS endpoints, runs local filters, and writes a source-by-source report. It does not call JSearch, Apollo, Hunter, Airtable, or Instantly.
 
 ### Approved Lead Sync
 
