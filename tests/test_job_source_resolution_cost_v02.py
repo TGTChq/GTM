@@ -7,7 +7,7 @@ from job_source_resolver import JobSourceResolver
 class JobSourceResolutionCostTests(unittest.TestCase):
     @patch("job_source_resolver.JobSourceResolver._fetch")
     @patch("job_source_resolver.JobSourceResolver._discover_company_job_urls")
-    def test_direct_official_link_still_runs_bounded_careers_discovery(self, discover, fetch):
+    def test_direct_official_link_resolves_before_careers_discovery(self, discover, fetch):
         discover.return_value = ([], [])
         fetch.return_value = {
             "status_code": 200,
@@ -21,8 +21,10 @@ class JobSourceResolutionCostTests(unittest.TestCase):
             "job_title": "Data Analyst",
             "job_apply_link": "https://example.com/careers/jobs/123",
         }, fetch=True)
-        discover.assert_called_once()
+        discover.assert_not_called()
+        fetch.assert_called_once()
         self.assertEqual(result.state, "ACTIVE_VERIFIED")
+        self.assertIn("direct_fast_path", result.notes)
 
     @patch("job_source_resolver.JobSourceResolver._fetch")
     @patch("job_source_resolver.JobSourceResolver._discover_company_job_urls")

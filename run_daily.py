@@ -319,6 +319,20 @@ def run_pipeline() -> dict:
             "nonpass_output": qualified.nonpass_path,
             "errors": qualified.errors,
         }
+        logger.info(
+            "Source gate funnel: verified=%d corroborated=%d direct_structured=%d "
+            "temporary=%d unresolved=%d retryable=%d direct_fast=%d discovery_fallback=%d "
+            "discovery_budget_exhausted=%d",
+            qualified.stats.get("source_state__ACTIVE_VERIFIED", 0),
+            qualified.stats.get("source_state__ACTIVE_CORROBORATED", 0),
+            qualified.stats.get("source_state__ACTIVE_DIRECT_STRUCTURED", 0),
+            qualified.stats.get("source_state__SOURCE_TEMPORARILY_UNAVAILABLE", 0),
+            qualified.stats.get("source_state__SOURCE_UNRESOLVED", 0),
+            qualified.stats.get("source_retryable", 0),
+            qualified.stats.get("source_note__direct_fast_path", 0),
+            qualified.stats.get("source_note__company_discovery_fallback", 0),
+            qualified.stats.get("source_attempt__discovery_budget_exhausted", 0),
+        )
         if config.PRODUCTION and not qualified.success:
             return _fail(summary, "qualification", qualified.errors)
 
@@ -646,8 +660,8 @@ def main() -> int:
     summary_path = save_run_summary(summary)
     logger.info("Run summary: %s", summary_path)
     if summary.get("success") and summary.get("sla_success") is False:
-        logger.error("Pipeline completed technically but missed the daily SLA")
-        return 2
+        logger.warning("Pipeline completed technically but missed the daily SLA")
+        return 2 if config.PIPELINE_FAIL_PROCESS_ON_SLA_MISS else 0
     if summary.get("success"):
         logger.info("Pipeline completed successfully")
         return 0
@@ -656,4 +670,10 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    try:
+        exit_code = main()
+    finally:
+        # Explicitly close file handlers so one-shot Railway services terminate
+        # cleanly after the run summary is persisted.
+        logging.shutdown()
+    raise SystemExit(exit_code)

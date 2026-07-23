@@ -144,6 +144,8 @@ def _job_to_fields(job: Dict) -> Dict:
     if not canonical_active_status and source_state:
         canonical_active_status = {
             "ACTIVE_VERIFIED": "verified",
+            "ACTIVE_CORROBORATED": "verified",
+            "ACTIVE_DIRECT_STRUCTURED": "unverified_review",
             "INACTIVE_VERIFIED": "broken",
             "SOURCE_TEMPORARILY_UNAVAILABLE": "unverified_review",
             "SOURCE_UNRESOLVED": "unverified_review",

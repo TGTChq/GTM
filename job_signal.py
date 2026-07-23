@@ -486,6 +486,13 @@ def select_job_url(
             canonical_type or classify_url_source(canonical_url, company_domain),
             "verified_by_job_gate",
         )
+    if canonical_url and canonical_state == "ACTIVE_DIRECT_STRUCTURED":
+        return (
+            _clean_candidate_url(canonical_url),
+            "unverified_review",
+            canonical_type or classify_url_source(canonical_url, company_domain),
+            "structured_direct_source_requires_revalidation",
+        )
     if canonical_url and canonical_state == "INACTIVE_VERIFIED":
         return (
             _clean_candidate_url(canonical_url),

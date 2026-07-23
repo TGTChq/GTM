@@ -433,8 +433,18 @@ class SchedulerBoundaryTests(unittest.TestCase):
         with (
             patch.object(run_daily, "run_pipeline", return_value={"success": True, "sla_success": False}),
             patch.object(run_daily, "save_run_summary", return_value="summary.json"),
+            patch.object(config, "PIPELINE_FAIL_PROCESS_ON_SLA_MISS", True),
         ):
             self.assertEqual(run_daily.main(), 2)
+
+    def test_daily_main_exits_zero_after_technical_success_by_default(self):
+        import run_daily
+        with (
+            patch.object(run_daily, "run_pipeline", return_value={"success": True, "sla_success": False}),
+            patch.object(run_daily, "save_run_summary", return_value="summary.json"),
+            patch.object(config, "PIPELINE_FAIL_PROCESS_ON_SLA_MISS", False),
+        ):
+            self.assertEqual(run_daily.main(), 0)
 
     def test_approved_sync_never_enrolls_failed_revalidation(self):
         import run_approved

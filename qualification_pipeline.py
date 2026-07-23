@@ -62,6 +62,22 @@ def run_precontact_qualification(
 
     for job in jobs:
         annotated = jgate.annotate(job, fetch=fetch_sources)
+        source = (
+            ((annotated.get("_job_gate_decision") or {}).get("metadata") or {}).get("source")
+            or {}
+        )
+        source_state = str(source.get("state") or "MISSING")
+        stats[f"source_state__{source_state}"] += 1
+        if source.get("retryable"):
+            stats["source_retryable"] += 1
+        for note in source.get("notes") or []:
+            stats[f"source_note__{str(note).split(':', 1)[0]}"] += 1
+        for attempt in source.get("attempts") or []:
+            if not isinstance(attempt, dict):
+                continue
+            stats[f"source_attempt__{attempt.get('status') or 'unknown'}"] += 1
+            if attempt.get("phase"):
+                stats[f"source_phase__{attempt.get('phase')}"] += 1
         if annotated.get("_job_gate_state") != GateState.PASS.value:
             nonpass.append(annotated)
             stats[f"job_{str(annotated.get('_job_gate_state')).lower()}"] += 1
