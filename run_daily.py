@@ -197,9 +197,11 @@ def run_pipeline() -> dict:
             base_num_pages=(
                 config.JSEARCH_TOPUP_INITIAL_PAGES if topup_enabled else None
             ),
-            # Closed-loop mode reserves the post-filter budget for queries selected
-            # using actual Apollo contactability instead of spending it blindly.
-            allow_adaptive=False if topup_enabled else None,
+            # Initial adaptive acquisition and downstream micro-batch top-up are
+            # independently bounded. Do not disable page-2/lookback merely because
+            # FINAL_PASS top-up is enabled; doing so collapses production to the 50
+            # base queries and defeats the upstream recall strategy.
+            allow_adaptive=None,
         )
         if checkpoint_metrics:
             scrape.stats["query_metrics"] = _merge_query_metrics(
