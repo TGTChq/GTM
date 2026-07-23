@@ -66,6 +66,49 @@ def normalize_company_name(value: str | None) -> str:
     return " ".join(words)
 
 
+def _name_alias(value: str) -> str:
+    try:
+        import config
+        aliases = dict(getattr(config, "COMPANY_NAME_ALIASES", {}) or {})
+    except Exception:
+        aliases = {}
+    normalized = normalize_company_name(value)
+    normalized_aliases: dict[str, str] = {}
+    for key, target in aliases.items():
+        source = normalize_company_name(key)
+        destination = normalize_company_name(target)
+        normalized_aliases[source] = destination
+        normalized_aliases[source.replace(" ", "")] = destination
+    seen: set[str] = set()
+    while normalized not in seen:
+        seen.add(normalized)
+        next_value = normalized_aliases.get(normalized) or normalized_aliases.get(
+            normalized.replace(" ", "")
+        )
+        if not next_value:
+            break
+        normalized = next_value
+    return normalized
+
+
+def _domain_alias(value: str | None) -> str:
+    try:
+        import config
+        aliases = dict(getattr(config, "COMPANY_DOMAIN_ALIASES", {}) or {})
+    except Exception:
+        aliases = {}
+    normalized = normalize_company_domain(value)
+    normalized_aliases = {
+        normalize_company_domain(key): normalize_company_domain(target)
+        for key, target in aliases.items()
+    }
+    seen: set[str] = set()
+    while normalized in normalized_aliases and normalized not in seen:
+        seen.add(normalized)
+        normalized = normalized_aliases[normalized]
+    return normalized
+
+
 def _core_name_tokens(value: str | None) -> set[str]:
     return {
         token
@@ -76,8 +119,8 @@ def _core_name_tokens(value: str | None) -> set[str]:
 
 def company_names_compatible(requested: str | None, resolved: str | None) -> bool:
     """Conservative organization-name validation for domainless Apollo lookups."""
-    left = normalize_company_name(requested)
-    right = normalize_company_name(resolved)
+    left = _name_alias(str(requested or ""))
+    right = _name_alias(str(resolved or ""))
     if not left or not right:
         return False
     if left == right:
@@ -104,8 +147,8 @@ def company_names_compatible(requested: str | None, resolved: str | None) -> boo
 
 
 def domains_equivalent(left: str | None, right: str | None) -> bool:
-    left_domain = normalize_company_domain(left)
-    right_domain = normalize_company_domain(right)
+    left_domain = _domain_alias(left)
+    right_domain = _domain_alias(right)
     return bool(left_domain and right_domain and left_domain == right_domain)
 
 

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Optional, Set
 
+import re
+
 from apollo_client import PersonMatch
 from company_identity import email_matches_company
 from decision_types import GateDecision, GateState
@@ -26,6 +28,17 @@ class EmailGate:
             return GateDecision(
                 "email", GateState.UNVERIFIED, ReasonCode.UNVERIFIED_EMAIL,
                 retryable=True, next_action="try_next_contact_or_email",
+            )
+        local_part = email.split("@", 1)[0]
+        if re.fullmatch(
+            r"(?:info|hello|contact|sales|support|careers|jobs|recruiting|hr|admin|office|team|marketing)",
+            local_part,
+            re.I,
+        ):
+            return GateDecision(
+                "email", GateState.REROUTE, ReasonCode.UNVERIFIED_EMAIL,
+                retryable=True, next_action="try_next_contact_or_email",
+                metadata={"generic_mailbox": True},
             )
         if not email_matches_company(email, company_domains):
             return GateDecision(

@@ -151,8 +151,15 @@ def static_checks() -> Dict:
             )
         if config.FINAL_PASS_MICROBATCH_QUERY_UNITS < 1:
             errors.append("FINAL_PASS_MICROBATCH_QUERY_UNITS must be at least 1")
+        elif config.FINAL_PASS_MICROBATCH_QUERY_UNITS > 12:
+            errors.append("FINAL_PASS_MICROBATCH_QUERY_UNITS must be <= 12 in READY v1")
         if config.FINAL_PASS_MAX_TOPUP_ITERATIONS < 0:
             errors.append("FINAL_PASS_MAX_TOPUP_ITERATIONS cannot be negative; 0 means exhaustive")
+        elif config.FINAL_PASS_MAX_TOPUP_ITERATIONS > 2:
+            errors.append(
+                "FINAL_PASS_MAX_TOPUP_ITERATIONS must be <= 2 in READY v1; "
+                "inventory is weekly and top-up is not an unbounded recovery mechanism"
+            )
         if 0 < config.FINAL_PASS_MAX_RUNTIME_SECONDS < 60:
             errors.append("FINAL_PASS_MAX_RUNTIME_SECONDS must be 0 or at least 60")
         if config.FINAL_PASS_MAX_EMPTY_QUERY_CYCLES < 1:
@@ -167,9 +174,28 @@ def static_checks() -> Dict:
             errors.append("REQUIRE_CURRENT_EMPLOYMENT_EVIDENCE must be enabled in strict FINAL_PASS mode")
         if not config.REQUIRE_CONTACT_LINKEDIN:
             errors.append("REQUIRE_CONTACT_LINKEDIN must be enabled in strict FINAL_PASS mode")
-        if not config.REQUIRE_US_CONTACT_TERRITORY:
-            warnings.append(
-                "REQUIRE_US_CONTACT_TERRITORY=0 allows contacts without positive US/global ownership evidence"
+        if str(config.DATE_POSTED).lower() != "week":
+            errors.append("DATE_POSTED must be week for the READY v1 rolling inventory")
+        if config.NUM_PAGES != 1:
+            errors.append("NUM_PAGES must be 1; deeper acquisition is handled by bounded top-up")
+        if config.READY_DAILY_DELIVERY_LIMIT < 1:
+            errors.append("READY_DAILY_DELIVERY_LIMIT must be at least 1")
+        if config.READY_INVENTORY_TARGET < config.READY_DAILY_DELIVERY_LIMIT:
+            errors.append("READY_INVENTORY_TARGET must be >= READY_DAILY_DELIVERY_LIMIT")
+        if not 1 <= config.READY_INVENTORY_TTL_DAYS <= 3:
+            errors.append("READY_INVENTORY_TTL_DAYS must be between 1 and 3")
+        if not 1 <= config.MAX_JOB_AGE_DAYS <= 8:
+            errors.append("MAX_JOB_AGE_DAYS must be between 1 and 8 for the rolling weekly signal")
+        if config.JOB_SOURCE_MIN_INDEPENDENT_PUBLISHERS < 2:
+            errors.append("JOB_SOURCE_MIN_INDEPENDENT_PUBLISHERS must be at least 2")
+        if config.TOPUP_MAX_ZERO_DOWNSTREAM_BATCHES < 1:
+            errors.append("TOPUP_MAX_ZERO_DOWNSTREAM_BATCHES must be at least 1")
+        if config.PIPELINE_LOCK_STALE_HOURS < 1:
+            errors.append("PIPELINE_LOCK_STALE_HOURS must be at least 1")
+        if len(config.ROLES) > 50:
+            errors.append(
+                "ROLES_JSON contains more than 50 acquisition queries; remove the legacy "
+                "118-role override and use acquisition families"
             )
         if not config.APPROVED_REVALIDATE_JOB_SOURCE:
             errors.append("APPROVED_REVALIDATE_JOB_SOURCE must be enabled before Instantly enrollment")

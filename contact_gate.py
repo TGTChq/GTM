@@ -200,15 +200,18 @@ class ContactGate:
             role_has_us = any(re.search(pattern, role_scope, re.I) for pattern in US_TERRITORY_PATTERNS)
             role_global = bool(re.search(GLOBAL_SCOPE_PATTERN, role_scope, re.I))
             has_us = any(re.search(pattern, territory, re.I) for pattern in US_TERRITORY_PATTERNS)
-            if (role_foreign and not role_has_us) or (foreign and not has_us and not role_global):
+            # A person's physical location is not proof of territory ownership.
+            # Reroute only when the role itself explicitly owns a conflicting
+            # geography (for example, "VP Sales EMEA").
+            if role_foreign and not role_has_us and not role_global:
                 bundle.add(FactValue(
-                    "contact_territory", foreign, EvidenceStatus.VERIFIED_CROSS_SOURCE,
-                    [EvidenceItem("contact_territory", foreign, EvidenceStatus.VERIFIED_CROSS_SOURCE, "apollo", excerpt=territory, confidence=0.95)]
+                    "contact_territory", role_foreign, EvidenceStatus.VERIFIED_CROSS_SOURCE,
+                    [EvidenceItem("contact_territory", role_foreign, EvidenceStatus.VERIFIED_CROSS_SOURCE, "apollo", excerpt=role_scope, confidence=0.95)]
                 ))
                 return GateDecision(
                     "contact", GateState.REROUTE, ReasonCode.REROUTE_TERRITORY_MISMATCH,
                     evidence=bundle, retryable=True, next_action="try_next_contact",
-                    metadata={"detected_territories": foreign},
+                    metadata={"detected_territories": role_foreign},
                 )
         if intent_market == "us_market" and config.REQUIRE_US_CONTACT_TERRITORY and not has_us and not role_global:
             return GateDecision(

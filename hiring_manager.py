@@ -896,7 +896,7 @@ def _is_reviewable_lead(lead: Dict) -> bool:
     """Return Airtable-surface candidates, with legacy-fixture compatibility."""
     if lead.get("_final_state"):
         return bool(
-            lead.get("_final_state") in {"FINAL_PASS", "NEEDS_CHECK"}
+            lead.get("_final_state") == "FINAL_PASS"
             and lead.get("hiring_manager_email")
             and lead.get("lead_key")
         )

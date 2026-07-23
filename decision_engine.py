@@ -98,6 +98,14 @@ def annotate_final_decision(lead: dict, gates: Dict[str, GateDecision]) -> dict:
     final = decide(gates)
     result = dict(lead)
     payload = final.to_dict()
+    retryable = any(bool(item.retryable) for item in gates.values())
+    operational_state = (
+        "READY"
+        if payload["state"] == FinalState.FINAL_PASS.value
+        else "RETRY"
+        if retryable or payload["state"] == FinalState.REROUTE.value
+        else "REJECTED"
+    )
     result.update(
         {
             "_final_state": payload["state"],
@@ -109,6 +117,7 @@ def annotate_final_decision(lead: dict, gates: Dict[str, GateDecision]) -> dict:
             "_validation_version": payload["validation_version"],
             "_validation_timestamp": lead.get("_validation_timestamp") or utc_now_iso(),
             "_gate_decisions": payload["gate_decisions"],
+            "_operational_state": operational_state,
         }
     )
     return result

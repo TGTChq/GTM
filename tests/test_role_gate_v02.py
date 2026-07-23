@@ -5,10 +5,19 @@ from role_gate import RoleGate
 
 
 class RoleGateV02Tests(unittest.TestCase):
-    def test_senior_official_title_rejects(self):
+    def test_senior_individual_contributor_title_passes(self):
         job = {
             "canonical_job_title": "Senior Staff Accountant",
             "official_job_description": "Own the monthly close.",
+            "official_job_url": "https://example.com/job",
+            "_matched_role": "Staff Accountant",
+        }
+        self.assertEqual(RoleGate().evaluate(job).state, GateState.PASS)
+
+    def test_director_title_still_rejects(self):
+        job = {
+            "canonical_job_title": "Director of Accounting",
+            "official_job_description": "Lead the accounting function.",
             "official_job_url": "https://example.com/job",
             "_matched_role": "Staff Accountant",
         }

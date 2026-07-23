@@ -293,7 +293,11 @@ def assess_posting_integrity(job: Dict) -> QualityAssessment:
     shell_name = bool(
         ("." in employer and employer_host)
         or re.search(r"\bposted on 20\d{2}[-/]\d{2}[-/]\d{2}\b", employer, re.I)
-        or re.fullmatch(r"[$£€]?\d+(?:[.,]\d+)?", employer.strip())
+        or re.fullmatch(
+            r"[$£€]?\d+(?:[.,]\d+)?(?:\s*/\s*(?:month|mo|hour|hr|year|yr))?",
+            employer.strip(),
+            re.I,
+        )
         or employer_norm in {"this", "company", "the company", "employer"}
     )
     if placeholder_count >= 3:

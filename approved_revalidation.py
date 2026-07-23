@@ -58,7 +58,12 @@ def revalidate_approved_record(record: Dict) -> Tuple[bool, str]:
 
     if config.APPROVED_REVALIDATE_JOB_SOURCE:
         source = JobSourceResolver().resolve(job, fetch=True)
-        if source.state != "ACTIVE_VERIFIED" or not source.official:
+        trusted_active = bool(
+            source.state == "ACTIVE_VERIFIED" and (source.official or source.corroborated)
+        ) or bool(
+            source.state == "ACTIVE_CORROBORATED" and source.corroborated
+        )
+        if not trusted_active:
             return False, f"Job source revalidation failed: {source.state}"
 
     org = apollo.enrich_organization(domain=domain, name=company, website=website)
@@ -93,10 +98,11 @@ def revalidate_approved_record(record: Dict) -> Tuple[bool, str]:
         return False, f"Contact revalidation failed: {contact.primary_reason}"
 
     hunter_result = None
-    if not current_email:
-        if not (config.VERIFY_WITH_HUNTER and config.HUNTER_API_KEY):
-            return False, "Current Apollo record no longer exposes the approved email"
+    if config.VERIFY_WITH_HUNTER and config.HUNTER_API_KEY:
         hunter_result = hunter.verify_email(stored_email)
+    if not current_email:
+        if hunter_result is None:
+            return False, "Current Apollo record no longer exposes the approved email"
         person = replace(
             person,
             email=stored_email,

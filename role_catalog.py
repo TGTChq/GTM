@@ -259,6 +259,66 @@ for _definition in _ROLE_DEFINITIONS:
 
 DEFAULT_SEARCH_ROLES: Tuple[str, ...] = tuple(ROLE_DEFINITIONS)
 
+# Acquisition is intentionally smaller than the classification catalog. These
+# titles provide broad coverage of every supported function; returned postings
+# are then classified against all DEFAULT_SEARCH_ROLES. This prevents aliases
+# and near-duplicate titles from consuming separate JSearch requests.
+DEFAULT_ACQUISITION_ROLES: Tuple[str, ...] = (
+    "Customer Support Representative",
+    "Customer Success Manager",
+    "Customer Success Associate",
+    "Technical Support Specialist",
+    "Implementation Specialist",
+    "Software Engineer",
+    "Full Stack Developer",
+    "DevOps Engineer",
+    "Systems Administrator",
+    "Data Engineer",
+    "Data Analyst",
+    "Data Scientist",
+    "AI Engineer",
+    "Machine Learning Engineer",
+    "Automation Specialist",
+    "Accountant",
+    "Staff Accountant",
+    "Financial Analyst",
+    "AP Specialist",
+    "AR Specialist",
+    "Billing Specialist",
+    "Payroll Specialist",
+    "Digital Marketing Specialist",
+    "Content Marketing Specialist",
+    "Paid Media Specialist",
+    "SEO Specialist",
+    "Brand Manager",
+    "Graphic Designer",
+    "UX/UI Designer",
+    "Copywriter",
+    "Video Editor",
+    "Podcast Producer",
+    "Executive Assistant",
+    "Project Coordinator",
+    "Operations Analyst",
+    "Virtual Assistant",
+    "Account Executive",
+    "Sales Development Representative",
+    "Revenue Operations Analyst",
+    "CRM Administrator",
+    "Partnerships Manager",
+    "HR Generalist",
+    "Recruiter",
+    "Talent Acquisition Specialist",
+    "People Operations Specialist",
+    "Product Designer",
+    "Product Analyst",
+    "Technical Writer",
+    "E-commerce Manager",
+    "Shopify Developer",
+)
+
+if any(title not in ROLE_DEFINITIONS for title in DEFAULT_ACQUISITION_ROLES):
+    raise RuntimeError("DEFAULT_ACQUISITION_ROLES contains an unknown role")
+
 
 def canonical_role_for_search(search_title: str) -> str:
     """Resolve a configured search title/alias to a catalog canonical title.

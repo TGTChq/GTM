@@ -8,6 +8,7 @@ explicit retryability.  It never crawls a whole site and never loops forever.
 from __future__ import annotations
 
 import html
+import hashlib
 import json
 import logging
 import re
@@ -38,6 +39,44 @@ CLOSED_PATTERNS = (
     r"job not found",
 )
 TRANSIENT_STATUS_CODES = {403, 408, 425, 429, 500, 502, 503, 504}
+
+
+def _identity_slug(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", str(value or "").lower())
+
+
+def _ats_tenant_slug(url: str) -> str:
+    parsed = urlparse(str(url or ""))
+    host = parsed.netloc.lower().split(":", 1)[0]
+    parts = [part for part in parsed.path.split("/") if part]
+    tenant = ""
+    if host in {"jobs.lever.co", "api.lever.co"} and parts:
+        tenant = parts[-1] if host == "api.lever.co" and parts[-1] not in {"postings"} else parts[0]
+        if host == "api.lever.co" and "postings" in parts:
+            index = parts.index("postings")
+            tenant = parts[index + 1] if len(parts) > index + 1 else ""
+    elif "greenhouse.io" in host and parts:
+        tenant = parts[0]
+    elif host == "jobs.ashbyhq.com" and parts:
+        tenant = parts[0]
+    else:
+        match = re.match(r"([^.]+)\.wd\d+\.myworkdayjobs\.com$", host)
+        if match:
+            tenant = match.group(1)
+    # ATS tenants commonly carry a harmless numeric suffix, e.g. masterborn-2.
+    tenant = re.sub(r"[-_]?\d+$", "", tenant)
+    return _identity_slug(tenant)
+
+
+def _ats_employer_identity_compatible(url: str, company_name: str, company_domain: str) -> bool:
+    tenant = _ats_tenant_slug(url)
+    if not tenant:
+        return False
+    domain_stem = str(company_domain or "").split(".", 1)[0]
+    return bool(
+        company_names_compatible(tenant, company_name)
+        or company_names_compatible(tenant, domain_stem)
+    )
 
 
 class _TextExtractor(HTMLParser):
@@ -128,9 +167,13 @@ def _clean_url(value: str) -> str:
     value = html.unescape(str(value or "")).strip()
     if not value.startswith(("http://", "https://")):
         return ""
+    if any(marker in value for marker in ("<", ">", '"', "'", "\\", "\x00")):
+        return ""
     try:
         parsed = urlparse(value)
     except (TypeError, ValueError):
+        return ""
+    if not parsed.scheme or not parsed.netloc or any(char.isspace() for char in parsed.netloc):
         return ""
     if parsed.netloc.lower().endswith("google.com"):
         query = parse_qs(parsed.query)
@@ -465,24 +508,45 @@ class JobSourceResolver:
             self.session.max_redirects = max(1, config.JOB_SOURCE_MAX_REDIRECTS)
         self.cache = JsonTtlCache(config.SOURCE_CACHE_DIR, config.JOB_SOURCE_CACHE_TTL_HOURS)
 
-    def _fetch(self, url: str) -> Dict[str, Any]:
-        cached = self.cache.get(url)
+    def _fetch(
+        self,
+        url: str,
+        *,
+        method: str = "GET",
+        json_body: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        method = str(method or "GET").upper()
+        body_text = json.dumps(json_body or {}, sort_keys=True, separators=(",", ":"))
+        cache_key = url if method == "GET" and not json_body else (
+            f"{url}#__{method}__{hashlib.sha256(body_text.encode('utf-8')).hexdigest()}"
+        )
+        cached = self.cache.get(cache_key)
         if cached is not None:
             return cached
         result: Dict[str, Any] = {
             "status_code": None, "final_url": url, "text": "", "error": "not_attempted"
         }
+        headers = {
+            "User-Agent": "Mozilla/5.0 (compatible; TGTCJobVerifier/1.0)",
+            "Accept": "text/html,application/xhtml+xml,application/json",
+        }
         for _attempt in range(max(1, config.JOB_SOURCE_ATTEMPTS_PER_URL)):
             try:
-                response = self.session.get(
-                    url,
-                    timeout=config.JOB_SOURCE_TIMEOUT_SECONDS,
-                    allow_redirects=True,
-                    headers={
-                        "User-Agent": "Mozilla/5.0 (compatible; TGTCJobVerifier/1.0)",
-                        "Accept": "text/html,application/xhtml+xml,application/json",
-                    },
-                )
+                if method == "POST":
+                    response = self.session.post(
+                        url,
+                        json=json_body or {},
+                        timeout=config.JOB_SOURCE_TIMEOUT_SECONDS,
+                        allow_redirects=True,
+                        headers={**headers, "Content-Type": "application/json"},
+                    )
+                else:
+                    response = self.session.get(
+                        url,
+                        timeout=config.JOB_SOURCE_TIMEOUT_SECONDS,
+                        allow_redirects=True,
+                        headers=headers,
+                    )
                 result = {
                     "status_code": response.status_code,
                     "final_url": response.url,
@@ -497,33 +561,136 @@ class JobSourceResolver:
                 break
         # Do not turn a transient outage into a 24-hour cached fact.
         if result.get("status_code") not in TRANSIENT_STATUS_CODES and result.get("status_code") is not None:
-            self.cache.set(url, result)
+            self.cache.set(cache_key, result)
         return result
+
+    def _corroborate_independent_publishers(
+        self,
+        job: Dict,
+        urls: Iterable[str],
+        attempts: List[SourceAttempt],
+    ) -> Optional[ResolvedJobSource]:
+        """Accept a recent signal only when independent publishers agree.
+
+        This is a bounded fallback for ATS families that cannot be queried
+        directly. A single aggregator can never qualify a lead. Google wrapper
+        URLs and company/ATS pages are intentionally excluded because they have
+        stronger resolution paths elsewhere in this module.
+        """
+        if not config.JOB_SOURCE_ALLOW_CORROBORATED:
+            return None
+        required = max(2, int(config.JOB_SOURCE_MIN_INDEPENDENT_PUBLISHERS))
+        title = str(job.get("job_title") or "")
+        company = str(job.get("employer_name") or "")
+        company_tokens = {
+            token for token in re.findall(r"[a-z0-9]+", company.lower())
+            if len(token) >= 3 and token not in {"inc", "llc", "ltd", "corp", "company"}
+        }
+        confirmations: Dict[str, Tuple[str, str]] = {}
+        for url in urls:
+            source_type = classify_url_source(url, "")
+            if source_type not in {"aggregator", "other", "indeed", "linkedin"}:
+                continue
+            host = normalize_company_domain(url)
+            if not host or host in confirmations:
+                continue
+            payload = self._fetch(url)
+            status = payload.get("status_code")
+            final_url = payload.get("final_url") or url
+            if status in TRANSIENT_STATUS_CODES or status is None:
+                attempts.append(SourceAttempt(
+                    url, source_type, "publisher_temporary_failure", status, final_url,
+                    payload.get("error") or "",
+                ))
+                continue
+            if status != 200:
+                attempts.append(SourceAttempt(url, source_type, "publisher_unavailable", status, final_url))
+                continue
+            body = str(payload.get("text") or "")
+            text = _strip_html(body)
+            if any(re.search(pattern, text[:12_000], re.I) for pattern in CLOSED_PATTERNS):
+                attempts.append(SourceAttempt(url, source_type, "publisher_inactive", status, final_url))
+                continue
+            title_match = any(
+                _titles_compatible(title, candidate)
+                for candidate in [*_page_heading_texts(body), text[:500]]
+                if candidate
+            )
+            text_norm = text.lower()
+            company_match = bool(company_tokens) and all(
+                token in text_norm for token in sorted(company_tokens, key=len, reverse=True)[:2]
+            )
+            if not title_match or not company_match or not _looks_like_individual_job_path(final_url):
+                attempts.append(SourceAttempt(
+                    url, source_type, "publisher_identity_unverified", status, final_url
+                ))
+                continue
+            fingerprint = hashlib.sha256(
+                re.sub(r"\s+", " ", text_norm[:20_000]).encode("utf-8")
+            ).hexdigest()
+            if any(existing_fingerprint == fingerprint for _url, existing_fingerprint in confirmations.values()):
+                attempts.append(SourceAttempt(
+                    url, source_type, "publisher_duplicate_content", status, final_url
+                ))
+                continue
+            confirmations[host] = (final_url, fingerprint)
+            attempts.append(SourceAttempt(
+                url, source_type, "publisher_corroborated", status, final_url
+            ))
+            if len(confirmations) >= required:
+                selected_url = next(iter(confirmations.values()))[0]
+                return ResolvedJobSource(
+                    state="ACTIVE_CORROBORATED",
+                    source_url=selected_url,
+                    source_type="corroborated",
+                    http_status=200,
+                    active=True,
+                    canonical_title=title,
+                    canonical_employer=company,
+                    description=str(job.get("job_description") or ""),
+                    location_text=str(job.get("job_location") or ""),
+                    employment_type=str(job.get("job_employment_type") or ""),
+                    date_posted=str(job.get("job_posted_at_datetime_utc") or ""),
+                    job_id=str(job.get("job_id") or ""),
+                    official=False,
+                    corroborated=True,
+                    retryable=False,
+                    attempts=list(attempts),
+                    notes=["independent_publishers:" + ",".join(sorted(confirmations))],
+                )
+        return None
 
     def _discover_company_job_urls(
         self, job: Dict, company_domain: str
-    ) -> Tuple[List[str], List[SourceAttempt]]:
+    ) -> Tuple[List[str], List[SourceAttempt], Dict[str, Dict[str, Any]]]:
         if not company_domain:
-            return [], []
+            return [], [], {}
         website = _clean_url(str(job.get("employer_website") or "")) or f"https://{company_domain}/"
-        base = f"{urlparse(website).scheme or 'https'}://{urlparse(website).netloc or company_domain}/"
-        discovery_pages = [
-            base,
-            urljoin(base, "careers"),
-            urljoin(base, "jobs"),
-            urljoin(base, "career"),
-            urljoin(base, "about/careers"),
-            urljoin(base, "company/careers"),
-            urljoin(base, "join-us"),
-            urljoin(base, "opportunities"),
+        supplied_base = f"{urlparse(website).scheme or 'https'}://{urlparse(website).netloc or company_domain}/"
+        canonical_bases = [
+            supplied_base,
+            f"https://{company_domain}/",
+            f"https://www.{company_domain}/",
         ]
+        discovery_pages: List[str] = []
+        # Interleave paths across the supplied host, root and www host. This
+        # guarantees root-domain fallback within the same small request budget
+        # instead of exhausting every guessed path on a bad subdomain first.
+        for path in (
+            "", "careers", "jobs", "career", "about/careers",
+            "company/careers", "join-us", "opportunities",
+        ):
+            for base in canonical_bases:
+                discovery_pages.append(base if not path else urljoin(base, path))
+        discovery_pages = list(dict.fromkeys(discovery_pages))
         title = str(job.get("job_title") or "")
         job_id = str(job.get("job_id") or "").lower()
         scored: List[Tuple[float, str]] = []
         board_candidates: List[str] = []
         attempts: List[SourceAttempt] = []
+        adapter_records: Dict[str, Dict[str, Any]] = {}
         visited_pages: set[str] = set()
-        for page_url in discovery_pages[: max(1, config.JOB_SOURCE_DISCOVERY_MAX_PAGES)]:
+        for page_url in discovery_pages[: max(3, config.JOB_SOURCE_DISCOVERY_MAX_PAGES)]:
             payload = self._fetch(page_url)
             status = payload.get("status_code")
             final_url = payload.get("final_url") or page_url
@@ -567,6 +734,10 @@ class JobSourceResolver:
             # Greenhouse and Lever boards. Employer identity still comes from
             # this board URL having been discovered on the employer website.
             adapter_result = discover_public_ats_urls(final_url, title, self._fetch)
+            if adapter_result.authoritative_absence:
+                attempts.append(SourceAttempt(
+                    final_url, "ats", "official_ats_job_absent", 200, final_url
+                ))
             for item in adapter_result.attempts:
                 attempts.append(SourceAttempt(
                     item.get("url") or final_url,
@@ -581,6 +752,8 @@ class JobSourceResolver:
                 # The API already performed a title match. Keep a minimum
                 # score so the exact posting is validated by resolve().
                 scored.append((max(score, 0.75), adapter_url))
+                if adapter_url in adapter_result.records:
+                    adapter_records[adapter_url] = dict(adapter_result.records[adapter_url])
 
             # Some ATS URLs already point at the exact posting but were hidden
             # in script data. Keep the board itself as a candidate only when the
@@ -602,7 +775,7 @@ class JobSourceResolver:
                 output.append(link)
             if len(output) >= max(1, config.JOB_SOURCE_MAX_CANDIDATES):
                 break
-        return output, attempts
+        return output, attempts, adapter_records
 
     def resolve(self, job: Dict, *, fetch: Optional[bool] = None) -> ResolvedJobSource:
         fetch = config.JOB_SOURCE_FETCH_ENABLED if fetch is None else fetch
@@ -612,12 +785,54 @@ class JobSourceResolver:
             config.INTERMEDIARY_JOB_DOMAINS,
         )
         urls = candidate_urls(job)
+        origin_urls = set(urls)
         attempts: List[SourceAttempt] = []
         discovered_urls: set[str] = set()
+        adapter_records: Dict[str, Dict[str, Any]] = {}
+        if fetch:
+            # Direct ATS URLs supplied by JSearch are resolved through the same
+            # provider APIs as employer-discovered boards. They remain
+            # corroborated rather than official unless employer provenance is
+            # established later.
+            for origin in list(urls):
+                if classify_url_source(origin, company_domain) != "ats":
+                    continue
+                adapter_result = discover_public_ats_urls(origin, str(job.get("job_title") or ""), self._fetch)
+                if adapter_result.authoritative_absence:
+                    # Direct ATS absence is authoritative only when the tenant
+                    # itself identifies the hiring employer. A shared or
+                    # mismatched tenant cannot prove that this company's job is gone.
+                    absence_status = (
+                        "official_ats_job_absent"
+                        if _ats_employer_identity_compatible(origin, company_name, company_domain)
+                        else "ats_job_absent_unverified"
+                    )
+                    attempts.append(SourceAttempt(
+                        origin, "ats", absence_status, 200, origin
+                    ))
+                for item in adapter_result.attempts:
+                    attempts.append(SourceAttempt(
+                        item.get("url") or origin,
+                        "ats",
+                        f"public_ats_{item.get('provider')}_{item.get('status')}",
+                        item.get("http_status"),
+                        item.get("final_url") or "",
+                        item.get("error") or "",
+                    ))
+                urls = [*adapter_result.urls, *urls]
+                adapter_records.update({key: dict(value) for key, value in adapter_result.records.items()})
         if fetch and company_domain:
-            discovered, discovery_attempts = self._discover_company_job_urls(job, company_domain)
+            discovery_result = self._discover_company_job_urls(job, company_domain)
+            # Preserve compatibility with focused test doubles and custom
+            # resolvers that implemented the pre-v1 two-value contract.
+            if len(discovery_result) == 2:
+                discovered, discovery_attempts = discovery_result
+                discovered_records = {}
+            else:
+                discovered, discovery_attempts, discovered_records = discovery_result
             attempts.extend(discovery_attempts)
             discovered_urls.update(discovered)
+            adapter_records.update(discovered_records)
             urls = [*discovered, *urls]
         urls = list(dict.fromkeys(urls))
         urls.sort(
@@ -637,6 +852,9 @@ class JobSourceResolver:
                 state="SOURCE_UNRESOLVED", retryable=False, attempts=attempts, notes=["no_candidate_urls"]
             )
 
+        authoritative_absence = any(
+            attempt.status == "official_ats_job_absent" for attempt in attempts
+        )
         transient_official = any(
             attempt.http_status in TRANSIENT_STATUS_CODES
             for attempt in attempts
@@ -651,6 +869,44 @@ class JobSourceResolver:
             official_candidate = _official_for(
                 url, source_type, company_domain, discovered_from_company=discovered_from_company
             )
+            adapter_record = adapter_records.get(url)
+            if adapter_record and adapter_record.get("active") is not False:
+                adapter_title = str(adapter_record.get("title") or "")
+                adapter_identity = bool(
+                    discovered_from_company
+                    or _ats_employer_identity_compatible(url, company_name, company_domain)
+                )
+                if (
+                    _titles_compatible(str(job.get("job_title") or ""), adapter_title)
+                    and adapter_identity
+                ):
+                    official = bool(discovered_from_company)
+                    attempts.append(SourceAttempt(
+                        url,
+                        "ats",
+                        "adapter_record_resolved",
+                        200,
+                        url,
+                    ))
+                    return ResolvedJobSource(
+                        state="ACTIVE_VERIFIED" if official else "ACTIVE_CORROBORATED",
+                        source_url=url,
+                        source_type="ats",
+                        http_status=200,
+                        active=True,
+                        canonical_title=adapter_title or str(job.get("job_title") or ""),
+                        canonical_employer=company_name,
+                        description=_strip_html(adapter_record.get("description") or "") or str(job.get("job_description") or ""),
+                        location_text=str(adapter_record.get("location") or job.get("job_location") or ""),
+                        employment_type=str(adapter_record.get("employment_type") or ""),
+                        date_posted=str(adapter_record.get("date_posted") or ""),
+                        job_id=str(adapter_record.get("job_id") or job.get("job_id") or ""),
+                        official=official,
+                        corroborated=True,
+                        retryable=False,
+                        attempts=list(attempts),
+                        notes=[f"public_{adapter_record.get('provider') or 'ats'}_record"],
+                    )
             if source_type in {"aggregator", "google", "indeed", "linkedin"} and not official_candidate:
                 attempts.append(SourceAttempt(url, source_type, f"skipped_{source_type}"))
                 continue
@@ -731,6 +987,14 @@ class JobSourceResolver:
                 identity_official = provenance_official or employer_matches
             else:
                 identity_official = provenance_official and employer_matches
+            provider_direct_corroborated = bool(
+                final_source_type == "ats"
+                and url in origin_urls
+                and _looks_like_individual_job_path(final_url)
+                and (title_matches or heading_match)
+                and _ats_employer_identity_compatible(final_url, company_name, company_domain)
+                and not (canonical_employer and not employer_matches)
+            )
 
             jsonld_evidence = bool(obj and title_matches and identity_official)
             listing_markers = len(re.findall(
@@ -738,11 +1002,11 @@ class JobSourceResolver:
             ))
             heuristic_evidence = bool(
                 not obj
-                and identity_official
+                and (identity_official or provider_direct_corroborated)
                 and heading_match
                 and _looks_like_individual_job_path(final_url)
-                and _has_apply_action(body, text)
-                and len(description) >= 400
+                and (_has_apply_action(body, text) or final_source_type == "ats")
+                and len(description) >= 250
                 and listing_markers <= 3
             )
             job_page_evidence = jsonld_evidence or heuristic_evidence
@@ -750,7 +1014,7 @@ class JobSourceResolver:
             if multiple_postings and not jsonld_evidence:
                 attempts.append(SourceAttempt(url, source_type, "multi_job_listing", status, final_url))
                 continue
-            if not identity_official:
+            if not identity_official and not provider_direct_corroborated:
                 attempts.append(SourceAttempt(url, source_type, "employer_identity_unverified", status, final_url))
                 continue
             if not job_page_evidence:
@@ -783,17 +1047,19 @@ class JobSourceResolver:
                 continue
 
             attempts.append(SourceAttempt(url, source_type, "resolved", status, final_url))
+            official_resolution = bool(identity_official)
             return ResolvedJobSource(
-                state="ACTIVE_VERIFIED", source_url=final_url,
+                state="ACTIVE_VERIFIED" if official_resolution else "ACTIVE_CORROBORATED",
+                source_url=final_url,
                 source_type=final_source_type, http_status=status, active=True,
                 canonical_title=canonical_title or str(job.get("job_title") or ""),
                 canonical_employer=canonical_employer or company_name,
-                description=description, location_text=_location_from_json_ld(obj),
+                description=description, location_text=_location_from_json_ld(obj) or str(job.get("job_location") or ""),
                 employment_type=str(employment_type or ""),
                 date_posted=str(obj.get("datePosted") or "") if obj else "",
                 valid_through=valid_through,
                 job_id=str(obj.get("identifier") or job.get("job_id") or ""),
-                official=True, corroborated=True, attempts=attempts, notes=active_notes,
+                official=official_resolution, corroborated=True, attempts=attempts, notes=active_notes,
             )
 
         # A potentially active transient source outranks an older inactive URL.
@@ -811,6 +1077,19 @@ class JobSourceResolver:
             result = inactive_candidates[-1]
             result.attempts = attempts
             return result
+        if authoritative_absence:
+            return ResolvedJobSource(
+                state="INACTIVE_VERIFIED",
+                active=False,
+                official=True,
+                corroborated=True,
+                retryable=False,
+                attempts=attempts,
+                notes=["official_ats_inventory_does_not_contain_job"],
+            )
+        corroborated = self._corroborate_independent_publishers(job, origin_urls, attempts)
+        if corroborated is not None:
+            return corroborated
         return ResolvedJobSource(
             state="SOURCE_UNRESOLVED", retryable=False, attempts=attempts, notes=[],
         )

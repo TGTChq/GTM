@@ -42,7 +42,7 @@ def _surface_keys(leads: Iterable[Dict]) -> set[str]:
     return {
         str(lead.get("lead_key"))
         for lead in leads
-        if lead.get("_final_state") in {"FINAL_PASS", "NEEDS_CHECK"} and lead.get("lead_key")
+        if lead.get("_final_state") == "FINAL_PASS" and lead.get("lead_key")
     }
 
 
@@ -233,6 +233,7 @@ def run_final_pass_topup(
     stop_reason = initial_enriched.stop_reason
     attempted_role_cycle: set[str] = set()
     empty_query_cycles = 0
+    zero_downstream_batches = 0
 
     if len(_final_pass_keys(all_leads)) >= target_final_pass_leads:
         stop_reason = "final_pass_target_reached_initial_pass"
@@ -389,10 +390,15 @@ def run_final_pass_topup(
                 "precontact_rejected": qualified.rejected_jobs,
                 "precontact_unverified": qualified.unverified_jobs,
                 "qualification_output": qualified.output_path,
+                "qualification_nonpass_output": getattr(qualified, "nonpass_path", ""),
             })
             if qualified.contact_eligible_jobs <= 0:
                 round_detail["final_pass_added"] = 0
                 details["rounds"].append(round_detail)
+                zero_downstream_batches += 1
+                if zero_downstream_batches >= max(1, config.TOPUP_MAX_ZERO_DOWNSTREAM_BATCHES):
+                    stop_reason = "zero_downstream_yield"
+                    break
                 continue
 
             before = current
@@ -417,8 +423,15 @@ def run_final_pass_topup(
                 "enrichment_output": enriched.output_path,
             })
             details["rounds"].append(round_detail)
+            if after > before:
+                zero_downstream_batches = 0
+            else:
+                zero_downstream_batches += 1
             if after >= target_final_pass_leads:
                 stop_reason = "final_pass_target_reached"
+                break
+            if zero_downstream_batches >= max(1, config.TOPUP_MAX_ZERO_DOWNSTREAM_BATCHES):
+                stop_reason = "zero_downstream_yield"
                 break
             if units <= 0:
                 stop_reason = "jsearch_unit_budget_exhausted"

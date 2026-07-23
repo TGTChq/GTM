@@ -119,15 +119,30 @@ class RunDailyTopupIntegrationTests(unittest.TestCase):
                 "skipped_existing_company": 0,
                 "failed": 0,
             }
+            checkpoint = SimpleNamespace(
+                pending_jobs=lambda: [], query_metrics=lambda: {}, append_jobs=lambda *a, **k: None,
+                remove_jobs=lambda *a, **k: None, clear=lambda: None,
+            )
+            recovery = SimpleNamespace(
+                due_jobs=lambda: [], upsert=lambda *a, **k: None, remove=lambda *a, **k: None,
+            )
+            inventory = SimpleNamespace(
+                stage=lambda *a, **k: None, available=lambda limit=None: [], reserve=lambda *a, **k: None,
+                mark_persisted=lambda *a, **k: None, release_failed=lambda *a, **k: None,
+            )
 
             with (
                 patch.object(config, "PRODUCTION", True),
+                patch.object(config, "FINAL_PASS_PIPELINE_ENABLED", False),
                 patch.object(config, "JSEARCH_REVIEWABLE_TOPUP_ENABLED", True),
                 patch.object(config, "JSEARCH_TOPUP_MAX_ROUNDS", 3),
                 patch.object(config, "JSEARCH_TOPUP_INITIAL_PAGES", 1),
                 patch.object(config, "TARGET_REVIEWABLE_LEADS_PER_RUN", 2),
                 patch.object(config, "MAX_ELIGIBLE_COMPANIES_PER_RUN", 90),
                 patch.object(run_daily, "SeenJobsRegistry", return_value=registry),
+                patch.object(run_daily, "PipelineCheckpoint", return_value=checkpoint),
+                patch.object(run_daily, "RecoverableJobQueue", return_value=recovery),
+                patch.object(run_daily, "FinalPassInventory", return_value=inventory),
                 patch.object(run_daily, "run_daily_scrape", return_value=scrape) as scrape_mock,
                 patch.object(run_daily, "run_filter", return_value=filtered),
                 patch.object(run_daily, "run_audit", return_value=audit),

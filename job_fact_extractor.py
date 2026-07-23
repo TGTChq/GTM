@@ -23,7 +23,12 @@ def _matching(sentences: Iterable[str], patterns: Iterable[str]) -> List[str]:
 
 
 def _fact(name: str, value, source: ResolvedJobSource, excerpts: List[str], *, verified=True) -> FactValue:
-    status = EvidenceStatus.VERIFIED_OFFICIAL if verified else EvidenceStatus.WEAK_PROVIDER_SIGNAL
+    if not verified:
+        status = EvidenceStatus.WEAK_PROVIDER_SIGNAL
+    elif source.official:
+        status = EvidenceStatus.VERIFIED_OFFICIAL
+    else:
+        status = EvidenceStatus.VERIFIED_CROSS_SOURCE
     return FactValue(
         name,
         value,
@@ -188,7 +193,7 @@ def extract_job_facts(job: Dict, source: ResolvedJobSource) -> Dict[str, FactVal
     provider_sentences = _sentences(
         f"{job.get('job_title') or ''}. {job.get('job_location') or ''}. {provider_text}"
     )
-    official = source.state == "ACTIVE_VERIFIED" and source.official
+    official = source.state in {"ACTIVE_VERIFIED", "ACTIVE_CORROBORATED"} and source.corroborated
 
     facts: Dict[str, FactValue] = {}
     facts["active_status"] = (

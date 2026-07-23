@@ -15,6 +15,20 @@ from reason_codes import ReasonCode
 from job_filter import normalize_text
 
 
+def _excluded_industry_keyword(industry_norm: str) -> str | None:
+    """Match Apollo taxonomy categories without broad substring false positives."""
+    normalized = normalize_text(industry_norm)
+    exact = {normalize_text(value): value for value in config.APOLLO_EXCLUDED_INDUSTRY_KEYWORDS}
+    if normalized in exact:
+        return exact[normalized]
+    # Apollo occasionally appends a narrow qualifier after a canonical category.
+    # Permit only delimiter-bounded extensions, never arbitrary occurrences.
+    for key, original in exact.items():
+        if normalized.startswith(key + " / ") or normalized.startswith(key + " - "):
+            return original
+    return None
+
+
 class AccountGate:
     def __init__(self, resolver: Optional[CompanySourceResolver] = None):
         self.resolver = resolver or CompanySourceResolver()
@@ -38,12 +52,19 @@ class AccountGate:
             return self._unknown(ReasonCode.UNVERIFIED_ORGANIZATION, bundle, retryable=True)
         if not canonical_domain:
             return self._unknown(ReasonCode.UNVERIFIED_DOMAIN, bundle, retryable=False)
-        if input_company_name and canonical_name and not company_names_compatible(
-            input_company_name, canonical_name
+        input_safe = safe_company_domain(input_domain, config.INTERMEDIARY_JOB_DOMAINS)
+        domain_matches = bool(input_safe and domains_equivalent(input_safe, canonical_domain))
+        # A canonical domain match is stronger identity evidence than a brand-name
+        # mismatch caused by a rebrand, parent company or legal suffix. Name-only
+        # lookups remain conservative.
+        if (
+            input_company_name
+            and canonical_name
+            and not company_names_compatible(input_company_name, canonical_name)
+            and not domain_matches
         ):
             return self._unknown(ReasonCode.UNVERIFIED_EMPLOYER_IDENTITY, bundle, retryable=False)
-        input_safe = safe_company_domain(input_domain, config.INTERMEDIARY_JOB_DOMAINS)
-        if input_safe and not domains_equivalent(input_safe, canonical_domain):
+        if input_safe and not domain_matches:
             return self._unknown(ReasonCode.UNVERIFIED_EMPLOYER_IDENTITY, bundle, retryable=False)
 
         bundle.add(FactValue(
@@ -70,19 +91,16 @@ class AccountGate:
         if not industry:
             return self._unknown(ReasonCode.UNVERIFIED_INDUSTRY, bundle, retryable=False)
         industry_norm = normalize_text(industry)
-        excluded_industry = next((
-            keyword for keyword in config.APOLLO_EXCLUDED_INDUSTRY_KEYWORDS
-            if normalize_text(keyword) and normalize_text(keyword) in industry_norm
-        ), None)
+        excluded_industry = _excluded_industry_keyword(industry_norm)
         if excluded_industry:
             reason = ReasonCode.REJECT_EXCLUDED_INDUSTRY
-            if any(marker in industry_norm for marker in ("staff", "recruit", "human resources services")):
+            if excluded_industry in {"staffing and recruiting", "staffing", "recruiting", "human resources services"}:
                 reason = ReasonCode.REJECT_STAFFING
-            elif any(marker in industry_norm for marker in ("hospital", "health care", "healthcare", "medical", "mental health")):
+            elif excluded_industry in {"hospital & health care", "hospitals and health care", "health care", "healthcare", "mental health care", "mental health", "medical practice"}:
                 reason = ReasonCode.REJECT_HEALTHCARE
-            elif "government" in industry_norm:
+            elif excluded_industry == "government administration":
                 reason = ReasonCode.REJECT_GOVERNMENT
-            elif any(marker in industry_norm for marker in ("outsourcing", "offshoring")):
+            elif excluded_industry == "outsourcing/offshoring":
                 reason = ReasonCode.REJECT_OUTSOURCING
             bundle.add(FactValue(
                 "industry", industry, EvidenceStatus.VERIFIED_CROSS_SOURCE,
@@ -124,22 +142,22 @@ class AccountGate:
             )
             bundle.add(FactValue("business_model", model.category, model_status, model.evidence))
             return self._reject(reason, bundle, metadata={"company_source": source.to_dict()})
-        if model.state == "UNKNOWN":
-            return self._unknown(
-                ReasonCode.UNVERIFIED_BUSINESS_MODEL, bundle,
-                retryable=source.retryable,
-                metadata={"company_source": source.to_dict()},
-            )
-        evidence_statuses = {
-            item.status.value if hasattr(item.status, "value") else str(item.status)
-            for item in model.evidence
-        }
-        model_status = (
-            EvidenceStatus.VERIFIED_OFFICIAL
-            if EvidenceStatus.VERIFIED_OFFICIAL.value in evidence_statuses
-            else EvidenceStatus.VERIFIED_CROSS_SOURCE
-        )
-        bundle.add(FactValue("business_model", model.category, model_status, model.evidence))
+        # Passing means that bounded first-party/Apollo evidence contained no
+        # excluded-model signal. It is not a claim that the model itself was
+        # positively verified, so do not manufacture cross-source evidence.
+        allowed_evidence = list(model.evidence) or [EvidenceItem(
+            "business_model_exclusion_check",
+            "no_excluded_model_detected",
+            EvidenceStatus.WEAK_PROVIDER_SIGNAL,
+            "policy",
+            confidence=0.75,
+        )]
+        bundle.add(FactValue(
+            "business_model_exclusion_check",
+            "no_excluded_model_detected",
+            EvidenceStatus.WEAK_PROVIDER_SIGNAL,
+            allowed_evidence,
+        ))
         return GateDecision(
             "account", GateState.PASS, "ACCOUNT_PASS", evidence=bundle,
             next_action="continue_to_contact_gate",

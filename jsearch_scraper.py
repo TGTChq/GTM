@@ -19,7 +19,7 @@ from job_filter import assess_pre_enrichment_viability
 from job_quality import normalize_job_identity
 from http_utils import QuotaExhaustedError, request_with_retry, safe_json
 from pipeline_state import SeenJobsRegistry
-from role_catalog import canonical_role_for_search, role_specificity
+from role_catalog import DEFAULT_SEARCH_ROLES, canonical_role_for_search, role_specificity
 from role_mapping import get_bucket_name
 from role_relevance import assess_role, normalize_relevance_score
 
@@ -353,11 +353,27 @@ def _ingest_query_jobs(
         job["_jsearch_country_filter"] = config.COUNTRY
         job["_jsearch_remote_filter_applied"] = bool(config.JSEARCH_REMOTE_JOBS_ONLY)
         normalize_job_identity(job)
-        assessment = assess_role(job, canonical_role)
+        requested_assessment = assess_role(job, canonical_role)
+        # Acquisition queries are representatives, not the final taxonomy.
+        # Always classify each returned row against the complete supported
+        # catalog so a broad accepted query cannot hide a more precise role.
+        candidates = [
+            (role, requested_assessment if role == canonical_role else assess_role(job, role))
+            for role in DEFAULT_SEARCH_ROLES
+        ]
+        status_rank = {"accept": 2, "review": 1, "reject": 0}
+        matched_role, assessment = max(
+            candidates,
+            key=lambda item: (
+                status_rank.get(item[1].status, 0),
+                item[1].score,
+                role_specificity(item[0]),
+            ),
+        )
         candidate = dict(job)
-        candidate["_matched_role"] = canonical_role
+        candidate["_matched_role"] = matched_role
         candidate["_search_role"] = search_role
-        candidate["_role_specificity"] = role_specificity(canonical_role)
+        candidate["_role_specificity"] = role_specificity(matched_role)
         candidate["_role_relevance_status"] = assessment.status
         candidate["_role_relevance_points"] = assessment.score
         candidate["_role_relevance_score"] = normalize_relevance_score(assessment.score)
