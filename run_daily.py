@@ -321,11 +321,13 @@ def run_pipeline() -> dict:
         }
         logger.info(
             "Source gate funnel: verified=%d corroborated=%d direct_structured=%d "
-            "temporary=%d unresolved=%d retryable=%d direct_fast=%d discovery_fallback=%d "
+            "provider_structured=%d temporary=%d unresolved=%d retryable=%d "
+            "direct_fast=%d discovery_fallback=%d "
             "discovery_budget_exhausted=%d",
             qualified.stats.get("source_state__ACTIVE_VERIFIED", 0),
             qualified.stats.get("source_state__ACTIVE_CORROBORATED", 0),
             qualified.stats.get("source_state__ACTIVE_DIRECT_STRUCTURED", 0),
+            qualified.stats.get("source_state__ACTIVE_PROVIDER_STRUCTURED", 0),
             qualified.stats.get("source_state__SOURCE_TEMPORARILY_UNAVAILABLE", 0),
             qualified.stats.get("source_state__SOURCE_UNRESOLVED", 0),
             qualified.stats.get("source_retryable", 0),

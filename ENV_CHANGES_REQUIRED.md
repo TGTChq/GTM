@@ -253,3 +253,29 @@ PIPELINE_FAIL_PROCESS_ON_SLA_MISS=0
 A technically successful run exits `0` even when the commercial 30-lead SLA is
 missed, preventing Railway restart loops. The miss remains explicit in logs and the
 run summary.
+
+
+## READY v1.2: employer identity and provider review
+
+- Publisher/apply domains are never treated as employer domains unless JSearch
+  explicitly marks the URL direct. Name-only Apollo resolution must return a
+  compatible organization before its domain is used.
+- The complete configured role catalog may use bounded adaptive page-2 and
+  lookback acquisition. `JSEARCH_MAX_ESTIMATED_UNITS_PER_RUN=0` means no global
+  cap; the adaptive 32-query and lookback 16-query caps still bound the run.
+- Fresh, substantial provider records that already passed Step 2 may enter
+  Account/Contact/Email qualification as `ACTIVE_PROVIDER_STRUCTURED`. Airtable
+  displays `unverified_review`, and approval still requires trusted live-source
+  revalidation before Instantly.
+- Authoritative ATS absence, inactive postings, identity contradictions, stale
+  records, thin descriptions, contracts, non-US scope and onsite/hybrid roles
+  remain blocked.
+
+Recommended Railway additions:
+
+```env
+VALIDATION_VERSION=tgtc-ready-v1.2-identity-and-recall
+JOB_SOURCE_PROVIDER_STRUCTURED_REVIEW_ENABLED=1
+JOB_SOURCE_PROVIDER_STRUCTURED_MAX_AGE_DAYS=8
+JOB_SOURCE_PROVIDER_STRUCTURED_MIN_DESCRIPTION_CHARS=700
+```

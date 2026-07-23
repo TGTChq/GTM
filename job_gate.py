@@ -70,10 +70,24 @@ class JobGate:
             and source.source_type == "corroborated"
             and source.corroborated
         )
+        trusted_provider_review = bool(
+            source.state == "ACTIVE_PROVIDER_STRUCTURED"
+            and source.source_type == "provider_structured"
+            and source.corroborated
+        )
         if (
-            source.state not in {"ACTIVE_VERIFIED", "ACTIVE_CORROBORATED", "ACTIVE_DIRECT_STRUCTURED"}
+            source.state not in {
+                "ACTIVE_VERIFIED",
+                "ACTIVE_CORROBORATED",
+                "ACTIVE_DIRECT_STRUCTURED",
+                "ACTIVE_PROVIDER_STRUCTURED",
+            }
             or not source.corroborated
-            or (resolved_source_type == "aggregator" and not trusted_corroborated_aggregator)
+            or (
+                resolved_source_type == "aggregator"
+                and not trusted_corroborated_aggregator
+                and not trusted_provider_review
+            )
         ):
             source_payload = source.to_dict()
             source_payload["defense_source_type"] = resolved_source_type
@@ -135,6 +149,8 @@ class JobGate:
                 "signal_confidence": (
                     "official" if source.official else
                     "direct_structured" if source.state == "ACTIVE_DIRECT_STRUCTURED" else
+                    "provider_structured_review"
+                    if source.state == "ACTIVE_PROVIDER_STRUCTURED" else
                     "corroborated"
                 ),
             },
@@ -159,6 +175,8 @@ class JobGate:
                     "official" if source.get("official") else
                     "direct_structured"
                     if source.get("state") == "ACTIVE_DIRECT_STRUCTURED" else
+                    "provider_structured_review"
+                    if source.get("state") == "ACTIVE_PROVIDER_STRUCTURED" else
                     "corroborated" if source.get("corroborated") else "unresolved"
                 ),
                 # Canonical aliases are retained for downstream consumers that
@@ -169,7 +187,10 @@ class JobGate:
                     "verified"
                     if source.get("state") in {"ACTIVE_VERIFIED", "ACTIVE_CORROBORATED"}
                     else "unverified_review"
-                    if source.get("state") == "ACTIVE_DIRECT_STRUCTURED"
+                    if source.get("state") in {
+                        "ACTIVE_DIRECT_STRUCTURED",
+                        "ACTIVE_PROVIDER_STRUCTURED",
+                    }
                     else "broken"
                     if source.get("state") == "INACTIVE_VERIFIED"
                     else "unverified_review"
@@ -177,6 +198,13 @@ class JobGate:
                     else ""
                 ),
                 "official_job_description": source.get("description") or "",
+                "job_signal_review_required": source.get("state")
+                in {"ACTIVE_DIRECT_STRUCTURED", "ACTIVE_PROVIDER_STRUCTURED"},
+                "job_signal_notes": (
+                    "provider_structured_review; approved_revalidation_required"
+                    if source.get("state") == "ACTIVE_PROVIDER_STRUCTURED"
+                    else result.get("job_signal_notes")
+                ),
             }
         )
         return result

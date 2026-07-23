@@ -572,8 +572,25 @@ def _adaptive_deepening_is_enabled(
         and max_queries is None
         and len(planned_roles) >= 50
         and not effective_max
-        and len(planned_roles) >= 100
     )
+
+
+def _adaptive_budget_remaining(
+    *, estimated_units: int, base_units: int
+) -> int:
+    """Return bounded units available to adaptive acquisition.
+
+    JSEARCH_MAX_ESTIMATED_UNITS_PER_RUN=0 means no global cap throughout the
+    scraper. Adaptive work remains bounded by its own page-2 and lookback caps;
+    treating zero as zero units silently disabled both production strategies.
+    """
+    global_budget = int(config.JSEARCH_MAX_ESTIMATED_UNITS_PER_RUN)
+    if global_budget > 0:
+        return max(0, global_budget - int(estimated_units))
+    adaptive_cap = max(0, int(config.JSEARCH_ADAPTIVE_MAX_EXTRA_QUERIES))
+    lookback_cap = max(0, int(config.JSEARCH_ADAPTIVE_LOOKBACK_MAX_QUERIES))
+    extra_used = max(0, int(estimated_units) - int(base_units))
+    return max(0, adaptive_cap + lookback_cap - extra_used)
 
 
 def run_daily_scrape(
@@ -616,7 +633,7 @@ def run_daily_scrape(
         and config.PRODUCTION
         and search_roles is None
         and max_queries is None
-        and len(planned_roles) >= 100
+        and len(planned_roles) >= 50
         and not effective_max
     )
     stats = {
@@ -628,6 +645,12 @@ def run_daily_scrape(
         "base_estimated_request_units": estimated_request_units,
         "estimated_request_units": estimated_request_units,
         "estimated_unit_budget": config.JSEARCH_MAX_ESTIMATED_UNITS_PER_RUN,
+        "adaptive_effective_extra_unit_cap": (
+            config.JSEARCH_MAX_ESTIMATED_UNITS_PER_RUN
+            if config.JSEARCH_MAX_ESTIMATED_UNITS_PER_RUN > 0
+            else max(0, config.JSEARCH_ADAPTIVE_MAX_EXTRA_QUERIES)
+            + max(0, config.JSEARCH_ADAPTIVE_LOOKBACK_MAX_QUERIES)
+        ),
         "adaptive_deepening_enabled": _adaptive_deepening_is_enabled(
             search_roles=search_roles,
             max_queries=max_queries,
@@ -779,9 +802,9 @@ def run_daily_scrape(
     # Allocation is round-robin by functional bucket before any bucket receives
     # additional overflow, preventing one broad function from consuming the run.
     if stats["adaptive_deepening_enabled"] and not stats["query_stop_reason"]:
-        unit_budget = config.JSEARCH_MAX_ESTIMATED_UNITS_PER_RUN
-        budget_remaining = (
-            max(0, unit_budget - estimated_request_units) if unit_budget > 0 else 0
+        budget_remaining = _adaptive_budget_remaining(
+            estimated_units=estimated_request_units,
+            base_units=stats["base_estimated_request_units"],
         )
         configured_cap = config.JSEARCH_ADAPTIVE_MAX_EXTRA_QUERIES
         lookback_reserve = (
@@ -950,8 +973,10 @@ def run_daily_scrape(
             for item in candidates
         )
     }
-    unit_budget = config.JSEARCH_MAX_ESTIMATED_UNITS_PER_RUN
-    budget_remaining = max(0, unit_budget - stats["estimated_request_units"]) if unit_budget > 0 else 0
+    budget_remaining = _adaptive_budget_remaining(
+        estimated_units=stats["estimated_request_units"],
+        base_units=stats["base_estimated_request_units"],
+    )
     if (
         lookback_enabled
         and budget_remaining > 0

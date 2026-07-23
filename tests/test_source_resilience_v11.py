@@ -229,7 +229,9 @@ class SourceResilienceV11Tests(unittest.TestCase):
             patch.object(resolver, "_discover_company_job_urls", return_value=([], [], {})),
         ):
             resolved = resolver.resolve(job, fetch=True)
-        self.assertEqual(resolved.state, "SOURCE_UNRESOLVED")
+        self.assertEqual(resolved.state, "ACTIVE_PROVIDER_STRUCTURED")
+        self.assertNotEqual(resolved.state, "ACTIVE_DIRECT_STRUCTURED")
+        self.assertIn("approved_revalidation_required", resolved.notes)
 
     def test_explicit_non_direct_flag_blocks_fallback(self):
         resolver = JobSourceResolver()

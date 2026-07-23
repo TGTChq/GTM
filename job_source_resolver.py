@@ -896,6 +896,125 @@ class JobSourceResolver:
             )
         return None
 
+    def _provider_structured_review_fallback(
+        self,
+        job: Dict,
+        urls: Iterable[str],
+        attempts: List[SourceAttempt],
+        *,
+        company_name: str,
+        company_domain: str,
+        authoritative_absence: bool,
+        inactive_candidates: List[ResolvedJobSource],
+    ) -> Optional[ResolvedJobSource]:
+        """Admit a fresh provider record to human review, never to auto-send.
+
+        Aggregators are useful discovery channels. They are not employer identity
+        and cannot prove a posting is live. This state therefore requires the
+        signed Step-2 full-time/remote/US decisions, a recent substantial record,
+        and no authoritative contradiction. Account, Contact and Email gates still
+        run normally; approved enrollment later fail-closes on live source
+        revalidation.
+        """
+        if not config.JOB_SOURCE_PROVIDER_STRUCTURED_REVIEW_ENABLED:
+            return None
+        if authoritative_absence or inactive_candidates:
+            return None
+        posted = _posted_at(job)
+        if posted is None:
+            return None
+        max_age = max(1, min(
+            int(config.JOB_SOURCE_PROVIDER_STRUCTURED_MAX_AGE_DAYS),
+            int(getattr(config, "MAX_JOB_AGE_DAYS", 8)),
+        ))
+        age_days = (datetime.now(timezone.utc) - posted).total_seconds() / 86400
+        if age_days < -1 or age_days > max_age:
+            return None
+        description = str(job.get("job_description") or "").strip()
+        if len(description) < max(
+            500, int(config.JOB_SOURCE_PROVIDER_STRUCTURED_MIN_DESCRIPTION_CHARS)
+        ):
+            return None
+        if not _prefilter_full_time(job) or not _prefilter_remote_us(job):
+            return None
+        company_name = str(company_name or "").strip()
+        if len(_identity_slug(company_name)) < 3:
+            return None
+
+        combined = f"{job.get('job_title') or ''}\n{description[:12000]}"
+        disqualifying_text = (
+            *CLOSED_PATTERNS,
+            r"\bfuture openings?\b",
+            r"\bfuture opportunities\b",
+            r"\btalent (?:pool|pipeline)\b",
+            r"\bgeneral application\b",
+            r"\bnot an active (?:opening|role|position)\b",
+        )
+        if any(re.search(pattern, combined, re.I) for pattern in disqualifying_text):
+            return None
+
+        # A trusted source saying the employer/job is wrong or absent outranks
+        # publisher metadata. Discovery-page misses and bot blocks do not.
+        authoritative_contradictions = {
+            "inactive",
+            "inactive_verified",
+            "employer_identity_mismatch",
+            "official_ats_job_absent",
+        }
+        if any(
+            attempt.authoritative and attempt.status in authoritative_contradictions
+            for attempt in attempts
+        ):
+            return None
+
+        preferred: List[str] = []
+        for value in (
+            job.get("job_apply_link"),
+            job.get("canonical_source_url"),
+            job.get("official_job_url"),
+            *list(urls),
+        ):
+            cleaned = _clean_url(str(value or ""))
+            if not cleaned or cleaned in preferred:
+                continue
+            if classify_url_source(cleaned, company_domain) == "google":
+                continue
+            preferred.append(cleaned)
+        if not preferred:
+            return None
+        source_url = preferred[0]
+        original_type = classify_url_source(source_url, company_domain)
+        if original_type == "company" and company_domain:
+            # A genuine direct company path belongs to the stricter direct
+            # fallback. Do not downgrade accessible authoritative evidence.
+            direct_flag = _direct_flag_for_url(job, source_url)
+            if direct_flag is not False and _looks_like_individual_job_path(source_url):
+                return None
+
+        return ResolvedJobSource(
+            state="ACTIVE_PROVIDER_STRUCTURED",
+            source_url=source_url,
+            source_type="provider_structured",
+            active=True,
+            canonical_title=str(job.get("job_title") or ""),
+            canonical_employer=company_name,
+            description=description,
+            location_text=str(job.get("job_location") or ""),
+            employment_type=str(job.get("job_employment_type") or ""),
+            date_posted=posted.isoformat(),
+            job_id=str(job.get("job_id") or ""),
+            official=False,
+            corroborated=True,
+            retryable=False,
+            attempts=list(attempts),
+            notes=[
+                "provider_structured_review",
+                f"provider_source_type:{original_type}",
+                f"age_days:{age_days:.2f}",
+                "approved_revalidation_required",
+            ],
+        )
+
     def _discover_company_job_urls(
         self, job: Dict, company_domain: str
     ) -> Tuple[List[str], List[SourceAttempt], Dict[str, Dict[str, Any]]]:
@@ -1409,6 +1528,18 @@ class JobSourceResolver:
         )
         if structured_fallback is not None:
             return structured_fallback
+
+        provider_review = self._provider_structured_review_fallback(
+            job,
+            origin_urls,
+            attempts,
+            company_name=company_name,
+            company_domain=company_domain,
+            authoritative_absence=authoritative_absence,
+            inactive_candidates=inactive_candidates,
+        )
+        if provider_review is not None:
+            return provider_review
 
         # A potentially active transient source outranks an older inactive URL.
         if transient_official:

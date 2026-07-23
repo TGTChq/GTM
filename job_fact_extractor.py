@@ -25,6 +25,8 @@ def _matching(sentences: Iterable[str], patterns: Iterable[str]) -> List[str]:
 def _fact(name: str, value, source: ResolvedJobSource, excerpts: List[str], *, verified=True) -> FactValue:
     if not verified:
         status = EvidenceStatus.WEAK_PROVIDER_SIGNAL
+    elif source.state == "ACTIVE_PROVIDER_STRUCTURED":
+        status = EvidenceStatus.PROVIDER_STRUCTURED_REVIEW
     elif source.official:
         status = EvidenceStatus.VERIFIED_OFFICIAL
     else:
@@ -97,6 +99,26 @@ def _cross_source_fact(
         for field in provider_fields
         if job.get(field) not in (None, "", [], {})
     }
+    if source.state == "ACTIVE_PROVIDER_STRUCTURED":
+        status = EvidenceStatus.PROVIDER_STRUCTURED_REVIEW
+        evidence = [
+            EvidenceItem(
+                name,
+                value,
+                status,
+                "jsearch_prefilter",
+                source.source_url or str(job.get("job_apply_link") or ""),
+                " | ".join(excerpts)[:700],
+                0.82,
+                {
+                    "provider_fields": provider_snapshot,
+                    "review_required": True,
+                    "approved_revalidation_required": True,
+                },
+            )
+        ]
+        return FactValue(name, value, status, evidence)
+
     evidence = [
         EvidenceItem(
             name,
@@ -193,7 +215,12 @@ def extract_job_facts(job: Dict, source: ResolvedJobSource) -> Dict[str, FactVal
     provider_sentences = _sentences(
         f"{job.get('job_title') or ''}. {job.get('job_location') or ''}. {provider_text}"
     )
-    official = source.state in {"ACTIVE_VERIFIED", "ACTIVE_CORROBORATED", "ACTIVE_DIRECT_STRUCTURED"} and source.corroborated
+    official = source.state in {
+        "ACTIVE_VERIFIED",
+        "ACTIVE_CORROBORATED",
+        "ACTIVE_DIRECT_STRUCTURED",
+        "ACTIVE_PROVIDER_STRUCTURED",
+    } and source.corroborated
 
     facts: Dict[str, FactValue] = {}
     facts["active_status"] = (

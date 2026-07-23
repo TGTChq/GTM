@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Optional
 class EvidenceStatus(str, Enum):
     VERIFIED_OFFICIAL = "VERIFIED_OFFICIAL"
     VERIFIED_CROSS_SOURCE = "VERIFIED_CROSS_SOURCE"
+    PROVIDER_STRUCTURED_REVIEW = "PROVIDER_STRUCTURED_REVIEW"
     WEAK_PROVIDER_SIGNAL = "WEAK_PROVIDER_SIGNAL"
     CONTRADICTED = "CONTRADICTED"
     UNKNOWN = "UNKNOWN"
@@ -48,6 +49,7 @@ class FactValue:
         return value in {
             EvidenceStatus.VERIFIED_OFFICIAL.value,
             EvidenceStatus.VERIFIED_CROSS_SOURCE.value,
+            EvidenceStatus.PROVIDER_STRUCTURED_REVIEW.value,
         }
 
     @property

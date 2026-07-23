@@ -43,7 +43,9 @@ AGGREGATOR_DOMAINS = {
     "builtin.com", "builtinsf.com", "builtinnyc.com", "builtinla.com",
     "builtinaustin.com", "builtinboston.com", "builtinchicago.org",
     "builtincolorado.com", "builtinseattle.com", "remoteok.com",
-    "remoterocketship.com",
+    "remoterocketship.com", "simplify.jobs", "tealhq.com", "remote.co",
+    "recruit.net", "dailyremote.com", "learn4good.com", "monster.com",
+    "jobtrees.com", "jobmesh.io",
 }
 
 # These sites can return HTTP 200 while still being unreliable review links in
@@ -492,6 +494,13 @@ def select_job_url(
             "unverified_review",
             canonical_type or classify_url_source(canonical_url, company_domain),
             "structured_direct_source_requires_revalidation",
+        )
+    if canonical_url and canonical_state == "ACTIVE_PROVIDER_STRUCTURED":
+        return (
+            _clean_candidate_url(canonical_url),
+            "unverified_review",
+            canonical_type or classify_url_source(canonical_url, company_domain),
+            "provider_structured_source_requires_revalidation",
         )
     if canonical_url and canonical_state == "INACTIVE_VERIFIED":
         return (
