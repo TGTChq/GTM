@@ -163,7 +163,7 @@ class RunDailyTopupIntegrationTests(unittest.TestCase):
         scrape_mock.assert_called_once_with(
             registry=registry,
             base_num_pages=1,
-            allow_adaptive=False,
+            allow_adaptive=None,
         )
         self.assertEqual(topup_mock.call_count, 1)
         self.assertEqual(len(push_mock.call_args.args[0]), 2)
