@@ -90,19 +90,44 @@ for directory in (
 
 # ---------- Final-pass architecture ----------
 FINAL_PASS_PIPELINE_ENABLED = _env_bool("FINAL_PASS_PIPELINE_ENABLED", True)
-VALIDATION_VERSION = os.getenv("VALIDATION_VERSION", "tgtc-ready-v1.0")
+VALIDATION_VERSION = os.getenv("VALIDATION_VERSION", "tgtc-ready-v1.1-source-resilience")
 VALIDATION_SIGNING_KEY = os.getenv("VALIDATION_SIGNING_KEY", "")
 # Source and company-site retrieval is bounded and cached.  Disabling fetches is
 # intended only for deterministic offline replay; it does not relax any gate.
 JOB_SOURCE_FETCH_ENABLED = _env_bool("JOB_SOURCE_FETCH_ENABLED", True)
 JOB_SOURCE_MAX_CANDIDATES = _env_int("JOB_SOURCE_MAX_CANDIDATES", 8)
-JOB_SOURCE_DISCOVERY_MAX_PAGES = _env_int("JOB_SOURCE_DISCOVERY_MAX_PAGES", 8)
+# Resolve supplied company/ATS job URLs before guessing careers paths. This is
+# both faster and safer because the direct URL carries stronger provenance.
+JOB_SOURCE_DIRECT_FIRST_ENABLED = _env_bool("JOB_SOURCE_DIRECT_FIRST_ENABLED", True)
+# Generic company discovery is a bounded fallback, not a prerequisite for every
+# posting. A small budget prevents inaccessible career sites from serially
+# blocking the entire daily run.
+JOB_SOURCE_DISCOVERY_MAX_PAGES = _env_int("JOB_SOURCE_DISCOVERY_MAX_PAGES", 4)
 JOB_SOURCE_DISCOVERY_MAX_BOARD_PAGES = _env_int(
-    "JOB_SOURCE_DISCOVERY_MAX_BOARD_PAGES", 4
+    "JOB_SOURCE_DISCOVERY_MAX_BOARD_PAGES", 2
+)
+JOB_SOURCE_DISCOVERY_BUDGET_SECONDS = _env_int(
+    "JOB_SOURCE_DISCOVERY_BUDGET_SECONDS", 18
+)
+JOB_SOURCE_DISCOVERY_TIMEOUT_SECONDS = _env_int(
+    "JOB_SOURCE_DISCOVERY_TIMEOUT_SECONDS", 5
 )
 JOB_SOURCE_MAX_REDIRECTS = _env_int("JOB_SOURCE_MAX_REDIRECTS", 5)
-JOB_SOURCE_ATTEMPTS_PER_URL = _env_int("JOB_SOURCE_ATTEMPTS_PER_URL", 2)
-JOB_SOURCE_TIMEOUT_SECONDS = _env_int("JOB_SOURCE_TIMEOUT_SECONDS", 12)
+JOB_SOURCE_ATTEMPTS_PER_URL = _env_int("JOB_SOURCE_ATTEMPTS_PER_URL", 1)
+JOB_SOURCE_TIMEOUT_SECONDS = _env_int("JOB_SOURCE_TIMEOUT_SECONDS", 8)
+# When a recent direct company/ATS posting cannot be fetched because the site
+# blocks bots or times out, retain recall only under a closed evidence contract:
+# direct identity, recent timestamp, substantial description, and prefilter-
+# corroborated full-time/remote/US facts. Approved enrollment still revalidates.
+JOB_SOURCE_FRESH_DIRECT_FALLBACK_ENABLED = _env_bool(
+    "JOB_SOURCE_FRESH_DIRECT_FALLBACK_ENABLED", True
+)
+JOB_SOURCE_FRESH_DIRECT_MAX_AGE_DAYS = _env_int(
+    "JOB_SOURCE_FRESH_DIRECT_MAX_AGE_DAYS", 8
+)
+JOB_SOURCE_FRESH_DIRECT_MIN_DESCRIPTION_CHARS = _env_int(
+    "JOB_SOURCE_FRESH_DIRECT_MIN_DESCRIPTION_CHARS", 700
+)
 JOB_SOURCE_CACHE_TTL_HOURS = _env_int("JOB_SOURCE_CACHE_TTL_HOURS", 24)
 JOB_SOURCE_MAX_ACTIVE_AGE_DAYS = _env_int("JOB_SOURCE_MAX_ACTIVE_AGE_DAYS", 45)
 COMPANY_SOURCE_FETCH_ENABLED = _env_bool("COMPANY_SOURCE_FETCH_ENABLED", True)
@@ -396,6 +421,11 @@ AIRTABLE_STATUS_ERROR = os.getenv("AIRTABLE_STATUS_ERROR", "Error")
 APPROVED_REVALIDATION_MAX_AGE_HOURS = _env_int("APPROVED_REVALIDATION_MAX_AGE_HOURS", 24)
 APPROVED_REVALIDATE_JOB_SOURCE = _env_bool("APPROVED_REVALIDATE_JOB_SOURCE", True)
 SLA_REQUIRE_NET_NEW_AIRTABLE = _env_bool("SLA_REQUIRE_NET_NEW_AIRTABLE", True)
+# A commercial volume miss is reported in the run summary but is not a process
+# failure. Keep this disabled for Railway services to avoid restart loops.
+PIPELINE_FAIL_PROCESS_ON_SLA_MISS = _env_bool(
+    "PIPELINE_FAIL_PROCESS_ON_SLA_MISS", False
+)
 RECOVERABLE_JOB_TTL_DAYS = _env_int("RECOVERABLE_JOB_TTL_DAYS", 7)
 RECOVERABLE_JOB_MAX_ATTEMPTS = _env_int("RECOVERABLE_JOB_MAX_ATTEMPTS", 5)
 FINAL_PASS_INVENTORY_TTL_DAYS = _env_int("FINAL_PASS_INVENTORY_TTL_DAYS", 7)

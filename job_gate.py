@@ -71,7 +71,7 @@ class JobGate:
             and source.corroborated
         )
         if (
-            source.state not in {"ACTIVE_VERIFIED", "ACTIVE_CORROBORATED"}
+            source.state not in {"ACTIVE_VERIFIED", "ACTIVE_CORROBORATED", "ACTIVE_DIRECT_STRUCTURED"}
             or not source.corroborated
             or (resolved_source_type == "aggregator" and not trusted_corroborated_aggregator)
         ):
@@ -132,7 +132,11 @@ class JobGate:
             metadata={
                 "source": source.to_dict(),
                 "canonical_title": official_title,
-                "signal_confidence": "official" if source.official else "corroborated",
+                "signal_confidence": (
+                    "official" if source.official else
+                    "direct_structured" if source.state == "ACTIVE_DIRECT_STRUCTURED" else
+                    "corroborated"
+                ),
             },
         )
 
@@ -153,6 +157,8 @@ class JobGate:
                 "official_job_status": source.get("state") or "",
                 "job_signal_confidence": (
                     "official" if source.get("official") else
+                    "direct_structured"
+                    if source.get("state") == "ACTIVE_DIRECT_STRUCTURED" else
                     "corroborated" if source.get("corroborated") else "unresolved"
                 ),
                 # Canonical aliases are retained for downstream consumers that
@@ -162,6 +168,8 @@ class JobGate:
                 "canonical_active_status": (
                     "verified"
                     if source.get("state") in {"ACTIVE_VERIFIED", "ACTIVE_CORROBORATED"}
+                    else "unverified_review"
+                    if source.get("state") == "ACTIVE_DIRECT_STRUCTURED"
                     else "broken"
                     if source.get("state") == "INACTIVE_VERIFIED"
                     else "unverified_review"

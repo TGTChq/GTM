@@ -193,7 +193,7 @@ def extract_job_facts(job: Dict, source: ResolvedJobSource) -> Dict[str, FactVal
     provider_sentences = _sentences(
         f"{job.get('job_title') or ''}. {job.get('job_location') or ''}. {provider_text}"
     )
-    official = source.state in {"ACTIVE_VERIFIED", "ACTIVE_CORROBORATED"} and source.corroborated
+    official = source.state in {"ACTIVE_VERIFIED", "ACTIVE_CORROBORATED", "ACTIVE_DIRECT_STRUCTURED"} and source.corroborated
 
     facts: Dict[str, FactValue] = {}
     facts["active_status"] = (

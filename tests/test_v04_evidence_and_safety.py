@@ -133,7 +133,7 @@ class SourceResolverRecoveryTests(unittest.TestCase):
         self.assertEqual(source_type, "company")
         self.assertEqual(reason, "verified_by_job_gate")
 
-    def test_discovery_403_is_retryable_temporary_unavailability(self):
+    def test_guessed_discovery_403_does_not_poison_the_posting_as_timeout(self):
         resolver = JobSourceResolver()
         job = {
             **_provider_job(),
@@ -160,9 +160,9 @@ class SourceResolverRecoveryTests(unittest.TestCase):
         ):
             resolved = resolver.resolve(job, fetch=True)
 
-        self.assertEqual(resolved.state, "SOURCE_TEMPORARILY_UNAVAILABLE")
+        self.assertEqual(resolved.state, "SOURCE_UNRESOLVED")
         self.assertTrue(resolved.retryable)
-        self.assertTrue(resolved.temporarily_unavailable)
+        self.assertFalse(resolved.temporarily_unavailable)
 
     def test_discovery_runs_even_when_provider_supplies_direct_company_url(self):
         resolver = JobSourceResolver()

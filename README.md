@@ -222,3 +222,34 @@ python audit_airtable_export.py "Leads-All Leads.csv" --last 16 --output lead_qu
 
 The audit writes PASS/REVIEW/REJECT decisions and deterministic reasons using the
 same local gates as production.
+
+
+## Source-resilient normal operation (READY v1.1)
+
+The Job Gate resolves supplied company/ATS posting URLs before generic careers-page
+discovery. Generic discovery is bounded by a per-job time budget. A 401/403, timeout,
+or bot block cannot qualify a job by itself and cannot poison unrelated discovery
+paths. A fresh direct company/ATS posting may use the structured fallback only when
+identity, recency, substantial description, full-time, remote, and US-market facts
+all agree and no authoritative inactive or contradictory evidence exists. Approved
+Instantly enrollment still performs volatile source revalidation.
+
+Recommended Railway values:
+
+```env
+JOB_SOURCE_DIRECT_FIRST_ENABLED=1
+JOB_SOURCE_DISCOVERY_MAX_PAGES=4
+JOB_SOURCE_DISCOVERY_MAX_BOARD_PAGES=2
+JOB_SOURCE_DISCOVERY_BUDGET_SECONDS=18
+JOB_SOURCE_DISCOVERY_TIMEOUT_SECONDS=5
+JOB_SOURCE_ATTEMPTS_PER_URL=1
+JOB_SOURCE_TIMEOUT_SECONDS=8
+JOB_SOURCE_FRESH_DIRECT_FALLBACK_ENABLED=1
+JOB_SOURCE_FRESH_DIRECT_MAX_AGE_DAYS=8
+JOB_SOURCE_FRESH_DIRECT_MIN_DESCRIPTION_CHARS=700
+PIPELINE_FAIL_PROCESS_ON_SLA_MISS=0
+```
+
+A technically successful run exits `0` even when the commercial 30-lead SLA is
+missed, preventing Railway restart loops. The miss remains explicit in logs and the
+run summary.
