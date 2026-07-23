@@ -49,6 +49,52 @@ DEBUG_API_RESPONSES = _env_bool("DEBUG_API_RESPONSES", False)
 REQUEST_TIMEOUT_SECONDS = _env_int("REQUEST_TIMEOUT_SECONDS", 30)
 MAX_HTTP_RETRIES = _env_int("MAX_HTTP_RETRIES", 3)
 
+# ---------- Acquisition mode ----------
+# Free multi-source acquisition is the production default. JSearch remains
+# available only as an explicit rollback mode.
+ACQUISITION_MODE = os.getenv("ACQUISITION_MODE", "free_multi_source").strip().lower()
+FREE_JOB_SOURCES = _env_json(
+    "FREE_JOB_SOURCES_JSON",
+    ["himalayas", "jobicy", "weworkremotely", "remotive", "remoteok"],
+)
+FREE_SOURCE_REQUEST_TIMEOUT_SECONDS = _env_int(
+    "FREE_SOURCE_REQUEST_TIMEOUT_SECONDS", 20
+)
+FREE_SOURCE_MAX_RESPONSE_CHARS = _env_int(
+    "FREE_SOURCE_MAX_RESPONSE_CHARS", 8_000_000
+)
+FREE_SOURCE_MAX_RECORDS_PER_SOURCE = _env_int(
+    "FREE_SOURCE_MAX_RECORDS_PER_SOURCE", 1000
+)
+FREE_SOURCE_MIN_SUCCESSFUL_SOURCES = _env_int(
+    "FREE_SOURCE_MIN_SUCCESSFUL_SOURCES", 2
+)
+HIMALAYAS_PAGE_SIZE = _env_int("HIMALAYAS_PAGE_SIZE", 20)
+HIMALAYAS_MAX_PAGES = _env_int("HIMALAYAS_MAX_PAGES", 25)
+FREE_SOURCE_LANDING_DISCOVERY_ENABLED = _env_bool(
+    "FREE_SOURCE_LANDING_DISCOVERY_ENABLED", True
+)
+FREE_SOURCE_LANDING_DISCOVERY_MAX_REQUESTS = _env_int(
+    "FREE_SOURCE_LANDING_DISCOVERY_MAX_REQUESTS", 40
+)
+ATS_DIRECT_ACQUISITION_ENABLED = _env_bool(
+    "ATS_DIRECT_ACQUISITION_ENABLED", True
+)
+ATS_BOARD_REFRESH_INTERVAL_HOURS = _env_int(
+    "ATS_BOARD_REFRESH_INTERVAL_HOURS", 20
+)
+ATS_MAX_BOARDS_PER_RUN = _env_int("ATS_MAX_BOARDS_PER_RUN", 150)
+ATS_MAX_JOBS_PER_BOARD = _env_int("ATS_MAX_JOBS_PER_BOARD", 250)
+ATS_REGISTRY_AUTO_SEED_HISTORY = _env_bool(
+    "ATS_REGISTRY_AUTO_SEED_HISTORY", True
+)
+ATS_REGISTRY_HISTORY_FILE_LIMIT = _env_int(
+    "ATS_REGISTRY_HISTORY_FILE_LIMIT", 80
+)
+ATS_REGISTRY_MAX_HISTORY_FILE_BYTES = _env_int(
+    "ATS_REGISTRY_MAX_HISTORY_FILE_BYTES", 25_000_000
+)
+
 # ---------- Paths ----------
 STATE_DIR = str(BASE_DIR / "data" / "state")
 ARTIFACT_ROOT = Path(os.getenv("PIPELINE_ARTIFACT_ROOT", str(BASE_DIR / "data")))
@@ -66,6 +112,9 @@ FINAL_PASS_INVENTORY_FILE = str(Path(STATE_DIR) / "final_pass_inventory.json")
 PIPELINE_CHECKPOINT_FILE = str(Path(STATE_DIR) / "pipeline_checkpoint.json")
 PIPELINE_LOCK_FILE = str(Path(STATE_DIR) / "pipeline.lock")
 SEEN_JOBS_FILE = str(Path(STATE_DIR) / "seen_jobs.json")
+ATS_BOARD_REGISTRY_FILE = os.getenv(
+    "ATS_BOARD_REGISTRY_FILE", str(Path(STATE_DIR) / "ats_board_registry.json")
+)
 CRM_EXCLUSION_FILE = os.getenv(
     "CRM_EXCLUSION_FILE", str(BASE_DIR / "data" / "exclusions" / "crm_companies.csv")
 )
@@ -90,7 +139,7 @@ for directory in (
 
 # ---------- Final-pass architecture ----------
 FINAL_PASS_PIPELINE_ENABLED = _env_bool("FINAL_PASS_PIPELINE_ENABLED", True)
-VALIDATION_VERSION = os.getenv("VALIDATION_VERSION", "tgtc-ready-v1.2-identity-and-recall")
+VALIDATION_VERSION = os.getenv("VALIDATION_VERSION", "tgtc-ready-v1.3-free-multi-source")
 VALIDATION_SIGNING_KEY = os.getenv("VALIDATION_SIGNING_KEY", "")
 # Source and company-site retrieval is bounded and cached.  Disabling fetches is
 # intended only for deterministic offline replay; it does not relax any gate.
@@ -696,6 +745,11 @@ KNOWN_JOB_AGGREGATOR_EMPLOYERS = [
     "freelanceshop",
     "onlinejobs ph client",
     "freelance shop",
+    "himalayas",
+    "jobicy",
+    "we work remotely",
+    "remotive",
+    "remote ok",
 ]
 
 # Generic employer-name patterns are only used with corroborating evidence
@@ -753,6 +807,8 @@ INTERMEDIARY_JOB_DOMAINS = [
     "breezy.hr",
     "workable.com",
     "recruitee.com",
+    "jobicy.com",
+    "personio.de",
     "applytojob.com",
     "adp.com",
     "oraclecloud.com",
@@ -810,6 +866,8 @@ INTERMEDIARY_JOB_DOMAINS = [
     "simplify.jobs",
     "jobtrees.com",
     "jobmesh.io",
+    "remoteok.com",
+    "weworkremotely.com",
 ]
 
 KNOWN_OUTSOURCING_EMPLOYERS = [

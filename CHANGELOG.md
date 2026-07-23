@@ -1,3 +1,14 @@
+# READY v1.3 free multi-source acquisition — July 23, 2026
+
+- Replaced JSearch as the production acquisition default with five free global feeds: Himalayas, Jobicy, We Work Remotely, Remotive, and Remote OK.
+- Added automatic public ATS discovery, persistence, and direct acquisition for Greenhouse, Lever, Ashby, Recruitee, Workable, and Personio.
+- Added cross-source employer/title deduplication that prefers official ATS records while preserving all discovery provenance and apply URLs.
+- Added bounded landing-page discovery and fail-closed response parsing, redirect validation, private-network blocking, and response-size limits.
+- Added source-level yield metrics and an acquisition/filter shadow command with zero JSearch, Apollo, Hunter, Airtable, or Instantly calls.
+- Kept JSearch as an explicit rollback mode only; JSearch top-up is disabled in free multi-source production mode.
+- Corrected `topup_filter_error`: a non-empty micro-batch with zero filter survivors is now treated as zero downstream yield, not a technical failure.
+- Added focused regression coverage for all global feed formats, ATS detection/fetching, automatic registry growth, deduplication, and the zero-yield top-up path.
+
 # FINAL_PASS v0.5 production hardening — July 22, 2026
 
 - Added strict ATS employer identity, positive job-activity proof, multi-URL evaluation, and public Greenhouse, Lever, and Ashby board adapters.
