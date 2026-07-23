@@ -347,8 +347,8 @@ def push_leads(jobs: List[Dict], batch_size: int = 10) -> Dict:
     if strict_mode:
         reviewable = [
             dict(job) for job in jobs
-            if job.get("_final_state") in {"FINAL_PASS", "NEEDS_CHECK"}
-            and job.get("_airtable_relevance") in {"accept", "review"}
+            if job.get("_final_state") == "FINAL_PASS"
+            and job.get("_airtable_relevance") == "accept"
             and job.get("hiring_manager_email")
             and job.get("lead_key")
         ]
@@ -432,6 +432,7 @@ def push_leads(jobs: List[Dict], batch_size: int = 10) -> Dict:
             })
 
     created = 0
+    created_lead_keys: List[str] = []
     updated_missing_role_focus = 0
     updated_missing_job_signals = 0
     failed = 0
@@ -447,9 +448,11 @@ def push_leads(jobs: List[Dict], batch_size: int = 10) -> Dict:
         try:
             response = request_with_retry("POST", _base_url(), headers=_headers(), json_body=body)
             data = safe_json(response)
-            created += len(data.get("records", []))
-            if len(data.get("records", [])) != len(batch):
+            created_count = len(data.get("records", []))
+            if created_count != len(batch):
                 raise ValueError("Airtable returned fewer records than submitted")
+            created += created_count
+            created_lead_keys.extend(job["lead_key"] for job in batch)
         except Exception as exc:
             logger.error("Airtable batch create failed: %s", exc)
             failed += len(batch)
@@ -482,8 +485,15 @@ def push_leads(jobs: List[Dict], batch_size: int = 10) -> Dict:
     signal_review_required = sum(
         bool(job.get("job_signal_review_required")) for job in unique_by_key.values()
     )
+    persisted_lead_keys = list(dict.fromkeys([
+        *existing_keys,
+        *suppressed_company_keys,
+        *created_lead_keys,
+    ]))
     return {
         "created": created,
+        "created_lead_keys": created_lead_keys,
+        "persisted_lead_keys": persisted_lead_keys,
         "updated_missing_role_focus": updated_missing_role_focus,
         "updated_missing_job_signals": updated_missing_job_signals,
         "skipped_existing": skipped_existing,
@@ -494,7 +504,7 @@ def push_leads(jobs: List[Dict], batch_size: int = 10) -> Dict:
         "skipped_no_contact": skipped_no_contact,
         "reviewable": len(unique_by_key),
         "final_pass": sum(job.get("_final_state") == "FINAL_PASS" for job in unique_by_key.values()),
-        "needs_check": sum(job.get("_final_state") == "NEEDS_CHECK" for job in unique_by_key.values()),
+        "needs_check": 0,
         "strict_mode": strict_mode,
         "job_signal_review_required": signal_review_required,
     }

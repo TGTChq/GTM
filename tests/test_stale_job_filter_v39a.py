@@ -9,10 +9,10 @@ import job_signal
 class StaleJobFilterV39ATests(unittest.TestCase):
     def test_keeps_job_younger_than_limit(self):
         now = datetime.now(timezone.utc)
-        job = {"job_posted_at_datetime_utc": (now - timedelta(days=29)).isoformat()}
+        job = {"job_posted_at_datetime_utc": (now - timedelta(days=7)).isoformat()}
         with patch("job_signal.datetime") as mocked_datetime:
             # classify_freshness receives its own current time; keep this test
-            # tolerant by using an age comfortably below the threshold.
+            # tolerant by using an age below the seven-day acquisition threshold.
             mocked_datetime.now.return_value = now
             mocked_datetime.fromisoformat.side_effect = datetime.fromisoformat
             mocked_datetime.fromtimestamp.side_effect = datetime.fromtimestamp
@@ -22,7 +22,7 @@ class StaleJobFilterV39ATests(unittest.TestCase):
 
     def test_rejects_job_at_limit(self):
         now = datetime.now(timezone.utc)
-        job = {"job_posted_at_datetime_utc": (now - timedelta(days=31)).isoformat()}
+        job = {"job_posted_at_datetime_utc": (now - timedelta(days=8)).isoformat()}
         matched, reason = job_filter.is_stale_job(job)
         self.assertTrue(matched)
         self.assertTrue(reason.startswith("stale_job:"))

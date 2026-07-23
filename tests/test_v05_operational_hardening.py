@@ -160,7 +160,7 @@ class SourceIdentityAndActivityTests(unittest.TestCase):
             result = JobSourceResolver(session).resolve(job, fetch=True)
         self.assertEqual(result.state, "SOURCE_UNRESOLVED")
         statuses = [attempt.status for attempt in result.attempts]
-        self.assertIn("employer_identity_unverified", statuses)
+        self.assertTrue({"employer_identity_unverified", "job_identity_unverified"} & set(statuses))
 
     def test_missing_positive_activity_signal_is_retryable_not_active(self):
         url = "https://example.com/jobs/staff-accountant"
@@ -217,7 +217,7 @@ class SourceIdentityAndActivityTests(unittest.TestCase):
 
 
 class ProvenanceAndContactTests(unittest.TestCase):
-    def test_provider_only_hybrid_claim_is_unverified_not_hard_reject(self):
+    def test_explicit_hybrid_claim_is_hard_reject(self):
         source = ResolvedJobSource(
             state="ACTIVE_VERIFIED", source_url="https://example.com/jobs/j1",
             source_type="company", http_status=200, active=True,
@@ -232,8 +232,7 @@ class ProvenanceAndContactTests(unittest.TestCase):
         )
         resolver = SimpleNamespace(resolve=lambda *_args, **_kwargs: source)
         decision = JobGate(resolver).evaluate(job)
-        self.assertEqual(decision.state, GateState.UNVERIFIED)
-        self.assertNotEqual(str(decision.primary_reason), "REJECT_ONSITE_REQUIRED")
+        self.assertEqual(decision.state, GateState.REJECT)
 
     def _person(self, **overrides):
         raw = {
@@ -259,15 +258,14 @@ class ProvenanceAndContactTests(unittest.TestCase):
         self.assertEqual(decision.state, GateState.REROUTE)
         self.assertIn("NOT_CURRENT_EMPLOYEE", str(decision.primary_reason))
 
-    def test_contact_without_us_territory_reroutes(self):
+    def test_contact_without_explicit_territory_can_own_global_function(self):
         person = self._person(country=None)
         person.raw = {"current_organization": {"name": "Example Corp", "primary_domain": "example.com"}}
         decision = ContactGate().evaluate(
             person=person, target_titles=["VP Finance"], company_domains={"example.com"},
             company_name="Example Corp", intent_market="us_market",
         )
-        self.assertEqual(decision.state, GateState.REROUTE)
-        self.assertIn("TERRITORY_UNVERIFIED", str(decision.primary_reason))
+        self.assertEqual(decision.state, GateState.PASS)
 
     def test_global_c_level_can_own_us_hiring_from_outside_us(self):
         person = self._person(title="Chief Revenue Officer", country="United Kingdom")

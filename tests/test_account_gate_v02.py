@@ -66,12 +66,28 @@ class AccountGateV02Tests(unittest.TestCase):
         )).evaluate(org=org(), input_company_name="Example Corp", input_domain="example.com", jobs=[])
         self.assertEqual(decision.state, GateState.PASS)
 
-    def test_generic_company_page_without_business_model_abstains(self):
+    def test_generic_company_page_without_excluded_model_passes(self):
         decision = AccountGate(_Resolver(
             "Welcome to Example Corp. Meet our team, read our news, view careers, and contact us today."
         )).evaluate(org=org(raw={}), input_company_name="Example Corp", input_domain="example.com", jobs=[])
-        self.assertEqual(decision.state, GateState.UNVERIFIED)
-        self.assertEqual(str(decision.primary_reason.value), "UNVERIFIED_BUSINESS_MODEL")
+        self.assertEqual(decision.state, GateState.PASS)
+
+    def test_incidental_job_government_language_does_not_reject_account(self):
+        decision = AccountGate(_Resolver(
+            "We build workflow software for modern business teams."
+        )).evaluate(
+            org=org(industry="Computer Software"),
+            input_company_name="Example Corp",
+            input_domain="example.com",
+            jobs=[{
+                "job_description": (
+                    "The role monitors government regulations and supports "
+                    "compliance reporting for customers."
+                )
+            }],
+            fetch_company=False,
+        )
+        self.assertEqual(decision.state, GateState.PASS)
 
     def test_government_contractor_rejects(self):
         decision = AccountGate(_Resolver(

@@ -61,16 +61,8 @@ def run_precontact_qualification(
     stats: Counter = Counter()
 
     for job in jobs:
-        # Compatibility for tiny mocked fixtures. Production JSearch payloads are
-        # substantial and always execute the strict gates.
-        if not _is_substantial_job(job):
-            legacy = dict(job)
-            legacy["_qualification_bypassed"] = True
-            contact_eligible.append(legacy)
-            stats["compatibility_bypass"] += 1
-            continue
         annotated = jgate.annotate(job, fetch=fetch_sources)
-        if annotated.get("_job_gate_state") not in {GateState.PASS.value, GateState.NEEDS_CHECK.value}:
+        if annotated.get("_job_gate_state") != GateState.PASS.value:
             nonpass.append(annotated)
             stats[f"job_{str(annotated.get('_job_gate_state')).lower()}"] += 1
             stats[f"reason__{annotated.get('_job_gate_reason')}"] += 1
@@ -83,8 +75,6 @@ def run_precontact_qualification(
             continue
         contact_eligible.append(annotated)
         stats["contact_eligible"] += 1
-        if annotated.get("_job_gate_state") == GateState.NEEDS_CHECK.value:
-            stats["needs_check"] += 1
 
     output_payload = {
         **{key: value for key, value in payload.items() if key != "jobs"},

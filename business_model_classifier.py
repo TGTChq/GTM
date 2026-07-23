@@ -1,7 +1,8 @@
-"""Evidence-backed company business-model classifier.
+"""Evidence-backed exclusion classifier for company business models.
 
-Patterns describe the company's own offering, not incidental customer mentions.
-The classifier returns UNKNOWN rather than guessing when evidence is too thin.
+The classifier is a positive-evidence veto: first-party or Apollo evidence may
+exclude a company, while absence of such evidence does not become another gate.
+Job text can corroborate a decision but cannot exclude an account by itself.
 """
 
 from __future__ import annotations
@@ -181,7 +182,8 @@ def classify_business_model(
             job_text=job_text,
             source_url=source_url,
         )
-        if evidence:
+        decisive = [item for item in evidence if item.source_type != "job_provider"]
+        if decisive:
             return BusinessModelResult("EXCLUDED", category, reason, evidence)
 
     for category, patterns in EXCLUDED_INDUSTRY_PATTERNS.items():
@@ -193,16 +195,15 @@ def classify_business_model(
             job_text=job_text,
             source_url=source_url,
         )
-        if evidence:
+        decisive = [item for item in evidence if item.source_type != "job_provider"]
+        if decisive:
             return BusinessModelResult(
                 "EXCLUDED", category, "REJECT_EXCLUDED_INDUSTRY",
                 evidence,
             )
 
-    # Fail closed: arbitrary first-party page text is not a verified business
-    # model. Require a clause that describes what the company itself builds,
-    # sells, operates or provides. Navigation/careers boilerplate alone remains
-    # UNKNOWN and is replaced by the top-up loop.
+    # Positive allowed-model evidence is retained for audit/ranking, but it is
+    # not required to pass the account gate.
     allowed_excerpts = _find(ALLOWED_MODEL_PATTERNS, official)
     if allowed_excerpts:
         return BusinessModelResult(
@@ -230,4 +231,8 @@ def classify_business_model(
             ),
         )
 
-    return BusinessModelResult("UNKNOWN", "unknown", "UNVERIFIED_BUSINESS_MODEL", [])
+    # Absence of an exclusion signal is not evidence that the account is bad.
+    # The Account Gate already requires a resolved organization, domain, employee
+    # count and known industry. Business-model classification is therefore a
+    # negative-evidence veto, not an additional proof-of-allowance gate.
+    return BusinessModelResult("ALLOWED", "no_excluded_model_detected", "", [])

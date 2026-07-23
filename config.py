@@ -10,7 +10,7 @@ from typing import Any, Dict
 
 from dotenv import load_dotenv
 
-from role_catalog import DEFAULT_SEARCH_ROLES
+from role_catalog import DEFAULT_ACQUISITION_ROLES
 
 BASE_DIR = Path(__file__).resolve().parent
 load_dotenv(BASE_DIR / ".env")
@@ -64,6 +64,7 @@ REROUTE_STATE_FILE = str(Path(STATE_DIR) / "reroute_state.json")
 RECOVERABLE_JOBS_FILE = str(Path(STATE_DIR) / "recoverable_jobs.json")
 FINAL_PASS_INVENTORY_FILE = str(Path(STATE_DIR) / "final_pass_inventory.json")
 PIPELINE_CHECKPOINT_FILE = str(Path(STATE_DIR) / "pipeline_checkpoint.json")
+PIPELINE_LOCK_FILE = str(Path(STATE_DIR) / "pipeline.lock")
 SEEN_JOBS_FILE = str(Path(STATE_DIR) / "seen_jobs.json")
 CRM_EXCLUSION_FILE = os.getenv(
     "CRM_EXCLUSION_FILE", str(BASE_DIR / "data" / "exclusions" / "crm_companies.csv")
@@ -89,7 +90,7 @@ for directory in (
 
 # ---------- Final-pass architecture ----------
 FINAL_PASS_PIPELINE_ENABLED = _env_bool("FINAL_PASS_PIPELINE_ENABLED", True)
-VALIDATION_VERSION = os.getenv("VALIDATION_VERSION", "tgtc-final-pass-v0.5")
+VALIDATION_VERSION = os.getenv("VALIDATION_VERSION", "tgtc-ready-v1.0")
 VALIDATION_SIGNING_KEY = os.getenv("VALIDATION_SIGNING_KEY", "")
 # Source and company-site retrieval is bounded and cached.  Disabling fetches is
 # intended only for deterministic offline replay; it does not relax any gate.
@@ -109,30 +110,55 @@ COMPANY_SOURCE_MAX_PAGES = _env_int("COMPANY_SOURCE_MAX_PAGES", 3)
 COMPANY_SOURCE_TIMEOUT_SECONDS = _env_int("COMPANY_SOURCE_TIMEOUT_SECONDS", 10)
 COMPANY_SOURCE_CACHE_TTL_HOURS = _env_int("COMPANY_SOURCE_CACHE_TTL_HOURS", 168)
 FINAL_PASS_MICROBATCH_QUERY_UNITS = _env_int("FINAL_PASS_MICROBATCH_QUERY_UNITS", 6)
-FINAL_PASS_MAX_TOPUP_ITERATIONS = _env_int("FINAL_PASS_MAX_TOPUP_ITERATIONS", 50)
-FINAL_PASS_MAX_RUNTIME_SECONDS = _env_int("FINAL_PASS_MAX_RUNTIME_SECONDS", 3300)
+FINAL_PASS_MAX_TOPUP_ITERATIONS = _env_int("FINAL_PASS_MAX_TOPUP_ITERATIONS", 2)
+FINAL_PASS_MAX_RUNTIME_SECONDS = _env_int("FINAL_PASS_MAX_RUNTIME_SECONDS", 1800)
 FINAL_PASS_MAX_EMPTY_QUERY_CYCLES = _env_int(
     "FINAL_PASS_MAX_EMPTY_QUERY_CYCLES", 2
 )
 DRIFT_AUDIT_SAMPLE_SIZE = _env_int("DRIFT_AUDIT_SAMPLE_SIZE", 10)
 
+# ---------- READY inventory and source corroboration ----------
+# FINAL_PASS remains the persisted compatibility label; operationally it means READY.
+READY_INVENTORY_TARGET = _env_int("READY_INVENTORY_TARGET", 60)
+READY_DAILY_DELIVERY_LIMIT = _env_int("READY_DAILY_DELIVERY_LIMIT", 30)
+READY_INVENTORY_TTL_DAYS = _env_int("READY_INVENTORY_TTL_DAYS", 2)
+PIPELINE_LOCK_STALE_HOURS = _env_int("PIPELINE_LOCK_STALE_HOURS", 6)
+JOB_SOURCE_MIN_INDEPENDENT_PUBLISHERS = _env_int(
+    "JOB_SOURCE_MIN_INDEPENDENT_PUBLISHERS", 2
+)
+JOB_SOURCE_ALLOW_CORROBORATED = _env_bool("JOB_SOURCE_ALLOW_CORROBORATED", True)
+# Explicit aliases cover observed rebrands/legacy ATS tenants without weakening
+# identity checks globally. Override or extend through JSON env variables.
+COMPANY_NAME_ALIASES = _env_json(
+    "COMPANY_NAME_ALIASES_JSON",
+    {"magnitude software": "insightsoftware"},
+)
+COMPANY_DOMAIN_ALIASES = _env_json(
+    "COMPANY_DOMAIN_ALIASES_JSON",
+    {"magnitudesoftware.com": "insightsoftware.com"},
+)
+TOPUP_MAX_ZERO_DOWNSTREAM_BATCHES = _env_int(
+    "TOPUP_MAX_ZERO_DOWNSTREAM_BATCHES", 2
+)
+ROLE_ALLOW_SENIOR_IC = _env_bool("ROLE_ALLOW_SENIOR_IC", True)
+
 # ---------- JSearch ----------
 RAPIDAPI_KEY = os.getenv("RAPIDAPI_KEY", "")
 JSEARCH_HOST = os.getenv("JSEARCH_HOST", "jsearch.p.rapidapi.com")
 JSEARCH_ENDPOINT = os.getenv("JSEARCH_ENDPOINT", "https://jsearch.p.rapidapi.com/search-v2")
-DATE_POSTED = os.getenv("DATE_POSTED", "today")
+DATE_POSTED = os.getenv("DATE_POSTED", "week")
 COUNTRY = os.getenv("COUNTRY", "us")
-NUM_PAGES = _env_int("NUM_PAGES", 3)
+NUM_PAGES = _env_int("NUM_PAGES", 1)
 SEARCH_DELAY_SECONDS = _env_float("SEARCH_DELAY_SECONDS", 0.8)
-# Operational controls keep the complete Brett-approved catalog active while
-# bounding request-unit usage. Zero disables only the corresponding guard.
+# Acquisition uses representative role families; returned rows are classified
+# locally against the complete Brett-approved catalog. Zero disables only the
+# corresponding request guard.
 JSEARCH_MAX_QUERIES_PER_RUN = _env_int("JSEARCH_MAX_QUERIES_PER_RUN", 0)
-# Guard the estimated request units before the first API call. JSearch charges
-# approximately one request unit per requested page; 118 roles x 3 pages = 354.
-# The 370-unit default leaves 16 units for diversified lookback queries. Set to
-# 0 only for an intentional, supervised deep diagnostic.
+# Guard estimated request units before the first API call. READY v1 uses 50
+# strategically complete acquisition roles at one page each, leaving bounded room for
+# adaptive deepening without returning to the 118-query fan-out.
 JSEARCH_MAX_ESTIMATED_UNITS_PER_RUN = _env_int(
-    "JSEARCH_MAX_ESTIMATED_UNITS_PER_RUN", 370
+    "JSEARCH_MAX_ESTIMATED_UNITS_PER_RUN", 150
 )
 JSEARCH_STOP_ON_LOW_QUOTA = _env_bool("JSEARCH_STOP_ON_LOW_QUOTA", True)
 JSEARCH_MIN_REMAINING_REQUESTS = _env_int("JSEARCH_MIN_REMAINING_REQUESTS", 500)
@@ -157,7 +183,7 @@ JSEARCH_LOOKBACK_QUERY_VARIANTS = _env_json(
 )
 JSEARCH_TOPUP_DATE_WINDOWS = _env_json(
     "JSEARCH_TOPUP_DATE_WINDOWS",
-    ["week", "month", "all"],
+    ["week"],
 )
 # When one-page mode is intentionally configured, use only the remaining
 # request-unit budget on deeper pages for roles whose first-page results survive
@@ -176,9 +202,7 @@ JSEARCH_ADAPTIVE_MIN_PREFILTER_VIABLE = _env_int(
 JSEARCH_ADAPTIVE_BUCKET_BALANCING = _env_bool(
     "JSEARCH_ADAPTIVE_BUCKET_BALANCING", True
 )
-# After three-page base coverage, reserve the remaining 16-unit budget for a
-# diversified, wider-window pass. This improves qualified inventory without
-# weakening any quality gate.
+# Keep any adaptive lookback inside the same seven-day signal window.
 JSEARCH_ADAPTIVE_LOOKBACK = _env_bool("JSEARCH_ADAPTIVE_LOOKBACK", True)
 JSEARCH_ADAPTIVE_LOOKBACK_DATE_POSTED = os.getenv(
     "JSEARCH_ADAPTIVE_LOOKBACK_DATE_POSTED", "week"
@@ -215,9 +239,10 @@ JSEARCH_TOPUP_PREFILTER_MULTIPLIER = _env_float(
 JSEARCH_TOPUP_MIN_PREFILTER_TARGET = _env_int(
     "JSEARCH_TOPUP_MIN_PREFILTER_TARGET", 20
 )
-# Reject only clearly stale job-intent signals before enrichment. Unknown or
-# conflicting dates remain eligible; the oldest parseable source date is used.
-MAX_JOB_AGE_DAYS = _env_int("MAX_JOB_AGE_DAYS", 30)
+# Keep the acquisition signal inside the rolling weekly window. Unknown or
+# conflicting dates remain eligible for source resolution; the oldest parseable
+# source date is used.
+MAX_JOB_AGE_DAYS = _env_int("MAX_JOB_AGE_DAYS", 8)
 
 # Quality gates restore the paid-test standard before any Apollo/Hunter spend.
 # The 118-role catalog remains active, but only current full-time roles with
@@ -237,7 +262,7 @@ ALLOW_PROVIDER_CONFIRMED_US_REMOTE = _env_bool(
     "ALLOW_PROVIDER_CONFIRMED_US_REMOTE", True
 )
 
-ROLES = _env_json("ROLES_JSON", list(DEFAULT_SEARCH_ROLES))
+ROLES = _env_json("ROLES_JSON", list(DEFAULT_ACQUISITION_ROLES))
 
 # Global title exclusions from Brett's Intent-Based Outbound 2.0 rules.
 # Phrase matching is word-boundary based in jsearch_scraper.py.
@@ -247,8 +272,6 @@ EXCLUDED_TITLE_KEYWORDS = [
     "director",
     "intern",
     "internship",
-    "senior",
-    "sr",
     "head of",
     "event marketing",
     "field marketing",
@@ -282,7 +305,9 @@ def get_final_pass_target() -> int:
     if _TARGET_FINAL_PASS_EXPLICIT not in (None, ""):
         return TARGET_FINAL_PASS_LEADS_PER_RUN
     return TARGET_REVIEWABLE_LEADS_PER_RUN
-MAX_ELIGIBLE_COMPANIES_PER_RUN = _env_int("MAX_ELIGIBLE_COMPANIES_PER_RUN", 90)
+# No arbitrary account cap: acquisition/query budgets and downstream gates are
+# the bounded controls. Set a positive value only for a deliberate cost-limited run.
+MAX_ELIGIBLE_COMPANIES_PER_RUN = _env_int("MAX_ELIGIBLE_COMPANIES_PER_RUN", 0)
 SEEN_JOBS_RETENTION_DAYS = _env_int("SEEN_JOBS_RETENTION_DAYS", 30)
 CRM_MIN_MATCH_LENGTH = _env_int("CRM_MIN_MATCH_LENGTH", 4)
 
@@ -346,7 +371,7 @@ REROUTE_TEMPORARY_TTL_HOURS = _env_int("REROUTE_TEMPORARY_TTL_HOURS", 12)
 REROUTE_PERMANENT_TTL_DAYS = _env_int("REROUTE_PERMANENT_TTL_DAYS", 30)
 REQUIRE_CURRENT_EMPLOYMENT_EVIDENCE = _env_bool("REQUIRE_CURRENT_EMPLOYMENT_EVIDENCE", True)
 REQUIRE_CONTACT_LINKEDIN = _env_bool("REQUIRE_CONTACT_LINKEDIN", True)
-REQUIRE_US_CONTACT_TERRITORY = _env_bool("REQUIRE_US_CONTACT_TERRITORY", True)
+REQUIRE_US_CONTACT_TERRITORY = _env_bool("REQUIRE_US_CONTACT_TERRITORY", False)
 # Founders remain a legitimate fallback for genuinely small companies, but not
 # for mid-market accounts where a functional leader should exist.
 FOUNDER_FALLBACK_MAX_EMPLOYEES = _env_int(
@@ -520,7 +545,7 @@ NON_PAYING_JOB_PATTERNS = [
 # Provider employment labels are not trusted when the title/description carries
 # a stronger contradictory signal (for example, "Full-time" plus "15 hrs/wk").
 NON_FULL_TIME_TITLE_PATTERNS = [
-    r"\bpart[- ]time\b",
+    r"\bpart[-–—‑ ]time\b",
     r"\bcontractor\b",
     r"\bcontract (?:role|position|opportunity|job)\b",
     r"\btemporary (?:role|position|opportunity|job)\b",
@@ -538,7 +563,9 @@ NON_FULL_TIME_TITLE_PATTERNS = [
     r"\b\d{1,2}\s*[-–]\s*\d{1,2}\s*(?:hours|hrs)(?:\s+per|/)\s*(?:week|wk)\b",
 ]
 NON_FULL_TIME_DESCRIPTION_PATTERNS = [
-    r"\bthis is (?:a )?part[- ]time (?:role|position|job)\b",
+    r"\bthis is (?:a )?part[-–—‑ ]time (?:role|position|job)\b",
+    r"\b(?:on|as) (?:a )?part[-–—‑ ]time basis\b",
+    r"\bpart[-–—‑ ]time\s+(?:or|/)\s+full[-–—‑ ]time\b",
     r"\b(?:seeking|hiring|looking for) (?:an? )?freelance(?:r)?\b",
     r"\bthis is (?:an? )?(?:freelance|independent contractor|project[- ]based|temporary) (?:role|position|job|engagement)\b",
     r"\b(?:independent contractor|freelance) position\b",
@@ -607,6 +634,8 @@ KNOWN_JOB_AGGREGATOR_EMPLOYERS = [
     "grabjobs",
     "jobleads",
     "remote rocketship",
+    "gradebuzz",
+    "cosmoquick",
     "remote jobs",
     "startup jobs",
     "tech jobs",
@@ -730,6 +759,9 @@ INTERMEDIARY_JOB_DOMAINS = [
     "goparalegals.com",
     "dynamitejobs.com",
     "remotive.com",
+    "remoterocketship.com",
+    "gradebuzz.com",
+    "cosmoquick.com",
 ]
 
 KNOWN_OUTSOURCING_EMPLOYERS = [

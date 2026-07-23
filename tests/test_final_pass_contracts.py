@@ -47,7 +47,7 @@ class FinalPassContractTests(unittest.TestCase):
         result = decide(gates)
         self.assertEqual(result.state, FinalState.NEEDS_CHECK)
         self.assertFalse(result.counts_toward_target)
-        self.assertEqual(result.airtable_relevance, "review")
+        self.assertIsNone(result.airtable_relevance)
 
     def test_reject_has_precedence_over_reroute(self):
         gates = {

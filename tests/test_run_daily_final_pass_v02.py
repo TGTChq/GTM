@@ -92,6 +92,8 @@ class RunDailyFinalPassV02Tests(unittest.TestCase):
                 patch.object(config, "FINAL_PASS_PIPELINE_ENABLED", True),
                 patch.object(config, "JSEARCH_REVIEWABLE_TOPUP_ENABLED", False),
                 patch.object(config, "MAX_ELIGIBLE_COMPANIES_PER_RUN", 90),
+                patch.object(config, "READY_INVENTORY_TARGET", 1),
+                patch.object(config, "READY_DAILY_DELIVERY_LIMIT", 1),
                 patch.object(config, "get_final_pass_target", return_value=1),
                 patch.object(run_daily, "SeenJobsRegistry", return_value=registry),
                 patch.object(run_daily, "run_daily_scrape", return_value=scrape),

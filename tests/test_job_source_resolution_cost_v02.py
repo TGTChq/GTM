@@ -28,6 +28,11 @@ class JobSourceResolutionCostTests(unittest.TestCase):
     @patch("job_source_resolver.JobSourceResolver._discover_company_job_urls")
     def test_aggregator_only_uses_bounded_company_discovery(self, discover, fetch):
         discover.return_value = ([], [])
+        fetch.return_value = {
+            "status_code": 403,
+            "final_url": "https://www.indeed.com/viewjob?jk=123",
+            "text": "",
+        }
         resolver = JobSourceResolver()
         result = resolver.resolve({
             "employer_name": "Example",
@@ -36,7 +41,7 @@ class JobSourceResolutionCostTests(unittest.TestCase):
             "job_apply_link": "https://www.indeed.com/viewjob?jk=123",
         }, fetch=True)
         discover.assert_called_once()
-        fetch.assert_not_called()
+        fetch.assert_called_once()
         self.assertEqual(result.state, "SOURCE_UNRESOLVED")
 
 

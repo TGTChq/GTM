@@ -204,13 +204,13 @@ class SourceResolverRecoveryTests(unittest.TestCase):
 
 
 class BusinessModelSafetyTests(unittest.TestCase):
-    def test_long_apollo_description_without_own_offering_clause_stays_unknown(self):
+    def test_absence_of_excluded_model_does_not_require_positive_product_clause(self):
         result = classify_business_model(
             company_text="Welcome. Read our team biographies, company history, awards, and careers.",
             apollo_industry="Professional Services",
             apollo_description=("Experienced people serving customers across many markets. " * 10),
         )
-        self.assertEqual(result.state, "UNKNOWN")
+        self.assertEqual(result.state, "ALLOWED")
 
     def test_apollo_own_offering_clause_can_corroborate_allowed_model(self):
         result = classify_business_model(

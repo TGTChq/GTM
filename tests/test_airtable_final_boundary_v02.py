@@ -42,9 +42,9 @@ class AirtableFinalBoundaryTests(unittest.TestCase):
     @patch.object(airtable_client, "validate_preflight")
     @patch.object(airtable_client, "_get_existing_leads", return_value={})
     @patch.object(airtable_client, "request_with_retry")
-    def test_push_only_surfaces_final_pass_and_needs_check(self, request_mock, _existing, _preflight):
+    def test_push_only_surfaces_final_pass(self, request_mock, _existing, _preflight):
         response = Mock()
-        response.json.return_value = {"records": [{"id": "a"}, {"id": "b"}]}
+        response.json.return_value = {"records": [{"id": "a"}]}
         response.text = ""
         request_mock.return_value = response
         jobs = [
@@ -56,14 +56,14 @@ class AirtableFinalBoundaryTests(unittest.TestCase):
         ]
         result = airtable_client.push_leads(jobs)
         self.assertTrue(result["strict_mode"])
-        self.assertEqual(result["reviewable"], 2)
+        self.assertEqual(result["reviewable"], 1)
         self.assertEqual(result["final_pass"], 1)
-        self.assertEqual(result["needs_check"], 1)
+        self.assertEqual(result["needs_check"], 0)
         submitted = request_mock.call_args.kwargs["json_body"]["records"]
         decisions = {row["fields"]["Final Decision"] for row in submitted}
-        self.assertEqual(decisions, {"FINAL_PASS", "NEEDS_CHECK"})
+        self.assertEqual(decisions, {"FINAL_PASS"})
         relevance = {row["fields"]["Relevance"] for row in submitted}
-        self.assertEqual(relevance, {"accept", "review"})
+        self.assertEqual(relevance, {"accept"})
 
     @patch.object(airtable_client, "validate_preflight")
     @patch.object(airtable_client, "request_with_retry")

@@ -5,6 +5,8 @@ from __future__ import annotations
 import re
 from typing import Dict
 
+import config
+
 from decision_types import GateDecision, GateState
 from evidence_types import EvidenceBundle, EvidenceItem, EvidenceStatus, FactValue
 from reason_codes import ReasonCode
@@ -13,9 +15,10 @@ from role_mapping import get_bucket_name_for_job
 from role_relevance import assess_role
 
 
-SENIORITY_PATTERN = re.compile(
-    r"\b(?:intern(?:ship)?|senior|sr\.?|director|vice president|vp)\b", re.I
+HARD_SENIORITY_PATTERN = re.compile(
+    r"\b(?:intern(?:ship)?|director|vice president|vp|chief|c[- ]?level)\b", re.I
 )
+SENIOR_IC_PATTERN = re.compile(r"\b(?:senior|sr\.?)\b", re.I)
 PHYSICAL_TITLE_SPECIALIZATION = re.compile(
     r"\b(?:clinical|patient care|bedside|laboratory|lab technician|warehouse|plant|factory|field operations|plc|scada|industrial controls|manufacturing operations)\b",
     re.I,
@@ -40,7 +43,9 @@ class RoleGate:
             [EvidenceItem("canonical_role_title", canonical_title, EvidenceStatus.VERIFIED_OFFICIAL, "official_job", job.get("official_job_url") or "", canonical_title, 0.99)]
         ))
 
-        if SENIORITY_PATTERN.search(canonical_title):
+        if HARD_SENIORITY_PATTERN.search(canonical_title) or (
+            SENIOR_IC_PATTERN.search(canonical_title) and not config.ROLE_ALLOW_SENIOR_IC
+        ):
             return GateDecision(
                 "role", GateState.REJECT, ReasonCode.REJECT_EXCLUDED_SENIORITY,
                 evidence=evidence, next_action="discard_and_replace",
