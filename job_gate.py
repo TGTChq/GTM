@@ -26,12 +26,11 @@ _EMPLOYMENT_REASONS = {
     "unpaid": ReasonCode.REJECT_NON_PAYING,
 }
 _ARRANGEMENT_REASONS = {
-    "onsite_required": ReasonCode.REJECT_ONSITE_REQUIRED,
-    "hybrid_required": ReasonCode.REJECT_HYBRID_REQUIRED,
-    "local_presence_required": ReasonCode.REJECT_LOCAL_PRESENCE_REQUIRED,
+    # Onsite/hybrid/local-office requirements are accepted intent signals. Only
+    # duties that are intrinsically physical remain disqualifying.
     "field_work_required": ReasonCode.REJECT_FIELD_WORK_REQUIRED,
     "travel_required": ReasonCode.REJECT_TRAVEL_REQUIRED,
-    "relocation_required": ReasonCode.REJECT_RELOCATION_REQUIRED,
+    "physical_required": ReasonCode.REJECT_PHYSICAL_FACILITY_REQUIREMENT,
 }
 
 
@@ -124,8 +123,8 @@ class JobGate:
         arrangement = facts["work_arrangement"]
         if arrangement.value in _ARRANGEMENT_REASONS:
             return _reject(_ARRANGEMENT_REASONS[arrangement.value], bundle, source, secondary)
-        if not arrangement.verified or arrangement.value != "remote":
-            return _unknown("job", ReasonCode.UNVERIFIED_WORK_ARRANGEMENT, bundle, source, secondary)
+        # Modality is preserved for prioritization and messaging, not used as a
+        # remote-only gate. Remote, hybrid, onsite and unknown can all continue.
 
         market = facts["intent_market"]
         if market.value == "foreign_only":
@@ -215,9 +214,11 @@ def _cross_source_minor_check(job: Dict, source: ResolvedJobSource) -> bool:
     return bool(
         source.temporarily_unavailable
         and len(description) >= 800
-        and str(job.get("job_employment_type") or "").lower().replace("-", " ") in {"full time", "fulltime"}
-        and job.get("job_is_remote") is True
-        and str(job.get("job_country") or "").lower() in {"us", "usa", "united states"}
+        and str(job.get("_employment_quality") or "") == "full_time"
+        and str(job.get("_work_arrangement") or "")
+        in {"remote", "hybrid", "onsite", "unknown"}
+        and str(job.get("_remote_scope") or "")
+        in {"us_explicit", "us_provider_confirmed", "us_weak"}
     )
 
 

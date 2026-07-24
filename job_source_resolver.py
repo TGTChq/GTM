@@ -538,16 +538,21 @@ def _prefilter_full_time(job: Dict) -> bool:
     )
 
 
-def _prefilter_remote_us(job: Dict) -> bool:
-    """Use the Step-2 remote/US decision while rejecting a foreign country field."""
+def _prefilter_supported_us_work(job: Dict) -> bool:
+    """Use the signed Step-2 US/modality decision without requiring remote wording.
+
+    Remote, hybrid, and onsite office roles are valid demand signals. Only work
+    that Step 2 classified as inherently physical is disallowed here.
+    """
     country = re.sub(r"[^a-z]", "", str(job.get("job_country") or "").lower())
     if country and country not in {"us", "usa", "unitedstates"}:
         return False
+    arrangement = str(job.get("_work_arrangement") or "")
     return bool(
-        str(job.get("_work_arrangement") or "") == "remote"
+        arrangement in {"remote", "hybrid", "onsite", "unknown"}
         and str(job.get("_work_arrangement_reason") or "")
         and str(job.get("_remote_scope") or "")
-        in {"us_explicit", "us_provider_confirmed"}
+        in {"us_explicit", "us_provider_confirmed", "us_weak"}
         and str(job.get("_us_eligibility_reason") or "")
     )
 
@@ -812,7 +817,7 @@ class JobSourceResolver:
             return None
         max_age = max(1, min(
             int(config.JOB_SOURCE_FRESH_DIRECT_MAX_AGE_DAYS),
-            int(getattr(config, "MAX_JOB_AGE_DAYS", 8)),
+            int(getattr(config, "RECOVERY_MAX_JOB_AGE_DAYS", 30)),
         ))
         age_days = (datetime.now(timezone.utc) - posted).total_seconds() / 86400
         if age_days < -1 or age_days > max_age:
@@ -820,7 +825,7 @@ class JobSourceResolver:
         description = str(job.get("job_description") or "").strip()
         if len(description) < max(250, int(config.JOB_SOURCE_FRESH_DIRECT_MIN_DESCRIPTION_CHARS)):
             return None
-        if not _prefilter_full_time(job) or not _prefilter_remote_us(job):
+        if not _prefilter_full_time(job) or not _prefilter_supported_us_work(job):
             return None
         if any(re.search(pattern, description[:12_000], re.I) for pattern in CLOSED_PATTERNS):
             return None
@@ -911,7 +916,7 @@ class JobSourceResolver:
 
         Aggregators are useful discovery channels. They are not employer identity
         and cannot prove a posting is live. This state therefore requires the
-        signed Step-2 full-time/remote/US decisions, a recent substantial record,
+        signed Step-2 full-time/US/modality decisions, a recent substantial record,
         and no authoritative contradiction. Account, Contact and Email gates still
         run normally; approved enrollment later fail-closes on live source
         revalidation.
@@ -925,7 +930,7 @@ class JobSourceResolver:
             return None
         max_age = max(1, min(
             int(config.JOB_SOURCE_PROVIDER_STRUCTURED_MAX_AGE_DAYS),
-            int(getattr(config, "MAX_JOB_AGE_DAYS", 8)),
+            int(getattr(config, "RECOVERY_MAX_JOB_AGE_DAYS", 30)),
         ))
         age_days = (datetime.now(timezone.utc) - posted).total_seconds() / 86400
         if age_days < -1 or age_days > max_age:
@@ -935,7 +940,7 @@ class JobSourceResolver:
             500, int(config.JOB_SOURCE_PROVIDER_STRUCTURED_MIN_DESCRIPTION_CHARS)
         ):
             return None
-        if not _prefilter_full_time(job) or not _prefilter_remote_us(job):
+        if not _prefilter_full_time(job) or not _prefilter_supported_us_work(job):
             return None
         company_name = str(company_name or "").strip()
         if len(_identity_slug(company_name)) < 3:

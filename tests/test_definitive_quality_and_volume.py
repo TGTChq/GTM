@@ -348,7 +348,7 @@ class DefinitiveQualityGuardTests(unittest.TestCase):
         )
         self.assertTrue(assessment.eligible)
 
-    def test_stampli_three_day_office_schedule_overrides_remote_flag(self):
+    def test_stampli_three_day_office_schedule_remains_valid_demand(self):
         assessment = job_filter.assess_pre_enrichment_viability(
             self._job(
                 employer_name="Stampli",
@@ -363,8 +363,8 @@ class DefinitiveQualityGuardTests(unittest.TestCase):
                 ),
             )
         )
-        self.assertFalse(assessment.eligible)
-        self.assertEqual(assessment.stat_name, "excluded_in_person")
+        self.assertTrue(assessment.eligible)
+        self.assertEqual(assessment.work_arrangement.status, "hybrid")
 
     def test_optional_office_access_does_not_reject_fully_remote_role(self):
         assessment = job_filter.assess_pre_enrichment_viability(
@@ -377,7 +377,7 @@ class DefinitiveQualityGuardTests(unittest.TestCase):
         )
         self.assertTrue(assessment.eligible)
 
-    def test_hybrid_requirement_variations_override_remote_flag(self):
+    def test_hybrid_requirement_variations_are_valid_demand(self):
         descriptions = [
             "Expected to work from our New York office two days per week.",
             "The role is remote Monday and Friday, with required in-office work Tuesday through Thursday.",
@@ -388,8 +388,8 @@ class DefinitiveQualityGuardTests(unittest.TestCase):
                 assessment = job_filter.assess_pre_enrichment_viability(
                     self._job(job_description=description)
                 )
-                self.assertFalse(assessment.eligible)
-                self.assertEqual(assessment.stat_name, "excluded_in_person")
+                self.assertTrue(assessment.eligible)
+                self.assertIn(assessment.work_arrangement.status, {"hybrid", "onsite"})
 
     def test_four_month_coop_is_rejected(self):
         assessment = job_filter.assess_pre_enrichment_viability(

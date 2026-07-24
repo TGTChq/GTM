@@ -108,6 +108,8 @@ def default_fetcher(
     params: Optional[Mapping[str, Any]] = None,
     headers: Optional[Mapping[str, str]] = None,
     timeout: Optional[int] = None,
+    method: str = "GET",
+    json_body: Optional[Mapping[str, Any]] = None,
 ) -> FetchPayload:
     request_headers = {
         "User-Agent": "TGTCJobAcquisition/1.3 (+https://tgtc.io)",
@@ -120,9 +122,14 @@ def default_fetcher(
         if not _safe_public_url(current_url):
             return FetchPayload(status_code=None, url=current_url, error="unsafe_or_unresolvable_url")
         try:
-            with requests.get(
+            request_method = str(method or "GET").upper()
+            if request_method not in {"GET", "POST"}:
+                return FetchPayload(status_code=None, url=current_url, error="unsupported_http_method")
+            with requests.request(
+                request_method,
                 current_url,
                 params=current_params,
+                json=dict(json_body or {}) if json_body is not None else None,
                 headers=request_headers,
                 timeout=timeout or config.FREE_SOURCE_REQUEST_TIMEOUT_SECONDS,
                 allow_redirects=False,

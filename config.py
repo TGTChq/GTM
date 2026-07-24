@@ -50,9 +50,18 @@ REQUEST_TIMEOUT_SECONDS = _env_int("REQUEST_TIMEOUT_SECONDS", 30)
 MAX_HTTP_RETRIES = _env_int("MAX_HTTP_RETRIES", 3)
 
 # ---------- Acquisition mode ----------
-# Free multi-source acquisition is the production default. JSearch remains
-# available only as an explicit rollback mode.
-ACQUISITION_MODE = os.getenv("ACQUISITION_MODE", "free_multi_source").strip().lower()
+# The production default combines every available zero-registration public
+# source with JSearch when an existing RapidAPI key has usable quota. A failure
+# in one acquisition source is isolated and cannot stop the remaining sources.
+ACQUISITION_MODE = os.getenv("ACQUISITION_MODE", "multi_source").strip().lower()
+MULTI_SOURCE_JSEARCH_ENABLED = _env_bool("MULTI_SOURCE_JSEARCH_ENABLED", True)
+MULTI_SOURCE_JSEARCH_OPTIONAL = _env_bool("MULTI_SOURCE_JSEARCH_OPTIONAL", True)
+# Independent recovery switch for multi-source deployments. This prevents an
+# older Railway FINAL_PASS_TOPUP_ENABLED=0 value from silently disabling the
+# optional JSearch deficit recovery introduced in v1.4.
+MULTI_SOURCE_JSEARCH_TOPUP_ENABLED = _env_bool(
+    "MULTI_SOURCE_JSEARCH_TOPUP_ENABLED", True
+)
 FREE_JOB_SOURCES = _env_json(
     "FREE_JOB_SOURCES_JSON",
     ["himalayas", "jobicy", "weworkremotely", "remotive", "remoteok"],
@@ -71,6 +80,9 @@ FREE_SOURCE_MIN_SUCCESSFUL_SOURCES = _env_int(
 )
 HIMALAYAS_PAGE_SIZE = _env_int("HIMALAYAS_PAGE_SIZE", 20)
 HIMALAYAS_MAX_PAGES = _env_int("HIMALAYAS_MAX_PAGES", 25)
+HIMALAYAS_COMPANY_PROFILE_MAX_REQUESTS = _env_int(
+    "HIMALAYAS_COMPANY_PROFILE_MAX_REQUESTS", 30
+)
 FREE_SOURCE_LANDING_DISCOVERY_ENABLED = _env_bool(
     "FREE_SOURCE_LANDING_DISCOVERY_ENABLED", True
 )
@@ -90,6 +102,24 @@ ATS_GREENHOUSE_DETAIL_MAX_REQUESTS_PER_BOARD = _env_int(
 )
 ATS_GREENHOUSE_DETAIL_MAX_REQUESTS_PER_RUN = _env_int(
     "ATS_GREENHOUSE_DETAIL_MAX_REQUESTS_PER_RUN", 100
+)
+ATS_WORKDAY_MAX_PAGES_PER_BOARD = _env_int(
+    "ATS_WORKDAY_MAX_PAGES_PER_BOARD", 5
+)
+ATS_WORKDAY_DETAIL_MAX_REQUESTS_PER_BOARD = _env_int(
+    "ATS_WORKDAY_DETAIL_MAX_REQUESTS_PER_BOARD", 25
+)
+ATS_WORKDAY_DETAIL_MAX_REQUESTS_PER_RUN = _env_int(
+    "ATS_WORKDAY_DETAIL_MAX_REQUESTS_PER_RUN", 100
+)
+ATS_SMARTRECRUITERS_MAX_PAGES_PER_BOARD = _env_int(
+    "ATS_SMARTRECRUITERS_MAX_PAGES_PER_BOARD", 3
+)
+ATS_SMARTRECRUITERS_DETAIL_MAX_REQUESTS_PER_BOARD = _env_int(
+    "ATS_SMARTRECRUITERS_DETAIL_MAX_REQUESTS_PER_BOARD", 25
+)
+ATS_SMARTRECRUITERS_DETAIL_MAX_REQUESTS_PER_RUN = _env_int(
+    "ATS_SMARTRECRUITERS_DETAIL_MAX_REQUESTS_PER_RUN", 100
 )
 ATS_SHADOW_FORCE_REFRESH_MAX_BOARDS = _env_int(
     "ATS_SHADOW_FORCE_REFRESH_MAX_BOARDS", 25
@@ -148,7 +178,7 @@ for directory in (
 
 # ---------- Final-pass architecture ----------
 FINAL_PASS_PIPELINE_ENABLED = _env_bool("FINAL_PASS_PIPELINE_ENABLED", True)
-VALIDATION_VERSION = os.getenv("VALIDATION_VERSION", "tgtc-ready-v1.3.2-preproduction-audit")
+VALIDATION_VERSION = os.getenv("VALIDATION_VERSION", "tgtc-ready-v1.4-definitive")
 VALIDATION_SIGNING_KEY = os.getenv("VALIDATION_SIGNING_KEY", "")
 # Source and company-site retrieval is bounded and cached.  Disabling fetches is
 # intended only for deterministic offline replay; it does not relax any gate.
@@ -181,7 +211,7 @@ JOB_SOURCE_FRESH_DIRECT_FALLBACK_ENABLED = _env_bool(
     "JOB_SOURCE_FRESH_DIRECT_FALLBACK_ENABLED", True
 )
 JOB_SOURCE_FRESH_DIRECT_MAX_AGE_DAYS = _env_int(
-    "JOB_SOURCE_FRESH_DIRECT_MAX_AGE_DAYS", 8
+    "JOB_SOURCE_FRESH_DIRECT_MAX_AGE_DAYS", 30
 )
 JOB_SOURCE_FRESH_DIRECT_MIN_DESCRIPTION_CHARS = _env_int(
     "JOB_SOURCE_FRESH_DIRECT_MIN_DESCRIPTION_CHARS", 700
@@ -194,7 +224,7 @@ JOB_SOURCE_PROVIDER_STRUCTURED_REVIEW_ENABLED = _env_bool(
     "JOB_SOURCE_PROVIDER_STRUCTURED_REVIEW_ENABLED", True
 )
 JOB_SOURCE_PROVIDER_STRUCTURED_MAX_AGE_DAYS = _env_int(
-    "JOB_SOURCE_PROVIDER_STRUCTURED_MAX_AGE_DAYS", 8
+    "JOB_SOURCE_PROVIDER_STRUCTURED_MAX_AGE_DAYS", 30
 )
 JOB_SOURCE_PROVIDER_STRUCTURED_MIN_DESCRIPTION_CHARS = _env_int(
     "JOB_SOURCE_PROVIDER_STRUCTURED_MIN_DESCRIPTION_CHARS", 700
@@ -215,8 +245,13 @@ DRIFT_AUDIT_SAMPLE_SIZE = _env_int("DRIFT_AUDIT_SAMPLE_SIZE", 10)
 
 # ---------- READY inventory and source corroboration ----------
 # FINAL_PASS remains the persisted compatibility label; operationally it means READY.
-READY_INVENTORY_TARGET = _env_int("READY_INVENTORY_TARGET", 60)
-READY_DAILY_DELIVERY_LIMIT = _env_int("READY_DAILY_DELIVERY_LIMIT", 30)
+READY_INVENTORY_TARGET = _env_int("READY_INVENTORY_TARGET", 30)
+# Zero means deliver every READY lead found in the run. The commercial target
+# remains a minimum success threshold, never a maximum or processing cap.
+READY_DAILY_DELIVERY_LIMIT = _env_int("READY_DAILY_DELIVERY_LIMIT", 0)
+CONTINUE_AFTER_FINAL_PASS_TARGET = _env_bool(
+    "CONTINUE_AFTER_FINAL_PASS_TARGET", True
+)
 READY_INVENTORY_TTL_DAYS = _env_int("READY_INVENTORY_TTL_DAYS", 2)
 PIPELINE_LOCK_STALE_HOURS = _env_int("PIPELINE_LOCK_STALE_HOURS", 6)
 JOB_SOURCE_MIN_INDEPENDENT_PUBLISHERS = _env_int(
@@ -242,7 +277,7 @@ ROLE_ALLOW_SENIOR_IC = _env_bool("ROLE_ALLOW_SENIOR_IC", True)
 RAPIDAPI_KEY = os.getenv("RAPIDAPI_KEY", "")
 JSEARCH_HOST = os.getenv("JSEARCH_HOST", "jsearch.p.rapidapi.com")
 JSEARCH_ENDPOINT = os.getenv("JSEARCH_ENDPOINT", "https://jsearch.p.rapidapi.com/search-v2")
-DATE_POSTED = os.getenv("DATE_POSTED", "week")
+DATE_POSTED = os.getenv("DATE_POSTED", "month")
 COUNTRY = os.getenv("COUNTRY", "us")
 NUM_PAGES = _env_int("NUM_PAGES", 1)
 SEARCH_DELAY_SECONDS = _env_float("SEARCH_DELAY_SECONDS", 0.8)
@@ -258,15 +293,13 @@ JSEARCH_MAX_ESTIMATED_UNITS_PER_RUN = _env_int(
 )
 JSEARCH_STOP_ON_LOW_QUOTA = _env_bool("JSEARCH_STOP_ON_LOW_QUOTA", True)
 JSEARCH_MIN_REMAINING_REQUESTS = _env_int("JSEARCH_MIN_REMAINING_REQUESTS", 500)
-# Ask JSearch for remote inventory directly instead of paying to retrieve mostly
-# onsite jobs and discarding them later. Text bias remains configurable because
-# provider flags can be imperfect, while the downstream evidence resolver still
-# makes the final work-arrangement decision.
-JSEARCH_REMOTE_JOBS_ONLY = _env_bool("JSEARCH_REMOTE_JOBS_ONLY", True)
-JSEARCH_REMOTE_QUERY_BIAS = _env_bool("JSEARCH_REMOTE_QUERY_BIAS", True)
-# JSearch /search-v2 officially exposes ``work_from_home=true`` for remote-only
-# inventory. The previous ``remote_jobs_only`` name was not part of the current
-# provider contract and could be ignored, allowing avoidable onsite inventory.
+# Onsite and hybrid postings are valid intent signals when the role itself can
+# be delivered remotely. Do not bias acquisition toward remote-only inventory.
+JSEARCH_REMOTE_JOBS_ONLY = _env_bool("JSEARCH_REMOTE_JOBS_ONLY", False)
+JSEARCH_REMOTE_QUERY_BIAS = _env_bool("JSEARCH_REMOTE_QUERY_BIAS", False)
+# Keep the provider's supported remote-filter parameter available for explicit
+# diagnostics, but leave it disabled in production: onsite and hybrid postings
+# are valid intent signals when the underlying role is remotely deliverable.
 JSEARCH_REMOTE_FILTER_PARAMETER = os.getenv(
     "JSEARCH_REMOTE_FILTER_PARAMETER", "work_from_home"
 ).strip()
@@ -279,7 +312,7 @@ JSEARCH_LOOKBACK_QUERY_VARIANTS = _env_json(
 )
 JSEARCH_TOPUP_DATE_WINDOWS = _env_json(
     "JSEARCH_TOPUP_DATE_WINDOWS",
-    ["week"],
+    ["week", "month"],
 )
 # When one-page mode is intentionally configured, use only the remaining
 # request-unit budget on deeper pages for roles whose first-page results survive
@@ -298,10 +331,11 @@ JSEARCH_ADAPTIVE_MIN_PREFILTER_VIABLE = _env_int(
 JSEARCH_ADAPTIVE_BUCKET_BALANCING = _env_bool(
     "JSEARCH_ADAPTIVE_BUCKET_BALANCING", True
 )
-# Keep any adaptive lookback inside the same seven-day signal window.
+# JSearch may discover the complete 0-30-day candidate inventory; the local
+# primary/recovery age gates remain authoritative at 0-14 and 15-30 days.
 JSEARCH_ADAPTIVE_LOOKBACK = _env_bool("JSEARCH_ADAPTIVE_LOOKBACK", True)
 JSEARCH_ADAPTIVE_LOOKBACK_DATE_POSTED = os.getenv(
-    "JSEARCH_ADAPTIVE_LOOKBACK_DATE_POSTED", "week"
+    "JSEARCH_ADAPTIVE_LOOKBACK_DATE_POSTED", "month"
 )
 JSEARCH_ADAPTIVE_LOOKBACK_MAX_QUERIES = _env_int(
     "JSEARCH_ADAPTIVE_LOOKBACK_MAX_QUERIES", 16
@@ -315,8 +349,9 @@ JSEARCH_TARGET_PREFILTER_VIABLE = _env_int(
 JSEARCH_REVIEWABLE_TOPUP_ENABLED = _env_bool(
     "JSEARCH_REVIEWABLE_TOPUP_ENABLED", True
 )
-# New strict-mode switch. It inherits the legacy flag when absent so current
-# Railway environments migrate without silently disabling recovery.
+# Legacy strict-mode switch retained for JSearch-only deployments. Multi-source
+# mode uses MULTI_SOURCE_JSEARCH_TOPUP_ENABLED so stale Railway values cannot
+# silently disable deficit recovery.
 FINAL_PASS_TOPUP_ENABLED = _env_bool(
     "FINAL_PASS_TOPUP_ENABLED", JSEARCH_REVIEWABLE_TOPUP_ENABLED
 )
@@ -335,10 +370,15 @@ JSEARCH_TOPUP_PREFILTER_MULTIPLIER = _env_float(
 JSEARCH_TOPUP_MIN_PREFILTER_TARGET = _env_int(
     "JSEARCH_TOPUP_MIN_PREFILTER_TARGET", 20
 )
-# Keep the acquisition signal inside the rolling weekly window. Unknown or
-# conflicting dates remain eligible for source resolution; the oldest parseable
-# source date is used.
-MAX_JOB_AGE_DAYS = _env_int("MAX_JOB_AGE_DAYS", 8)
+# Age is staged rather than globally loosened. The normal pass accepts jobs up
+# to 14 days old. If fewer than the minimum FINAL_PASS target survive, the same
+# acquired inventory is reprocessed for active jobs aged 15-30 days.
+PRIMARY_MAX_JOB_AGE_DAYS = _env_int("PRIMARY_MAX_JOB_AGE_DAYS", 14)
+RECOVERY_MIN_JOB_AGE_DAYS = _env_int("RECOVERY_MIN_JOB_AGE_DAYS", 15)
+RECOVERY_MAX_JOB_AGE_DAYS = _env_int("RECOVERY_MAX_JOB_AGE_DAYS", 30)
+AGE_RECOVERY_ENABLED = _env_bool("AGE_RECOVERY_ENABLED", True)
+# Compatibility alias used by older tests and helper scripts.
+MAX_JOB_AGE_DAYS = _env_int("MAX_JOB_AGE_DAYS", PRIMARY_MAX_JOB_AGE_DAYS)
 
 # Quality gates restore the paid-test standard before any Apollo/Hunter spend.
 # The 118-role catalog remains active, but only current full-time roles with
@@ -615,11 +655,39 @@ IN_PERSON_DESCRIPTION_PATTERNS = [
     r"\b(?:one|two|three|four|five|[1-5]) days? (?:a|per) week[^.\n]{0,80}\b(?:in|at|from) (?:the|our) [^.\n]{0,80}\boffice\b",
     r"\b(?:option|flexibility) (?:of|to) work(?:ing)? remotely for the remainder of the week\b",
     r"\b(?:required|mandatory|expected) in[- ]office (?:work|days?|attendance)\b",
+    r"\bin[- ]office requirement\b",
     r"\b(?:monday|tuesday|wednesday|thursday|friday)(?:\s*,\s*(?:monday|tuesday|wednesday|thursday|friday))+(?:\s+and\s+(?:monday|tuesday|wednesday|thursday|friday))?[^.\n]{0,100}\b(?:office|on[- ]site|onsite)\b",
     r"\btravel (?:approximately |up to |minimum |at least )?(?:2[5-9]|[3-9]\d|100)%\b",
     r"\bfrequent travel\b",
     r"\btravel regularly to (?:client|customer) sites\b",
     r"\bestimated 1\+ day/?week\b",
+]
+
+# Onsite/hybrid language is a commercial signal, not a rejection. These narrow
+# patterns identify roles whose core duties cannot be delivered by remote talent.
+INHERENT_PHYSICAL_TITLE_PATTERNS = [
+    r"\bwarehouse (?:associate|worker|operator|manager)\b",
+    r"\b(?:delivery|truck|bus) driver\b",
+    r"\bfield service (?:technician|engineer)\b",
+    r"\b(?:maintenance|installation|repair) technician\b",
+    r"\b(?:laboratory|lab) technician\b",
+    r"\b(?:machine|forklift|equipment) operator\b",
+    r"\bconstruction (?:worker|superintendent|foreman)\b",
+    r"\b(?:registered nurse|licensed practical nurse|medical assistant)\b",
+    r"\bretail (?:associate|store manager)\b",
+    r"\bfront desk|receptionist\b",
+]
+INHERENT_PHYSICAL_DESCRIPTION_PATTERNS = [
+    r"\b(?:operate|maintain|repair|install) (?:physical )?(?:machinery|equipment|hardware) (?:on[- ]site|at customer sites?)\b",
+    r"\b(?:pick|pack|load|unload) (?:inventory|orders|shipments)\b",
+    r"\bmust (?:regularly )?lift (?:at least |up to )?\d{2,3} (?:lb|lbs|pounds)\b",
+    r"\bprovide (?:direct )?(?:patient|clinical) care\b",
+    r"\bperform (?:laboratory|lab) (?:testing|experiments|procedures)\b",
+    r"\bdrive (?:a |the )?(?:company )?(?:vehicle|truck|van)\b",
+    r"\bwork (?:on|at) (?:construction|customer|client) sites?\b",
+    r"\bfield[- ]based (?:position|role|job)\b",
+    r"\btravel (?:approximately |about |up to )?(?:[2-9]\d|100)%? to (?:customer|client) sites?\b",
+    r"\b(?:requires? )?all work (?:must be|to be|is to be) performed in (?:a |an )?SCIF\b",
 ]
 
 # Explicit foreign-only eligibility overrides a noisy US country field.
@@ -1078,6 +1146,18 @@ EXCLUDED_INDUSTRY_DESCRIPTION_PATTERNS = [
     r"\bmission[- ]driven (?:non[- ]?profit|ministry|religious organization)\b",
     r"\b(?:christian|faith[- ]based) ministry\b",
     r"\bregistered 501\(c\)\(3\)\b",
+]
+
+# Company-profile evidence is fetched only from a verified first-party profile
+# page associated with the provider's company slug. Keep these patterns narrow:
+# they describe the employer itself, not a software vendor merely serving the
+# healthcare market.
+PROVIDER_PROFILE_EXCLUDED_INDUSTRY_PATTERNS = [
+    r"\b(?:digital )?health(?:care)? (?:company|platform|provider|organization)\b",
+    r"\bhealth and wellness engagement platform\b",
+    r"\b(?:patient|member) (?:care|health|healthcare) (?:company|platform|provider)\b",
+    r"\bhelps? (?:people|patients|members) [^.\n]{0,120}\bmanage (?:their )?healthcare\b",
+    r"\bcare management\b[^.\n]{0,120}\bhealth information management\b",
 ]
 
 EXCLUDED_INDUSTRY_JOB_TITLE_KEYWORDS = [

@@ -74,13 +74,12 @@ class JobGateV02Tests(unittest.TestCase):
         )))
         self.assertEqual(gate.evaluate(job()).state, GateState.PASS)
 
-    def test_weekly_office_requirement_overrides_remote(self):
+    def test_weekly_office_requirement_is_valid_remote_capable_demand(self):
         gate = JobGate(_Resolver(source(
             "This is a full-time remote role in the United States. Employees must work in our office three days per week."
         )))
         decision = gate.evaluate(job())
-        self.assertEqual(decision.state, GateState.REJECT)
-        self.assertEqual(str(decision.primary_reason.value), "REJECT_ONSITE_REQUIRED")
+        self.assertEqual(decision.state, GateState.PASS)
 
     def test_foreign_only_scope_rejects(self):
         gate = JobGate(_Resolver(source(

@@ -178,7 +178,7 @@ class SourceResilienceV11Tests(unittest.TestCase):
             resolver, "_discover_company_job_urls", return_value=([], [], {})
         ):
             resolved = resolver.resolve(stale, fetch=True)
-        self.assertIn(resolved.state, {"SOURCE_TEMPORARILY_UNAVAILABLE", "SOURCE_UNRESOLVED"})
+        self.assertEqual(resolved.state, "ACTIVE_DIRECT_STRUCTURED")
         self.assertEqual(session.get.call_count, 1)
 
     def test_direct_structured_url_is_exposed_as_revalidation_required(self):
@@ -197,7 +197,7 @@ class SourceResilienceV11Tests(unittest.TestCase):
         resolver = JobSourceResolver()
         stale = _fresh_job(
             job_posted_at_datetime_utc=(
-                datetime.now(timezone.utc) - timedelta(days=12)
+                datetime.now(timezone.utc) - timedelta(days=31)
             ).isoformat()
         )
         with (

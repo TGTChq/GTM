@@ -59,13 +59,19 @@ def static_checks() -> Dict:
             errors.append(f"Missing {name}")
     if jsearch_mode and not config.RAPIDAPI_KEY:
         errors.append("Missing RAPIDAPI_KEY for ACQUISITION_MODE=jsearch")
+    if (
+        acquisition_mode == "multi_source"
+        and config.MULTI_SOURCE_JSEARCH_ENABLED
+        and not config.RAPIDAPI_KEY
+    ):
+        warnings.append("RAPIDAPI_KEY is missing; multi_source will continue without JSearch")
 
-    allowed_modes = {"free_multi_source", "jsearch"}
+    allowed_modes = {"multi_source", "free_multi_source", "jsearch"}
     if acquisition_mode not in allowed_modes:
         errors.append(
             f"ACQUISITION_MODE must be one of {sorted(allowed_modes)}, got {config.ACQUISITION_MODE!r}"
         )
-    if acquisition_mode == "free_multi_source":
+    if acquisition_mode in {"multi_source", "free_multi_source"}:
         allowed_sources = {"himalayas", "jobicy", "weworkremotely", "remotive", "remoteok"}
         configured_sources = [str(value).lower() for value in config.FREE_JOB_SOURCES]
         unknown_sources = sorted(set(configured_sources) - allowed_sources)
@@ -89,13 +95,43 @@ def static_checks() -> Dict:
             errors.append("HIMALAYAS_MAX_PAGES must be positive")
         if config.FREE_SOURCE_LANDING_DISCOVERY_MAX_REQUESTS < 0:
             errors.append("FREE_SOURCE_LANDING_DISCOVERY_MAX_REQUESTS cannot be negative")
+        if config.HIMALAYAS_COMPANY_PROFILE_MAX_REQUESTS < 0:
+            errors.append("HIMALAYAS_COMPANY_PROFILE_MAX_REQUESTS cannot be negative")
         if config.ATS_MAX_BOARDS_PER_RUN < 1 or config.ATS_MAX_JOBS_PER_BOARD < 1:
             errors.append("ATS board and job limits must be positive")
         if config.ATS_BOARD_REFRESH_INTERVAL_HOURS < 1:
             errors.append("ATS_BOARD_REFRESH_INTERVAL_HOURS must be positive")
-        if config.FINAL_PASS_TOPUP_ENABLED:
+        if config.ATS_WORKDAY_MAX_PAGES_PER_BOARD < 1:
+            errors.append("ATS_WORKDAY_MAX_PAGES_PER_BOARD must be positive")
+        if config.ATS_SMARTRECRUITERS_MAX_PAGES_PER_BOARD < 1:
+            errors.append("ATS_SMARTRECRUITERS_MAX_PAGES_PER_BOARD must be positive")
+        for name, value in (
+            (
+                "ATS_WORKDAY_DETAIL_MAX_REQUESTS_PER_BOARD",
+                config.ATS_WORKDAY_DETAIL_MAX_REQUESTS_PER_BOARD,
+            ),
+            (
+                "ATS_WORKDAY_DETAIL_MAX_REQUESTS_PER_RUN",
+                config.ATS_WORKDAY_DETAIL_MAX_REQUESTS_PER_RUN,
+            ),
+            (
+                "ATS_SMARTRECRUITERS_DETAIL_MAX_REQUESTS_PER_BOARD",
+                config.ATS_SMARTRECRUITERS_DETAIL_MAX_REQUESTS_PER_BOARD,
+            ),
+            (
+                "ATS_SMARTRECRUITERS_DETAIL_MAX_REQUESTS_PER_RUN",
+                config.ATS_SMARTRECRUITERS_DETAIL_MAX_REQUESTS_PER_RUN,
+            ),
+        ):
+            if value < 0:
+                errors.append(f"{name} cannot be negative")
+        if (
+            config.MULTI_SOURCE_JSEARCH_TOPUP_ENABLED
+            and not config.RAPIDAPI_KEY
+        ):
             warnings.append(
-                "FINAL_PASS_TOPUP_ENABLED is ignored in free_multi_source mode; JSearch top-up remains rollback-only"
+                "MULTI_SOURCE_JSEARCH_TOPUP_ENABLED has no effect until JSearch "
+                "is configured and has usable quota"
             )
 
     signing_key = str(config.VALIDATION_SIGNING_KEY or "")
@@ -155,10 +191,10 @@ def static_checks() -> Dict:
         errors.append("JSEARCH_ADAPTIVE_MAX_EXTRA_QUERIES cannot be negative")
     if jsearch_mode and config.JSEARCH_ADAPTIVE_MIN_PREFILTER_VIABLE < 0:
         errors.append("JSEARCH_ADAPTIVE_MIN_PREFILTER_VIABLE cannot be negative")
-    if jsearch_mode and not config.JSEARCH_REMOTE_JOBS_ONLY:
+    if jsearch_mode and config.JSEARCH_REMOTE_JOBS_ONLY:
         warnings.append(
-            "JSEARCH_REMOTE_JOBS_ONLY=0 can substantially reduce reviewable lead volume "
-            "because onsite jobs consume the same request budget"
+            "JSEARCH_REMOTE_JOBS_ONLY=1 excludes valid onsite and hybrid hiring "
+            "signals from the definitive v1.4 acquisition contract"
         )
     if not config.REQUIRE_FULL_TIME_ROLES:
         warnings.append("REQUIRE_FULL_TIME_ROLES=0 allows non-full-time employment labels")
@@ -218,17 +254,27 @@ def static_checks() -> Dict:
             errors.append("JOB_SOURCE_TIMEOUT_SECONDS must be between 1 and 20")
         if config.JOB_SOURCE_ATTEMPTS_PER_URL < 1:
             errors.append("JOB_SOURCE_ATTEMPTS_PER_URL must be at least 1")
-        if not 1 <= config.JOB_SOURCE_FRESH_DIRECT_MAX_AGE_DAYS <= config.MAX_JOB_AGE_DAYS:
+        if not (
+            1
+            <= config.JOB_SOURCE_FRESH_DIRECT_MAX_AGE_DAYS
+            <= config.RECOVERY_MAX_JOB_AGE_DAYS
+        ):
             errors.append(
-                "JOB_SOURCE_FRESH_DIRECT_MAX_AGE_DAYS must be between 1 and MAX_JOB_AGE_DAYS"
+                "JOB_SOURCE_FRESH_DIRECT_MAX_AGE_DAYS must be between 1 and "
+                "RECOVERY_MAX_JOB_AGE_DAYS"
             )
         if config.JOB_SOURCE_FRESH_DIRECT_MIN_DESCRIPTION_CHARS < 500:
             errors.append(
                 "JOB_SOURCE_FRESH_DIRECT_MIN_DESCRIPTION_CHARS must be at least 500"
             )
-        if not 1 <= config.JOB_SOURCE_PROVIDER_STRUCTURED_MAX_AGE_DAYS <= config.MAX_JOB_AGE_DAYS:
+        if not (
+            1
+            <= config.JOB_SOURCE_PROVIDER_STRUCTURED_MAX_AGE_DAYS
+            <= config.RECOVERY_MAX_JOB_AGE_DAYS
+        ):
             errors.append(
-                "JOB_SOURCE_PROVIDER_STRUCTURED_MAX_AGE_DAYS must be between 1 and MAX_JOB_AGE_DAYS"
+                "JOB_SOURCE_PROVIDER_STRUCTURED_MAX_AGE_DAYS must be between 1 "
+                "and RECOVERY_MAX_JOB_AGE_DAYS"
             )
         if config.JOB_SOURCE_PROVIDER_STRUCTURED_MIN_DESCRIPTION_CHARS < 500:
             errors.append(
@@ -257,18 +303,50 @@ def static_checks() -> Dict:
             errors.append("REQUIRE_CURRENT_EMPLOYMENT_EVIDENCE must be enabled in strict FINAL_PASS mode")
         if not config.REQUIRE_CONTACT_LINKEDIN:
             errors.append("REQUIRE_CONTACT_LINKEDIN must be enabled in strict FINAL_PASS mode")
-        if jsearch_mode and str(config.DATE_POSTED).lower() != "week":
-            errors.append("DATE_POSTED must be week for the READY v1 rolling inventory")
+        if jsearch_mode and str(config.DATE_POSTED).lower() != "month":
+            errors.append(
+                "DATE_POSTED must be month so local v1.4 gates can evaluate the "
+                "0-14 and 15-30 day windows"
+            )
         if jsearch_mode and config.NUM_PAGES != 1:
             errors.append("NUM_PAGES must be 1; deeper acquisition is handled by bounded top-up")
-        if config.READY_DAILY_DELIVERY_LIMIT < 1:
-            errors.append("READY_DAILY_DELIVERY_LIMIT must be at least 1")
-        if config.READY_INVENTORY_TARGET < config.READY_DAILY_DELIVERY_LIMIT:
-            errors.append("READY_INVENTORY_TARGET must be >= READY_DAILY_DELIVERY_LIMIT")
+        if config.READY_DAILY_DELIVERY_LIMIT < 0:
+            errors.append(
+                "READY_DAILY_DELIVERY_LIMIT cannot be negative; 0 means unlimited"
+            )
+        if config.READY_INVENTORY_TARGET < final_target:
+            errors.append(
+                "READY_INVENTORY_TARGET must be >= TARGET_FINAL_PASS_LEADS_PER_RUN"
+            )
+        if (
+            config.READY_DAILY_DELIVERY_LIMIT > 0
+            and config.READY_INVENTORY_TARGET < config.READY_DAILY_DELIVERY_LIMIT
+        ):
+            errors.append(
+                "READY_INVENTORY_TARGET must be >= a positive READY_DAILY_DELIVERY_LIMIT"
+            )
         if not 1 <= config.READY_INVENTORY_TTL_DAYS <= 3:
             errors.append("READY_INVENTORY_TTL_DAYS must be between 1 and 3")
-        if not 1 <= config.MAX_JOB_AGE_DAYS <= 8:
-            errors.append("MAX_JOB_AGE_DAYS must be between 1 and 8 for the rolling weekly signal")
+        if config.PRIMARY_MAX_JOB_AGE_DAYS != 14:
+            errors.append(
+                "PRIMARY_MAX_JOB_AGE_DAYS must be 14 for the definitive v1.4 contract"
+            )
+        if config.RECOVERY_MIN_JOB_AGE_DAYS != 15:
+            errors.append(
+                "RECOVERY_MIN_JOB_AGE_DAYS must be 15 so recovery does not overlap primary"
+            )
+        if config.RECOVERY_MAX_JOB_AGE_DAYS != 30:
+            errors.append(
+                "RECOVERY_MAX_JOB_AGE_DAYS must be 30 for the definitive v1.4 contract"
+            )
+        if config.MAX_JOB_AGE_DAYS != config.PRIMARY_MAX_JOB_AGE_DAYS:
+            errors.append(
+                "MAX_JOB_AGE_DAYS compatibility value must equal PRIMARY_MAX_JOB_AGE_DAYS"
+            )
+        if not config.AGE_RECOVERY_ENABLED:
+            warnings.append(
+                "AGE_RECOVERY_ENABLED=0 disables the 15-30 day deficit recovery lane"
+            )
         if config.JOB_SOURCE_MIN_INDEPENDENT_PUBLISHERS < 2:
             errors.append("JOB_SOURCE_MIN_INDEPENDENT_PUBLISHERS must be at least 2")
         if config.TOPUP_MAX_ZERO_DOWNSTREAM_BATCHES < 1:

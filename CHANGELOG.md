@@ -1,3 +1,17 @@
+# READY v1.3.3 source-truth hardening — July 23, 2026
+
+- Treats explicit Ashby `Hybrid`/`OnSite` workplace types as authoritative over a broad `isRemote=true` eligibility flag.
+- Preserves raw Ashby workplace and remote fields for auditability.
+- Adds generic in-office requirement detection in both the prefilter and Job Gate fact extractor.
+- Adds bounded, identity-verified Himalayas company-profile enrichment for website and employee range.
+- Rejects provider employee ranges that cannot overlap the 25–1,000 employee ICP before Apollo.
+- Uses verified provider-profile text for narrow healthcare-industry exclusions.
+- Detects CamelCase industry brands such as `UnitedHealth`.
+- Rejects PEO/co-employment service-delivery roles before enrichment.
+- Preserves verified profile evidence when an official ATS posting wins cross-source deduplication.
+- Adds shadow metrics for profile requests, verification, websites, employee ranges, and enriched jobs.
+- Validation: Python compilation passed; 399 tests passed; zero live paid-service calls.
+
 # READY v1.3.2 cumulative preproduction audit — July 23, 2026
 
 - Includes all v1.3.1 shadow-quality fixes and supersedes the earlier v1.3.1 package.

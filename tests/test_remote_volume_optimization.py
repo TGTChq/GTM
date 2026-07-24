@@ -84,7 +84,7 @@ class SharedPrefilterTests(unittest.TestCase):
         assessment = job_filter.assess_pre_enrichment_viability(job)
         self.assertTrue(assessment.eligible)
 
-    def test_onsite_job_is_not_used_as_adaptive_yield(self):
+    def test_onsite_remote_capable_job_is_valid_adaptive_yield(self):
         job = {
             "job_id": "onsite-1",
             "job_title": "Accountant",
@@ -96,8 +96,8 @@ class SharedPrefilterTests(unittest.TestCase):
             "_matched_role": "Accountant",
         }
         assessment = job_filter.assess_pre_enrichment_viability(job)
-        self.assertFalse(assessment.eligible)
-        self.assertEqual(assessment.stat_name, "excluded_in_person")
+        self.assertTrue(assessment.eligible)
+        self.assertEqual(assessment.work_arrangement.status, "onsite")
 
     def test_structured_hybrid_field_overrides_true_remote_flag(self):
         job = {
@@ -112,8 +112,8 @@ class SharedPrefilterTests(unittest.TestCase):
             "_matched_role": "Accountant",
         }
         assessment = job_filter.assess_pre_enrichment_viability(job)
-        self.assertFalse(assessment.eligible)
-        self.assertEqual(assessment.stat_name, "excluded_in_person")
+        self.assertTrue(assessment.eligible)
+        self.assertEqual(assessment.work_arrangement.status, "hybrid")
 
     def test_structured_remote_field_is_used_when_legacy_flag_is_missing(self):
         job = {
@@ -168,11 +168,11 @@ class AdaptiveRemoteYieldTests(unittest.TestCase):
                     {
                         "job_id": f"onsite-{page}-{index}",
                         "job_title": "Accountant",
-                        "job_description": "Work onsite in our Dallas office.",
+                        "job_description": "Operate physical equipment on-site at customer sites.",
                         "job_location": "Dallas, TX",
                         "job_country": "US",
                         "job_is_remote": False,
-                        "employer_name": f"Onsite {index}",
+                        "employer_name": f"Physical {index}",
                     }
                     for index in range(10)
                 ]

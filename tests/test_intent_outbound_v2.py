@@ -78,12 +78,18 @@ class RoleCatalogV2Tests(unittest.TestCase):
 
 
 class IntentV2FilterTests(unittest.TestCase):
-    def test_explicit_non_remote_job_is_rejected(self):
+    def test_explicit_non_remote_job_is_accepted(self):
         matched, reason = job_filter.is_explicitly_in_person(
             {"job_title": "Data Analyst", "job_is_remote": False}
         )
-        self.assertTrue(matched)
-        self.assertIn("remote_false", reason)
+        self.assertFalse(matched)
+        self.assertEqual(reason, "")
+        self.assertEqual(
+            job_filter.classify_work_arrangement(
+                {"job_title": "Data Analyst", "job_is_remote": False}
+            ).status,
+            "onsite",
+        )
 
     def test_unknown_work_arrangement_is_left_for_review(self):
         self.assertEqual(
@@ -93,15 +99,13 @@ class IntentV2FilterTests(unittest.TestCase):
             (False, ""),
         )
 
-    def test_hybrid_job_is_rejected(self):
-        self.assertTrue(
-            job_filter.is_explicitly_in_person(
-                {
-                    "job_title": "Marketing Analyst",
-                    "job_description": "This is a hybrid role with three days in office.",
-                }
-            )[0]
-        )
+    def test_hybrid_job_is_accepted(self):
+        job = {
+            "job_title": "Marketing Analyst",
+            "job_description": "This is a hybrid role with three days in office.",
+        }
+        self.assertEqual(job_filter.is_explicitly_in_person(job), (False, ""))
+        self.assertEqual(job_filter.classify_work_arrangement(job).status, "hybrid")
 
     def test_unpaid_role_is_rejected(self):
         self.assertTrue(
@@ -143,7 +147,7 @@ class IntentV2FilterTests(unittest.TestCase):
                 "job_is_remote": True,
             }
         )
-        self.assertEqual(evidence.status, "in_person")
+        self.assertEqual(evidence.status, "hybrid")
         self.assertIn("title_or_location", evidence.reason)
 
     def test_onsite_word_in_channel_context_is_not_a_requirement(self):
@@ -167,7 +171,7 @@ class IntentV2FilterTests(unittest.TestCase):
                 ),
             }
         )
-        self.assertEqual(evidence.status, "in_person")
+        self.assertEqual(evidence.status, "physical_required")
 
     def test_hybrid_schedule_beats_work_from_home_phrase(self):
         evidence = job_filter.classify_work_arrangement(
@@ -180,7 +184,7 @@ class IntentV2FilterTests(unittest.TestCase):
                 ),
             }
         )
-        self.assertEqual(evidence.status, "in_person")
+        self.assertEqual(evidence.status, "hybrid")
 
     def test_onsite_day_shift_beats_work_from_home_benefit(self):
         evidence = job_filter.classify_work_arrangement(
@@ -193,7 +197,7 @@ class IntentV2FilterTests(unittest.TestCase):
                 ),
             }
         )
-        self.assertEqual(evidence.status, "in_person")
+        self.assertEqual(evidence.status, "onsite")
 
     def test_in_office_role_beats_hybrid_benefit_language(self):
         evidence = job_filter.classify_work_arrangement(
@@ -206,7 +210,7 @@ class IntentV2FilterTests(unittest.TestCase):
                 ),
             }
         )
-        self.assertEqual(evidence.status, "in_person")
+        self.assertEqual(evidence.status, "onsite")
 
     def test_little_to_no_work_from_home_is_rejected(self):
         evidence = job_filter.classify_work_arrangement(
@@ -219,7 +223,7 @@ class IntentV2FilterTests(unittest.TestCase):
                 ),
             }
         )
-        self.assertEqual(evidence.status, "in_person")
+        self.assertEqual(evidence.status, "physical_required")
 
     def test_hybrid_remote_location_is_rejected(self):
         evidence = job_filter.classify_work_arrangement(
@@ -229,7 +233,7 @@ class IntentV2FilterTests(unittest.TestCase):
                 "job_description": "Work Location: Hybrid remote in Fresno, CA 93711",
             }
         )
-        self.assertEqual(evidence.status, "in_person")
+        self.assertEqual(evidence.status, "hybrid")
 
     def test_foreign_only_eligibility_overrides_noisy_us_country(self):
         ok, reason = job_filter.is_us_job(

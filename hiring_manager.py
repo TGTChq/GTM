@@ -965,12 +965,11 @@ def run_hiring_manager_identification(
     exclude_company_keys: Optional[set[str]] = None,
     output_suffix: Optional[str] = None,
 ) -> Step3Result:
-    """Enrich prequalified accounts and stop on the applicable daily target.
+    """Enrich prequalified accounts under the applicable daily target.
 
-    Strict payloads (those annotated by the Job Gate) stop only on
-    ``target_final_pass_leads``.  The legacy reviewable argument remains for
-    controlled tests and rollback compatibility, but it does not determine
-    production success in final-pass mode.
+    The strict target is a minimum SLA. Production continues through every
+    eligible company unless an explicit safety cap is configured. Legacy
+    reviewable behavior remains available for controlled rollback tests.
     """
     validate_preflight()
     for name, value in (
@@ -1058,6 +1057,7 @@ def run_hiring_manager_identification(
             strict_input
             and target_final_pass_leads is not None
             and final_pass_leads >= target_final_pass_leads
+            and not config.CONTINUE_AFTER_FINAL_PASS_TARGET
         ):
             stop_reason = "final_pass_target_reached"
             logger.info(

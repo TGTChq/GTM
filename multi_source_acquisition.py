@@ -17,11 +17,11 @@ from urllib.parse import urljoin, urlparse
 
 import config
 from ats_board_registry import AtsBoardRegistry, detect_board_ref, fetch_board_jobs
-from free_job_sources import build_adapters, default_fetcher, provider_domain
+from free_job_sources import build_adapters, default_fetcher, html_to_text, provider_domain
 from job_filter import assess_pre_enrichment_viability, dedup_key, get_safe_employer_domain
 from job_quality import normalize_job_identity
 from company_identity import company_names_compatible, normalize_company_name
-from jsearch_scraper import ScrapeResult, is_excluded_title
+from jsearch_scraper import ScrapeResult, is_excluded_title, run_daily_scrape
 from pipeline_state import SeenJobsRegistry
 from role_catalog import DEFAULT_SEARCH_ROLES, role_specificity
 from role_relevance import assess_role, normalize_relevance_score
@@ -103,6 +103,180 @@ def _company_website_candidate(url: str, company: str, provider_host: str) -> bo
     # Substring matching can poison employer identity (for example Meta vs
     # metabase.com). Reuse the repository's conservative organization matcher.
     return company_names_compatible(company, domain_brand)
+
+
+def _himalayas_profile_identity_candidates(html_text: str) -> List[str]:
+    candidates: List[str] = []
+    for match in re.finditer(r"<h1\b[^>]*>(.*?)</h1>", html_text, re.I | re.S):
+        value = html_to_text(match.group(1)).strip()
+        if value and value not in candidates:
+            candidates.append(value)
+    title_match = re.search(r"<title\b[^>]*>(.*?)</title>", html_text, re.I | re.S)
+    if title_match:
+        title = html_to_text(title_match.group(1)).strip()
+        for value in (title, re.split(r"\s*(?:\||:| - )\s*", title, maxsplit=1)[0]):
+            if value and value not in candidates:
+                candidates.append(value)
+    return candidates[:8]
+
+
+def _parse_employee_range(text: str) -> Tuple[str, Optional[int], Optional[int]]:
+    match = re.search(
+        r"\b(\d[\d,]*)\s*[-–—]\s*(\d[\d,]*)\s+employees\b",
+        text,
+        re.I,
+    )
+    if match:
+        minimum = int(match.group(1).replace(",", ""))
+        maximum = int(match.group(2).replace(",", ""))
+        return f"{minimum}-{maximum}", minimum, maximum
+    match = re.search(r"\b(\d[\d,]*)\+\s+employees\b", text, re.I)
+    if match:
+        minimum = int(match.group(1).replace(",", ""))
+        return f"{minimum}+", minimum, None
+    return "", None, None
+
+
+def _parse_himalayas_company_profile(
+    html_text: str,
+    *,
+    company_name: str,
+    profile_url: str,
+) -> Optional[Dict[str, Any]]:
+    if not html_text or not any(
+        company_names_compatible(company_name, candidate)
+        for candidate in _himalayas_profile_identity_candidates(html_text)
+    ):
+        return None
+
+    visible_html = re.sub(
+        r"<(?:script|style|noscript|svg)\b[^>]*>.*?</(?:script|style|noscript|svg)>",
+        " ",
+        html_text,
+        flags=re.I | re.S,
+    )
+    visible_text = html_to_text(visible_html)
+    employee_range, employee_min, employee_max = _parse_employee_range(visible_text)
+    website = ""
+    for candidate in _extract_links(html_text, profile_url):
+        if _company_website_candidate(candidate, company_name, "himalayas.app"):
+            parsed = urlparse(candidate)
+            website = f"{parsed.scheme}://{parsed.netloc}/"
+            break
+    if not website:
+        visit_match = re.search(
+            r"\bVisit\s+([a-z0-9][a-z0-9.-]+\.[a-z]{2,})\b",
+            visible_text,
+            re.I,
+        )
+        if visit_match:
+            candidate = f"https://{visit_match.group(1).lower().removeprefix('www.')}"
+            if _company_website_candidate(candidate, company_name, "himalayas.app"):
+                website = candidate + "/"
+
+    return {
+        "profile_url": profile_url,
+        "profile_text": visible_text[:12000],
+        "website": website,
+        "employee_range": employee_range,
+        "employee_min": employee_min,
+        "employee_max": employee_max,
+    }
+
+
+def _enrich_himalayas_company_profiles(
+    jobs: List[Dict[str, Any]],
+    *,
+    fetcher=default_fetcher,
+) -> Dict[str, int]:
+    metrics = {
+        "candidates_considered": 0,
+        "attempted": 0,
+        "succeeded": 0,
+        "verified": 0,
+        "websites": 0,
+        "employee_ranges": 0,
+        "jobs_enriched": 0,
+    }
+    max_requests = max(0, config.HIMALAYAS_COMPANY_PROFILE_MAX_REQUESTS)
+    if max_requests == 0:
+        return metrics
+
+    candidates: Dict[str, Tuple[int, int, int, Dict[str, Any]]] = {}
+    jobs_by_slug: Dict[str, List[Dict[str, Any]]] = {}
+    for job in jobs:
+        if str(job.get("_acquisition_source") or "") != "himalayas":
+            continue
+        slug = str(job.get("_source_company_slug") or "").strip().lower()
+        if not slug or not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,99}", slug):
+            continue
+        matched_role, role_assessment = _best_role(job)
+        if role_assessment.status not in {"accept", "review"}:
+            continue
+        viability = assess_pre_enrichment_viability(job)
+        profile_resolvable_identity = (
+            viability.stat_name == "excluded_posting_integrity"
+            and viability.reason in {
+                "insufficient_direct_employer_evidence",
+                "untrustworthy_employer_identity",
+            }
+        )
+        if not viability.eligible and not profile_resolvable_identity:
+            continue
+        jobs_by_slug.setdefault(slug, []).append(job)
+        rank = 2 if role_assessment.status == "accept" else 1
+        viability_rank = 1 if viability.eligible else 0
+        current = candidates.get(slug)
+        candidate = (viability_rank, rank, role_assessment.score, job)
+        if current is None or candidate[:3] > current[:3]:
+            candidates[slug] = candidate
+
+    metrics["candidates_considered"] = len(candidates)
+    ordered = sorted(
+        candidates.items(),
+        key=lambda item: (item[1][0], item[1][1], item[1][2]),
+        reverse=True,
+    )
+    for slug, (_viability_rank, _rank, _score, representative) in ordered[:max_requests]:
+        profile_url = f"https://himalayas.app/companies/{slug}"
+        payload = fetcher(
+            profile_url,
+            headers={"Accept": "text/html,application/xhtml+xml"},
+        )
+        metrics["attempted"] += 1
+        if payload.status_code != 200 or not payload.text:
+            continue
+        metrics["succeeded"] += 1
+        profile = _parse_himalayas_company_profile(
+            payload.text,
+            company_name=str(representative.get("employer_name") or ""),
+            profile_url=payload.url or profile_url,
+        )
+        if profile is None:
+            continue
+        metrics["verified"] += 1
+        if profile["website"]:
+            metrics["websites"] += 1
+        if profile["employee_range"]:
+            metrics["employee_ranges"] += 1
+
+        for job in jobs_by_slug.get(slug, []):
+            if not company_names_compatible(
+                str(job.get("employer_name") or ""),
+                str(representative.get("employer_name") or ""),
+            ):
+                continue
+            job["_provider_company_profile_verified"] = True
+            job["_provider_company_profile_url"] = profile["profile_url"]
+            job["_provider_company_profile_text"] = profile["profile_text"]
+            job["_provider_employee_range"] = profile["employee_range"]
+            job["_provider_employee_min"] = profile["employee_min"]
+            job["_provider_employee_max"] = profile["employee_max"]
+            if profile["website"] and not job.get("employer_website"):
+                job["employer_website"] = profile["website"]
+                job["_employer_website_from_provider_profile"] = True
+            metrics["jobs_enriched"] += 1
+    return metrics
 
 
 def _discover_landing_links(
@@ -205,6 +379,27 @@ def _merge_options(target: Dict[str, Any], source: Mapping[str, Any]) -> None:
     target["apply_options"] = options
 
 
+def _merge_company_profile_evidence(
+    target: Dict[str, Any], source: Mapping[str, Any]
+) -> None:
+    if source.get("_provider_company_profile_verified") is not True:
+        return
+    if target.get("_provider_company_profile_verified") is True:
+        return
+    for key in (
+        "_provider_company_profile_verified",
+        "_provider_company_profile_url",
+        "_provider_company_profile_text",
+        "_provider_employee_range",
+        "_provider_employee_min",
+        "_provider_employee_max",
+    ):
+        target[key] = source.get(key)
+    if not target.get("employer_website") and source.get("employer_website"):
+        target["employer_website"] = source.get("employer_website")
+        target["_employer_website_from_provider_profile"] = True
+
+
 def _strength(job: Mapping[str, Any]) -> Tuple[int, int, int, int]:
     return (
         1 if str(job.get("_acquisition_source") or "").startswith("ats_") else 0,
@@ -259,6 +454,7 @@ def _dedupe(jobs: Iterable[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], int]:
             duplicates += 1
             if _strength(job) > _strength(current):
                 _merge_options(job, current)
+                _merge_company_profile_evidence(job, current)
                 job["_discovery_sources"] = sorted(
                     set(job.get("_discovery_sources") or [])
                     | set(current.get("_discovery_sources") or [])
@@ -267,6 +463,7 @@ def _dedupe(jobs: Iterable[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], int]:
                 current = job
             else:
                 _merge_options(current, job)
+                _merge_company_profile_evidence(current, job)
                 current["_discovery_sources"] = sorted(
                     set(current.get("_discovery_sources") or [])
                     | set(job.get("_discovery_sources") or [])
@@ -326,7 +523,7 @@ def _save_raw(jobs: List[Dict[str, Any]], stats: Mapping[str, Any]) -> str:
     now = datetime.now()
     payload = {
         "scrape_date": now.isoformat(),
-        "acquisition_mode": "free_multi_source",
+        "acquisition_mode": "multi_source",
         "total_jobs": len(jobs),
         "stats": dict(stats),
         "jobs": jobs,
@@ -381,6 +578,66 @@ def run_multi_source_acquisition(
             source_result.errors,
         )
 
+    jsearch_stats: Dict[str, Any] = {
+        "enabled": bool(config.MULTI_SOURCE_JSEARCH_ENABLED),
+        "attempted": False,
+        "success": False,
+        "skipped_reason": "",
+        "errors": [],
+        "jobs": 0,
+    }
+    if config.MULTI_SOURCE_JSEARCH_ENABLED and config.RAPIDAPI_KEY:
+        jsearch_stats["attempted"] = True
+        try:
+            jsearch_result = run_daily_scrape(registry=registry)
+            payload = json.loads(Path(jsearch_result.output_path).read_text(encoding="utf-8"))
+            jsearch_jobs = [dict(job) for job in payload.get("jobs", []) if isinstance(job, dict)]
+            for job in jsearch_jobs:
+                job.setdefault("_acquisition_source", "jsearch")
+            all_jobs.extend(jsearch_jobs)
+            jsearch_stats.update({
+                "success": bool(jsearch_result.success),
+                "jobs": len(jsearch_jobs),
+                "failed_roles": list(jsearch_result.failed_roles),
+                "errors": list(jsearch_result.errors),
+                "stats": dict(jsearch_result.stats),
+            })
+            source_metrics["jsearch"] = {
+                "success": bool(jsearch_result.success),
+                "requests_attempted": int(jsearch_result.stats.get("queries_attempted", 0)),
+                "requests_succeeded": int(jsearch_result.stats.get("queries_succeeded", 0)),
+                "pages": int(jsearch_result.stats.get("estimated_request_units", 0)),
+                "raw_records": int(jsearch_result.stats.get("total_raw_jobs", len(jsearch_jobs))),
+                "normalized_jobs": len(jsearch_jobs),
+                "errors": list(jsearch_result.errors),
+                "metadata": {"optional": bool(config.MULTI_SOURCE_JSEARCH_OPTIONAL)},
+            }
+            if not jsearch_result.success:
+                failed_sources.append("jsearch")
+        except Exception as exc:
+            logger.warning("Optional JSearch acquisition failed; continuing with public sources: %s", exc)
+            jsearch_stats["errors"] = [str(exc)]
+            source_metrics["jsearch"] = {
+                "success": False,
+                "requests_attempted": 0,
+                "requests_succeeded": 0,
+                "pages": 0,
+                "raw_records": 0,
+                "normalized_jobs": 0,
+                "errors": [str(exc)],
+                "metadata": {"optional": bool(config.MULTI_SOURCE_JSEARCH_OPTIONAL)},
+            }
+            failed_sources.append("jsearch")
+            if not config.MULTI_SOURCE_JSEARCH_OPTIONAL:
+                raise
+    elif config.MULTI_SOURCE_JSEARCH_ENABLED:
+        jsearch_stats["skipped_reason"] = "missing_rapidapi_key"
+    else:
+        jsearch_stats["skipped_reason"] = "disabled"
+
+    himalayas_profile_metrics = _enrich_himalayas_company_profiles(
+        all_jobs, fetcher=fetcher
+    )
     landing_metrics = _discover_landing_links(all_jobs, fetcher=fetcher)
     propagated_before_ats = _propagate_company_websites(all_jobs)
     boards_from_feeds = board_registry.upsert_from_jobs(all_jobs)
@@ -389,6 +646,19 @@ def run_multi_source_acquisition(
     ats_metrics: Dict[str, Dict[str, int]] = {}
     greenhouse_detail_remaining = max(
         0, int(getattr(config, "ATS_GREENHOUSE_DETAIL_MAX_REQUESTS_PER_RUN", 100))
+    )
+    workday_detail_remaining = max(
+        0, int(getattr(config, "ATS_WORKDAY_DETAIL_MAX_REQUESTS_PER_RUN", 100))
+    )
+    smartrecruiters_detail_remaining = max(
+        0,
+        int(
+            getattr(
+                config,
+                "ATS_SMARTRECRUITERS_DETAIL_MAX_REQUESTS_PER_RUN",
+                100,
+            )
+        ),
     )
     if config.ATS_DIRECT_ACQUISITION_ENABLED:
         for board in board_registry.due_entries(limit=ats_board_limit, force=force_ats_refresh):
@@ -399,11 +669,35 @@ def run_multi_source_acquisition(
                 greenhouse_detail_budget=(
                     greenhouse_detail_remaining if provider == "greenhouse" else None
                 ),
+                workday_detail_budget=(
+                    workday_detail_remaining if provider == "workday" else None
+                ),
+                smartrecruiters_detail_budget=(
+                    smartrecruiters_detail_remaining
+                    if provider == "smartrecruiters"
+                    else None
+                ),
             )
             detail_requests = sum(
                 1 for job in jobs if job.get("_greenhouse_detail_request_made")
             )
             greenhouse_detail_remaining = max(0, greenhouse_detail_remaining - detail_requests)
+            workday_detail_requests = sum(
+                1 for job in jobs if job.get("_workday_detail_request_made")
+            )
+            workday_detail_remaining = max(
+                0, workday_detail_remaining - workday_detail_requests
+            )
+            smartrecruiters_detail_requests = sum(
+                1
+                for job in jobs
+                if job.get("_smartrecruiters_detail_request_made")
+            )
+            smartrecruiters_detail_remaining = max(
+                0,
+                smartrecruiters_detail_remaining
+                - smartrecruiters_detail_requests,
+            )
             metric = ats_metrics.setdefault(provider, {
                 "boards_attempted": 0,
                 "boards_succeeded": 0,
@@ -411,7 +705,11 @@ def run_multi_source_acquisition(
                 "errors": 0,
                 "detail_requests": 0,
             })
-            metric["detail_requests"] += detail_requests
+            metric["detail_requests"] += (
+                detail_requests
+                + workday_detail_requests
+                + smartrecruiters_detail_requests
+            )
             metric["boards_attempted"] += 1
             if error:
                 metric["errors"] += 1
@@ -437,15 +735,21 @@ def run_multi_source_acquisition(
     propagated_websites = propagated_before_ats + propagated_after_ats
 
     normalized: List[Dict[str, Any]] = []
+    enabled_sources = list(config.FREE_JOB_SOURCES)
+    if config.MULTI_SOURCE_JSEARCH_ENABLED:
+        enabled_sources.append("jsearch")
+
     stats: Dict[str, Any] = {
-        "acquisition_mode": "free_multi_source",
-        "enabled_sources": list(config.FREE_JOB_SOURCES),
+        "acquisition_mode": "multi_source",
+        "enabled_sources": enabled_sources,
         "source_metrics": source_metrics,
+        "jsearch": jsearch_stats,
         "ats_metrics": ats_metrics,
         "ats_force_refresh": bool(force_ats_refresh),
         "ats_board_limit": ats_board_limit,
         "history_registry_seed": history_seed,
         "landing_discovery": landing_metrics,
+        "himalayas_company_profiles": himalayas_profile_metrics,
         "company_websites_propagated": propagated_websites,
         "boards_discovered_from_current_feeds": boards_from_feeds,
         "boards_total": len(board_registry.entries),
@@ -459,16 +763,16 @@ def run_multi_source_acquisition(
         "role_accept": 0,
         "role_review": 0,
         "role_reject": 0,
-        "query_metrics": {},
-        "query_variant_metrics": {},
-        "base_estimated_request_units": 0,
-        "estimated_request_units": 0,
-        "adaptive_extra_queries": 0,
-        "adaptive_prefilter_viable_added": 0,
-        "adaptive_lookback_queries": 0,
-        "adaptive_lookback_prefilter_viable_added": 0,
-        "adaptive_bucket_counts": {},
-        "adaptive_lookback_variant_counts": {},
+        "query_metrics": dict((jsearch_stats.get("stats") or {}).get("query_metrics", {})),
+        "query_variant_metrics": dict((jsearch_stats.get("stats") or {}).get("query_variant_metrics", {})),
+        "base_estimated_request_units": int((jsearch_stats.get("stats") or {}).get("base_estimated_request_units", 0)),
+        "estimated_request_units": int((jsearch_stats.get("stats") or {}).get("estimated_request_units", 0)),
+        "adaptive_extra_queries": int((jsearch_stats.get("stats") or {}).get("adaptive_extra_queries", 0)),
+        "adaptive_prefilter_viable_added": int((jsearch_stats.get("stats") or {}).get("adaptive_prefilter_viable_added", 0)),
+        "adaptive_lookback_queries": int((jsearch_stats.get("stats") or {}).get("adaptive_lookback_queries", 0)),
+        "adaptive_lookback_prefilter_viable_added": int((jsearch_stats.get("stats") or {}).get("adaptive_lookback_prefilter_viable_added", 0)),
+        "adaptive_bucket_counts": dict((jsearch_stats.get("stats") or {}).get("adaptive_bucket_counts", {})),
+        "adaptive_lookback_variant_counts": dict((jsearch_stats.get("stats") or {}).get("adaptive_lookback_variant_counts", {})),
     }
 
     for original in all_jobs:
