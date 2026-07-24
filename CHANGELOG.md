@@ -1,3 +1,15 @@
+# READY v1.4.1 source observability and minimum recovery — July 23, 2026
+
+- Reports actual JSearch request attempts, successes, estimated units, normalized jobs, errors, and skip state in shadow output.
+- Adds exact shadow rejection diagnostics by reason and acquisition source, with bounded examples for false-negative review.
+- Fixes a posting-integrity overfilter that required verified ATS records to repeat the employer identity inside the description; malformed, generic, aggregator, conflicting, and unstructured syndicated records remain blocked.
+- Rejects generic Workable product URLs as company ATS boards and prunes legacy invalid registry entries.
+- Hardens Himalayas public company-profile retrieval with browser-compatible requests, extra identity metadata, detailed failure metrics, and a repeated-access-failure circuit breaker.
+- Separates multi-source FINAL_PASS top-up limits from legacy JSearch-only settings.
+- Removes the stale two-microbatch ceiling in multi-source mode while retaining request-unit, runtime, inventory, and downstream-yield bounds.
+- Clarifies that the minimum of 30 applies to FINAL_PASS leads; shadow contact-eligible companies are an earlier funnel stage.
+- Validation: Python compilation passed; 14 focused v1.4.1 tests and 425 total offline tests passed; zero live external calls.
+
 # READY v1.3.3 source-truth hardening — July 23, 2026
 
 - Treats explicit Ashby `Hybrid`/`OnSite` workplace types as authoritative over a broad `isRemote=true` eligibility flag.

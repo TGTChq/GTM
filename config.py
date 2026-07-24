@@ -83,6 +83,11 @@ HIMALAYAS_MAX_PAGES = _env_int("HIMALAYAS_MAX_PAGES", 25)
 HIMALAYAS_COMPANY_PROFILE_MAX_REQUESTS = _env_int(
     "HIMALAYAS_COMPANY_PROFILE_MAX_REQUESTS", 30
 )
+# Stop hammering a public profile surface when access is consistently blocked.
+# This is a per-run circuit breaker; it does not disable the source permanently.
+HIMALAYAS_COMPANY_PROFILE_MAX_CONSECUTIVE_FAILURES = _env_int(
+    "HIMALAYAS_COMPANY_PROFILE_MAX_CONSECUTIVE_FAILURES", 3
+)
 FREE_SOURCE_LANDING_DISCOVERY_ENABLED = _env_bool(
     "FREE_SOURCE_LANDING_DISCOVERY_ENABLED", True
 )
@@ -178,7 +183,7 @@ for directory in (
 
 # ---------- Final-pass architecture ----------
 FINAL_PASS_PIPELINE_ENABLED = _env_bool("FINAL_PASS_PIPELINE_ENABLED", True)
-VALIDATION_VERSION = os.getenv("VALIDATION_VERSION", "tgtc-ready-v1.4-definitive")
+VALIDATION_VERSION = os.getenv("VALIDATION_VERSION", "tgtc-ready-v1.4.1-source-observability")
 VALIDATION_SIGNING_KEY = os.getenv("VALIDATION_SIGNING_KEY", "")
 # Source and company-site retrieval is bounded and cached.  Disabling fetches is
 # intended only for deterministic offline replay; it does not relax any gate.
@@ -237,6 +242,13 @@ COMPANY_SOURCE_TIMEOUT_SECONDS = _env_int("COMPANY_SOURCE_TIMEOUT_SECONDS", 10)
 COMPANY_SOURCE_CACHE_TTL_HOURS = _env_int("COMPANY_SOURCE_CACHE_TTL_HOURS", 168)
 FINAL_PASS_MICROBATCH_QUERY_UNITS = _env_int("FINAL_PASS_MICROBATCH_QUERY_UNITS", 6)
 FINAL_PASS_MAX_TOPUP_ITERATIONS = _env_int("FINAL_PASS_MAX_TOPUP_ITERATIONS", 2)
+# Multi-source recovery has its own limit so a stale Railway value from older
+# JSearch-only deployments cannot stop deficit recovery after two batches. Zero
+# means keep searching until the FINAL_PASS minimum, request budget, runtime,
+# inventory exhaustion, or downstream-yield circuit breaker ends the loop.
+MULTI_SOURCE_FINAL_PASS_MAX_TOPUP_ITERATIONS = _env_int(
+    "MULTI_SOURCE_FINAL_PASS_MAX_TOPUP_ITERATIONS", 0
+)
 FINAL_PASS_MAX_RUNTIME_SECONDS = _env_int("FINAL_PASS_MAX_RUNTIME_SECONDS", 1800)
 FINAL_PASS_MAX_EMPTY_QUERY_CYCLES = _env_int(
     "FINAL_PASS_MAX_EMPTY_QUERY_CYCLES", 2
@@ -270,6 +282,9 @@ COMPANY_DOMAIN_ALIASES = _env_json(
 )
 TOPUP_MAX_ZERO_DOWNSTREAM_BATCHES = _env_int(
     "TOPUP_MAX_ZERO_DOWNSTREAM_BATCHES", 2
+)
+MULTI_SOURCE_TOPUP_MAX_ZERO_DOWNSTREAM_BATCHES = _env_int(
+    "MULTI_SOURCE_TOPUP_MAX_ZERO_DOWNSTREAM_BATCHES", 4
 )
 ROLE_ALLOW_SENIOR_IC = _env_bool("ROLE_ALLOW_SENIOR_IC", True)
 

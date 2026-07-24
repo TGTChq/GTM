@@ -176,10 +176,13 @@ def _jsearch_topup_enabled(
         topup_switch = config.FINAL_PASS_TOPUP_ENABLED
     else:
         topup_switch = config.JSEARCH_REVIEWABLE_TOPUP_ENABLED
+    legacy_rounds_enabled = (
+        mode == "multi_source" or config.JSEARCH_TOPUP_MAX_ROUNDS > 0
+    )
     return bool(
         jsearch_available
         and topup_switch
-        and config.JSEARCH_TOPUP_MAX_ROUNDS > 0
+        and legacy_rounds_enabled
         and int(target_final_pass) > 0
     )
 

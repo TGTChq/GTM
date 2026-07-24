@@ -256,6 +256,27 @@ def run_final_pass_topup(
     attempted_role_cycle: set[str] = set()
     empty_query_cycles = 0
     zero_downstream_batches = 0
+    multi_source_mode = str(config.ACQUISITION_MODE or "").strip().lower() == "multi_source"
+    iteration_limit = (
+        config.MULTI_SOURCE_FINAL_PASS_MAX_TOPUP_ITERATIONS
+        if multi_source_mode
+        else config.FINAL_PASS_MAX_TOPUP_ITERATIONS
+    )
+    zero_downstream_limit = max(
+        1,
+        config.MULTI_SOURCE_TOPUP_MAX_ZERO_DOWNSTREAM_BATCHES
+        if multi_source_mode
+        else config.TOPUP_MAX_ZERO_DOWNSTREAM_BATCHES,
+    )
+    details["iteration_limit"] = iteration_limit
+    details["zero_downstream_batch_limit"] = zero_downstream_limit
+    details["bounded_by"] = [
+        "final_pass_target",
+        "jsearch_request_budget",
+        "runtime",
+        "valid_inventory",
+        "downstream_yield",
+    ]
 
     if len(_final_pass_keys(all_leads)) >= target_final_pass_leads:
         stop_reason = "final_pass_target_reached_initial_pass"
@@ -289,10 +310,7 @@ def run_final_pass_topup(
         iteration = 0
         while True:
             iteration += 1
-            if (
-                config.FINAL_PASS_MAX_TOPUP_ITERATIONS > 0
-                and iteration > config.FINAL_PASS_MAX_TOPUP_ITERATIONS
-            ):
+            if iteration_limit > 0 and iteration > iteration_limit:
                 stop_reason = "topup_iteration_limit_reached"
                 break
             current = len(_final_pass_keys(_dedupe_leads_prefer_stronger(all_leads)))
@@ -414,7 +432,7 @@ def run_final_pass_topup(
                     round_detail["filter_zero_yield"] = True
                     details["rounds"].append(round_detail)
                     zero_downstream_batches += 1
-                    if zero_downstream_batches >= max(1, config.TOPUP_MAX_ZERO_DOWNSTREAM_BATCHES):
+                    if zero_downstream_batches >= zero_downstream_limit:
                         stop_reason = "zero_downstream_yield"
                         break
                     continue
@@ -437,7 +455,7 @@ def run_final_pass_topup(
                 round_detail["final_pass_added"] = 0
                 details["rounds"].append(round_detail)
                 zero_downstream_batches += 1
-                if zero_downstream_batches >= max(1, config.TOPUP_MAX_ZERO_DOWNSTREAM_BATCHES):
+                if zero_downstream_batches >= zero_downstream_limit:
                     stop_reason = "zero_downstream_yield"
                     break
                 continue
@@ -471,7 +489,7 @@ def run_final_pass_topup(
             if after >= target_final_pass_leads:
                 stop_reason = "final_pass_target_reached"
                 break
-            if zero_downstream_batches >= max(1, config.TOPUP_MAX_ZERO_DOWNSTREAM_BATCHES):
+            if zero_downstream_batches >= zero_downstream_limit:
                 stop_reason = "zero_downstream_yield"
                 break
             if units <= 0:
