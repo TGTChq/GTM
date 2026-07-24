@@ -83,6 +83,123 @@ def _shadow_company_metrics(filtered_path: str) -> dict:
     }
 
 
+
+def _shadow_rejection_diagnostics(
+    rejected_path: str, *, samples_per_reason: int = 3
+) -> dict:
+    payload = json.loads(Path(rejected_path).read_text(encoding="utf-8"))
+    jobs = payload.get("jobs", []) if isinstance(payload, dict) else []
+    reason_counts: Counter[str] = Counter()
+    source_counts: dict[str, Counter[str]] = {}
+    samples: dict[str, list[dict]] = {}
+    for job in jobs if isinstance(jobs, list) else []:
+        if not isinstance(job, dict):
+            continue
+        reason = str(job.get("_filter_reason") or "unknown").strip() or "unknown"
+        source = str(job.get("_acquisition_source") or job.get("job_publisher") or "unknown").strip() or "unknown"
+        reason_counts[reason] += 1
+        source_counts.setdefault(reason, Counter())[source] += 1
+        bucket = samples.setdefault(reason, [])
+        if len(bucket) < max(1, samples_per_reason):
+            bucket.append({
+                "company": str(job.get("employer_name") or ""),
+                "title": str(job.get("job_title") or ""),
+                "source": source,
+                "location": str(job.get("job_location") or ""),
+                "posted_at": str(job.get("job_posted_at_datetime_utc") or ""),
+                "url": str(job.get("canonical_source_url") or job.get("job_apply_link") or ""),
+            })
+    top = []
+    for reason, count in reason_counts.most_common(25):
+        top.append({
+            "reason": reason,
+            "jobs": count,
+            "sources": dict(source_counts.get(reason, Counter()).most_common(10)),
+            "samples": samples.get(reason, []),
+        })
+    return {
+        "total_rejected": sum(reason_counts.values()),
+        "unique_exact_reasons": len(reason_counts),
+        "top_exact_reasons": top,
+    }
+
+
+def _jsearch_request_metrics(acquisition_stats: dict) -> dict:
+    source_metrics = acquisition_stats.get("source_metrics", {})
+    source = source_metrics.get("jsearch", {}) if isinstance(source_metrics, dict) else {}
+    jsearch = acquisition_stats.get("jsearch", {})
+    nested = jsearch.get("stats", {}) if isinstance(jsearch, dict) else {}
+    attempted = int(source.get("requests_attempted", nested.get("queries_attempted", 0)) or 0)
+    succeeded = int(source.get("requests_succeeded", nested.get("queries_succeeded", 0)) or 0)
+    units = int(nested.get("estimated_request_units", acquisition_stats.get("estimated_request_units", 0)) or 0)
+    jobs = int(source.get("normalized_jobs", jsearch.get("jobs", 0) if isinstance(jsearch, dict) else 0) or 0)
+    return {
+        "enabled": bool(jsearch.get("enabled")) if isinstance(jsearch, dict) else False,
+        "attempted": bool(jsearch.get("attempted")) if isinstance(jsearch, dict) else attempted > 0,
+        "requests_attempted": attempted,
+        "requests_succeeded": succeeded,
+        "estimated_request_units": units,
+        "jobs_normalized": jobs,
+        "skipped_reason": str(jsearch.get("skipped_reason") or "") if isinstance(jsearch, dict) else "",
+        "errors": list(jsearch.get("errors") or []) if isinstance(jsearch, dict) else [],
+    }
+
+
+def _shadow_funnel_diagnostics(
+    *,
+    acquired: int,
+    filter_stats: dict,
+    filtered_company_metrics: dict,
+    qualified_company_metrics: dict,
+) -> dict:
+    kept = int(filter_stats.get("kept", 0) or 0)
+    contact_jobs = int(
+        qualified_company_metrics.get("jobs_with_company_identity", 0) or 0
+    )
+    contact_companies = int(qualified_company_metrics.get("unique_companies", 0) or 0)
+    target = max(1, int(config.get_final_pass_target()))
+    rejection_families = [
+        {"reason": key, "jobs": int(value or 0)}
+        for key, value in filter_stats.items()
+        if str(key).startswith("excluded_") and int(value or 0) > 0
+    ]
+    rejection_families.sort(key=lambda item: item["jobs"], reverse=True)
+    modality_exclusions = int(filter_stats.get("excluded_in_person", 0) or 0)
+    return {
+        "acquired_jobs": int(acquired),
+        "filter_kept_jobs": kept,
+        "filter_kept_rate": round(kept / acquired, 4) if acquired else 0.0,
+        "contact_eligible_jobs": contact_jobs,
+        "contact_eligible_unique_companies": contact_companies,
+        "kept_to_contact_eligible_rate": round(contact_jobs / kept, 4) if kept else 0.0,
+        "minimum_final_pass_target": target,
+        "precontact_unique_companies_above_minimum": contact_companies >= target,
+        "final_pass_not_computed_in_shadow": True,
+        "modality_exclusions": modality_exclusions,
+        "modality_was_not_the_volume_constraint": modality_exclusions == 0,
+        "top_filter_loss_families": rejection_families[:10],
+        "filtered_unique_companies": int(
+            filtered_company_metrics.get("unique_companies", 0) or 0
+        ),
+        "deficit_recovery": {
+            "primary_window_days": "0-14",
+            "age_recovery_window_days": "15-30",
+            "age_recovery_enabled": bool(config.AGE_RECOVERY_ENABLED),
+            "jsearch_microbatch_topup_enabled": bool(
+                config.MULTI_SOURCE_JSEARCH_ENABLED
+                and config.MULTI_SOURCE_JSEARCH_TOPUP_ENABLED
+            ),
+            "multi_source_iteration_limit": int(
+                config.MULTI_SOURCE_FINAL_PASS_MAX_TOPUP_ITERATIONS
+            ),
+            "iteration_limit_zero_means": (
+                "bounded by target, request budget, runtime, inventory, "
+                "and downstream yield"
+            ),
+        },
+    }
+
+
 def main() -> int:
     args = _parse_args()
     logging.basicConfig(
@@ -131,6 +248,14 @@ def main() -> int:
 
     filtered_company_metrics = _shadow_company_metrics(filtered.output_path)
     qualified_company_metrics = _shadow_company_metrics(qualified.output_path)
+    jsearch_requests = _jsearch_request_metrics(acquisition.stats)
+    rejection_diagnostics = _shadow_rejection_diagnostics(filtered.rejected_path)
+    funnel_diagnostics = _shadow_funnel_diagnostics(
+        acquired=acquisition.total_jobs,
+        filter_stats=filtered.stats,
+        filtered_company_metrics=filtered_company_metrics,
+        qualified_company_metrics=qualified_company_metrics,
+    )
 
     interpretation = {
         "filter_kept_are_not_final_leads": True,
@@ -150,14 +275,25 @@ def main() -> int:
     }
     report = {
         "generated_at": datetime.now().isoformat(),
-        "mode": "free_multi_source_shadow",
+        "mode": "multi_source_shadow",
+        "external_api_requests": {
+            "apollo": 0,
+            "hunter": 0,
+            "airtable": 0,
+            "instantly": 0,
+            "jsearch": jsearch_requests,
+        },
+        # Compatibility field retained for older report consumers. JSearch now
+        # reports actual attempted requests instead of a hard-coded zero.
         "external_paid_calls": {
             "apollo": 0,
             "hunter": 0,
             "airtable": 0,
             "instantly": 0,
-            "jsearch": 0,
+            "jsearch": jsearch_requests["requests_attempted"],
         },
+        "funnel_diagnostics": funnel_diagnostics,
+        "rejection_diagnostics": rejection_diagnostics,
         "interpretation": interpretation,
         "acquisition": {
             "success": acquisition.success,
@@ -208,7 +344,10 @@ def main() -> int:
         "contact_eligible_company_metrics": qualified_company_metrics,
         "filter_stats": filtered.stats,
         "qualification_stats": qualified.stats,
+        "funnel_diagnostics": funnel_diagnostics,
+        "rejection_diagnostics": rejection_diagnostics,
         "interpretation": interpretation,
+        "external_api_requests": report["external_api_requests"],
         "external_paid_calls": report["external_paid_calls"],
     }, indent=2, ensure_ascii=False))
     # Low market volume is diagnostic, not a technical failure. Acquisition,

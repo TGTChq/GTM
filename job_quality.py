@@ -258,6 +258,49 @@ def normalize_job_identity(job: Dict) -> Dict:
     return job
 
 
+
+
+def _trusted_structured_employer_identity(job: Dict, employer: str) -> bool:
+    """Return whether a normalized record carries a trustworthy structured employer.
+
+    Direct ATS boards and first-party structured provider feeds already supply the
+    employer as a dedicated field. Requiring the same company name to appear
+    twice inside the description overfilters valid postings and duplicates the
+    later source/account gates. Generic, aggregator, and malformed employers
+    remain ineligible.
+    """
+    employer_clean = _clean_space(employer)
+    if not employer_clean:
+        return False
+    if _known_aggregator_name(employer_clean) or _generic_publisher_name(employer_clean):
+        return False
+    if re.fullmatch(
+        r"(?:confidential|undisclosed|anonymous|client of .+|stealth(?: startup)?|hiring company)",
+        employer_clean,
+        re.I,
+    ):
+        return False
+    trusted_direct_ats = bool(
+        job.get("job_apply_is_direct") is True
+        and job.get("_ats_board_identity_verified") is True
+    )
+    acquisition_source = str(job.get("_acquisition_source") or "").strip().lower()
+    trusted_provider_record = bool(
+        job.get("_provider_record_structured") is True
+        and (
+            acquisition_source.startswith("ats_")
+            or acquisition_source
+            in {
+                "himalayas",
+                "jobicy",
+                "weworkremotely",
+                "remotive",
+                "remoteok",
+            }
+        )
+    )
+    return trusted_direct_ats or trusted_provider_record
+
 def assess_posting_integrity(job: Dict) -> QualityAssessment:
     title = str(job.get("job_title") or "")
     employer = str(job.get("employer_name") or "")
@@ -322,8 +365,10 @@ def assess_posting_integrity(job: Dict) -> QualityAssessment:
         or _known_aggregator_name(publisher)
         or _generic_publisher_name(publisher)
     )
+    trusted_structured_identity = _trusted_structured_employer_identity(job, employer)
     if (
         syndicated_source
+        and not trusted_structured_identity
         and not _known_aggregator_name(employer)
         and not _generic_publisher_name(employer)
         and not safe_hosts
@@ -334,6 +379,7 @@ def assess_posting_integrity(job: Dict) -> QualityAssessment:
         return QualityAssessment(False, "excluded_posting_integrity", "insufficient_direct_employer_evidence")
     if (
         syndicated_source
+        and not trusted_structured_identity
         and not _known_aggregator_name(employer)
         and not _generic_publisher_name(employer)
         and not safe_hosts

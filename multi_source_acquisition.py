@@ -117,7 +117,19 @@ def _himalayas_profile_identity_candidates(html_text: str) -> List[str]:
         for value in (title, re.split(r"\s*(?:\||:| - )\s*", title, maxsplit=1)[0]):
             if value and value not in candidates:
                 candidates.append(value)
-    return candidates[:8]
+    for match in re.finditer(
+        r"<meta\b[^>]*(?:property|name)=[\"'](?:og:title|twitter:title)[\"'][^>]*>",
+        html_text,
+        re.I,
+    ):
+        content = re.search(r"\bcontent=[\"']([^\"']+)", match.group(0), re.I)
+        if not content:
+            continue
+        value = html_to_text(content.group(1)).strip()
+        for candidate in (value, re.split(r"\s*(?:\||:| - )\s*", value, maxsplit=1)[0]):
+            if candidate and candidate not in candidates:
+                candidates.append(candidate)
+    return candidates[:16]
 
 
 def _parse_employee_range(text: str) -> Tuple[str, Optional[int], Optional[int]]:
@@ -188,18 +200,27 @@ def _enrich_himalayas_company_profiles(
     jobs: List[Dict[str, Any]],
     *,
     fetcher=default_fetcher,
-) -> Dict[str, int]:
-    metrics = {
+) -> Dict[str, Any]:
+    circuit_limit = max(
+        1, int(config.HIMALAYAS_COMPANY_PROFILE_MAX_CONSECUTIVE_FAILURES)
+    )
+    metrics: Dict[str, Any] = {
         "candidates_considered": 0,
         "attempted": 0,
+        "requests_attempted": 0,
         "succeeded": 0,
         "verified": 0,
         "websites": 0,
         "employee_ranges": 0,
         "jobs_enriched": 0,
+        "http_status_counts": {},
+        "failure_reasons": {},
+        "circuit_breaker_limit": circuit_limit,
+        "circuit_breaker_triggered": False,
     }
     max_requests = max(0, config.HIMALAYAS_COMPANY_PROFILE_MAX_REQUESTS)
     if max_requests == 0:
+        metrics["stop_reason"] = "disabled"
         return metrics
 
     candidates: Dict[str, Tuple[int, int, int, Dict[str, Any]]] = {}
@@ -231,21 +252,60 @@ def _enrich_himalayas_company_profiles(
         if current is None or candidate[:3] > current[:3]:
             candidates[slug] = candidate
 
+    def record_failure(reason: str) -> None:
+        counts = metrics["failure_reasons"]
+        counts[reason] = int(counts.get(reason, 0)) + 1
+
     metrics["candidates_considered"] = len(candidates)
     ordered = sorted(
         candidates.items(),
         key=lambda item: (item[1][0], item[1][1], item[1][2]),
         reverse=True,
     )
+    consecutive_access_failures = 0
+    browser_headers = {
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Referer": "https://himalayas.app/companies/",
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/149.0.0.0 Safari/537.36"
+        ),
+    }
     for slug, (_viability_rank, _rank, _score, representative) in ordered[:max_requests]:
-        profile_url = f"https://himalayas.app/companies/{slug}"
-        payload = fetcher(
-            profile_url,
-            headers={"Accept": "text/html,application/xhtml+xml"},
-        )
+        profile_url = f"https://himalayas.app/companies/{slug}/"
+        payload = fetcher(profile_url, headers=browser_headers)
         metrics["attempted"] += 1
+        metrics["requests_attempted"] += 1
+        status_key = str(payload.status_code) if payload.status_code is not None else "none"
+        status_counts = metrics["http_status_counts"]
+        status_counts[status_key] = int(status_counts.get(status_key, 0)) + 1
+
+        access_failure = (
+            payload.status_code is None
+            or payload.status_code in {401, 403, 429}
+            or bool(payload.status_code and payload.status_code >= 500)
+        )
         if payload.status_code != 200 or not payload.text:
+            reason = (
+                f"http_{payload.status_code}"
+                if payload.status_code is not None
+                else str(payload.error or "request_failed").split(":", 1)[0]
+            )
+            if payload.status_code == 200 and not payload.text:
+                reason = "empty_response"
+            record_failure(reason)
+            consecutive_access_failures = (
+                consecutive_access_failures + 1 if access_failure else 0
+            )
+            if consecutive_access_failures >= circuit_limit:
+                metrics["circuit_breaker_triggered"] = True
+                metrics["stop_reason"] = "consecutive_profile_access_failures"
+                break
             continue
+
+        consecutive_access_failures = 0
         metrics["succeeded"] += 1
         profile = _parse_himalayas_company_profile(
             payload.text,
@@ -253,6 +313,7 @@ def _enrich_himalayas_company_profiles(
             profile_url=payload.url or profile_url,
         )
         if profile is None:
+            record_failure("identity_mismatch_or_unparseable")
             continue
         metrics["verified"] += 1
         if profile["website"]:
@@ -276,6 +337,12 @@ def _enrich_himalayas_company_profiles(
                 job["employer_website"] = profile["website"]
                 job["_employer_website_from_provider_profile"] = True
             metrics["jobs_enriched"] += 1
+    metrics.setdefault(
+        "stop_reason",
+        "candidate_budget_exhausted"
+        if metrics["attempted"] >= max_requests
+        else "candidates_exhausted",
+    )
     return metrics
 
 
@@ -753,6 +820,7 @@ def run_multi_source_acquisition(
         "company_websites_propagated": propagated_websites,
         "boards_discovered_from_current_feeds": boards_from_feeds,
         "boards_total": len(board_registry.entries),
+        "ats_invalid_registry_entries_pruned": board_registry.invalid_entries_pruned,
         "raw_records_total": len(all_jobs),
         "excluded_by_seniority": 0,
         "previously_seen_removed": 0,

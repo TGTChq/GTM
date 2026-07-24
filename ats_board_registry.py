@@ -40,6 +40,34 @@ class BoardRef:
         return f"{self.provider}:{self.identifier}:{self.api_base}"
 
 
+_WORKABLE_RESERVED_IDENTIFIERS = {
+    "api",
+    "apply",
+    "blog",
+    "careers",
+    "help",
+    "jobs",
+    "resources",
+    "support",
+    "www",
+}
+
+
+def _valid_workable_identifier(value: Any) -> bool:
+    identifier = str(value or "").strip().lower()
+    return bool(
+        re.fullmatch(r"[a-z0-9][a-z0-9-]{1,99}", identifier)
+        and identifier not in _WORKABLE_RESERVED_IDENTIFIERS
+    )
+
+
+def _valid_registry_entry(item: Mapping[str, Any]) -> bool:
+    provider = str(item.get("provider") or "").strip().lower()
+    if provider == "workable":
+        return _valid_workable_identifier(item.get("identifier"))
+    return True
+
+
 def _host(url: str) -> str:
     try:
         return (urlparse(str(url or "")).hostname or "").lower().removeprefix("www.")
@@ -100,10 +128,10 @@ def detect_board_ref(url: str) -> Optional[BoardRef]:
 
     if host == "apply.workable.com" and parts:
         slug = parts[0]
-        if slug not in {"j", "jobs"}:
+        if _valid_workable_identifier(slug):
             return BoardRef("workable", slug, "https://www.workable.com", f"https://apply.workable.com/{slug}")
     match = re.fullmatch(r"([a-z0-9-]+)\.workable\.com", host)
-    if match and match.group(1) not in {"www", "api", "apply"}:
+    if match and _valid_workable_identifier(match.group(1)):
         slug = match.group(1)
         return BoardRef("workable", slug, "https://www.workable.com", f"https://apply.workable.com/{slug}")
     if host == "workable.com":
@@ -111,7 +139,7 @@ def detect_board_ref(url: str) -> Optional[BoardRef]:
             slug = parts[parts.index("accounts") + 1]
         except (ValueError, IndexError):
             slug = ""
-        if slug:
+        if _valid_workable_identifier(slug):
             return BoardRef("workable", slug, "https://www.workable.com", f"https://apply.workable.com/{slug}")
 
     match = re.fullmatch(r"([a-z0-9-]+)\.jobs\.personio\.(?:de|com)", host)
@@ -220,6 +248,7 @@ class AtsBoardRegistry:
     def __init__(self, path: Optional[str] = None) -> None:
         self.path = Path(path or config.ATS_BOARD_REGISTRY_FILE)
         self.entries: Dict[str, Dict[str, Any]] = {}
+        self.invalid_entries_pruned = 0
         self._load()
 
     def _load(self) -> None:
@@ -233,7 +262,22 @@ class AtsBoardRegistry:
             return
         entries = payload.get("boards", {}) if isinstance(payload, dict) else {}
         if isinstance(entries, dict):
-            self.entries = {str(key): dict(value) for key, value in entries.items() if isinstance(value, dict)}
+            loaded = {
+                str(key): dict(value)
+                for key, value in entries.items()
+                if isinstance(value, dict)
+            }
+            self.entries = {
+                key: value for key, value in loaded.items() if _valid_registry_entry(value)
+            }
+            self.invalid_entries_pruned = len(loaded) - len(self.entries)
+            if self.invalid_entries_pruned:
+                logger.warning(
+                    "Pruned %d invalid ATS registry entr%s",
+                    self.invalid_entries_pruned,
+                    "y" if self.invalid_entries_pruned == 1 else "ies",
+                )
+                self.save()
 
     def save(self) -> None:
         _atomic_write(self.path, {"updated_at": _now_iso(), "boards": self.entries})
@@ -364,6 +408,8 @@ class AtsBoardRegistry:
         cutoff = datetime.now(timezone.utc) - timedelta(hours=max(1, config.ATS_BOARD_REFRESH_INTERVAL_HOURS))
         due = []
         for item in self.entries.values():
+            if not _valid_registry_entry(item):
+                continue
             company = str(item.get("company_name") or "").strip()
             if not company:
                 continue

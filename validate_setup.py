@@ -97,6 +97,10 @@ def static_checks() -> Dict:
             errors.append("FREE_SOURCE_LANDING_DISCOVERY_MAX_REQUESTS cannot be negative")
         if config.HIMALAYAS_COMPANY_PROFILE_MAX_REQUESTS < 0:
             errors.append("HIMALAYAS_COMPANY_PROFILE_MAX_REQUESTS cannot be negative")
+        if config.HIMALAYAS_COMPANY_PROFILE_MAX_CONSECUTIVE_FAILURES < 1:
+            errors.append(
+                "HIMALAYAS_COMPANY_PROFILE_MAX_CONSECUTIVE_FAILURES must be at least 1"
+            )
         if config.ATS_MAX_BOARDS_PER_RUN < 1 or config.ATS_MAX_JOBS_PER_BOARD < 1:
             errors.append("ATS board and job limits must be positive")
         if config.ATS_BOARD_REFRESH_INTERVAL_HOURS < 1:
@@ -351,6 +355,14 @@ def static_checks() -> Dict:
             errors.append("JOB_SOURCE_MIN_INDEPENDENT_PUBLISHERS must be at least 2")
         if config.TOPUP_MAX_ZERO_DOWNSTREAM_BATCHES < 1:
             errors.append("TOPUP_MAX_ZERO_DOWNSTREAM_BATCHES must be at least 1")
+        if config.MULTI_SOURCE_FINAL_PASS_MAX_TOPUP_ITERATIONS < 0:
+            errors.append(
+                "MULTI_SOURCE_FINAL_PASS_MAX_TOPUP_ITERATIONS cannot be negative"
+            )
+        if config.MULTI_SOURCE_TOPUP_MAX_ZERO_DOWNSTREAM_BATCHES < 1:
+            errors.append(
+                "MULTI_SOURCE_TOPUP_MAX_ZERO_DOWNSTREAM_BATCHES must be at least 1"
+            )
         if config.PIPELINE_LOCK_STALE_HOURS < 1:
             errors.append("PIPELINE_LOCK_STALE_HOURS must be at least 1")
         if jsearch_mode and len(config.ROLES) > 50:
