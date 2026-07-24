@@ -15,7 +15,8 @@ from typing import Dict, Iterable, Optional, Tuple
 from urllib.parse import urlparse
 
 import config
-from company_identity import company_names_compatible
+from company_identity import company_names_compatible, is_placeholder_company_name
+from role_catalog import canonical_role_for_search, get_role_definition
 
 
 @dataclass(frozen=True)
@@ -145,8 +146,12 @@ def _clean_employer_candidate(value: str) -> Optional[str]:
         "our client", "the client", "client", "company", "the company",
         "employer", "organization", "hiring company", "confidential",
         "undisclosed", "remote jobs", "job board", "reputed company",
+        "this", "that", "it", "we", "they", "the role", "this role",
+        "the position", "this position", "the job", "this job",
     }
     if normalized in blocked or normalized.startswith("our client"):
+        return None
+    if is_placeholder_company_name(candidate):
         return None
     if _known_aggregator_name(candidate) or _generic_publisher_name(candidate):
         return None
@@ -223,6 +228,22 @@ def normalize_job_identity(job: Dict) -> Dict:
     publisher = _clean_space(job.get("job_publisher") or "")
     original_employer = employer
 
+    # Direct ATS adapters retain the canonical board identity separately. If a
+    # malformed registry value or upstream payload replaces the employer with a
+    # placeholder, restore the verified board company before any quality gate.
+    board_company = _clean_space(job.get("_ats_board_company_name") or "")
+    if (
+        board_company
+        and not is_placeholder_company_name(board_company)
+        and job.get("job_apply_is_direct") is True
+        and job.get("_ats_board_identity_verified") is True
+        and (not employer or is_placeholder_company_name(employer))
+    ):
+        employer = board_company
+        job["employer_name"] = employer
+        job["_employer_name_normalization"] = "restored_verified_ats_board_company"
+        job["_employer_identity_repaired"] = True
+
     ats_match = re.fullmatch(r"(.+?)\s+(?:ats|applicant tracking system)", employer, re.I)
     if ats_match:
         base_name = _clean_space(ats_match.group(1))
@@ -270,7 +291,7 @@ def _trusted_structured_employer_identity(job: Dict, employer: str) -> bool:
     remain ineligible.
     """
     employer_clean = _clean_space(employer)
-    if not employer_clean:
+    if not employer_clean or is_placeholder_company_name(employer_clean):
         return False
     if _known_aggregator_name(employer_clean) or _generic_publisher_name(employer_clean):
         return False
@@ -301,6 +322,29 @@ def _trusted_structured_employer_identity(job: Dict, employer: str) -> bool:
     )
     return trusted_direct_ats or trusted_provider_record
 
+def _recognized_short_role_title(job: Dict, title: str) -> bool:
+    """Allow only configured short aliases for the already matched role.
+
+    Acronyms such as DBA, BDR, and SDR are valid catalog aliases. Arbitrary
+    short or punctuation-only titles remain malformed and fail closed.
+    """
+    target = canonical_role_for_search(
+        job.get("_matched_role") or job.get("_search_role") or ""
+    )
+    definition = get_role_definition(target)
+    if not definition:
+        return False
+    normalized_title = re.sub(r"[^a-z0-9]+", "", str(title or "").lower())
+    return bool(
+        normalized_title
+        and any(
+            normalized_title
+            == re.sub(r"[^a-z0-9]+", "", str(term).lower())
+            for term in definition.match_terms
+        )
+    )
+
+
 def assess_posting_integrity(job: Dict) -> QualityAssessment:
     title = str(job.get("job_title") or "")
     employer = str(job.get("employer_name") or "")
@@ -324,7 +368,7 @@ def assess_posting_integrity(job: Dict) -> QualityAssessment:
     if re.search(r"\b(?:multiple|several) (?:open roles|positions|job openings)\b", title, re.I):
         return QualityAssessment(False, "excluded_posting_integrity", "multi_role_posting")
 
-    if len(title) < 4 or re.fullmatch(r"[\W_]+", title):
+    if (len(title) < 4 and not _recognized_short_role_title(job, title)) or re.fullmatch(r"[\W_]+", title):
         return QualityAssessment(False, "excluded_posting_integrity", "malformed_job_title")
 
     # Reject corrupted syndication shells structurally. These records replace
@@ -342,6 +386,7 @@ def assess_posting_integrity(job: Dict) -> QualityAssessment:
             re.I,
         )
         or employer_norm in {"this", "company", "the company", "employer"}
+        or is_placeholder_company_name(employer)
     )
     if placeholder_count >= 3:
         return QualityAssessment(False, "excluded_posting_integrity", "corrupted_syndication_placeholders")
@@ -406,11 +451,21 @@ def assess_posting_integrity(job: Dict) -> QualityAssessment:
                 job.get("job_apply_is_direct") is True
                 and job.get("_ats_board_identity_verified") is True
             )
-            if (
-                not trusted_direct_ats_identity
-                and len(re.findall(r"\b" + re.escape(claimed_name) + r"\b", description, re.I)) >= 2
+            repeated_claim = len(
+                re.findall(r"\b" + re.escape(claimed_name) + r"\b", description, re.I)
+            ) >= 2
+            if repeated_claim and trusted_structured_identity and getattr(
+                config, "ALLOW_STRUCTURED_IDENTITY_CONFLICT_REVIEW", True
             ):
-                return QualityAssessment(False, "excluded_posting_integrity", "description_employer_identity_conflict")
+                job["_employer_identity_review_required"] = True
+                job["_employer_identity_conflict_claimed_name"] = claimed_name
+                job["_approved_revalidation_required"] = True
+            elif repeated_claim and not trusted_direct_ats_identity:
+                return QualityAssessment(
+                    False,
+                    "excluded_posting_integrity",
+                    "description_employer_identity_conflict",
+                )
 
     deadline = re.search(
         r"\bapplication deadline\s*:\s*(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)?\s*,?\s*"

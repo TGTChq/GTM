@@ -238,6 +238,14 @@ def assess_role(job: Dict, target_role: str) -> RoleAssessment:
     description = (job.get("job_description") or "")[:12000]
     title_text = title.lower()
     full_text = f"{title}\n{description}".lower()
+    definition = get_role_definition(canonical_role)
+    exact_catalog_title = bool(
+        definition
+        and any(
+            _normalized_title(title) == _normalized_title(term)
+            for term in definition.match_terms
+        )
+    )
 
     strong_title = _matches(rules["strong"], title_text)
     strong_anywhere = _matches(rules["strong"], full_text)
@@ -248,9 +256,11 @@ def assess_role(job: Dict, target_role: str) -> RoleAssessment:
     score = 0
     reasons: List[str] = []
 
-    if strong_title:
+    if strong_title or exact_catalog_title:
         score += 5
-        reasons.append("strong_title_match")
+        reasons.append(
+            "strong_title_match" if strong_title else "exact_catalog_title_match"
+        )
     elif strong_anywhere:
         score += 2
         reasons.append("strong_description_match")

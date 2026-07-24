@@ -30,6 +30,38 @@ _FREE_EMAIL_DOMAINS = {
     "yahoo.com", "icloud.com", "me.com", "aol.com", "proton.me", "protonmail.com",
 }
 
+_PLACEHOLDER_COMPANY_NAMES = {
+    "anonymous",
+    "anonymous company",
+    "anonymous employer",
+    "client",
+    "company",
+    "company name",
+    "confidential",
+    "confidential company",
+    "confidential employer",
+    "employer",
+    "employer name",
+    "hiring company",
+    "name",
+    "name withheld",
+    "not disclosed",
+    "not provided",
+    "organization",
+    "organisation",
+    "our client",
+    "private company",
+    "reputed company",
+    "stealth",
+    "stealth startup",
+    "the company",
+    "the employer",
+    "undisclosed",
+    "undisclosed company",
+    "undisclosed employer",
+    "unknown",
+}
+
 
 def is_intermediary_domain(domain_or_url: str | None, blocked_domains: Iterable[str]) -> bool:
     domain = normalize_company_domain(domain_or_url)
@@ -64,6 +96,29 @@ def normalize_company_name(value: str | None) -> str:
     while words and words[-1] in _LEGAL_SUFFIXES:
         words.pop()
     return " ".join(words)
+
+
+def is_placeholder_company_name(value: str | None) -> bool:
+    """Return whether a company label is a non-identity placeholder.
+
+    Matching is exact after normalization so legitimate brands containing words
+    such as ``company`` or ``name`` remain valid.
+    """
+    normalized = normalize_company_name(value)
+    if not normalized:
+        return False
+    if normalized in _PLACEHOLDER_COMPANY_NAMES:
+        return True
+    return bool(
+        re.fullmatch(
+            r"(?:confidential|undisclosed|anonymous)(?: company| employer)?",
+            normalized,
+        )
+        or re.fullmatch(
+            r"(?:company|employer|organization|organisation) name",
+            normalized,
+        )
+    )
 
 
 def _name_alias(value: str) -> str:

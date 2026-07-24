@@ -218,7 +218,7 @@ def _cross_source_minor_check(job: Dict, source: ResolvedJobSource) -> bool:
         and str(job.get("_work_arrangement") or "")
         in {"remote", "hybrid", "onsite", "unknown"}
         and str(job.get("_remote_scope") or "")
-        in {"us_explicit", "us_provider_confirmed", "us_weak"}
+        in {"us_explicit", "us_provider_confirmed", "global_includes_us", "us_weak"}
     )
 
 

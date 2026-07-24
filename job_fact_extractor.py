@@ -177,7 +177,8 @@ def _provider_work_arrangement(job: Dict) -> str:
 
 def _provider_us_market(job: Dict) -> bool:
     return bool(
-        str(job.get("_remote_scope") or "") in {"us_explicit", "us_provider_confirmed"}
+        str(job.get("_remote_scope") or "")
+        in {"us_explicit", "us_provider_confirmed", "global_includes_us"}
         and str(job.get("_us_eligibility_reason") or "")
     )
 

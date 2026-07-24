@@ -21,7 +21,7 @@ from urllib.parse import urlparse
 from xml.etree import ElementTree
 
 import config
-from company_identity import company_names_compatible
+from company_identity import company_names_compatible, is_placeholder_company_name
 from domain_utils import normalize_company_domain
 from free_job_sources import FetchPayload, Fetcher, default_fetcher, html_to_text
 
@@ -38,6 +38,14 @@ class BoardRef:
     @property
     def key(self) -> str:
         return f"{self.provider}:{self.identifier}:{self.api_base}"
+
+
+# A direct Workday posting without a career-site segment has the shape
+# ``/<locale>/job/...`` or simply ``/job/...``. In that case ``job`` is a
+# route, not a Job_Posting_Site_ID. Other common names such as External,
+# Careers, Jobs, Recruiting, and Default are legitimate customer-defined site
+# identifiers and must remain discoverable.
+_WORKDAY_RESERVED_SITE_IDENTIFIERS = {"job"}
 
 
 _WORKABLE_RESERVED_IDENTIFIERS = {
@@ -61,10 +69,28 @@ def _valid_workable_identifier(value: Any) -> bool:
     )
 
 
+def _valid_workday_identifier(value: Any) -> bool:
+    raw = str(value or "").strip().lower()
+    if "|" not in raw:
+        return False
+    tenant, site = raw.split("|", 1)
+    return bool(
+        re.fullmatch(r"[a-z0-9][a-z0-9-]{1,99}", tenant)
+        and re.fullmatch(r"[a-z0-9][a-z0-9_-]{1,119}", site)
+        and site not in _WORKDAY_RESERVED_SITE_IDENTIFIERS
+        and not re.fullmatch(r"[a-z]{2}-[a-z]{2}", site, re.I)
+    )
+
+
 def _valid_registry_entry(item: Mapping[str, Any]) -> bool:
+    company = str(item.get("company_name") or "").strip()
+    if company and is_placeholder_company_name(company):
+        return False
     provider = str(item.get("provider") or "").strip().lower()
     if provider == "workable":
         return _valid_workable_identifier(item.get("identifier"))
+    if provider == "workday":
+        return _valid_workday_identifier(item.get("identifier"))
     return True
 
 
@@ -185,6 +211,8 @@ def detect_board_ref(url: str) -> Optional[BoardRef]:
             tenant = workday.group(1)
             site = path_parts[0]
             identifier = f"{tenant}|{site}"
+            if not _valid_workday_identifier(identifier):
+                return None
             base = f"https://{host}"
             return BoardRef("workday", identifier, base, f"{base}/{site}")
     return None
@@ -285,6 +313,8 @@ class AtsBoardRegistry:
     def upsert_from_job(self, job: Mapping[str, Any]) -> int:
         refs = discover_board_refs(job)
         company = str(job.get("employer_name") or "").strip()
+        if is_placeholder_company_name(company):
+            return 0
         website = str(job.get("employer_website") or "").strip()
         domain = normalize_company_domain(website)
         source = str(job.get("_acquisition_source") or job.get("job_publisher") or "")
@@ -411,7 +441,7 @@ class AtsBoardRegistry:
             if not _valid_registry_entry(item):
                 continue
             company = str(item.get("company_name") or "").strip()
-            if not company:
+            if not company or is_placeholder_company_name(company):
                 continue
             checked = _parse_iso(item.get("last_checked_at"))
             if force or checked is None or checked <= cutoff:
@@ -449,6 +479,8 @@ class AtsBoardRegistry:
 
 def _board_identity_verified(company_name: Any, identifier: Any) -> bool:
     company = str(company_name or "").strip()
+    if is_placeholder_company_name(company):
+        return False
     raw_identifier = str(identifier or "")
     if "|" in raw_identifier:
         raw_identifier = raw_identifier.split("|", 1)[0]
@@ -535,6 +567,8 @@ def _direct_job(
         "_acquisition_source": f"ats_{provider}",
         "_ats_provider": provider,
         "_ats_board_identifier": str(board.get("identifier") or ""),
+        "_ats_board_company_name": company,
+        "_ats_board_company_domain": domain,
         "_provider_record_structured": True,
         "_ats_board_identity_verified": _board_identity_verified(
             company, board.get("identifier")
