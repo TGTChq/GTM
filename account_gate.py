@@ -43,74 +43,115 @@ class AccountGate:
         fetch_company: Optional[bool] = None,
     ) -> GateDecision:
         bundle = EvidenceBundle()
-        canonical_domain = safe_company_domain(
-            org.domain or input_domain, config.INTERMEDIARY_JOB_DOMAINS
+        review_reasons: list[ReasonCode | str] = []
+        input_safe = safe_company_domain(input_domain, config.INTERMEDIARY_JOB_DOMAINS)
+        apollo_domain = safe_company_domain(
+            org.domain or "", config.INTERMEDIARY_JOB_DOMAINS
         )
+        canonical_domain = apollo_domain or input_safe
         canonical_name = str(org.name or input_company_name or "").strip()
 
         if not org.found:
-            return self._unknown(ReasonCode.UNVERIFIED_ORGANIZATION, bundle, retryable=True)
+            review_reasons.append(ReasonCode.UNVERIFIED_ORGANIZATION)
+            canonical_name = str(input_company_name or canonical_name or "").strip()
+            canonical_domain = input_safe or canonical_domain
         if not canonical_domain:
-            return self._unknown(ReasonCode.UNVERIFIED_DOMAIN, bundle, retryable=False)
-        input_safe = safe_company_domain(input_domain, config.INTERMEDIARY_JOB_DOMAINS)
-        domain_matches = bool(input_safe and domains_equivalent(input_safe, canonical_domain))
-        # A canonical domain match is stronger identity evidence than a brand-name
-        # mismatch caused by a rebrand, parent company or legal suffix. Name-only
-        # lookups remain conservative.
-        if (
-            input_company_name
-            and canonical_name
-            and not company_names_compatible(input_company_name, canonical_name)
-            and not domain_matches
-        ):
-            return self._unknown(ReasonCode.UNVERIFIED_EMPLOYER_IDENTITY, bundle, retryable=False)
-        if input_safe and not domain_matches:
-            return self._unknown(ReasonCode.UNVERIFIED_EMPLOYER_IDENTITY, bundle, retryable=False)
+            return self._unknown(
+                ReasonCode.UNVERIFIED_DOMAIN,
+                bundle,
+                retryable=False,
+                metadata={
+                    "canonical_company_name": canonical_name,
+                    "canonical_domain": "",
+                    "employee_count": org.employee_count,
+                    "industry": str(org.industry or "").strip(),
+                    "business_model": "unknown",
+                },
+            )
 
+        domain_matches = bool(
+            input_safe and apollo_domain and domains_equivalent(input_safe, apollo_domain)
+        )
+        name_matches = bool(
+            not input_company_name
+            or not canonical_name
+            or company_names_compatible(input_company_name, canonical_name)
+        )
+        if input_safe and apollo_domain and not domain_matches:
+            review_reasons.append(ReasonCode.UNVERIFIED_EMPLOYER_IDENTITY)
+            canonical_domain = input_safe
+            canonical_name = str(input_company_name or canonical_name).strip()
+        elif not name_matches and not domain_matches:
+            review_reasons.append(ReasonCode.UNVERIFIED_EMPLOYER_IDENTITY)
+            canonical_domain = input_safe or canonical_domain
+            canonical_name = str(input_company_name or canonical_name).strip()
+
+        organization_status = (
+            EvidenceStatus.VERIFIED_CROSS_SOURCE
+            if org.found and name_matches
+            else EvidenceStatus.WEAK_PROVIDER_SIGNAL
+        )
         bundle.add(FactValue(
-            "organization", canonical_name, EvidenceStatus.VERIFIED_CROSS_SOURCE,
-            [EvidenceItem("organization", canonical_name, EvidenceStatus.VERIFIED_CROSS_SOURCE, "apollo", excerpt=canonical_name, confidence=0.95)]
+            "organization", canonical_name, organization_status,
+            [EvidenceItem(
+                "organization", canonical_name, organization_status,
+                "apollo" if org.found else "job_input",
+                excerpt=canonical_name,
+                confidence=0.95 if organization_status == EvidenceStatus.VERIFIED_CROSS_SOURCE else 0.65,
+            )]
         ))
+        domain_status = (
+            EvidenceStatus.VERIFIED_CROSS_SOURCE
+            if domain_matches or (apollo_domain and not input_safe)
+            else EvidenceStatus.WEAK_PROVIDER_SIGNAL
+        )
         bundle.add(FactValue(
-            "domain", canonical_domain, EvidenceStatus.VERIFIED_CROSS_SOURCE,
-            [EvidenceItem("domain", canonical_domain, EvidenceStatus.VERIFIED_CROSS_SOURCE, "apollo_and_job", excerpt=canonical_domain, confidence=0.97)]
+            "domain", canonical_domain, domain_status,
+            [EvidenceItem(
+                "domain", canonical_domain, domain_status,
+                "apollo_and_job" if domain_status == EvidenceStatus.VERIFIED_CROSS_SOURCE else "job_input",
+                excerpt=canonical_domain,
+                confidence=0.97 if domain_status == EvidenceStatus.VERIFIED_CROSS_SOURCE else 0.7,
+            )]
         ))
 
         if org.employee_count is None:
-            return self._unknown(ReasonCode.UNVERIFIED_EMPLOYEE_COUNT, bundle, retryable=False)
-        bundle.add(FactValue(
-            "employee_count", org.employee_count, EvidenceStatus.VERIFIED_CROSS_SOURCE,
-            [EvidenceItem("employee_count", org.employee_count, EvidenceStatus.VERIFIED_CROSS_SOURCE, "apollo", confidence=0.9)]
-        ))
-        if org.employee_count < config.MIN_EMPLOYEES:
-            return self._reject(ReasonCode.REJECT_COMPANY_TOO_SMALL, bundle)
-        if org.employee_count > config.MAX_EMPLOYEES:
-            return self._reject(ReasonCode.REJECT_COMPANY_TOO_LARGE, bundle)
+            review_reasons.append(ReasonCode.UNVERIFIED_EMPLOYEE_COUNT)
+        else:
+            bundle.add(FactValue(
+                "employee_count", org.employee_count, EvidenceStatus.VERIFIED_CROSS_SOURCE,
+                [EvidenceItem("employee_count", org.employee_count, EvidenceStatus.VERIFIED_CROSS_SOURCE, "apollo", confidence=0.9)]
+            ))
+            if org.employee_count < config.MIN_EMPLOYEES:
+                return self._reject(ReasonCode.REJECT_COMPANY_TOO_SMALL, bundle)
+            if org.employee_count > config.MAX_EMPLOYEES:
+                return self._reject(ReasonCode.REJECT_COMPANY_TOO_LARGE, bundle)
 
         industry = str(org.industry or "").strip()
         if not industry:
-            return self._unknown(ReasonCode.UNVERIFIED_INDUSTRY, bundle, retryable=False)
-        industry_norm = normalize_text(industry)
-        excluded_industry = _excluded_industry_keyword(industry_norm)
-        if excluded_industry:
-            reason = ReasonCode.REJECT_EXCLUDED_INDUSTRY
-            if excluded_industry in {"staffing and recruiting", "staffing", "recruiting", "human resources services"}:
-                reason = ReasonCode.REJECT_STAFFING
-            elif excluded_industry in {"hospital & health care", "hospitals and health care", "health care", "healthcare", "mental health care", "mental health", "medical practice"}:
-                reason = ReasonCode.REJECT_HEALTHCARE
-            elif excluded_industry == "government administration":
-                reason = ReasonCode.REJECT_GOVERNMENT
-            elif excluded_industry == "outsourcing/offshoring":
-                reason = ReasonCode.REJECT_OUTSOURCING
+            review_reasons.append(ReasonCode.UNVERIFIED_INDUSTRY)
+        else:
+            industry_norm = normalize_text(industry)
+            excluded_industry = _excluded_industry_keyword(industry_norm)
+            if excluded_industry:
+                reason = ReasonCode.REJECT_EXCLUDED_INDUSTRY
+                if excluded_industry in {"staffing and recruiting", "staffing", "recruiting", "human resources services"}:
+                    reason = ReasonCode.REJECT_STAFFING
+                elif excluded_industry in {"hospital & health care", "hospitals and health care", "health care", "healthcare", "mental health care", "mental health", "medical practice"}:
+                    reason = ReasonCode.REJECT_HEALTHCARE
+                elif excluded_industry == "government administration":
+                    reason = ReasonCode.REJECT_GOVERNMENT
+                elif excluded_industry == "outsourcing/offshoring":
+                    reason = ReasonCode.REJECT_OUTSOURCING
+                bundle.add(FactValue(
+                    "industry", industry, EvidenceStatus.VERIFIED_CROSS_SOURCE,
+                    [EvidenceItem("industry", industry, EvidenceStatus.VERIFIED_CROSS_SOURCE, "apollo", excerpt=industry, confidence=0.9)]
+                ))
+                return self._reject(reason, bundle, metadata={"excluded_industry_keyword": excluded_industry})
             bundle.add(FactValue(
                 "industry", industry, EvidenceStatus.VERIFIED_CROSS_SOURCE,
-                [EvidenceItem("industry", industry, EvidenceStatus.VERIFIED_CROSS_SOURCE, "apollo", excerpt=industry, confidence=0.9)]
+                [EvidenceItem("industry", industry, EvidenceStatus.VERIFIED_CROSS_SOURCE, "apollo", excerpt=industry, confidence=0.82)]
             ))
-            return self._reject(reason, bundle, metadata={"excluded_industry_keyword": excluded_industry})
-        bundle.add(FactValue(
-            "industry", industry, EvidenceStatus.VERIFIED_CROSS_SOURCE,
-            [EvidenceItem("industry", industry, EvidenceStatus.VERIFIED_CROSS_SOURCE, "apollo", excerpt=industry, confidence=0.82)]
-        ))
 
         source = self.resolver.resolve(canonical_domain, fetch=fetch_company)
         raw = org.raw or {}
@@ -142,9 +183,7 @@ class AccountGate:
             )
             bundle.add(FactValue("business_model", model.category, model_status, model.evidence))
             return self._reject(reason, bundle, metadata={"company_source": source.to_dict()})
-        # Passing means that bounded first-party/Apollo evidence contained no
-        # excluded-model signal. It is not a claim that the model itself was
-        # positively verified, so do not manufacture cross-source evidence.
+
         allowed_evidence = list(model.evidence) or [EvidenceItem(
             "business_model_exclusion_check",
             "no_excluded_model_detected",
@@ -158,17 +197,31 @@ class AccountGate:
             EvidenceStatus.WEAK_PROVIDER_SIGNAL,
             allowed_evidence,
         ))
+        metadata = {
+            "canonical_company_name": canonical_name,
+            "canonical_domain": canonical_domain,
+            "employee_count": org.employee_count,
+            "industry": industry,
+            "business_model": model.category,
+            "company_source": source.to_dict(),
+            "review_reasons": [
+                value.value if hasattr(value, "value") else str(value)
+                for value in review_reasons
+            ],
+        }
+        if review_reasons:
+            return GateDecision(
+                "account",
+                GateState.NEEDS_CHECK,
+                review_reasons[0],
+                secondary_reasons=review_reasons[1:],
+                evidence=bundle,
+                next_action="continue_to_contact_gate_and_write_review",
+                metadata=metadata,
+            )
         return GateDecision(
             "account", GateState.PASS, "ACCOUNT_PASS", evidence=bundle,
-            next_action="continue_to_contact_gate",
-            metadata={
-                "canonical_company_name": canonical_name,
-                "canonical_domain": canonical_domain,
-                "employee_count": org.employee_count,
-                "industry": industry,
-                "business_model": model.category,
-                "company_source": source.to_dict(),
-            },
+            next_action="continue_to_contact_gate", metadata=metadata,
         )
 
     @staticmethod
@@ -181,8 +234,8 @@ class AccountGate:
     @staticmethod
     def _unknown(reason, bundle, retryable=False, metadata=None):
         return GateDecision(
-            "account", GateState.UNVERIFIED, reason, evidence=bundle,
+            "account", GateState.NEEDS_CHECK, reason, evidence=bundle,
             retryable=retryable,
-            next_action="retry_account_fallbacks_then_replace" if retryable else "discard_and_replace",
+            next_action="continue_to_contact_gate_and_write_review",
             metadata=metadata or {},
         )

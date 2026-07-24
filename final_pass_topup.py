@@ -19,6 +19,7 @@ from jsearch_scraper import ScrapeResult, run_targeted_topup_scrape
 from pipeline_state import SeenJobsRegistry
 from pipeline_checkpoint import PipelineCheckpoint
 from qualification_pipeline import run_precontact_qualification
+from review_policy import is_airtable_reviewable
 from reviewable_topup import (
     _dedupe_job_refs,
     _lead_dedupe_key,
@@ -42,7 +43,11 @@ def _surface_keys(leads: Iterable[Dict]) -> set[str]:
     return {
         str(lead.get("lead_key"))
         for lead in leads
-        if lead.get("_final_state") == "FINAL_PASS" and lead.get("lead_key")
+        if lead.get("lead_key")
+        and (
+            lead.get("_final_state") == "FINAL_PASS"
+            or is_airtable_reviewable(lead)
+        )
     }
 
 
@@ -65,7 +70,11 @@ def _preferred_roles(leads: Iterable[Dict]) -> List[str]:
     counts = Counter(
         str(lead.get("_search_role"))
         for lead in leads
-        if lead.get("_search_role") and lead.get("_final_state") == "FINAL_PASS"
+        if lead.get("_search_role")
+        and (
+            lead.get("_final_state") == "FINAL_PASS"
+            or is_airtable_reviewable(lead)
+        )
     )
     return [role for role, count in counts.most_common() for _ in range(count)]
 
@@ -98,7 +107,10 @@ def _combine(
     for result in results:
         _merge_numeric_stats(cumulative_stats, result.stats)
     _merge_numeric_stats(cumulative_stats, topup_stats)
-    eligible_leads = [lead for lead in all_leads if lead.get("_account_gate_state") == "PASS"]
+    eligible_leads = [
+        lead for lead in all_leads
+        if lead.get("_account_gate_state") in {"PASS", "NEEDS_CHECK", "UNVERIFIED"}
+    ]
     identified = sum(1 for lead in eligible_leads if lead.get("hiring_manager_name"))
     contactable = sum(1 for lead in eligible_leads if lead.get("_step3_status") == "found")
     eligible_buckets = len(eligible_leads)
@@ -107,7 +119,7 @@ def _combine(
     companies_considered = sum(result.companies_considered for result in results)
     eligible_companies = sum(result.eligible_companies for result in results)
     excluded_companies = sum(result.company_criteria_excluded_companies for result in results)
-    target_reached = pass_count >= target
+    target_reached = surface_count >= target
     limit_reached = bool(
         max_eligible_companies and eligible_companies >= max_eligible_companies
     )
@@ -126,8 +138,9 @@ def _combine(
         "company_criteria_excluded_companies": excluded_companies,
         "final_pass_target": target,
         "final_pass_leads": pass_count,
-        "final_pass_target_reached": target_reached,
+        "final_pass_target_reached": pass_count >= target,
         "reviewable_leads": surface_count,
+        "reviewable_target_reached": target_reached,
         "needs_check_leads": state_counts["NEEDS_CHECK"],
         "reroute_leads": state_counts["REROUTE"],
         "unverified_leads": state_counts["UNVERIFIED"],
@@ -171,7 +184,7 @@ def _combine(
         reroute_leads=state_counts["REROUTE"],
         unverified_leads=state_counts["UNVERIFIED"],
         rejected_leads=state_counts["REJECT"],
-        final_pass_target_reached=target_reached,
+        final_pass_target_reached=pass_count >= target,
         max_eligible_companies=max_eligible_companies,
         eligible_company_limit_reached=limit_reached,
         target_reached=target_reached,
@@ -278,7 +291,7 @@ def run_final_pass_topup(
         "downstream_yield",
     ]
 
-    if len(_final_pass_keys(all_leads)) >= target_final_pass_leads:
+    if len(_surface_keys(all_leads)) >= target_final_pass_leads:
         stop_reason = "final_pass_target_reached_initial_pass"
     else:
         # Reroute is cheaper than new JSearch inventory. Re-run only accounts that
@@ -287,7 +300,7 @@ def run_final_pass_topup(
         if reroute_jobs:
             reroute_input = Path(config.FILTERED_OUTPUT_DIR) / f"reroute_candidates_{datetime.now():%Y-%m-%d_%H%M%S}.json"
             reroute_input.write_text(json.dumps({"jobs": reroute_jobs}, indent=2), encoding="utf-8")
-            before = len(_final_pass_keys(all_leads))
+            before = len(_surface_keys(all_leads))
             try:
                 rerouted = run_hiring_manager_identification(
                     str(reroute_input),
@@ -301,8 +314,13 @@ def run_final_pass_topup(
                 payloads.append(reroute_payload)
                 results.append(rerouted)
                 all_leads.extend(reroute_payload.get("jobs", []))
-                after = len(_final_pass_keys(_dedupe_leads_prefer_stronger(all_leads)))
-                details["reroute_rounds"].append({"attempted": len(reroute_jobs), "final_pass_added": max(0, after - before), "output": rerouted.output_path})
+                after = len(_surface_keys(_dedupe_leads_prefer_stronger(all_leads)))
+                details["reroute_rounds"].append({
+                    "attempted": len(reroute_jobs),
+                    "reviewable_added": max(0, after - before),
+                    "final_pass_added": max(0, after - before),
+                    "output": rerouted.output_path,
+                })
             except Exception as exc:
                 logger.exception("Reroute recovery failed")
                 details["errors"].append(f"reroute: {exc}")
@@ -313,7 +331,7 @@ def run_final_pass_topup(
             if iteration_limit > 0 and iteration > iteration_limit:
                 stop_reason = "topup_iteration_limit_reached"
                 break
-            current = len(_final_pass_keys(_dedupe_leads_prefer_stronger(all_leads)))
+            current = len(_surface_keys(_dedupe_leads_prefer_stronger(all_leads)))
             if current >= target_final_pass_leads:
                 stop_reason = "final_pass_target_reached"
                 break
@@ -473,12 +491,13 @@ def run_final_pass_topup(
             results.append(enriched)
             all_leads.extend(payload.get("jobs", []))
             considered_company_keys.update(enriched.processed_company_keys)
-            after = len(_final_pass_keys(_dedupe_leads_prefer_stronger(all_leads)))
+            after = len(_surface_keys(_dedupe_leads_prefer_stronger(all_leads)))
             round_detail.update({
                 "companies_considered": enriched.companies_considered,
                 "eligible_companies": enriched.eligible_companies,
+                "reviewable_added": max(0, after - before),
                 "final_pass_added": max(0, after - before),
-                "final_pass_total": after,
+                "reviewable_total": after,
                 "enrichment_output": enriched.output_path,
             })
             details["rounds"].append(round_detail)
@@ -500,8 +519,9 @@ def run_final_pass_topup(
         "topup_query_units": topup_units,
         "total_query_units": total_query_units,
         "final_pass_leads": len(_final_pass_keys(_dedupe_leads_prefer_stronger(all_leads))),
+        "reviewable_leads": len(_surface_keys(_dedupe_leads_prefer_stronger(all_leads))),
         "stop_reason": stop_reason,
-        "deficit_remaining": max(0, target_final_pass_leads - len(_final_pass_keys(_dedupe_leads_prefer_stronger(all_leads)))),
+        "deficit_remaining": max(0, target_final_pass_leads - len(_surface_keys(_dedupe_leads_prefer_stronger(all_leads)))),
     })
     combined = _combine(
         results=results,

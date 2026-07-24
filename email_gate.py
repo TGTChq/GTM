@@ -49,16 +49,18 @@ class EmailGate:
         hunter_status = str(hunter_result.status if hunter_result else "").strip().lower()
         if hunter_status in {"invalid", "disposable", "webmail"}:
             return GateDecision(
-                "email", GateState.UNVERIFIED, ReasonCode.UNVERIFIED_EMAIL_DELIVERABILITY,
+                "email", GateState.REROUTE, ReasonCode.UNVERIFIED_EMAIL_DELIVERABILITY,
                 retryable=True, next_action="try_next_contact_or_email",
                 metadata={"apollo_status": apollo_status, "hunter_status": hunter_status},
             )
         verified = apollo_status == "verified" or hunter_status == "valid"
         if not verified:
-            # accept_all, risky, guessed, unavailable and unknown never surface.
+            # A professional, company-domain email remains operationally useful
+            # when deliverability could not be fully verified. Surface it for
+            # human review; only explicit invalidity remains terminal/reroutable.
             return GateDecision(
-                "email", GateState.UNVERIFIED, ReasonCode.UNVERIFIED_EMAIL_DELIVERABILITY,
-                retryable=True, next_action="try_next_contact_or_email",
+                "email", GateState.NEEDS_CHECK, ReasonCode.UNVERIFIED_EMAIL_DELIVERABILITY,
+                retryable=False, next_action="write_review",
                 metadata={"apollo_status": apollo_status, "hunter_status": hunter_status},
             )
         bundle.add(FactValue(

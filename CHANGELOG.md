@@ -1,3 +1,12 @@
+# READY v1.4.5 actionable review policy — July 24, 2026
+
+- Changed the Airtable boundary from fully verified only to actionable review: confirmed hard rejects remain terminal, while incomplete evidence is surfaced for human review.
+- Unknown organization size, industry, source verification, contact territory/current-employment proof, and non-invalid email deliverability no longer silently remove leads.
+- A lead still requires an aligned hiring manager, professional company-domain email, lead key, and no confirmed hard rejection.
+- The daily/top-up target now uses Airtable-reviewable leads; fully verified `FINAL_PASS` remains separately observable.
+- Approved review rows remain human-gated and are revalidated against hard failures before Instantly enrollment.
+- `PRIMARY_MAX_JOB_AGE_DAYS` is now authoritative so a stale compatibility environment value cannot block production.
+
 # READY v1.4.4 counterfactual recall recovery — July 24, 2026
 
 - Recovers recently updated, active Greenhouse listings whose official board API omits `first_published`, while keeping them in the review/revalidation lane.

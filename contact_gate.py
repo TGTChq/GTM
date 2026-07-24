@@ -175,8 +175,8 @@ class ContactGate:
         )
         if config.REQUIRE_CURRENT_EMPLOYMENT_EVIDENCE and not current_verified:
             return GateDecision(
-                "contact", GateState.REROUTE, ReasonCode.REROUTE_NOT_CURRENT_EMPLOYEE,
-                evidence=bundle, retryable=True, next_action="try_next_contact",
+                "contact", GateState.NEEDS_CHECK, ReasonCode.REROUTE_NOT_CURRENT_EMPLOYEE,
+                evidence=bundle, retryable=False, next_action="write_review",
                 metadata={"current_employment_reason": current_reason},
             )
         bundle.add(FactValue(
@@ -215,8 +215,8 @@ class ContactGate:
                 )
         if intent_market == "us_market" and config.REQUIRE_US_CONTACT_TERRITORY and not has_us and not role_global:
             return GateDecision(
-                "contact", GateState.REROUTE, ReasonCode.REROUTE_TERRITORY_UNVERIFIED,
-                evidence=bundle, retryable=True, next_action="try_next_contact",
+                "contact", GateState.NEEDS_CHECK, ReasonCode.REROUTE_TERRITORY_UNVERIFIED,
+                evidence=bundle, retryable=False, next_action="write_review",
                 metadata={"territory_text": territory},
             )
         territory_value = (

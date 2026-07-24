@@ -14,6 +14,7 @@ from company_identity import normalize_company_name
 from domain_utils import normalize_company_domain
 from job_filter import normalize_text
 from job_signal import annotate_job
+from review_policy import is_airtable_reviewable
 from validation_integrity import validation_fingerprint, utc_now_iso
 from http_utils import request_with_retry, safe_json
 
@@ -350,10 +351,7 @@ def push_leads(jobs: List[Dict], batch_size: int = 10) -> Dict:
     if strict_mode:
         reviewable = [
             dict(job) for job in jobs
-            if job.get("_final_state") == "FINAL_PASS"
-            and job.get("_airtable_relevance") == "accept"
-            and job.get("hiring_manager_email")
-            and job.get("lead_key")
+            if is_airtable_reviewable(job)
         ]
     else:
         # Legacy compatibility is retained only for rollback-mode fixtures.
@@ -507,7 +505,10 @@ def push_leads(jobs: List[Dict], batch_size: int = 10) -> Dict:
         "skipped_no_contact": skipped_no_contact,
         "reviewable": len(unique_by_key),
         "final_pass": sum(job.get("_final_state") == "FINAL_PASS" for job in unique_by_key.values()),
-        "needs_check": 0,
+        "needs_check": sum(
+            job.get("_final_state") in {"NEEDS_CHECK", "UNVERIFIED"}
+            for job in unique_by_key.values()
+        ),
         "strict_mode": strict_mode,
         "job_signal_review_required": signal_review_required,
     }
@@ -671,13 +672,15 @@ def get_approved_leads() -> List[Dict]:
     if config.FINAL_PASS_PIPELINE_ENABLED:
         safe_records = [
             record for record in records
-            if str((record.get("fields") or {}).get("Final Decision") or "").strip() == "FINAL_PASS"
+            if str((record.get("fields") or {}).get("Final Decision") or "").strip()
+            in {"FINAL_PASS", "NEEDS_CHECK", "UNVERIFIED"}
             and str((record.get("fields") or {}).get("Validation Version") or "").strip()
+            and str((record.get("fields") or {}).get("Email") or "").strip()
         ]
         skipped = len(records) - len(safe_records)
         if skipped:
             logger.error(
-                "Blocked %d Approved Airtable row(s) without a validated FINAL_PASS decision",
+                "Blocked %d Approved Airtable row(s) without an actionable validated decision",
                 skipped,
             )
         return safe_records

@@ -86,6 +86,11 @@ class FinalDecision:
     def airtable_relevance(self) -> str | None:
         if self.state_value == FinalState.FINAL_PASS.value:
             return "accept"
+        if self.state_value in {
+            FinalState.NEEDS_CHECK.value,
+            FinalState.UNVERIFIED.value,
+        }:
+            return "review"
         return None
 
     def to_dict(self) -> Dict[str, Any]:

@@ -121,9 +121,14 @@ class PreproductionQualificationTests(unittest.TestCase):
                     "_job_gate_decision": {"metadata": {"source": {"state": "NEEDS_CHECK"}}},
                 }
 
-        class NeverCalledRoleGate:
+        class ReviewableRoleGate:
             def annotate(self, job):
-                raise AssertionError("role gate should not run")
+                return {
+                    **job,
+                    "_role_gate_state": GateState.PASS.value,
+                    "_role_gate_reason": "role_pass",
+                    "_role_gate_decision": {"state": GateState.PASS.value},
+                }
 
         with tempfile.TemporaryDirectory() as temp:
             input_path = Path(temp) / "input.json"
@@ -136,10 +141,10 @@ class PreproductionQualificationTests(unittest.TestCase):
                 str(input_path),
                 output_dir=temp,
                 job_gate=NeedsCheckJobGate(),
-                role_gate=NeverCalledRoleGate(),
+                role_gate=ReviewableRoleGate(),
             )
         self.assertEqual(result.needs_check_jobs, 1)
-        self.assertEqual(result.contact_eligible_jobs, 0)
+        self.assertEqual(result.contact_eligible_jobs, 1)
 
     def test_provider_evidence_labels_are_source_aware(self):
         fact = _provider_signal_fact(
