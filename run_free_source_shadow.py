@@ -142,8 +142,9 @@ def main() -> int:
         "final_pass_computed": False,
         "meaning": (
             "Shadow validates public acquisition plus zero-credit Job and Role Gates. "
-            "Company size, firmographics, hiring-manager, email and FINAL_PASS still require "
-            "one controlled production run."
+            "Verified Himalayas profiles can also reject clearly out-of-range company sizes "
+            "and excluded industries for free. Remaining firmographics, hiring-manager, email "
+            "and FINAL_PASS still require one controlled production run."
         ),
         "next_required_stage": "review shadow quality, then run one controlled production execution",
     }
@@ -200,6 +201,9 @@ def main() -> int:
         "filter_rejected": filtered.rejected_count,
         "contact_eligible_jobs": qualified.contact_eligible_jobs,
         "source_outcomes": acquisition.stats.get("source_outcomes", {}),
+        "himalayas_company_profiles": acquisition.stats.get(
+            "himalayas_company_profiles", {}
+        ),
         "filtered_company_metrics": filtered_company_metrics,
         "contact_eligible_company_metrics": qualified_company_metrics,
         "filter_stats": filtered.stats,

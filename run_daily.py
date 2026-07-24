@@ -17,6 +17,7 @@ from pathlib import Path
 import airtable_client
 import config
 from audit_filter import run_audit
+from age_recovery import run_age_recovery
 from hiring_manager import run_hiring_manager_identification
 from jsearch_scraper import ScrapeResult, run_daily_scrape
 from multi_source_acquisition import run_multi_source_acquisition
@@ -138,11 +139,18 @@ def _load_jobs(path: str | None) -> list[dict]:
 
 
 def _ready_targets(starting_ready_count: int) -> tuple[int, int]:
-    """Return (acquisition target, delivery target) for the current inventory."""
+    """Return (minimum acquisition SLA, minimum delivery SLA).
+
+    A zero delivery limit means unlimited delivery, not zero. The returned
+    delivery target remains the minimum used for SLA reporting; selection later
+    sends every READY lead when no explicit cap is configured.
+    """
     configured_daily_target = max(1, int(config.get_final_pass_target()))
-    delivery_target = max(
-        1,
-        min(configured_daily_target, int(config.READY_DAILY_DELIVERY_LIMIT)),
+    configured_limit = int(config.READY_DAILY_DELIVERY_LIMIT)
+    delivery_target = (
+        configured_daily_target
+        if configured_limit <= 0
+        else max(1, min(configured_daily_target, configured_limit))
     )
     planned_existing_delivery = min(max(0, int(starting_ready_count)), delivery_target)
     inventory_after_planned_delivery = max(
@@ -153,6 +161,27 @@ def _ready_targets(starting_ready_count: int) -> tuple[int, int]:
         int(config.READY_INVENTORY_TARGET) - inventory_after_planned_delivery,
     )
     return acquisition_target, delivery_target
+
+
+def _jsearch_topup_enabled(
+    acquisition_mode: str,
+    *,
+    jsearch_available: bool,
+    target_final_pass: int,
+) -> bool:
+    mode = str(acquisition_mode or "").strip().lower()
+    if mode == "multi_source":
+        topup_switch = config.MULTI_SOURCE_JSEARCH_TOPUP_ENABLED
+    elif config.FINAL_PASS_PIPELINE_ENABLED:
+        topup_switch = config.FINAL_PASS_TOPUP_ENABLED
+    else:
+        topup_switch = config.JSEARCH_REVIEWABLE_TOPUP_ENABLED
+    return bool(
+        jsearch_available
+        and topup_switch
+        and config.JSEARCH_TOPUP_MAX_ROUNDS > 0
+        and int(target_final_pass) > 0
+    )
 
 
 def run_pipeline() -> dict:
@@ -178,19 +207,18 @@ def run_pipeline() -> dict:
     checkpoint_jobs = checkpoint.pending_jobs()
     checkpoint_metrics = checkpoint.query_metrics()
     due_recovery_jobs = recovery_queue.due_jobs()
-    # JSearch-specific micro-batch top-up is disabled outside explicit rollback
-    # mode. Free sources and direct ATS boards are already fetched in their full
-    # bounded daily windows; invoking JSearch here would reintroduce the noisy
-    # dependency that v1.3 removes from production.
-    topup_enabled = bool(
-        str(config.ACQUISITION_MODE).lower() == "jsearch"
-        and (
-            config.FINAL_PASS_TOPUP_ENABLED
-            if config.FINAL_PASS_PIPELINE_ENABLED
-            else config.JSEARCH_REVIEWABLE_TOPUP_ENABLED
-            and config.JSEARCH_TOPUP_MAX_ROUNDS > 0
-        )
-        and target_final_pass > 0
+    # JSearch is a resilient companion source in multi-source mode. It may add
+    # deep-page inventory after free feeds/ATS and age recovery, but quota or
+    # provider failure never disables the rest of acquisition.
+    acquisition_mode = str(config.ACQUISITION_MODE).lower()
+    jsearch_available = bool(config.RAPIDAPI_KEY) and (
+        acquisition_mode == "jsearch"
+        or (acquisition_mode == "multi_source" and config.MULTI_SOURCE_JSEARCH_ENABLED)
+    )
+    topup_enabled = _jsearch_topup_enabled(
+        acquisition_mode,
+        jsearch_available=jsearch_available,
+        target_final_pass=target_final_pass,
     )
     if checkpoint_jobs:
         logger.warning(
@@ -268,7 +296,12 @@ def run_pipeline() -> dict:
         )
 
     logger.info("=== STEP 2: FILTER ===")
-    filtered = run_filter(input_path=scrape.output_path, registry=registry)
+    filtered = run_filter(
+        input_path=scrape.output_path,
+        registry=registry,
+        max_age_days=config.PRIMARY_MAX_JOB_AGE_DAYS,
+        output_suffix="primary",
+    )
     summary["steps"]["filter"] = {
         "success": filtered.success,
         "kept": filtered.kept_count,
@@ -398,6 +431,30 @@ def run_pipeline() -> dict:
         exclude_company_keys=existing_airtable_company_keys,
         output_suffix="initial",
     )
+    summary["steps"]["age_recovery"] = {
+        "enabled": False,
+        "attempted": False,
+        "stop_reason": "not_applicable",
+    }
+    if strict_runtime:
+        enriched, age_recovery_summary = run_age_recovery(
+            initial_scrape=scrape,
+            initial_enriched=enriched,
+            registry=registry,
+            target_final_pass_leads=target_final_pass,
+            max_eligible_companies=(
+                config.MAX_ELIGIBLE_COMPANIES_PER_RUN
+                if config.MAX_ELIGIBLE_COMPANIES_PER_RUN > 0
+                else None
+            ),
+            exclude_company_keys=existing_airtable_company_keys,
+        )
+        summary["steps"]["age_recovery"] = age_recovery_summary
+        if age_recovery_summary.get("qualification_nonpass_output"):
+            precontact_nonpass_paths.append(
+                str(age_recovery_summary["qualification_nonpass_output"])
+            )
+
     summary["steps"]["topup"] = {
         "enabled": topup_enabled,
         "mode": "final_pass" if strict_runtime else "legacy_reviewable",
@@ -554,7 +611,13 @@ def run_pipeline() -> dict:
     inventory_leads: list[dict] = []
     if strict_runtime:
         final_pass_inventory.stage(current_final_pass)
-        inventory_leads = final_pass_inventory.available(limit=delivery_target)
+        inventory_leads = final_pass_inventory.available(
+            limit=(
+                None
+                if int(config.READY_DAILY_DELIVERY_LIMIT) <= 0
+                else int(config.READY_DAILY_DELIVERY_LIMIT)
+            )
+        )
         final_pass_inventory.reserve(inventory_leads)
         airtable_candidates = inventory_leads
     else:

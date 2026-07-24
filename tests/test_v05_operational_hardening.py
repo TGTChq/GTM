@@ -217,7 +217,7 @@ class SourceIdentityAndActivityTests(unittest.TestCase):
 
 
 class ProvenanceAndContactTests(unittest.TestCase):
-    def test_explicit_hybrid_claim_is_hard_reject(self):
+    def test_explicit_hybrid_claim_remains_valid_demand(self):
         source = ResolvedJobSource(
             state="ACTIVE_VERIFIED", source_url="https://example.com/jobs/j1",
             source_type="company", http_status=200, active=True,
@@ -232,7 +232,7 @@ class ProvenanceAndContactTests(unittest.TestCase):
         )
         resolver = SimpleNamespace(resolve=lambda *_args, **_kwargs: source)
         decision = JobGate(resolver).evaluate(job)
-        self.assertEqual(decision.state, GateState.REJECT)
+        self.assertEqual(decision.state, GateState.PASS)
 
     def _person(self, **overrides):
         raw = {

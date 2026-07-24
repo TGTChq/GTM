@@ -521,6 +521,7 @@ def assess_restricted_work(job: Dict) -> QualityAssessment:
 
 def assess_outsourcing_intermediary(job: Dict) -> QualityAssessment:
     employer = re.sub(r"[^a-z0-9]+", " ", str(job.get("employer_name") or "").lower()).strip()
+    title = str(job.get("job_title") or "")
     description = str(job.get("job_description") or "")[:7000]
 
     for known in config.KNOWN_OUTSOURCING_EMPLOYERS:
@@ -534,6 +535,29 @@ def assess_outsourcing_intermediary(job: Dict) -> QualityAssessment:
     if re.search(r"\b(?:call|contact) center\b|\bbpo\b|\boutsourc(?:ing|ed)\b", employer, re.I):
         return QualityAssessment(
             False, "excluded_outsourcing", "outsourcing_service_model_in_employer"
+        )
+
+    # Professional Employer Organizations are outsourced/co-employment service
+    # providers rather than the direct-employer hiring signal TGTC targets. Use
+    # service-delivery corroboration so unrelated uses of the acronym are not
+    # rejected.
+    peo_title = re.search(
+        r"(?:\bpeo\b[^\n]{0,80}\b(?:payroll|benefits|hr|human resources|client|"
+        r"account|implementation|service|specialist|consultant)\b|"
+        r"\b(?:payroll|benefits|hr|human resources|client|account|implementation|"
+        r"service)\b[^\n]{0,80}\bpeo\b)",
+        title,
+        re.I,
+    )
+    peo_description = re.search(
+        r"\b(?:professional employer organization|peo services?|co[- ]employment|"
+        r"worksite employees?)\b",
+        description,
+        re.I,
+    )
+    if peo_title or peo_description:
+        return QualityAssessment(
+            False, "excluded_outsourcing", "peo_service_delivery_role"
         )
 
     for pattern in config.OUTSOURCING_DESCRIPTION_PATTERNS:

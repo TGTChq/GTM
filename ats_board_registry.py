@@ -2,7 +2,7 @@
 
 The registry is populated from URLs already present in source jobs and historical
 raw artifacts. It never requires a user-maintained company list. Supported
-public boards: Greenhouse, Lever (global/EU), Ashby, Recruitee, Workable, and Personio.
+public boards: Greenhouse, Lever (global/EU), Ashby, Recruitee, Workable, Personio, SmartRecruiters, and Workday.
 """
 
 from __future__ import annotations
@@ -120,6 +120,45 @@ def detect_board_ref(url: str) -> Optional[BoardRef]:
         suffix = "com" if host.endswith(".com") else "de"
         base = f"https://{slug}.jobs.personio.{suffix}"
         return BoardRef("personio", slug, base, base)
+
+    smartrecruiters_hosts = {
+        "careers.smartrecruiters.com",
+        "jobs.smartrecruiters.com",
+        "smartrecruiters.com",
+    }
+    if host in smartrecruiters_hosts and parts:
+        identifier = parts[0]
+        if identifier not in {"external-referrals", "candidate", "jobs"}:
+            return BoardRef(
+                "smartrecruiters",
+                identifier,
+                "https://api.smartrecruiters.com/v1",
+                f"https://careers.smartrecruiters.com/{identifier}",
+            )
+    if host == "api.smartrecruiters.com":
+        try:
+            identifier = parts[parts.index("companies") + 1]
+        except (ValueError, IndexError):
+            identifier = ""
+        if identifier:
+            return BoardRef(
+                "smartrecruiters",
+                identifier,
+                "https://api.smartrecruiters.com/v1",
+                f"https://careers.smartrecruiters.com/{identifier}",
+            )
+
+    workday = re.fullmatch(r"([a-z0-9-]+)\.wd\d+\.myworkdayjobs\.com", host)
+    if workday:
+        path_parts = list(parts)
+        if path_parts and re.fullmatch(r"[a-z]{2}-[a-z]{2}", path_parts[0], re.I):
+            path_parts = path_parts[1:]
+        if path_parts:
+            tenant = workday.group(1)
+            site = path_parts[0]
+            identifier = f"{tenant}|{site}"
+            base = f"https://{host}"
+            return BoardRef("workday", identifier, base, f"{base}/{site}")
     return None
 
 
@@ -364,7 +403,10 @@ class AtsBoardRegistry:
 
 def _board_identity_verified(company_name: Any, identifier: Any) -> bool:
     company = str(company_name or "").strip()
-    board_name = re.sub(r"[-_]+", " ", str(identifier or "")).strip()
+    raw_identifier = str(identifier or "")
+    if "|" in raw_identifier:
+        raw_identifier = raw_identifier.split("|", 1)[0]
+    board_name = re.sub(r"[-_]+", " ", raw_identifier).strip()
     if len(re.sub(r"[^a-z0-9]+", "", company.lower())) < 4:
         return False
     if len(re.sub(r"[^a-z0-9]+", "", board_name.lower())) < 4:
@@ -411,7 +453,19 @@ def _direct_job(
     location_text = re.sub(r"\s+", " ", str(location or "")).strip()
     workplace = str(workplace_type or "").strip().lower()
     description_text = html_to_text(description)
-    remote = workplace == "remote" or bool(re.search(r"\bremote\b", f"{location_text}\n{description_text[:3000]}", re.I))
+    explicit_in_person = workplace in {
+        "hybrid", "onsite", "on site", "on-site", "in person", "in-person",
+    }
+    provider_remote = bool(extra and extra.get("_provider_is_remote") is True)
+    # A structured Hybrid/OnSite workplace type is more specific than a broad
+    # provider flag indicating that some remote work is possible. Keep the
+    # provider flag for auditability, but never let it turn a mandatory office
+    # role into a fully remote posting.
+    remote = False if explicit_in_person else (
+        workplace == "remote"
+        or provider_remote
+        or bool(re.search(r"\bremote\b", f"{location_text}\n{description_text[:3000]}", re.I))
+    )
     country = "US" if re.search(r"\b(?:united states|usa|u\.s\.|remote us|us only)\b", f"{location_text}\n{description_text[:4000]}", re.I) else ""
     job = {
         "job_id": f"ats:{provider}:{board.get('identifier')}:{job_id}",
@@ -428,6 +482,7 @@ def _direct_job(
         "job_location": location_text or ("Remote" if remote else ""),
         "job_country": country,
         "job_is_remote": remote,
+        "work_arrangement": str(workplace_type or "").strip(),
         "job_employment_type": str(employment_type or "").strip(),
         "job_posted_at_datetime_utc": _timestamp(posted_at),
         "job_offer_expiration_datetime_utc": _timestamp(expires_at),
@@ -489,6 +544,8 @@ def fetch_board_jobs(
     fetcher: Fetcher = default_fetcher,
     *,
     greenhouse_detail_budget: Optional[int] = None,
+    workday_detail_budget: Optional[int] = None,
+    smartrecruiters_detail_budget: Optional[int] = None,
 ) -> Tuple[List[Dict[str, Any]], str]:
     provider = str(board.get("provider") or "")
     identifier = str(board.get("identifier") or "")
@@ -588,12 +645,19 @@ def fetch_board_jobs(
             secondary_location = ""
             if isinstance(secondary, list) and secondary and isinstance(secondary[0], dict):
                 secondary_location = str(secondary[0].get("location") or "")
-            workplace_type = "Remote" if row.get("isRemote") is True else row.get("workplaceType")
+            workplace_type = row.get("workplaceType") or (
+                "Remote" if row.get("isRemote") is True else ""
+            )
             output.append(_direct_job(
                 provider=provider, board=board, job_id=row.get("id") or row.get("jobUrl"), title=row.get("title"),
                 description=row.get("descriptionPlain") or row.get("descriptionHtml"), url=row.get("jobUrl") or row.get("applyUrl"),
                 location=row.get("location") or secondary_location, employment_type=row.get("employmentType"),
                 posted_at=row.get("publishedAt") or row.get("updatedAt"), workplace_type=workplace_type,
+                extra={
+                    "_provider_is_remote": row.get("isRemote"),
+                    "_provider_workplace_type": row.get("workplaceType"),
+                    "_provider_secondary_locations": secondary,
+                },
             ))
         return output, ""
 
@@ -673,6 +737,256 @@ def fetch_board_jobs(
                 location=office, employment_type=_xml_text(position, "employmentType"),
                 posted_at=_xml_text(position, "createdAt") or _xml_text(position, "publishedAt"),
                 workplace_type="remote" if re.search(r"\bremote\b", f"{office}\n{description}", re.I) else "",
+            ))
+        return output, ""
+
+    if provider == "smartrecruiters":
+        api_base = str(
+            board.get("api_base") or "https://api.smartrecruiters.com/v1"
+        ).rstrip("/")
+        endpoint = f"{api_base}/companies/{identifier}/postings"
+        page_limit = max(
+            1, int(getattr(config, "ATS_SMARTRECRUITERS_MAX_PAGES_PER_BOARD", 3))
+        )
+        per_board_budget = max(
+            0,
+            int(
+                getattr(
+                    config,
+                    "ATS_SMARTRECRUITERS_DETAIL_MAX_REQUESTS_PER_BOARD",
+                    25,
+                )
+            ),
+        )
+        detail_limit = (
+            per_board_budget
+            if smartrecruiters_detail_budget is None
+            else min(per_board_budget, max(0, int(smartrecruiters_detail_budget)))
+        )
+
+        rows: List[Dict[str, Any]] = []
+        offset = 0
+        page_size = 100
+        for _page in range(page_limit):
+            data, error = _fetch_json(
+                fetcher,
+                endpoint,
+                params={
+                    "limit": page_size,
+                    "offset": offset,
+                    "destination": "PUBLIC",
+                },
+            )
+            if error:
+                return [], error
+            if not isinstance(data, dict):
+                return [], "invalid_smartrecruiters_list"
+            page_rows = data.get("content", data.get("postings", []))
+            if not isinstance(page_rows, list) or not page_rows:
+                break
+            rows.extend(row for row in page_rows if isinstance(row, dict))
+            offset += len(page_rows)
+            try:
+                total = int(data.get("totalFound", data.get("total", 0)) or 0)
+            except (TypeError, ValueError):
+                total = 0
+            if (
+                len(page_rows) < page_size
+                or (total and offset >= total)
+                or len(rows) >= max_jobs
+            ):
+                break
+
+        def label(value: Any) -> str:
+            if isinstance(value, Mapping):
+                return str(value.get("label") or value.get("name") or "").strip()
+            return str(value or "").strip()
+
+        def location_text(value: Any) -> str:
+            if not isinstance(value, Mapping):
+                return str(value or "").strip()
+            country = str(
+                value.get("country") or value.get("countryCode") or ""
+            ).strip()
+            if country.lower() in {"us", "usa"}:
+                country = "United States"
+            return ", ".join(
+                part
+                for part in (
+                    str(value.get("city") or "").strip(),
+                    str(value.get("region") or value.get("regionCode") or "").strip(),
+                    country,
+                )
+                if part
+            )
+
+        def description_text(value: Mapping[str, Any]) -> str:
+            job_ad = value.get("jobAd") or {}
+            sections = job_ad.get("sections") if isinstance(job_ad, Mapping) else {}
+            if not isinstance(sections, Mapping):
+                return ""
+            parts: List[str] = []
+            for key in (
+                "companyDescription",
+                "jobDescription",
+                "qualifications",
+                "additionalInformation",
+            ):
+                section = sections.get(key)
+                if not isinstance(section, Mapping):
+                    continue
+                title = str(section.get("title") or "").strip()
+                text = str(section.get("text") or "").strip()
+                if title or text:
+                    parts.append("\n".join(item for item in (title, text) if item))
+            return "\n\n".join(parts)
+
+        output: List[Dict[str, Any]] = []
+        detail_calls = 0
+        for row in rows[:max_jobs]:
+            title = row.get("name") or row.get("title")
+            posting_id = row.get("id") or row.get("uuid")
+            detail: Mapping[str, Any] = {}
+            detail_error = ""
+            detail_requested = False
+            if (
+                posting_id
+                and detail_calls < detail_limit
+                and _greenhouse_title_may_match(title)
+            ):
+                detail_calls += 1
+                detail_requested = True
+                fetched, detail_error = _fetch_json(
+                    fetcher, f"{endpoint}/{posting_id}"
+                )
+                if isinstance(fetched, Mapping):
+                    detail = fetched
+            effective: Mapping[str, Any] = detail or row
+            if effective.get("active") is False:
+                continue
+            company_data = effective.get("company") or row.get("company") or {}
+            company_name = (
+                str(company_data.get("name") or "").strip()
+                if isinstance(company_data, Mapping)
+                else ""
+            )
+            row_board = dict(board)
+            if company_name:
+                row_board["company_name"] = company_name
+            location_data = effective.get("location") or row.get("location") or {}
+            remote = bool(
+                isinstance(location_data, Mapping) and location_data.get("remote") is True
+            )
+            employment = label(
+                effective.get("typeOfEmployment") or row.get("typeOfEmployment")
+            )
+            description = description_text(effective)
+            url = (
+                effective.get("postingUrl")
+                or effective.get("applyUrl")
+                or row.get("postingUrl")
+                or row.get("ref")
+                or f"https://jobs.smartrecruiters.com/{identifier}/{posting_id}"
+            )
+            output.append(
+                _direct_job(
+                    provider=provider,
+                    board=row_board,
+                    job_id=posting_id,
+                    title=effective.get("name") or title,
+                    description=description,
+                    url=url,
+                    location=location_text(location_data),
+                    employment_type=employment,
+                    posted_at=(
+                        effective.get("releasedDate") or row.get("releasedDate")
+                    ),
+                    workplace_type="remote" if remote else "",
+                    extra={
+                        "_provider_is_remote": remote,
+                        "_smartrecruiters_detail_request_made": detail_requested,
+                        "_smartrecruiters_detail_error": detail_error,
+                    },
+                )
+            )
+        return output, ""
+
+    if provider == "workday":
+        if "|" not in identifier:
+            return [], "invalid_workday_identifier"
+        tenant, site = identifier.split("|", 1)
+        api_base = str(board.get("api_base") or "").rstrip("/")
+        if not api_base:
+            return [], "missing_workday_api_base"
+        cxs_base = f"{api_base}/wday/cxs/{tenant}/{site}"
+        page_limit = max(1, int(getattr(config, "ATS_WORKDAY_MAX_PAGES_PER_BOARD", 5)))
+        per_board_budget = max(0, int(getattr(config, "ATS_WORKDAY_DETAIL_MAX_REQUESTS_PER_BOARD", 25)))
+        detail_limit = per_board_budget if workday_detail_budget is None else min(
+            per_board_budget, max(0, int(workday_detail_budget))
+        )
+        rows: List[Dict[str, Any]] = []
+        offset = 0
+        for _page in range(page_limit):
+            payload = fetcher(
+                f"{cxs_base}/jobs",
+                method="POST",
+                json_body={"appliedFacets": {}, "limit": 20, "offset": offset, "searchText": ""},
+                headers={"Accept": "application/json", "Content-Type": "application/json"},
+            )
+            if payload.status_code != 200:
+                return [], f"HTTP {payload.status_code or 'error'}: {payload.error or payload.text[:200]}"
+            try:
+                data = json.loads(payload.text)
+            except (TypeError, ValueError, json.JSONDecodeError) as exc:
+                return [], f"invalid_json:{exc}"
+            page_rows = data.get("jobPostings", []) if isinstance(data, dict) else []
+            if not isinstance(page_rows, list) or not page_rows:
+                break
+            rows.extend(row for row in page_rows if isinstance(row, dict))
+            offset += len(page_rows)
+            total = int(data.get("total", 0) or 0) if isinstance(data, dict) else 0
+            if len(page_rows) < 20 or (total and offset >= total) or len(rows) >= max_jobs:
+                break
+
+        output: List[Dict[str, Any]] = []
+        detail_calls = 0
+        for row in rows[:max_jobs]:
+            title = row.get("title")
+            external_path = str(row.get("externalPath") or row.get("externalUrl") or "")
+            posting_path = external_path.split("/job/", 1)[1] if "/job/" in external_path else ""
+            detail_info: Dict[str, Any] = {}
+            detail_error = ""
+            detail_requested = False
+            if posting_path and detail_calls < detail_limit and _greenhouse_title_may_match(title):
+                detail_calls += 1
+                detail_requested = True
+                detail, detail_error = _fetch_json(fetcher, f"{cxs_base}/job/{posting_path}")
+                if isinstance(detail, dict) and isinstance(detail.get("jobPostingInfo"), dict):
+                    detail_info = detail["jobPostingInfo"]
+            description = detail_info.get("jobDescription") or ""
+            location = detail_info.get("location") or detail_info.get("primaryLocation") or row.get("locationsText") or ""
+            url = detail_info.get("externalUrl") or external_path
+            if url and str(url).startswith("/"):
+                url = f"{api_base}{url}"
+            job_id = detail_info.get("jobReqId") or (
+                row.get("bulletFields", [""])[0]
+                if isinstance(row.get("bulletFields"), list) and row.get("bulletFields")
+                else external_path
+            )
+            output.append(_direct_job(
+                provider=provider,
+                board=board,
+                job_id=job_id,
+                title=detail_info.get("title") or title,
+                description=description,
+                url=url or board.get("board_url"),
+                location=location,
+                employment_type=detail_info.get("timeType") or detail_info.get("workerType") or "",
+                posted_at=detail_info.get("startDate") or detail_info.get("postedOn") or row.get("postedOn") or "",
+                extra={
+                    "_workday_detail_request_made": detail_requested,
+                    "_workday_detail_error": detail_error,
+                },
             ))
         return output, ""
 

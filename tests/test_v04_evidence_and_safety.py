@@ -90,12 +90,12 @@ class CrossSourceJobFactTests(unittest.TestCase):
         self.assertEqual(facts["work_arrangement"].status, EvidenceStatus.VERIFIED_CROSS_SOURCE)
         self.assertEqual(facts["intent_market"].status, EvidenceStatus.VERIFIED_CROSS_SOURCE)
 
-    def test_official_onsite_contradiction_overrides_provider_remote(self):
+    def test_official_onsite_contradiction_updates_modality_without_rejecting(self):
         decision = JobGate(_Resolver(_source(
             "Employees must work in our office three days per week."
         ))).evaluate(_provider_job())
-        self.assertEqual(decision.state, GateState.REJECT)
-        self.assertEqual(str(decision.primary_reason.value), "REJECT_ONSITE_REQUIRED")
+        self.assertEqual(decision.state, GateState.PASS)
+        self.assertEqual(decision.evidence.facts["work_arrangement"].value, "onsite_required")
 
     def test_official_contract_contradiction_overrides_provider_full_time(self):
         decision = JobGate(_Resolver(_source(

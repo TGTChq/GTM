@@ -192,15 +192,18 @@ def is_job_aggregator_or_publisher(job: Dict) -> Tuple[bool, str]:
     return False, ""
 
 
-def is_stale_job(job: Dict) -> Tuple[bool, str]:
-    """Reject only clearly stale or unverifiable job-intent signals before enrichment.
+def is_stale_job(
+    job: Dict,
+    *,
+    max_age_days: Optional[int] = None,
+    min_age_days: Optional[int] = None,
+) -> Tuple[bool, str]:
+    """Apply a bounded age window without treating every missing date as invalid.
 
-    Provider feeds can surface an old syndicated listing inside a recent-date
-    query. We use the oldest parseable posting signal in the payload. Missing
-    dates are normally retained, except for direct Greenhouse acquisition:
-    Greenhouse exposes ``first_published`` on its public job-detail endpoint,
-    so a direct record without that verified freshness signal must not consume
-    paid enrichment.
+    The primary pass accepts 0-14 day postings. A later recovery pass may select
+    15-30 day postings from the same acquired inventory. Explicit expiration is
+    always terminal. Direct Greenhouse jobs still require verified first-published
+    evidence before any paid enrichment.
     """
     source = str(job.get("_acquisition_source") or "").lower()
     ats_provider = str(job.get("_ats_provider") or "").lower()
@@ -213,8 +216,11 @@ def is_stale_job(job: Dict) -> Tuple[bool, str]:
     _freshness, age_days, reason = classify_freshness(job)
     if reason == "explicit_expiration_is_in_the_past":
         return True, "expired_job_posting"
-    if age_days is not None and age_days >= config.MAX_JOB_AGE_DAYS:
+    effective_max = config.MAX_JOB_AGE_DAYS if max_age_days is None else max_age_days
+    if age_days is not None and effective_max is not None and age_days > int(effective_max):
         return True, f"stale_job:{age_days}days"
+    if age_days is not None and min_age_days is not None and age_days < int(min_age_days):
+        return True, f"outside_recovery_window:{age_days}days"
     return False, ""
 
 
@@ -302,7 +308,14 @@ def is_excluded_industry(job: Dict) -> Tuple[bool, str]:
     if not config.ENABLE_BROADER_INDUSTRY_EXCLUSIONS:
         return False, ""
 
-    employer_norm = normalize_text(job.get("employer_name", "") or "")
+    employer_raw = str(job.get("employer_name", "") or "")
+    employer_norm_original = normalize_text(employer_raw)
+    # Preserve word boundaries hidden inside CamelCase brands (UnitedHealth ->
+    # United Health) without changing normalization behavior across the rest of
+    # the pipeline.
+    employer_norm = normalize_text(
+        re.sub(r"(?<=[a-z])(?=[A-Z])", " ", employer_raw)
+    )
     title_norm = normalize_text(job.get("job_title", "") or "")
     website = (job.get("employer_website") or "").lower()
     apply_domain = extract_domain(job.get("job_apply_link") or "")
@@ -312,7 +325,9 @@ def is_excluded_industry(job: Dict) -> Tuple[bool, str]:
             return True, f"excluded_industry_job_title:{keyword}"
 
     for keyword in config.EXCLUDED_INDUSTRY_EMPLOYER_KEYWORDS:
-        if _contains_keyword(employer_norm, keyword):
+        if _contains_keyword(employer_norm_original, keyword) or _contains_keyword(
+            employer_norm, keyword
+        ):
             return True, f"excluded_industry_employer:{keyword}"
 
     if any(marker in website for marker in config.GOVERNMENT_WEBSITE_MARKERS):
@@ -342,6 +357,37 @@ def is_excluded_industry(job: Dict) -> Tuple[bool, str]:
     if website_domain.endswith(".org") and mission_signal:
         return True, "excluded_industry_mission_driven_org"
 
+    if job.get("_provider_company_profile_verified") is True:
+        profile_text = str(job.get("_provider_company_profile_text") or "")[:7000]
+        for pattern in config.PROVIDER_PROFILE_EXCLUDED_INDUSTRY_PATTERNS:
+            if re.search(pattern, profile_text, re.I):
+                return True, f"excluded_industry_provider_profile:{pattern}"
+
+    return False, ""
+
+
+def is_provider_firmographics_outside_target(job: Dict) -> Tuple[bool, str]:
+    """Reject only company-size ranges that cannot overlap the ICP.
+
+    Provider profile ranges are useful as a free pre-Apollo gate, but a range
+    such as 11-50 overlaps the configured minimum of 25 and must remain eligible.
+    """
+    if job.get("_provider_company_profile_verified") is not True:
+        return False, ""
+    try:
+        minimum = int(job.get("_provider_employee_min"))
+    except (TypeError, ValueError):
+        minimum = None
+    try:
+        maximum = int(job.get("_provider_employee_max"))
+    except (TypeError, ValueError):
+        maximum = None
+
+    if maximum is not None and maximum < config.MIN_EMPLOYEES:
+        return True, f"provider_employee_range_below_min:{minimum or 0}-{maximum}"
+    if minimum is not None and minimum > config.MAX_EMPLOYEES:
+        suffix = str(maximum) if maximum is not None else "plus"
+        return True, f"provider_employee_range_above_max:{minimum}-{suffix}"
     return False, ""
 
 
@@ -539,6 +585,21 @@ def assess_us_eligibility(job: Dict) -> GeographyEvidence:
         return GeographyEvidence(True, reason, display, "us_explicit")
 
     generic_remote = normalized_location in config.GENERIC_REMOTE_LOCATIONS
+    ambiguous_global_location = normalized_location in {
+        "anywhere", "worldwide", "global", "global remote",
+        "remote worldwide", "anywhere in the world",
+    }
+    query_country_hint = normalize_text(job.get("_jsearch_country_filter") or "")
+    query_remote_hint = job.get("_jsearch_remote_filter_applied") is True
+    if ambiguous_global_location and not (
+        query_country_hint in config.US_COUNTRY_CODES and query_remote_hint
+    ):
+        return GeographyEvidence(
+            False,
+            "ambiguous_remote_location_without_us_evidence",
+            location or "Remote",
+            "ambiguous",
+        )
     if country and country not in config.US_COUNTRY_CODES:
         return GeographyEvidence(False, f"non_us_country:{country}", location or "Remote", "foreign")
 
@@ -557,13 +618,27 @@ def assess_us_eligibility(job: Dict) -> GeographyEvidence:
     if (
         config.ALLOW_PROVIDER_CONFIRMED_US_REMOTE
         and query_country in config.US_COUNTRY_CODES
-        and query_remote_only
         and (not country or country in config.US_COUNTRY_CODES)
-        and provider_remote
+        and (provider_remote or not generic_remote or not query_remote_only)
     ):
         return GeographyEvidence(
             True,
-            "provider_confirmed_us_remote",
+            "provider_confirmed_us_market",
+            _extract_display_location(job, explicit_us=True),
+            "us_provider_confirmed",
+        )
+
+    # Direct ATS records may carry an authoritative structured country even when
+    # the display location is only "Remote". Aggregator country fields are often
+    # query echoes and are not enough by themselves.
+    acquisition_source = str(job.get("_acquisition_source") or "").lower()
+    if (
+        country in config.US_COUNTRY_CODES
+        and (acquisition_source.startswith("ats_") or job.get("_ats_provider"))
+    ):
+        return GeographyEvidence(
+            True,
+            "direct_ats_country_field",
             _extract_display_location(job, explicit_us=True),
             "us_provider_confirmed",
         )
@@ -576,8 +651,6 @@ def assess_us_eligibility(job: Dict) -> GeographyEvidence:
         )
         return GeographyEvidence(False, reason, location or "Remote", "ambiguous")
 
-    if country in config.US_COUNTRY_CODES:
-        return GeographyEvidence(True, "country_field", _extract_display_location(job, explicit_us=False), "us_weak")
     return GeographyEvidence(False, "missing_us_signals", location or "Remote", "ambiguous")
 
 
@@ -587,71 +660,96 @@ def is_us_job(job: Dict) -> Tuple[bool, str]:
 
 
 
-def classify_work_arrangement(job: Dict) -> WorkArrangementEvidence:
-    """Resolve work arrangement from high-confidence text before provider flags.
+def requires_inherent_physical_presence(job: Dict) -> Tuple[bool, str]:
+    """Detect duties that cannot reasonably be delivered by remote talent.
 
-    JSearch sometimes marks an explicitly remote title as ``job_is_remote=False``.
-    Conversely, a true flag can coexist with a hybrid or onsite title. Title and
-    location requirements therefore have the highest precedence, followed by
-    precise requirement language in the description, explicit remote language,
-    and finally the provider flag.
+    An employer's current office preference is intentionally not enough. The
+    rejection requires a physical occupation or a concrete physical duty.
     """
+    title = str(job.get("job_title") or "")
+    description = str(job.get("job_description") or "")[:8000]
+    for pattern in config.INHERENT_PHYSICAL_TITLE_PATTERNS:
+        if re.search(pattern, title, re.I):
+            return True, f"inherent_physical_title:{pattern}"
+    for pattern in config.INHERENT_PHYSICAL_DESCRIPTION_PATTERNS:
+        if re.search(pattern, description, re.I):
+            return True, f"inherent_physical_duty:{pattern}"
+    return False, ""
+
+
+def classify_work_arrangement(job: Dict) -> WorkArrangementEvidence:
+    """Classify modality without treating onsite/hybrid as disqualifying.
+
+    Remote, hybrid and onsite postings are all valid demand signals. Only roles
+    with inherently physical duties are ineligible for TGTC remote delivery.
+    """
+    physical, physical_reason = requires_inherent_physical_presence(job)
+    if physical:
+        return WorkArrangementEvidence("physical_required", physical_reason)
+
     title_location = "\n".join([
         job.get("job_title") or "",
         job.get("job_location") or "",
     ])
     description = (job.get("job_description") or "")[:6000]
 
-    for pattern in config.IN_PERSON_TITLE_LOCATION_PATTERNS:
-        if re.search(pattern, title_location, re.I):
-            return WorkArrangementEvidence(
-                "in_person", f"in_person_title_or_location:{pattern}"
-            )
+    structured_arrangement = normalize_text(
+        job.get("work_arrangement")
+        or job.get("job_work_arrangement")
+        or job.get("remote_work_model")
+        or ""
+    )
+    if structured_arrangement == "hybrid":
+        return WorkArrangementEvidence("hybrid", "structured_work_arrangement:hybrid")
+    if structured_arrangement in {"onsite", "on site", "in person", "office based"}:
+        return WorkArrangementEvidence("onsite", f"structured_work_arrangement:{structured_arrangement}")
+    if structured_arrangement in {"remote", "work from home", "wfh", "fully remote"}:
+        return WorkArrangementEvidence("remote", f"structured_work_arrangement:{structured_arrangement}")
+
+    if re.search(r"\bhybrid\b", title_location, re.I):
+        return WorkArrangementEvidence("hybrid", "hybrid_title_or_location")
+    if re.search(r"\b(?:on[- ]site|onsite|in[- ]person|office[- ]based)\b", title_location, re.I):
+        return WorkArrangementEvidence("onsite", "onsite_title_or_location")
 
     for pattern in config.IN_PERSON_DESCRIPTION_PATTERNS:
-        if re.search(pattern, description, re.I):
-            return WorkArrangementEvidence(
-                "in_person", f"required_in_person_description:{pattern}"
+        match = re.search(pattern, description, re.I)
+        if match:
+            matched_text = match.group(0).lower()
+            explicit_onsite = bool(re.search(
+                r"(?:this is|position is|role is).{0,20}(?:onsite|on-site|in-office)|little to no work from home",
+                matched_text,
+                re.I,
+            ))
+            hybrid_context = bool(
+                "hybrid" in matched_text
+                or (
+                    re.search(r"days? (?:a|per) week|monday|tuesday|wednesday|thursday|friday", matched_text, re.I)
+                    and re.search(r"remote|work from home|remainder of the week", description, re.I)
+                )
             )
+            status = "onsite" if explicit_onsite else "hybrid" if hybrid_context else "onsite"
+            return WorkArrangementEvidence(status, f"office_preference_description:{pattern}")
 
     for pattern in config.REMOTE_TITLE_LOCATION_PATTERNS:
         if re.search(pattern, title_location, re.I):
-            return WorkArrangementEvidence(
-                "remote", f"remote_title_or_location:{pattern}"
-            )
+            return WorkArrangementEvidence("remote", f"remote_title_or_location:{pattern}")
 
     for pattern in config.REMOTE_DESCRIPTION_PATTERNS:
         if re.search(pattern, description, re.I):
-            return WorkArrangementEvidence(
-                "remote", f"remote_description:{pattern}"
-            )
-
-    # Newer JSearch responses expose a normalized work_arrangement field. It is
-    # useful structured evidence, but it remains below explicit posting text so
-    # a provider label can never override mandatory office language.
-    structured_arrangement = normalize_text(job.get("work_arrangement") or "")
-    if structured_arrangement in {"hybrid", "onsite", "on site", "in person"}:
-        return WorkArrangementEvidence(
-            "in_person", f"jsearch_work_arrangement:{structured_arrangement}"
-        )
-    if structured_arrangement in {"remote", "work from home", "wfh"}:
-        return WorkArrangementEvidence(
-            "remote", f"jsearch_work_arrangement:{structured_arrangement}"
-        )
+            return WorkArrangementEvidence("remote", f"remote_description:{pattern}")
 
     remote_flag = job.get("job_is_remote")
     if remote_flag is True:
-        return WorkArrangementEvidence("remote", "jsearch_remote_true")
+        return WorkArrangementEvidence("remote", "provider_remote_true")
     if remote_flag is False:
-        return WorkArrangementEvidence(
-            "in_person", "jsearch_remote_false_without_remote_evidence"
-        )
+        return WorkArrangementEvidence("onsite", "provider_remote_false")
     return WorkArrangementEvidence("unknown", "missing_work_arrangement_evidence")
 
 
 def is_explicitly_in_person(job: Dict) -> Tuple[bool, str]:
+    """Compatibility wrapper: only inherently physical work is disqualifying."""
     evidence = classify_work_arrangement(job)
-    if evidence.status == "in_person":
+    if evidence.status == "physical_required":
         return True, evidence.reason
     return False, ""
 
@@ -833,7 +931,12 @@ def is_in_crm(job: Dict, crm_normalized: Set[str], crm_compact: Set[str]) -> Tup
     return False, ""
 
 
-def assess_pre_enrichment_viability(job: Dict) -> PreEnrichmentAssessment:
+def assess_pre_enrichment_viability(
+    job: Dict,
+    *,
+    max_age_days: Optional[int] = None,
+    min_age_days: Optional[int] = None,
+) -> PreEnrichmentAssessment:
     """Apply every zero-credit gate shared by scraping and final filtering.
 
     CRM suppression, in-run deduplication, and persistent seen-state are excluded
@@ -862,15 +965,21 @@ def assess_pre_enrichment_viability(job: Dict) -> PreEnrichmentAssessment:
 
     checks = [
         ("excluded_aggregator", is_job_aggregator_or_publisher),
-        ("excluded_stale", is_stale_job),
+        (
+            "excluded_stale",
+            lambda _job: is_stale_job(
+                _job, max_age_days=max_age_days, min_age_days=min_age_days
+            ),
+        ),
         ("excluded_staffing", is_staffing_company),
+        ("excluded_firmographics", is_provider_firmographics_outside_target),
         ("excluded_industry", is_excluded_industry),
         ("excluded_role_mismatch", is_obvious_role_mismatch),
         (
             "excluded_in_person",
             lambda _job: (
-                arrangement.status == "in_person",
-                arrangement.reason if arrangement.status == "in_person" else "",
+                arrangement.status == "physical_required",
+                arrangement.reason if arrangement.status == "physical_required" else "",
             ),
         ),
         ("excluded_non_paying", is_non_paying_role),
@@ -930,6 +1039,11 @@ def run_filter(
     input_path: Optional[str] = None,
     registry: Optional[SeenJobsRegistry] = None,
     output_dir: Optional[str] = None,
+    *,
+    max_age_days: Optional[int] = None,
+    min_age_days: Optional[int] = None,
+    output_suffix: str = "",
+    allow_empty: bool = False,
 ) -> FilterResult:
     input_path = input_path or find_latest_raw_file()
     registry = registry or SeenJobsRegistry()
@@ -950,6 +1064,7 @@ def run_filter(
         "excluded_aggregator": 0,
         "excluded_stale": 0,
         "excluded_staffing": 0,
+        "excluded_firmographics": 0,
         "excluded_industry": 0,
         "excluded_role_mismatch": 0,
         "excluded_in_person": 0,
@@ -964,7 +1079,9 @@ def run_filter(
 
     for job in jobs:
         normalize_job_identity(job)
-        assessment = assess_pre_enrichment_viability(job)
+        assessment = assess_pre_enrichment_viability(
+            job, max_age_days=max_age_days, min_age_days=min_age_days
+        )
         candidate = {
             **job,
             "_work_arrangement": assessment.work_arrangement.status,
@@ -1009,8 +1126,9 @@ def run_filter(
     stamp = datetime.now().strftime("%Y-%m-%d")
     destination = Path(output_dir or config.FILTERED_OUTPUT_DIR)
     destination.mkdir(parents=True, exist_ok=True)
-    output_path = str(destination / f"jobs_filtered_{stamp}.json")
-    rejected_path = str(destination / f"jobs_rejected_{stamp}.json")
+    suffix = f"_{output_suffix.strip('_')}" if output_suffix else ""
+    output_path = str(destination / f"jobs_filtered_{stamp}{suffix}.json")
+    rejected_path = str(destination / f"jobs_rejected_{stamp}{suffix}.json")
     Path(output_path).write_text(
         json.dumps({
             "filter_date": datetime.now().isoformat(),
@@ -1033,7 +1151,7 @@ def run_filter(
     )
 
     errors: List[str] = []
-    if config.PRODUCTION and jobs and not kept:
+    if config.PRODUCTION and jobs and not kept and not allow_empty:
         errors.append("Filter kept zero jobs from a non-empty scrape")
 
     return FilterResult(

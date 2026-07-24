@@ -188,6 +188,28 @@ def _combine(
     )
 
 
+def combine_step3_results(
+    results: List[Step3Result],
+    *,
+    target_final_pass_leads: int,
+    max_eligible_companies: Optional[int],
+    stop_reason: str,
+    additional_stats: Optional[Dict] = None,
+) -> Step3Result:
+    """Combine independently validated Step-3 batches without weakening gates."""
+    if not results:
+        raise ValueError("At least one Step3Result is required")
+    payloads = [_load(result.output_path) for result in results]
+    return _combine(
+        results=results,
+        payloads=payloads,
+        target=target_final_pass_leads,
+        max_eligible_companies=max_eligible_companies,
+        stop_reason=stop_reason,
+        topup_stats=dict(additional_stats or {}),
+    )
+
+
 def run_final_pass_topup(
     *,
     initial_scrape: ScrapeResult,

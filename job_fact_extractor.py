@@ -168,11 +168,11 @@ def _provider_full_time(job: Dict) -> bool:
     )
 
 
-def _provider_remote(job: Dict) -> bool:
-    return bool(
-        job.get("job_is_remote") is True
-        and str(job.get("_work_arrangement") or "") == "remote"
-    )
+def _provider_work_arrangement(job: Dict) -> str:
+    value = str(job.get("_work_arrangement") or "").strip().lower()
+    if value in {"remote", "hybrid", "onsite", "unknown", "physical_required"}:
+        return value
+    return ""
 
 
 def _provider_us_market(job: Dict) -> bool:
@@ -200,11 +200,15 @@ EMPLOYMENT_NEGATIVES: List[Tuple[str, List[str]]] = [
 ]
 FULL_TIME = [r"\bfull[- ]time\b", r"\bregular employee\b", r"\bpermanent (?:role|position|employee)\b"]
 REMOTE = [r"\bfully remote\b", r"\b100% remote\b", r"\bremote (?:role|position|job)\b", r"\bwork from home\b", r"\bhome[- ]based\b", r"\btelecommute\b"]
-HYBRID = [r"\bhybrid (?:role|position|schedule|work model)\b", r"\b(?:one|two|three|four|five|[1-5]) days? (?:a|per) week[^.]{0,80}\boffice\b"]
+HYBRID = [
+    r"\bhybrid (?:role|position|schedule|work model)\b",
+    r"\b(?:one|two|three|four|five|[1-5]) days? (?:a|per) week[^.]{0,80}\boffice\b",
+    r"\bin[- ]office requirement\b",
+]
 ONSITE = [r"\bon[- ]site\b", r"\bonsite\b", r"\bin[- ]person\b", r"\boffice[- ]based\b", r"\bmust (?:work|report|be) (?:in|at) (?:the|our) office\b"]
 FIELD = [r"\bfield[- ]based\b", r"\bregular(?:ly)? visit(?:ing)? (?:customer|client) sites\b", r"\bon customer sites\b"]
 RELOCATION = [r"\brelocation (?:is )?(?:required|mandatory)\b"]
-TRAVEL_HARD = [r"\btravel (?:up to |approximately |at least |minimum )?(?:20|2[5-9]|[3-9]\d|100)%\b", r"\bfrequent travel\b", r"\btravel regularly\b", r"\bmust live near (?:a|an) airport\b"]
+TRAVEL_HARD = [r"\btravel (?:up to |approximately |at least |minimum )?(?:20|2[5-9]|[3-9]\d|100)%", r"\bfrequent travel\b", r"\btravel regularly\b", r"\bmust live near (?:a|an) airport\b"]
 US_SCOPE = [r"\bremote (?:within|in|across) (?:the )?(?:u\.?s\.?|usa|united states)\b", r"\b(?:u\.?s\.?|usa|united states)[- ]based\b", r"\banywhere in (?:the )?(?:u\.?s\.?|united states)\b"]
 FOREIGN_ONLY = [r"\b(?:emea|apac|europe|european union|canada|uk|united kingdom|australia|india|philippines|latam)[- ]only\b", r"\bmust be (?:based|located|resident) in (?:emea|apac|europe|canada|the uk|australia|india|the philippines|latam)\b", r"\bopen only to candidates (?:based|located) in (?:emea|apac|europe|canada|the uk|australia|india|the philippines|latam)\b"]
 LOCAL_PRESENCE = [r"\bmust (?:live|reside) within \d+ miles\b", r"\bwithin commuting distance\b", r"\bmust be based in [A-Z][a-z]+(?:,? [A-Z]{2})? to (?:work|attend|report|visit)\b"]
@@ -306,10 +310,14 @@ def extract_job_facts(job: Dict, source: ResolvedJobSource) -> Dict[str, FactVal
     arrangement: Optional[str] = None
     arrangement_evidence: List[str] = []
     arrangement_provider_only = False
+    # Hard physical-delivery requirements take precedence over generic
+    # "onsite" or "hybrid" wording. Otherwise a field technician posting that
+    # also mentions an office could be misclassified as remotely deliverable.
     arrangement_rules = [
+        ("field_work_required", FIELD), ("travel_required", TRAVEL_HARD),
         ("hybrid_required", HYBRID), ("onsite_required", ONSITE),
-        ("field_work_required", FIELD), ("local_presence_required", LOCAL_PRESENCE),
-        ("relocation_required", RELOCATION), ("travel_required", TRAVEL_HARD),
+        ("local_presence_required", LOCAL_PRESENCE),
+        ("relocation_required", RELOCATION),
     ]
     for value, patterns in arrangement_rules:
         hits = _matching(official_sentences, patterns)
@@ -332,9 +340,10 @@ def extract_job_facts(job: Dict, source: ResolvedJobSource) -> Dict[str, FactVal
             if arrangement_provider_only
             else _fact("work_arrangement", arrangement, source, arrangement_evidence, verified=official)
         )
-    elif official and _provider_remote(job):
+    elif official and _provider_work_arrangement(job):
+        provider_arrangement = _provider_work_arrangement(job)
         facts["work_arrangement"] = _cross_source_fact(
-            "work_arrangement", "remote", source, job,
+            "work_arrangement", provider_arrangement, source, job,
             [f"job_is_remote={job.get('job_is_remote')}", f"_work_arrangement={job.get('_work_arrangement')}", str(job.get("_work_arrangement_reason") or "")],
             provider_fields=["job_is_remote", "_work_arrangement", "_work_arrangement_reason"],
         )

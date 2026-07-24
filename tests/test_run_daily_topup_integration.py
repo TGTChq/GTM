@@ -134,6 +134,7 @@ class RunDailyTopupIntegrationTests(unittest.TestCase):
             with (
                 patch.object(config, "PRODUCTION", True),
                 patch.object(config, "ACQUISITION_MODE", "jsearch"),
+                patch.object(config, "RAPIDAPI_KEY", "test-key"),
                 patch.object(config, "FINAL_PASS_PIPELINE_ENABLED", False),
                 patch.object(config, "JSEARCH_REVIEWABLE_TOPUP_ENABLED", True),
                 patch.object(config, "JSEARCH_TOPUP_MAX_ROUNDS", 3),

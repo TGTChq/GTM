@@ -20,9 +20,9 @@ class StaleJobFilterV39ATests(unittest.TestCase):
         self.assertFalse(matched)
         self.assertEqual(reason, "")
 
-    def test_rejects_job_at_limit(self):
+    def test_rejects_job_after_primary_limit(self):
         now = datetime.now(timezone.utc)
-        job = {"job_posted_at_datetime_utc": (now - timedelta(days=8)).isoformat()}
+        job = {"job_posted_at_datetime_utc": (now - timedelta(days=15)).isoformat()}
         matched, reason = job_filter.is_stale_job(job)
         self.assertTrue(matched)
         self.assertTrue(reason.startswith("stale_job:"))

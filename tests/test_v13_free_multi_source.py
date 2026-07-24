@@ -332,7 +332,14 @@ class MultiSourceAcquisitionTests(unittest.TestCase):
                 patch.object(config, "FREE_JOB_SOURCES", ["himalayas"]),
                 patch.object(config, "FREE_SOURCE_MIN_SUCCESSFUL_SOURCES", 1),
                 patch.object(config, "PRODUCTION", False),
+                patch.object(config, "MULTI_SOURCE_JSEARCH_ENABLED", False),
+                patch.object(config, "RAPIDAPI_KEY", "must-not-be-used-in-this-test"),
                 patch.object(multi_source_acquisition, "build_adapters", return_value=[fake_adapter]),
+                patch.object(
+                    multi_source_acquisition,
+                    "run_daily_scrape",
+                    side_effect=AssertionError("JSearch must remain disabled in this unit test"),
+                ),
             ):
                 result = multi_source_acquisition.run_multi_source_acquisition(
                     registry=seen,
@@ -342,7 +349,7 @@ class MultiSourceAcquisitionTests(unittest.TestCase):
 
         self.assertTrue(result.success)
         self.assertEqual(result.total_jobs, 1)
-        self.assertEqual(payload["acquisition_mode"], "free_multi_source")
+        self.assertEqual(payload["acquisition_mode"], "multi_source")
         self.assertEqual(payload["jobs"][0]["_matched_role"], "Customer Success Manager")
         self.assertEqual(result.stats["estimated_request_units"], 0)
         self.assertEqual(result.stats["source_outcomes"]["himalayas"]["selected_as_primary"], 1)
@@ -451,7 +458,7 @@ class V131QualityHardeningTests(unittest.TestCase):
         self.assertEqual(jobs[0]["_ats_source_updated_at"], "2026-07-23T12:00:00Z")
         self.assertEqual(jobs[0]["job_offer_expiration_datetime_utc"], "2026-08-15T23:59:59Z")
 
-    def test_ashby_is_remote_flag_is_preserved(self):
+    def test_ashby_explicit_onsite_overrides_remote_eligibility_flag(self):
         board = {
             "provider": "ashby",
             "identifier": "acme",
@@ -474,7 +481,9 @@ class V131QualityHardeningTests(unittest.TestCase):
             board, lambda url, **_kwargs: FetchPayload(200, url, json.dumps(payload))
         )
         self.assertEqual(error, "")
-        self.assertTrue(jobs[0]["job_is_remote"])
+        self.assertFalse(jobs[0]["job_is_remote"])
+        self.assertEqual(jobs[0]["work_arrangement"], "OnSite")
+        self.assertTrue(jobs[0]["_provider_is_remote"])
         self.assertTrue(jobs[0]["_ats_board_identity_verified"])
 
     def test_company_website_propagates_across_same_exact_employer(self):
