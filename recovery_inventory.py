@@ -16,6 +16,7 @@ from typing import Dict, Iterable, List
 import config
 from domain_utils import normalize_company_domain
 from job_filter import dedup_key, normalize_text
+from review_policy import is_airtable_reviewable
 
 
 def _now() -> datetime:
@@ -164,7 +165,7 @@ class RecoverableJobQueue:
 
 
 class FinalPassInventory:
-    """Persistent inventory of validated leads waiting for Airtable delivery.
+    """Persistent inventory of actionable leads waiting for Airtable delivery.
 
     The inventory is deliberately small: READY leads are retained across runs,
     reserved before a push, and marked sent only after Airtable confirms that
@@ -243,7 +244,10 @@ class FinalPassInventory:
             and isinstance(record.get("lead"), dict)
         }
         for lead in leads_to_stage:
-            if str(lead.get("_final_state") or "") != "FINAL_PASS":
+            state = str(lead.get("_final_state") or "")
+            if state == "FINAL_PASS":
+                pass
+            elif not is_airtable_reviewable(lead):
                 continue
             account = _account_key(lead)
             if account and account in sent_accounts:

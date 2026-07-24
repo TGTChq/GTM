@@ -23,6 +23,11 @@ from qualification_pipeline import run_precontact_qualification
 logger = logging.getLogger(__name__)
 
 
+def _reviewable_count(result: Step3Result) -> int:
+    """Treat legacy FINAL_PASS-only result fixtures as reviewable inventory."""
+    return max(int(result.reviewable_leads or 0), int(result.final_pass_leads or 0))
+
+
 def _load(path: str) -> Dict:
     return json.loads(Path(path).read_text(encoding="utf-8"))
 
@@ -68,7 +73,7 @@ def run_age_recovery(
     if not config.AGE_RECOVERY_ENABLED:
         details["stop_reason"] = "disabled"
         return initial_enriched, details
-    if initial_enriched.final_pass_leads >= target_final_pass_leads:
+    if _reviewable_count(initial_enriched) >= target_final_pass_leads:
         details["stop_reason"] = "minimum_reached_in_primary_window"
         return initial_enriched, details
 
@@ -121,7 +126,7 @@ def run_age_recovery(
         details["stop_reason"] = "recovery_downstream_gates_exhausted"
         return initial_enriched, details
 
-    remaining_target = max(1, target_final_pass_leads - initial_enriched.final_pass_leads)
+    remaining_target = max(1, target_final_pass_leads - _reviewable_count(initial_enriched))
     remaining_company_cap = (
         None
         if max_eligible_companies is None
@@ -139,6 +144,7 @@ def run_age_recovery(
         output_suffix="age_recovery",
     )
     details["recovered_final_pass_leads"] = recovered.final_pass_leads
+    details["recovered_reviewable_leads"] = _reviewable_count(recovered)
     details["recovery_hiring_manager_output"] = recovered.output_path
     if recovered.errors:
         details["errors"].extend(recovered.errors)
@@ -156,7 +162,7 @@ def run_age_recovery(
     )
     stop_reason = (
         "final_pass_minimum_reached_after_age_recovery"
-        if combined.final_pass_leads >= target_final_pass_leads
+        if _reviewable_count(combined) >= target_final_pass_leads
         else "age_recovery_exhausted"
     )
     combined_payload = _load(combined.output_path)
@@ -166,13 +172,14 @@ def run_age_recovery(
     )
     combined.stop_reason = stop_reason
     details["combined_final_pass_leads"] = combined.final_pass_leads
+    details["combined_reviewable_leads"] = _reviewable_count(combined)
     details["stop_reason"] = stop_reason
     logger.info(
-        "Age recovery 15-30d: kept=%d contact_eligible=%d FINAL_PASS_added=%d combined=%d/%d",
+        "Age recovery 15-30d: kept=%d contact_eligible=%d reviewable_added=%d combined=%d/%d",
         recovered_filter.kept_count,
         qualified.contact_eligible_jobs,
-        recovered.final_pass_leads,
-        combined.final_pass_leads,
+        _reviewable_count(recovered),
+        _reviewable_count(combined),
         target_final_pass_leads,
     )
     return combined, details

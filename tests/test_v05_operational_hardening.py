@@ -249,13 +249,13 @@ class ProvenanceAndContactTests(unittest.TestCase):
             setattr(person, key, value)
         return person
 
-    def test_contact_without_positive_current_employment_reroutes(self):
+    def test_contact_without_positive_current_employment_routes_to_review(self):
         person = self._person(raw={}, linkedin_url=None)
         decision = ContactGate().evaluate(
             person=person, target_titles=["VP Finance"], company_domains={"example.com"},
             company_name="Example Corp", intent_market="us_market",
         )
-        self.assertEqual(decision.state, GateState.REROUTE)
+        self.assertEqual(decision.state, GateState.NEEDS_CHECK)
         self.assertIn("NOT_CURRENT_EMPLOYEE", str(decision.primary_reason))
 
     def test_contact_without_explicit_territory_can_own_global_function(self):

@@ -79,14 +79,14 @@ class ContactEmailGateV02Tests(unittest.TestCase):
         )
         self.assertEqual(decision.state, GateState.PASS)
 
-    def test_accept_all_or_risky_never_passes(self):
+    def test_accept_all_or_risky_routes_to_review(self):
         hunter = HunterResult(found=True, email="a@example.com", status="accept_all")
         decision = EmailGate().evaluate(
             person=self.person(email_status="guessed"),
             hunter_result=hunter,
             company_domains={"example.com"},
         )
-        self.assertEqual(decision.state, GateState.UNVERIFIED)
+        self.assertEqual(decision.state, GateState.NEEDS_CHECK)
 
     def test_email_domain_mismatch_reroutes(self):
         decision = EmailGate().evaluate(

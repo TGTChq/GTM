@@ -29,6 +29,7 @@ from pipeline_state import SeenJobsRegistry
 from pipeline_checkpoint import PipelineCheckpoint
 from observability import build_observability_report, save_observability_report
 from recovery_inventory import FinalPassInventory, RecoverableJobQueue
+from review_policy import is_airtable_reviewable
 from pipeline_lock import PipelineRunLock
 
 Path(config.LOG_DIR).mkdir(parents=True, exist_ok=True)
@@ -404,7 +405,7 @@ def run_pipeline() -> dict:
                 airtable_client.get_active_existing_company_keys_for_pipeline()
             )
             logger.info(
-                "Pre-excluding %d active Airtable company keys before FINAL_PASS counting",
+                "Pre-excluding %d active Airtable company keys before reviewable-lead counting",
                 len(existing_airtable_company_keys),
             )
         except Exception as exc:
@@ -494,14 +495,14 @@ def run_pipeline() -> dict:
         )
         logger.info(
             "Top-up final: mode=%s rounds=%d query_units=%d total_query_units=%d "
-            "FINAL_PASS=%d/%d review_rows=%d stop_reason=%s",
+            "FINAL_PASS=%d review_rows=%d/%d stop_reason=%s",
             topup_summary.get("mode", "legacy_reviewable"),
             len(topup_summary.get("rounds", [])),
             topup_summary.get("topup_query_units", 0),
             topup_summary.get("total_query_units", 0),
             enriched.final_pass_leads,
-            target_final_pass,
             enriched.reviewable_leads,
+            target_final_pass,
             topup_summary.get("stop_reason", ""),
         )
     summary["steps"]["hiring_manager"] = {
@@ -574,10 +575,10 @@ def run_pipeline() -> dict:
     )
     if config.PRODUCTION and not enriched.success:
         return _fail(summary, "hiring_manager", enriched.errors)
-    if strict_runtime and not enriched.final_pass_target_reached:
+    if strict_runtime and not enriched.reviewable_target_reached:
         logger.warning(
-            "Daily target not reached: %d/%d FINAL_PASS leads. Stop reason: %s",
-            enriched.final_pass_leads,
+            "Daily target not reached: %d/%d Airtable-reviewable leads. Stop reason: %s",
+            enriched.reviewable_leads,
             enriched.final_pass_target or target_final_pass,
             enriched.stop_reason,
         )
@@ -608,12 +609,10 @@ def run_pipeline() -> dict:
     ]
     recovery_queue.upsert(recoverable_jobs)
     recovery_queue.remove([*terminal_jobs, *terminal_precontact_jobs])
-    current_final_pass = [
-        job for job in enriched_jobs if str(job.get("_final_state") or "") == "FINAL_PASS"
-    ]
+    current_reviewable = [job for job in enriched_jobs if is_airtable_reviewable(job)]
     inventory_leads: list[dict] = []
     if strict_runtime:
-        final_pass_inventory.stage(current_final_pass)
+        final_pass_inventory.stage(current_reviewable)
         inventory_leads = final_pass_inventory.available(
             limit=(
                 None

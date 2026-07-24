@@ -39,6 +39,7 @@ from role_mapping import (
     get_hiring_manager_bucket_for_job,
     get_target_titles_for_jobs,
 )
+from review_policy import is_airtable_reviewable
 
 logger = logging.getLogger(__name__)
 
@@ -690,7 +691,13 @@ def _process_company_strict(company_jobs: List[Dict]) -> Tuple[List[Dict], Dict]
         role_decision = _strict_gate_from_job(primary, "_role_gate_decision", "role")
         lead = _strict_base_lead(primary, bucket_jobs, bucket, org, account_decision)
 
-        if account_decision.state_value != GateState.PASS.value:
+        search_domain = str(
+            account_decision.metadata.get("canonical_domain")
+            or input_domain
+            or org.domain
+            or ""
+        )
+        if account_decision.state_value == GateState.REJECT.value or not search_domain:
             final = annotate_final_decision(
                 lead,
                 {"job": job_decision, "role": role_decision, "account": account_decision},
@@ -704,7 +711,6 @@ def _process_company_strict(company_jobs: List[Dict]) -> Tuple[List[Dict], Dict]
             stats[f"final_{str(final.get('_final_state')).lower()}"] += 1
             continue
 
-        search_domain = str(account_decision.metadata.get("canonical_domain") or "")
         target_titles = get_target_titles_for_jobs(bucket_jobs, org.employee_count)
         people = apollo.search_people_at_company(search_domain, target_titles)
         time.sleep(config.APOLLO_RATE_LIMIT_DELAY)
@@ -752,7 +758,10 @@ def _process_company_strict(company_jobs: List[Dict]) -> Tuple[List[Dict], Dict]
                 founder_allowed=founder_allowed,
             )
             last_contact_decision = contact_decision
-            if contact_decision.state_value != GateState.PASS.value:
+            if contact_decision.state_value not in {
+                GateState.PASS.value,
+                GateState.NEEDS_CHECK.value,
+            }:
                 stats[f"contact_reason__{_reason_family(str(contact_decision.primary_reason))}"] += 1
                 continue
 
@@ -787,7 +796,10 @@ def _process_company_strict(company_jobs: List[Dict]) -> Tuple[List[Dict], Dict]
                 company_domains=allowed_domains,
             )
             last_email_decision = email_decision
-            if email_decision.state_value != GateState.PASS.value:
+            if email_decision.state_value not in {
+                GateState.PASS.value,
+                GateState.NEEDS_CHECK.value,
+            }:
                 stats[f"email_reason__{_reason_family(str(email_decision.primary_reason))}"] += 1
                 continue
 
@@ -815,7 +827,20 @@ def _process_company_strict(company_jobs: List[Dict]) -> Tuple[List[Dict], Dict]
                     "hiring_manager_email_source": person.email_source,
                     "apollo_email_status": person.email_status,
                     "hunter_email_status": selected_hunter.status if selected_hunter else None,
-                    "hiring_manager_confidence": "verified",
+                    "hiring_manager_confidence": (
+                        "verified"
+                        if all(
+                            decision.state_value == GateState.PASS.value
+                            for decision in (
+                                job_decision,
+                                role_decision,
+                                account_decision,
+                                selected_contact_decision,
+                                selected_email_decision,
+                            )
+                        )
+                        else "review"
+                    ),
                     "hiring_manager_selection_tier": _selection_tier(person.title),
                 }
             )
@@ -903,14 +928,10 @@ def _is_final_pass_lead(lead: Dict) -> bool:
 def _is_reviewable_lead(lead: Dict) -> bool:
     """Return Airtable-surface candidates, with legacy-fixture compatibility."""
     if lead.get("_final_state"):
-        return bool(
-            lead.get("_final_state") == "FINAL_PASS"
-            and lead.get("hiring_manager_email")
-            and lead.get("lead_key")
-        )
+        return is_airtable_reviewable(lead)
     return bool(
         lead.get("_step3_status") == "found"
-        and lead.get("hiring_manager_confidence") in {"high", "medium", "low"}
+            and lead.get("hiring_manager_confidence") in {"high", "medium", "low", "review", "verified"}
         and lead.get("hiring_manager_email")
         and lead.get("lead_key")
     )
@@ -1035,7 +1056,12 @@ def run_hiring_manager_identification(
 
         if strict_input:
             company_account_pass = any(
-                lead.get("_account_gate_state") == GateState.PASS.value for lead in leads
+                lead.get("_account_gate_state") in {
+                    GateState.PASS.value,
+                    GateState.NEEDS_CHECK.value,
+                    GateState.UNVERIFIED.value,
+                }
+                for lead in leads
             )
             if company_account_pass:
                 eligible_companies += 1
@@ -1056,12 +1082,12 @@ def run_hiring_manager_identification(
         if (
             strict_input
             and target_final_pass_leads is not None
-            and final_pass_leads >= target_final_pass_leads
+            and reviewable_leads >= target_final_pass_leads
             and not config.CONTINUE_AFTER_FINAL_PASS_TARGET
         ):
-            stop_reason = "final_pass_target_reached"
+            stop_reason = "airtable_review_target_reached"
             logger.info(
-                "Reached daily target of %d FINAL_PASS leads after considering %d companies",
+                "Reached daily target of %d Airtable-reviewable leads after considering %d companies",
                 target_final_pass_leads,
                 companies_considered,
             )
@@ -1104,8 +1130,9 @@ def run_hiring_manager_identification(
     final_pass_leads = _count_unique_final_pass_leads(all_leads)
     state_counts = _final_state_counts(all_leads)
 
+    review_target = target_final_pass_leads if strict_input else target_reviewable_leads
     reviewable_target_reached = (
-        target_reviewable_leads is None or reviewable_leads >= target_reviewable_leads
+        review_target is None or reviewable_leads >= review_target
     )
     final_pass_target_reached = (
         target_final_pass_leads is not None
@@ -1118,7 +1145,7 @@ def run_hiring_manager_identification(
         max_eligible_companies is not None and eligible_companies >= max_eligible_companies
     )
     if strict_input:
-        target_reached = final_pass_target_reached
+        target_reached = reviewable_target_reached
     elif target_reviewable_leads is not None:
         target_reached = reviewable_target_reached
     else:

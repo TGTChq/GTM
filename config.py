@@ -183,7 +183,7 @@ for directory in (
 
 # ---------- Final-pass architecture ----------
 FINAL_PASS_PIPELINE_ENABLED = _env_bool("FINAL_PASS_PIPELINE_ENABLED", True)
-VALIDATION_VERSION = os.getenv("VALIDATION_VERSION", "tgtc-ready-v1.4.4-counterfactual-recall")
+VALIDATION_VERSION = "tgtc-ready-v1.4.5-actionable-review"
 VALIDATION_SIGNING_KEY = os.getenv("VALIDATION_SIGNING_KEY", "")
 # Source and company-site retrieval is bounded and cached.  Disabling fetches is
 # intended only for deterministic offline replay; it does not relax any gate.
@@ -393,7 +393,9 @@ RECOVERY_MIN_JOB_AGE_DAYS = _env_int("RECOVERY_MIN_JOB_AGE_DAYS", 15)
 RECOVERY_MAX_JOB_AGE_DAYS = _env_int("RECOVERY_MAX_JOB_AGE_DAYS", 30)
 AGE_RECOVERY_ENABLED = _env_bool("AGE_RECOVERY_ENABLED", True)
 # Compatibility alias used by older tests and helper scripts.
-MAX_JOB_AGE_DAYS = _env_int("MAX_JOB_AGE_DAYS", PRIMARY_MAX_JOB_AGE_DAYS)
+# Compatibility alias. PRIMARY_MAX_JOB_AGE_DAYS is authoritative; an older
+# Railway value must not block a production run or silently change the window.
+MAX_JOB_AGE_DAYS = PRIMARY_MAX_JOB_AGE_DAYS
 
 # Quality gates restore the paid-test standard before any Apollo/Hunter spend.
 # The 118-role catalog remains active, but only current full-time roles with

@@ -78,17 +78,27 @@ def run_precontact_qualification(
             stats[f"source_attempt__{attempt.get('status') or 'unknown'}"] += 1
             if attempt.get("phase"):
                 stats[f"source_phase__{attempt.get('phase')}"] += 1
-        if annotated.get("_job_gate_state") != GateState.PASS.value:
+        if annotated.get("_job_gate_state") == GateState.REJECT.value:
             nonpass.append(annotated)
             stats[f"job_{str(annotated.get('_job_gate_state')).lower()}"] += 1
             stats[f"reason__{annotated.get('_job_gate_reason')}"] += 1
             continue
+        if annotated.get("_job_gate_state") != GateState.PASS.value:
+            stats[f"job_{str(annotated.get('_job_gate_state')).lower()}_reviewable"] += 1
+            annotated.setdefault("_precontact_review_reasons", []).append(
+                str(annotated.get("_job_gate_reason") or "UNVERIFIED_JOB_GATE")
+            )
         annotated = rgate.annotate(annotated)
-        if annotated.get("_role_gate_state") != GateState.PASS.value:
+        if annotated.get("_role_gate_state") == GateState.REJECT.value:
             nonpass.append(annotated)
             stats[f"role_{str(annotated.get('_role_gate_state')).lower()}"] += 1
             stats[f"reason__{annotated.get('_role_gate_reason')}"] += 1
             continue
+        if annotated.get("_role_gate_state") != GateState.PASS.value:
+            stats[f"role_{str(annotated.get('_role_gate_state')).lower()}_reviewable"] += 1
+            annotated.setdefault("_precontact_review_reasons", []).append(
+                str(annotated.get("_role_gate_reason") or "UNVERIFIED_ROLE_GATE")
+            )
         contact_eligible.append(annotated)
         stats["contact_eligible"] += 1
 
@@ -110,10 +120,15 @@ def run_precontact_qualification(
     return QualificationResult(
         str(output_path), str(nonpass_path), len(jobs), len(contact_eligible),
         sum(1 for j in nonpass if j.get("_job_gate_state") == GateState.REJECT.value or j.get("_role_gate_state") == GateState.REJECT.value),
-        sum(1 for j in nonpass if j.get("_job_gate_state") == GateState.UNVERIFIED.value or j.get("_role_gate_state") == GateState.UNVERIFIED.value),
         sum(
             1
-            for job in nonpass
+            for j in [*contact_eligible, *nonpass]
+            if j.get("_job_gate_state") == GateState.UNVERIFIED.value
+            or j.get("_role_gate_state") == GateState.UNVERIFIED.value
+        ),
+        sum(
+            1
+            for job in [*contact_eligible, *nonpass]
             if job.get("_job_gate_state") == GateState.NEEDS_CHECK.value
             or job.get("_role_gate_state") == GateState.NEEDS_CHECK.value
         ),

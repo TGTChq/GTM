@@ -58,13 +58,8 @@ def revalidate_approved_record(record: Dict) -> Tuple[bool, str]:
 
     if config.APPROVED_REVALIDATE_JOB_SOURCE:
         source = JobSourceResolver().resolve(job, fetch=True)
-        trusted_active = bool(
-            source.state == "ACTIVE_VERIFIED" and (source.official or source.corroborated)
-        ) or bool(
-            source.state == "ACTIVE_CORROBORATED" and source.corroborated
-        )
-        if not trusted_active:
-            return False, f"Job source revalidation failed: {source.state}"
+        if source.state == "INACTIVE_VERIFIED":
+            return False, "Job source revalidation confirmed that the vacancy is inactive"
 
     org = apollo.enrich_organization(domain=domain, name=company, website=website)
     account = AccountGate().evaluate(
@@ -74,7 +69,7 @@ def revalidate_approved_record(record: Dict) -> Tuple[bool, str]:
         jobs=[job],
         fetch_company=True,
     )
-    if account.state_value != GateState.PASS.value:
+    if account.state_value == GateState.REJECT.value:
         return False, f"Account revalidation failed: {account.primary_reason}"
 
     person_id = str(fields.get("Apollo Person ID") or "")
@@ -94,7 +89,7 @@ def revalidate_approved_record(record: Dict) -> Tuple[bool, str]:
         intent_market="us_market",
         founder_allowed=True,
     )
-    if contact.state_value != GateState.PASS.value:
+    if contact.state_value not in {GateState.PASS.value, GateState.NEEDS_CHECK.value}:
         return False, f"Contact revalidation failed: {contact.primary_reason}"
 
     hunter_result = None
@@ -115,6 +110,6 @@ def revalidate_approved_record(record: Dict) -> Tuple[bool, str]:
         hunter_result=hunter_result,
         company_domains={domain},
     )
-    if email.state_value != GateState.PASS.value:
+    if email.state_value not in {GateState.PASS.value, GateState.NEEDS_CHECK.value}:
         return False, f"Email revalidation failed: {email.primary_reason}"
     return True, "approved_record_revalidated"

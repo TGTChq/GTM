@@ -67,7 +67,7 @@ class StrictHiringManagerV02Tests(unittest.TestCase):
         self.assertEqual(leads[0]["hiring_manager_email"], "u@acme.com")
         self.assertEqual(stats["person_match_attempts"], 2)
 
-    def test_unknown_account_never_calls_people_search(self):
+    def test_unknown_account_with_safe_domain_continues_to_people_search(self):
         job = {
             "job_id": "j1", "job_title": "Staff Accountant", "employer_name": "Acme",
             "employer_website": "https://acme.com", "_matched_role": "Staff Accountant",
@@ -83,7 +83,7 @@ class StrictHiringManagerV02Tests(unittest.TestCase):
             patch.object(hiring_manager.apollo, "search_people_at_company") as search_mock,
         ):
             leads, _stats = hiring_manager.process_company([job])
-        search_mock.assert_not_called()
+        search_mock.assert_called_once()
         self.assertEqual(leads[0]["_final_state"], "UNVERIFIED")
 
 

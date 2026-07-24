@@ -255,7 +255,7 @@ class AccountBoundaryV12Tests(unittest.TestCase):
 
 
 class ApprovalBoundaryV12Tests(unittest.TestCase):
-    def test_provider_only_source_cannot_enroll_without_live_revalidation(self):
+    def test_provider_only_source_can_enroll_after_hard_filter_revalidation(self):
         fields = {
             "Company": "Example Corp",
             "Website": "https://example.com",
@@ -281,12 +281,24 @@ class ApprovalBoundaryV12Tests(unittest.TestCase):
         with (
             patch.object(config, "VALIDATION_SIGNING_KEY", "offline-test-key"),
             patch("approved_revalidation.JobSourceResolver") as resolver_cls,
+            patch("approved_revalidation.apollo.enrich_organization", return_value=object()),
+            patch("approved_revalidation.AccountGate.evaluate", return_value=GateDecision(
+                "account", GateState.NEEDS_CHECK, "UNVERIFIED_EMPLOYEE_COUNT"
+            )),
+            patch("approved_revalidation.apollo.match_person") as person_mock,
+            patch("approved_revalidation.ContactGate.evaluate", return_value=GateDecision(
+                "contact", GateState.PASS, "CONTACT_PASS"
+            )),
+            patch("approved_revalidation.EmailGate.evaluate", return_value=GateDecision(
+                "email", GateState.NEEDS_CHECK, "UNVERIFIED_EMAIL_DELIVERABILITY"
+            )),
         ):
             fields["Validation Fingerprint"] = validation_fingerprint(fields)
             resolver_cls.return_value.resolve.return_value = provider_source
+            person_mock.return_value.email = "alex@example.com"
             valid, reason = revalidate_approved_record({"fields": fields})
-        self.assertFalse(valid)
-        self.assertIn("Job source revalidation failed", reason)
+        self.assertTrue(valid)
+        self.assertEqual(reason, "approved_record_revalidated")
 
 
 if __name__ == "__main__":
