@@ -9,7 +9,7 @@ import re
 import sys
 import unicodedata
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
 from urllib.parse import unquote
@@ -208,14 +208,51 @@ def is_stale_job(
     source = str(job.get("_acquisition_source") or "").lower()
     ats_provider = str(job.get("_ats_provider") or "").lower()
     is_direct_greenhouse = source == "ats_greenhouse" or ats_provider == "greenhouse"
-    if is_direct_greenhouse and not job.get("job_posted_at_datetime_utc"):
-        if job.get("_greenhouse_detail_request_made"):
-            return True, "greenhouse_first_published_unavailable"
-        return True, "greenhouse_first_published_not_checked"
 
     _freshness, age_days, reason = classify_freshness(job)
     if reason == "explicit_expiration_is_in_the_past":
         return True, "expired_job_posting"
+
+    if is_direct_greenhouse and not job.get("job_posted_at_datetime_utc"):
+        updated_at = None
+        raw_updated_at = str(job.get("_ats_source_updated_at") or "").strip()
+        if raw_updated_at:
+            try:
+                updated_at = datetime.fromisoformat(raw_updated_at.replace("Z", "+00:00"))
+                if updated_at.tzinfo is None:
+                    updated_at = updated_at.replace(tzinfo=timezone.utc)
+            except ValueError:
+                updated_at = None
+        max_review_age = max(
+            1, int(getattr(config, "RECOVERY_MAX_JOB_AGE_DAYS", 30))
+        )
+        recently_updated = bool(
+            updated_at
+            and datetime.now(timezone.utc) - updated_at <= timedelta(days=max_review_age)
+        )
+        reviewable_active_listing = bool(
+            getattr(config, "ALLOW_ACTIVE_GREENHOUSE_UNKNOWN_AGE_REVIEW", True)
+            and recently_updated
+            and job.get("job_apply_is_direct") is True
+            and job.get("_ats_board_identity_verified") is True
+            and job.get("_provider_record_structured") is True
+            and str(job.get("job_apply_link") or job.get("official_job_url") or "").strip()
+            and str(job.get("job_title") or "").strip()
+            and len(str(job.get("job_description") or "").strip()) >= 200
+        )
+        if reviewable_active_listing:
+            # Presence in the official Greenhouse board list proves that the job
+            # is active now, but not that it is younger than the normal age cap.
+            # Admit it only to the existing review/revalidation lane.
+            job["_freshness_review_required"] = True
+            job["_freshness_review_reason"] = (
+                "greenhouse_recently_updated_active_listing_unknown_first_published"
+            )
+            job["_approved_revalidation_required"] = True
+            return False, ""
+        if job.get("_greenhouse_detail_request_made"):
+            return True, "greenhouse_first_published_unavailable"
+        return True, "greenhouse_first_published_not_checked"
     effective_max = config.MAX_JOB_AGE_DAYS if max_age_days is None else max_age_days
     if age_days is not None and effective_max is not None and age_days > int(effective_max):
         return True, f"stale_job:{age_days}days"
@@ -485,15 +522,15 @@ def assess_us_eligibility(job: Dict) -> GeographyEvidence:
     normalized_location = normalize_text(location)
 
     global_location_markers = {normalize_text(value) for value in config.GLOBAL_REMOTE_LOCATION_MARKERS}
-    if normalized_location in global_location_markers:
-        return GeographyEvidence(False, "global_remote_location", location or "Remote", "global")
+    global_location = normalized_location in global_location_markers
+    global_pattern = next(
+        (pattern for pattern in config.GLOBAL_REMOTE_PATTERNS if re.search(pattern, source_text, re.I)),
+        None,
+    )
 
     for pattern in config.FOREIGN_ONLY_ELIGIBILITY_PATTERNS:
         if re.search(pattern, source_text, re.I):
             return GeographyEvidence(False, f"foreign_only_eligibility:{pattern}", location or "Remote", "foreign")
-    for pattern in config.GLOBAL_REMOTE_PATTERNS:
-        if re.search(pattern, source_text, re.I):
-            return GeographyEvidence(False, f"global_remote_scope:{pattern}", location or "Remote", "global")
 
     url_tokens = re.sub(r"[^a-z0-9]+", "-", apply_link)
     for marker in [*config.FOREIGN_COUNTRY_URL_SLUGS, *config.FOREIGN_CITY_URL_SLUGS]:
@@ -591,6 +628,46 @@ def assess_us_eligibility(job: Dict) -> GeographyEvidence:
     }
     query_country_hint = normalize_text(job.get("_jsearch_country_filter") or "")
     query_remote_hint = job.get("_jsearch_remote_filter_applied") is True
+
+    if global_location or global_pattern:
+        acquisition_source = str(job.get("_acquisition_source") or "").strip().lower()
+        structured_provider = bool(
+            job.get("_provider_record_structured") is True
+            and (
+                acquisition_source.startswith("ats_")
+                or acquisition_source
+                in {
+                    "himalayas",
+                    "jobicy",
+                    "weworkremotely",
+                    "remotive",
+                    "remoteok",
+                }
+            )
+        )
+        if (
+            getattr(config, "ALLOW_GLOBAL_REMOTE_US_INCLUSIVE_REVIEW", True)
+            and structured_provider
+        ):
+            # Worldwide eligibility includes the US unless the posting contains
+            # an explicit foreign-only restriction, which was rejected above.
+            # Keep the signal reviewable and require approval-time revalidation.
+            job["_global_remote_review_required"] = True
+            job["_global_remote_evidence"] = global_pattern or normalized_location
+            job["_approved_revalidation_required"] = True
+            return GeographyEvidence(
+                True,
+                "global_remote_includes_us_review",
+                location or "Remote",
+                "global_includes_us",
+            )
+        return GeographyEvidence(
+            False,
+            "global_remote_location" if global_location else f"global_remote_scope:{global_pattern}",
+            location or "Remote",
+            "global",
+        )
+
     if ambiguous_global_location and not (
         query_country_hint in config.US_COUNTRY_CODES and query_remote_hint
     ):
@@ -829,13 +906,19 @@ def assess_employment_quality(job: Dict) -> EmploymentEvidence:
     if any(value in employment_type for value in config.NON_FULL_TIME_EMPLOYMENT_TYPES):
         return EmploymentEvidence(False, f"non_full_time_employment_type:{employment_type_raw}", "non_full_time")
 
-    full_time = employment_type in {"full time", "fulltime"} or bool(
+    full_time = employment_type in config.FULL_TIME_EMPLOYMENT_TYPES or bool(
         re.search(r"\bfull[- ]time\b", title, re.I)
     )
-    if config.REQUIRE_FULL_TIME_ROLES and employment_type_raw and not full_time:
-        return EmploymentEvidence(False, f"unsupported_employment_type:{employment_type_raw}", "unknown")
     if full_time:
         return EmploymentEvidence(True, "explicit_full_time", "full_time")
+    if employment_type in config.AMBIGUOUS_EMPLOYEE_TYPES:
+        return EmploymentEvidence(
+            True,
+            f"employment_type_ambiguous_no_negative_evidence:{employment_type_raw}",
+            "unknown",
+        )
+    if config.REQUIRE_FULL_TIME_ROLES and employment_type_raw:
+        return EmploymentEvidence(False, f"unsupported_employment_type:{employment_type_raw}", "unknown")
     # Some JSearch sources omit employment type entirely. Keep the job when no
     # contrary part-time/contract signal exists, but preserve the uncertainty.
     return EmploymentEvidence(True, "employment_type_missing_no_negative_evidence", "unknown")

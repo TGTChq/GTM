@@ -145,6 +145,40 @@ def _jsearch_request_metrics(acquisition_stats: dict) -> dict:
     }
 
 
+def _shadow_recall_recovery_metrics(path: str) -> dict:
+    payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    jobs = payload.get("jobs", []) if isinstance(payload, dict) else []
+    flags = {
+        "greenhouse_unknown_age_review": "_freshness_review_required",
+        "global_remote_includes_us_review": "_global_remote_review_required",
+        "structured_identity_conflict_review": "_employer_identity_review_required",
+        "ats_identity_repaired": "_employer_identity_repaired",
+    }
+    counts = {}
+    samples = {}
+    for label, flag in flags.items():
+        matched = [job for job in jobs if isinstance(job, dict) and job.get(flag)]
+        counts[label] = len(matched)
+        samples[label] = [
+            {
+                "company": job.get("employer_name"),
+                "title": job.get("job_title"),
+                "source": job.get("_acquisition_source") or job.get("job_publisher"),
+                "url": job.get("job_apply_link") or job.get("official_job_url"),
+            }
+            for job in matched[:5]
+        ]
+    return {
+        "review_lane_counts": counts,
+        "review_lane_total": sum(counts.values()),
+        "samples": samples,
+        "safety_contract": (
+            "Recovered records still require Job, Role, Account, Contact, Email, "
+            "CRM, human approval, and pre-send source revalidation."
+        ),
+    }
+
+
 def _shadow_funnel_diagnostics(
     *,
     acquired: int,
@@ -234,6 +268,7 @@ def main() -> int:
                 input_path=acquisition.output_path,
                 registry=registry,
                 output_dir=str(filtered_dir),
+                max_age_days=config.PRIMARY_MAX_JOB_AGE_DAYS,
             )
             qualified = run_precontact_qualification(
                 filtered.output_path,
@@ -250,6 +285,7 @@ def main() -> int:
     qualified_company_metrics = _shadow_company_metrics(qualified.output_path)
     jsearch_requests = _jsearch_request_metrics(acquisition.stats)
     rejection_diagnostics = _shadow_rejection_diagnostics(filtered.rejected_path)
+    recall_recovery = _shadow_recall_recovery_metrics(filtered.output_path)
     funnel_diagnostics = _shadow_funnel_diagnostics(
         acquired=acquisition.total_jobs,
         filter_stats=filtered.stats,
@@ -294,6 +330,7 @@ def main() -> int:
         },
         "funnel_diagnostics": funnel_diagnostics,
         "rejection_diagnostics": rejection_diagnostics,
+        "recall_recovery": recall_recovery,
         "interpretation": interpretation,
         "acquisition": {
             "success": acquisition.success,

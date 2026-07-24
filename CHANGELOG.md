@@ -1,3 +1,14 @@
+# READY v1.4.4 counterfactual recall recovery — July 24, 2026
+
+- Recovers recently updated, active Greenhouse listings whose official board API omits `first_published`, while keeping them in the review/revalidation lane.
+- Treats structured worldwide roles as US-inclusive unless the posting explicitly restricts candidates to a foreign region; unstructured JSearch/aggregator records remain conservative.
+- Moves structured provider employer-identity conflicts to review rather than hard rejection; unstructured conflicts still fail closed.
+- Restores placeholder employers only from a separately verified ATS board company identity.
+- Prevents generic sentence starters such as `This is a...` from being interpreted as conflicting employer names.
+- Adds exact recall-recovery metrics to shadow reports and an offline counterfactual replay command with zero external calls.
+- Real-corpus replay: 1,058 raw / 983 unique postings; 69 to 93 prefilter survivors; 24 recovered; 0 lost.
+- Validation: 457 repository tests and 15 focused v1.4.4 regression tests passed; Python compilation and clean diff checks passed; zero live external calls.
+
 # READY v1.4.1 source observability and minimum recovery — July 23, 2026
 
 - Reports actual JSearch request attempts, successes, estimated units, normalized jobs, errors, and skip state in shadow output.
@@ -208,3 +219,10 @@
 - Restrict Founder/CEO fallback to companies with at most 99 employees.
 - Suppress Airtable companies in active lifecycle states across contacts and role buckets, while allowing Rejected and Error records to re-enter when a later job is qualified.
 - Add a zero-credit Airtable CSV audit command and 14 regression tests covering the observed production failures.
+
+## v1.4.3 — Final verified production hardening
+- Supersede the unshipped v1.4.2 package after a 300,972-case synthetic stress audit.
+- Preserve valid Workday site IDs while pruning only false `/job` registry entries.
+- Recover short catalog aliases, punctuation-equivalent titles, and permanent employment labels.
+- Reject placeholder employer identities and align physical-role filtering earlier in the funnel.
+- Explicitly enforce the 0–14 day shadow window.

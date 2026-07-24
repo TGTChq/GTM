@@ -183,7 +183,7 @@ for directory in (
 
 # ---------- Final-pass architecture ----------
 FINAL_PASS_PIPELINE_ENABLED = _env_bool("FINAL_PASS_PIPELINE_ENABLED", True)
-VALIDATION_VERSION = os.getenv("VALIDATION_VERSION", "tgtc-ready-v1.4.1-source-observability")
+VALIDATION_VERSION = os.getenv("VALIDATION_VERSION", "tgtc-ready-v1.4.4-counterfactual-recall")
 VALIDATION_SIGNING_KEY = os.getenv("VALIDATION_SIGNING_KEY", "")
 # Source and company-site retrieval is bounded and cached.  Disabling fetches is
 # intended only for deterministic offline replay; it does not relax any gate.
@@ -411,6 +411,18 @@ REQUIRE_EXPLICIT_US_REMOTE_SCOPE = _env_bool(
 # "United States", while retaining explicit non-US/global hard rejects.
 ALLOW_PROVIDER_CONFIRMED_US_REMOTE = _env_bool(
     "ALLOW_PROVIDER_CONFIRMED_US_REMOTE", True
+)
+# Controlled recall recovery. These policies move trustworthy but incomplete
+# records into the existing human-review/revalidation lane; they never bypass
+# Account, Contact, Email, CRM, approval, or pre-send source revalidation.
+ALLOW_ACTIVE_GREENHOUSE_UNKNOWN_AGE_REVIEW = _env_bool(
+    "ALLOW_ACTIVE_GREENHOUSE_UNKNOWN_AGE_REVIEW", True
+)
+ALLOW_GLOBAL_REMOTE_US_INCLUSIVE_REVIEW = _env_bool(
+    "ALLOW_GLOBAL_REMOTE_US_INCLUSIVE_REVIEW", True
+)
+ALLOW_STRUCTURED_IDENTITY_CONFLICT_REVIEW = _env_bool(
+    "ALLOW_STRUCTURED_IDENTITY_CONFLICT_REVIEW", True
 )
 
 ROLES = _env_json("ROLES_JSON", list(DEFAULT_ACQUISITION_ROLES))
@@ -681,7 +693,7 @@ IN_PERSON_DESCRIPTION_PATTERNS = [
 # Onsite/hybrid language is a commercial signal, not a rejection. These narrow
 # patterns identify roles whose core duties cannot be delivered by remote talent.
 INHERENT_PHYSICAL_TITLE_PATTERNS = [
-    r"\bwarehouse (?:associate|worker|operator|manager)\b",
+    r"\bwarehouse (?:associate|worker|operator|manager|operations? analyst)\b",
     r"\b(?:delivery|truck|bus) driver\b",
     r"\bfield service (?:technician|engineer)\b",
     r"\b(?:maintenance|installation|repair) technician\b",
@@ -761,6 +773,11 @@ NON_FULL_TIME_EMPLOYMENT_TYPES = {
     "part time", "part-time", "contract", "contractor", "temporary",
     "temp", "freelance", "internship", "seasonal", "per diem",
 }
+FULL_TIME_EMPLOYMENT_TYPES = {
+    "full time", "fulltime", "permanent", "permanent full time",
+    "regular full time", "salaried full time",
+}
+AMBIGUOUS_EMPLOYEE_TYPES = {"regular", "employee", "salaried"}
 NON_ACTIVE_HIRING_SIGNAL_PATTERNS = [
     r"(?m)^\s*(?:future openings?|future opportunities|talent pool|talent pipeline|expression of interest|general application)\s*$",
     r"\b(?:this|the) (?:posting|role|position|application) (?:is|exists|serves)\b[^.\n]{0,120}\b(?:future openings?|future opportunities|talent pool|talent pipeline|expression of interest|general application)\b",

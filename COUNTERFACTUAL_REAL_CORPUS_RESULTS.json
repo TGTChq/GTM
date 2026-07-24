@@ -1,0 +1,187 @@
+{
+  "corpus": "Two captured production runs (July 22-23, 2026)",
+  "raw_records": 1058,
+  "unique_records": 983,
+  "v143_kept": 69,
+  "v143_unique_companies": 66,
+  "v144_kept": 93,
+  "v144_unique_companies": 90,
+  "recovered_count": 24,
+  "lost_count": 0,
+  "recovered": [
+    {
+      "job_id": "RadexKH6ZyXkU0oNAAAAAA==",
+      "company": "Fuku",
+      "title": "Machine Learning Engineer - Search, Ranking & Personalization - Full-time",
+      "previous_reason": "description_employer_identity_conflict",
+      "new_review_flags": {}
+    },
+    {
+      "job_id": "hyLsaw4sAh3tSzC-AAAAAA==",
+      "company": "Snowflake",
+      "title": "Account Executive, Media & Entertainment",
+      "previous_reason": "description_employer_identity_conflict",
+      "new_review_flags": {}
+    },
+    {
+      "job_id": "D6bOpi7vP89LIblLAAAAAA==",
+      "company": "Dropbox",
+      "title": "Account Executive UKI",
+      "previous_reason": "description_employer_identity_conflict",
+      "new_review_flags": {}
+    },
+    {
+      "job_id": "Vvo4s-X7Qw7G4yx2AAAAAA==",
+      "company": "T-Mobile",
+      "title": "Account Executive, Business Team Sales- Central IL",
+      "previous_reason": "description_employer_identity_conflict",
+      "new_review_flags": {}
+    },
+    {
+      "job_id": "LXW8rm6UTZkbL1o_AAAAAA==",
+      "company": "Nectar Social",
+      "title": "Event & Community Manager",
+      "previous_reason": "description_employer_identity_conflict",
+      "new_review_flags": {}
+    },
+    {
+      "job_id": "_odM1fDqNlou6omqAAAAAA==",
+      "company": "TriHire Solutions",
+      "title": "Financial System Administrator",
+      "previous_reason": "description_employer_identity_conflict",
+      "new_review_flags": {}
+    },
+    {
+      "job_id": "H5-GZKzIhycZcGGCAAAAAA==",
+      "company": "Solomon Page",
+      "title": "Accounts Receivable Specialist job at Solomon Page in Houston, TX",
+      "previous_reason": "description_employer_identity_conflict",
+      "new_review_flags": {}
+    },
+    {
+      "job_id": "dCqEySjPsX4EZQz-AAAAAA==",
+      "company": "HireHawk",
+      "title": "Apparel Graphic Designer / Design Assistant | United States",
+      "previous_reason": "description_employer_identity_conflict",
+      "new_review_flags": {}
+    },
+    {
+      "job_id": "ieKURqA8gPKYyVuuAAAAAA==",
+      "company": "Mimecast",
+      "title": "Account Executive, Mid-Market (North Central)",
+      "previous_reason": "description_employer_identity_conflict",
+      "new_review_flags": {}
+    },
+    {
+      "job_id": "B4gKFlTNri9ejPulAAAAAA==",
+      "company": "Playbook",
+      "title": "Premium Creator Account Manager, Remote Job",
+      "previous_reason": "description_employer_identity_conflict",
+      "new_review_flags": {}
+    },
+    {
+      "job_id": "YKawt0kOOWrhRAN4AAAAAA==",
+      "company": "Bisnow",
+      "title": "Entry Level Business Development Representative job at Bisnow in Washington, DC, Philadelphia, PA",
+      "previous_reason": "description_employer_identity_conflict",
+      "new_review_flags": {}
+    },
+    {
+      "job_id": "IalTG6w0AeFcdXelAAAAAA==",
+      "company": "Illumio",
+      "title": "Motion Designer (Brand & Campaigns)",
+      "previous_reason": "description_employer_identity_conflict",
+      "new_review_flags": {}
+    },
+    {
+      "job_id": "LEpBpl7EQpFuetPAAAAAAA==",
+      "company": "My Amazon Guy",
+      "title": "E-commerce Web Designer (CRO)",
+      "previous_reason": "description_employer_identity_conflict",
+      "new_review_flags": {}
+    },
+    {
+      "job_id": "GBvBTG6c1504PivQAAAAAA==",
+      "company": "GuidePoint Security",
+      "title": "Account Executive - Velocity (North Carolina)",
+      "previous_reason": "description_employer_identity_conflict",
+      "new_review_flags": {}
+    },
+    {
+      "job_id": "f8i26JvjRQYIeO6MAAAAAA==",
+      "company": "JMAC Lending",
+      "title": "Wholesale Account Executive, National",
+      "previous_reason": "description_employer_identity_conflict",
+      "new_review_flags": {}
+    },
+    {
+      "job_id": "Sm8MSTuxI-GdXyPOAAAAAA==",
+      "company": "Quandary Consulting Group",
+      "title": "Account Executive- AI and Automation",
+      "previous_reason": "description_employer_identity_conflict",
+      "new_review_flags": {}
+    },
+    {
+      "job_id": "PUNdTPQWOKPMcF92AAAAAA==",
+      "company": "Hire Hangar",
+      "title": "Paid Media Specialist \u2013 Digital Acquisition",
+      "previous_reason": "description_employer_identity_conflict",
+      "new_review_flags": {}
+    },
+    {
+      "job_id": "ulktCGkDyc5BZOwQAAAAAA==",
+      "company": "PointClickCare",
+      "title": "(US) Customer Success Manager - Health Plan (Great Lakes)",
+      "previous_reason": "description_employer_identity_conflict",
+      "new_review_flags": {}
+    },
+    {
+      "job_id": "z3xMNEEVCa5O-v-VAAAAAA==",
+      "company": "Element 84",
+      "title": "Senior DevOps Engineer (Hub-Remote: DC or Philly Metro)",
+      "previous_reason": "description_employer_identity_conflict",
+      "new_review_flags": {}
+    },
+    {
+      "job_id": "1LYwEcNXpfgHAWzwAAAAAA==",
+      "company": "Pinterest",
+      "title": "Software Engineer II, Big Data, tvScientific",
+      "previous_reason": "description_employer_identity_conflict",
+      "new_review_flags": {}
+    },
+    {
+      "job_id": "_jfdv-XLMfc0euwKAAAAAA==",
+      "company": "Sentinel",
+      "title": "Enterprise Data Analyst",
+      "previous_reason": "description_employer_identity_conflict",
+      "new_review_flags": {}
+    },
+    {
+      "job_id": "icZ8cL7oxY_F_5Q6AAAAAA==",
+      "company": "Sanity",
+      "title": "Senior Manager, Paid Media, Remote Job",
+      "previous_reason": "description_employer_identity_conflict",
+      "new_review_flags": {}
+    },
+    {
+      "job_id": "j0WsX9QaZ-dWWpXfAAAAAA==",
+      "company": "Pearl",
+      "title": "Remote Executive Assistant (US Hours)",
+      "previous_reason": "description_employer_identity_conflict",
+      "new_review_flags": {}
+    },
+    {
+      "job_id": "E8iRf6-5r13rcDp9AAAAAA==",
+      "company": "Anthropos",
+      "title": "Account Executive US Market - Skills Assessment and AI Adoption (East Coast only)",
+      "previous_reason": "description_employer_identity_conflict",
+      "new_review_flags": {}
+    }
+  ],
+  "lost": [],
+  "limitations": [
+    "This is a pre-enrichment replay, not FINAL_PASS.",
+    "The exact 1,988-posting shadow raw archive was not present in the uploaded artifacts.",
+    "Recovered postings still face CRM, Job, Role, Account, Contact, Email, approval, and pre-send revalidation gates."
+  ]
+}

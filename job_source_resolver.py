@@ -527,10 +527,10 @@ def _posted_at(job: Dict) -> Optional[datetime]:
 
 def _prefilter_full_time(job: Dict) -> bool:
     """Use the signed Step-2 employment decision, rejecting raw contradictions."""
-    raw = re.sub(
-        r"[^a-z]", "", str(job.get("job_employment_type") or "").lower()
-    )
-    if raw and raw != "fulltime":
+    raw_label = re.sub(
+        r"[^a-z]+", " ", str(job.get("job_employment_type") or "").lower()
+    ).strip()
+    if raw_label and raw_label not in config.FULL_TIME_EMPLOYMENT_TYPES:
         return False
     return bool(
         str(job.get("_employment_quality") or "") == "full_time"
