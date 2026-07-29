@@ -685,6 +685,13 @@ def _process_company_strict(company_jobs: List[Dict]) -> Tuple[List[Dict], Dict]
         jobs_by_bucket[get_bucket_name_for_job(job)].append(job)
 
     leads: List[Dict] = []
+    # Company-level "at least one bucket had X" flags for the row-2 instrumentation
+    # (66-eligible-to-19-attempts reconciliation). Set inside the bucket loop below.
+    company_had_people_search_call = False
+    company_had_person_returned = False
+    company_had_title_match = False
+    company_had_untried_candidate = False
+    company_had_person_match_attempt = False
     for bucket, bucket_jobs in jobs_by_bucket.items():
         primary = _primary_job(bucket_jobs)
         job_decision = _strict_gate_from_job(primary, "_job_gate_decision", "job")
@@ -707,21 +714,88 @@ def _process_company_strict(company_jobs: List[Dict]) -> Tuple[List[Dict], Dict]
             )
             final["_step3_reason"] = final.get("_final_primary_reason")
             final["hiring_manager_confidence"] = "none"
+            final["_row2_diagnostic"] = {
+                "company_key": company_key_for_job(first),
+                "domain": search_domain or input_domain or "",
+                "bucket": bucket,
+                "people_search_call": False,
+                "apollo_search_error": False,
+                "people_returned": None,
+                "title_matched_candidates": None,
+                "untried_candidates": None,
+                "person_match_attempts": 0,
+                "terminal_reason": (
+                    "account_reject"
+                    if account_decision.state_value == GateState.REJECT.value
+                    else "no_search_domain"
+                ),
+            }
             leads.append(final)
             stats[f"final_{str(final.get('_final_state')).lower()}"] += 1
             continue
 
         target_titles = get_target_titles_for_jobs(bucket_jobs, org.employee_count)
-        people = apollo.search_people_at_company(search_domain, target_titles)
-        time.sleep(config.APOLLO_RATE_LIMIT_DELAY)
-        ranked_candidates = rank_candidates(people, target_titles)
         account_bucket_key = f"{search_domain}|{bucket}"
         reroute_registry = RerouteRegistry()
         attempted_before = reroute_registry.attempted_ids(account_bucket_key)
-        ranked_candidates = [
-            item for item in ranked_candidates
-            if str(item.get("id") or item.get("person_id") or "") not in attempted_before
-        ]
+
+        company_had_people_search_call = True
+        stats["row2_people_search_calls_total"] += 1
+        apollo_error = False
+        try:
+            people = apollo.search_people_at_company(search_domain, target_titles)
+        except Exception as exc:
+            apollo_error = True
+            people = []
+            logger.warning(
+                "Apollo people search error for %s|%s: %s", search_domain, bucket, exc
+            )
+        time.sleep(config.APOLLO_RATE_LIMIT_DELAY)
+
+        if apollo_error:
+            # An exception/failed response is not the same as a confirmed empty
+            # result and must not be counted under bucket_zero_apollo_people.
+            stats["bucket_apollo_search_error"] += 1
+            title_ranked_candidates: List[Dict] = []
+            ranked_candidates: List[Dict] = []
+        else:
+            stats["row2_apollo_people_returned_total"] += len(people)
+            if people:
+                stats["row2_buckets_with_apollo_person"] += 1
+                company_had_person_returned = True
+            title_ranked_candidates = rank_candidates(people, target_titles)
+            stats["row2_title_matched_candidates_total"] += len(title_ranked_candidates)
+            if title_ranked_candidates:
+                stats["row2_buckets_with_title_match"] += 1
+                company_had_title_match = True
+            ranked_candidates = [
+                item for item in title_ranked_candidates
+                if str(item.get("id") or item.get("person_id") or "") not in attempted_before
+            ]
+            stats["row2_untried_candidates_total"] += len(ranked_candidates)
+            if ranked_candidates:
+                stats["row2_buckets_with_untried_candidate"] += 1
+                company_had_untried_candidate = True
+
+        if apollo_error:
+            zero_attempt_reason = "apollo_search_error"
+        elif not ranked_candidates:
+            # Distinguishes why this bucket contributes zero person_match_attempts:
+            # no people returned by Apollo at all, people returned but none ranked
+            # against target titles, or candidates existed but were all already
+            # attempted in a prior run (RerouteRegistry). Instrumentation only —
+            # does not change which candidates are searched or attempted.
+            if not people:
+                stats["bucket_zero_apollo_people"] += 1
+                zero_attempt_reason = "zero_apollo_people"
+            elif not title_ranked_candidates:
+                stats["bucket_no_title_match"] += 1
+                zero_attempt_reason = "no_title_match"
+            else:
+                stats["bucket_all_candidates_previously_attempted"] += 1
+                zero_attempt_reason = "all_candidates_previously_attempted"
+        else:
+            zero_attempt_reason = None
 
         company_domains = _organization_domains(org)
         company_domains.add(search_domain)
@@ -808,6 +882,9 @@ def _process_company_strict(company_jobs: List[Dict]) -> Tuple[List[Dict], Dict]
             selected_contact_decision = contact_decision
             selected_email_decision = email_decision
             break
+
+        if attempted_ids:
+            company_had_person_match_attempt = True
 
         if selected_person and selected_contact_decision and selected_email_decision:
             person = selected_person
@@ -899,9 +976,32 @@ def _process_company_strict(company_jobs: List[Dict]) -> Tuple[List[Dict], Dict]
                 )
 
         final = annotate_job(final, probe_url=False)
+        final["_row2_diagnostic"] = {
+            "company_key": company_key_for_job(first),
+            "domain": search_domain,
+            "bucket": bucket,
+            "people_search_call": True,
+            "apollo_search_error": apollo_error,
+            "people_returned": None if apollo_error else len(people),
+            "title_matched_candidates": None if apollo_error else len(title_ranked_candidates),
+            "untried_candidates": None if apollo_error else len(ranked_candidates),
+            "person_match_attempts": len(attempted_ids),
+            "terminal_reason": "attempted" if attempted_ids else zero_attempt_reason,
+        }
         leads.append(final)
         stats[f"bucket_{bucket}_{final.get('_step3_status')}"] += 1
         stats[f"final_{str(final.get('_final_state')).lower()}"] += 1
+
+    if company_had_people_search_call:
+        stats["row2_companies_with_people_search_call"] += 1
+    if company_had_person_returned:
+        stats["row2_companies_with_person_returned"] += 1
+    if company_had_title_match:
+        stats["row2_companies_with_title_match"] += 1
+    if company_had_untried_candidate:
+        stats["row2_companies_with_untried_candidate"] += 1
+    if company_had_person_match_attempt:
+        stats["row2_companies_with_person_match_attempt"] += 1
 
     return leads, dict(stats)
 

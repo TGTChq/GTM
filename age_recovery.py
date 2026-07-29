@@ -145,6 +145,8 @@ def run_age_recovery(
     )
     details["recovered_final_pass_leads"] = recovered.final_pass_leads
     details["recovered_reviewable_leads"] = _reviewable_count(recovered)
+    details["recovered_companies_considered"] = recovered.companies_considered
+    details["recovered_eligible_companies"] = recovered.eligible_companies
     details["recovery_hiring_manager_output"] = recovered.output_path
     if recovered.errors:
         details["errors"].extend(recovered.errors)
@@ -175,9 +177,12 @@ def run_age_recovery(
     details["combined_reviewable_leads"] = _reviewable_count(combined)
     details["stop_reason"] = stop_reason
     logger.info(
-        "Age recovery 15-30d: kept=%d contact_eligible=%d reviewable_added=%d combined=%d/%d",
+        "Age recovery 15-30d: kept=%d contact_eligible=%d companies_considered=%d "
+        "eligible_companies=%d reviewable_added=%d combined=%d/%d",
         recovered_filter.kept_count,
         qualified.contact_eligible_jobs,
+        recovered.companies_considered,
+        recovered.eligible_companies,
         _reviewable_count(recovered),
         _reviewable_count(combined),
         target_final_pass_leads,
