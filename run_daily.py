@@ -51,6 +51,15 @@ def save_run_summary(summary: dict) -> str:
     return str(path)
 
 
+def _reason_counts(stats: dict, prefix: str) -> dict:
+    """Aggregate non-zero `{prefix}reasoncode` stat keys into a plain dict for logging."""
+    return {
+        key.removeprefix(prefix): value
+        for key, value in stats.items()
+        if key.startswith(prefix) and value
+    }
+
+
 def _fail(summary: dict, step: str, errors: list[str]) -> dict:
     summary["failed_at"] = step
     summary["errors"] = errors
@@ -535,11 +544,18 @@ def run_pipeline() -> dict:
         "output": enriched.output_path,
         "errors": enriched.errors,
     }
+    # `no_matching_hiring_manager`/`candidate_*` keys are written only by the
+    # legacy (non-strict) path; the strict pipeline records the same failure
+    # reasons under `contact_reason__*`/`email_reason__*` instead, which the
+    # original version of this line never read (always printed 0 in strict
+    # mode). Both are now included so neither pipeline mode is silently blind.
+    contact_reason_counts = _reason_counts(enriched.stats, "contact_reason__")
+    email_reason_counts = _reason_counts(enriched.stats, "email_reason__")
     logger.info(
         "Hiring-manager funnel: companies_considered=%d eligible=%d FINAL_PASS=%d/%d review_rows=%d "
         "identified=%d contactable=%d | no_manager=%d no_email=%d invalid_email=%d "
         "org_domain_mismatch=%d email_domain_mismatch=%d founder_disallowed=%d "
-        "person_match_attempts=%d",
+        "person_match_attempts=%d | contact_reasons=%s email_reasons=%s",
         enriched.companies_considered,
         enriched.eligible_companies,
         enriched.final_pass_leads,
@@ -554,12 +570,46 @@ def run_pipeline() -> dict:
         enriched.stats.get("candidate_email_domain_mismatch", 0),
         enriched.stats.get("candidate_founder_fallback_disallowed", 0),
         enriched.stats.get("person_match_attempts", 0),
+        contact_reason_counts,
+        email_reason_counts,
     )
     logger.info(
         "Hiring-manager selection tiers: direct=%d functional_exec=%d founder_fallback=%d",
         enriched.stats.get("selection_tier_direct_functional_leader", 0),
         enriched.stats.get("selection_tier_functional_executive", 0),
         enriched.stats.get("selection_tier_founder_fallback", 0),
+    )
+    logger.info(
+        "Zero-attempt buckets: zero_apollo_people=%d no_title_match=%d all_candidates_previously_attempted=%d "
+        "apollo_search_error=%d",
+        enriched.stats.get("bucket_zero_apollo_people", 0),
+        enriched.stats.get("bucket_no_title_match", 0),
+        enriched.stats.get("bucket_all_candidates_previously_attempted", 0),
+        enriched.stats.get("bucket_apollo_search_error", 0),
+    )
+    logger.info(
+        "Row-2 reconciliation (bucket-level): eligible_company_buckets=%d people_search_calls=%d "
+        "people_returned_total=%d buckets_with_person=%d title_matched_total=%d buckets_with_title_match=%d "
+        "untried_total=%d buckets_with_untried=%d person_match_attempts=%d",
+        enriched.total_output_leads - enriched.company_criteria_excluded,
+        enriched.stats.get("row2_people_search_calls_total", 0),
+        enriched.stats.get("row2_apollo_people_returned_total", 0),
+        enriched.stats.get("row2_buckets_with_apollo_person", 0),
+        enriched.stats.get("row2_title_matched_candidates_total", 0),
+        enriched.stats.get("row2_buckets_with_title_match", 0),
+        enriched.stats.get("row2_untried_candidates_total", 0),
+        enriched.stats.get("row2_buckets_with_untried_candidate", 0),
+        enriched.stats.get("person_match_attempts", 0),
+    )
+    logger.info(
+        "Row-2 reconciliation (company-level, of %d eligible companies): with_people_search_call=%d "
+        "with_person_returned=%d with_title_match=%d with_untried_candidate=%d with_person_match_attempt=%d",
+        enriched.eligible_companies,
+        enriched.stats.get("row2_companies_with_people_search_call", 0),
+        enriched.stats.get("row2_companies_with_person_returned", 0),
+        enriched.stats.get("row2_companies_with_title_match", 0),
+        enriched.stats.get("row2_companies_with_untried_candidate", 0),
+        enriched.stats.get("row2_companies_with_person_match_attempt", 0),
     )
     company_reason_counts = {
         key.removeprefix("company_criteria_reason__"): value
