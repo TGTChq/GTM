@@ -51,6 +51,26 @@ def _surface_keys(leads: Iterable[Dict]) -> set[str]:
     }
 
 
+def _final_pass_count(leads: Iterable[Dict]) -> int:
+    """Genuine reconciled FINAL_PASS count (deduped, prefer-stronger).
+
+    This is the ONLY authoritative progress metric for the FINAL_PASS SLA.
+    It must never be conflated with the Airtable-reviewable surface count
+    (``_surface_keys``), which additionally includes NEEDS_CHECK / UNVERIFIED
+    review rows. Reaching the review-row target must never satisfy the
+    FINAL_PASS target -- 30 is a floor on genuine FINAL_PASS, never a cap.
+    """
+    return len(_final_pass_keys(_dedupe_leads_prefer_stronger(leads)))
+
+
+def _surface_count(leads: Iterable[Dict]) -> int:
+    """Airtable-reviewable surface count (FINAL_PASS + reviewable review rows).
+
+    Reported separately for observability; it never gates the FINAL_PASS SLA.
+    """
+    return len(_surface_keys(_dedupe_leads_prefer_stronger(leads)))
+
+
 def _dedupe_leads_prefer_stronger(leads: Iterable[Dict]) -> List[Dict]:
     rank = {"FINAL_PASS": 5, "NEEDS_CHECK": 4, "REROUTE": 3, "UNVERIFIED": 2, "REJECT": 1, "": 0}
     selected: Dict[Tuple[str, ...], Dict] = {}
@@ -291,7 +311,7 @@ def run_final_pass_topup(
         "downstream_yield",
     ]
 
-    if len(_surface_keys(all_leads)) >= target_final_pass_leads:
+    if _final_pass_count(all_leads) >= target_final_pass_leads:
         stop_reason = "final_pass_target_reached_initial_pass"
     else:
         # Reroute is cheaper than new JSearch inventory. Re-run only accounts that
@@ -300,11 +320,12 @@ def run_final_pass_topup(
         if reroute_jobs:
             reroute_input = Path(config.FILTERED_OUTPUT_DIR) / f"reroute_candidates_{datetime.now():%Y-%m-%d_%H%M%S}.json"
             reroute_input.write_text(json.dumps({"jobs": reroute_jobs}, indent=2), encoding="utf-8")
-            before = len(_surface_keys(all_leads))
+            fp_before = _final_pass_count(all_leads)
+            surface_before = len(_surface_keys(all_leads))
             try:
                 rerouted = run_hiring_manager_identification(
                     str(reroute_input),
-                    target_final_pass_leads=max(1, target_final_pass_leads - before),
+                    target_final_pass_leads=max(1, target_final_pass_leads - fp_before),
                     max_eligible_companies=(
                         max_eligible_companies if max_eligible_companies > 0 else None
                     ),
@@ -314,11 +335,12 @@ def run_final_pass_topup(
                 payloads.append(reroute_payload)
                 results.append(rerouted)
                 all_leads.extend(reroute_payload.get("jobs", []))
-                after = len(_surface_keys(_dedupe_leads_prefer_stronger(all_leads)))
+                fp_after = _final_pass_count(all_leads)
+                surface_after = _surface_count(all_leads)
                 details["reroute_rounds"].append({
                     "attempted": len(reroute_jobs),
-                    "reviewable_added": max(0, after - before),
-                    "final_pass_added": max(0, after - before),
+                    "reviewable_added": max(0, surface_after - surface_before),
+                    "final_pass_added": max(0, fp_after - fp_before),
                     "output": rerouted.output_path,
                 })
             except Exception as exc:
@@ -331,7 +353,11 @@ def run_final_pass_topup(
             if iteration_limit > 0 and iteration > iteration_limit:
                 stop_reason = "topup_iteration_limit_reached"
                 break
-            current = len(_surface_keys(_dedupe_leads_prefer_stronger(all_leads)))
+            # Genuine reconciled FINAL_PASS is the ONLY progress metric here.
+            # The review-row surface count must never satisfy this target
+            # (Incident 1: production emitted final_pass_target_reached at
+            # FINAL_PASS=15 because review_rows had reached 30).
+            current = _final_pass_count(all_leads)
             if current >= target_final_pass_leads:
                 stop_reason = "final_pass_target_reached"
                 break
@@ -498,7 +524,8 @@ def run_final_pass_topup(
                     break
                 continue
 
-            before = current
+            fp_before = current
+            surface_before = _surface_count(all_leads)
             enriched = run_hiring_manager_identification(
                 qualified.output_path,
                 target_final_pass_leads=deficit,
@@ -511,21 +538,25 @@ def run_final_pass_topup(
             results.append(enriched)
             all_leads.extend(payload.get("jobs", []))
             considered_company_keys.update(enriched.processed_company_keys)
-            after = len(_surface_keys(_dedupe_leads_prefer_stronger(all_leads)))
+            fp_after = _final_pass_count(all_leads)
+            surface_after = _surface_count(all_leads)
             round_detail.update({
                 "companies_considered": enriched.companies_considered,
                 "eligible_companies": enriched.eligible_companies,
-                "reviewable_added": max(0, after - before),
-                "final_pass_added": max(0, after - before),
-                "reviewable_total": after,
+                "reviewable_added": max(0, surface_after - surface_before),
+                "final_pass_added": max(0, fp_after - fp_before),
+                "reviewable_total": surface_after,
+                "final_pass_total": fp_after,
                 "enrichment_output": enriched.output_path,
             })
             details["rounds"].append(round_detail)
-            if after > before:
+            # Downstream yield is measured against genuine FINAL_PASS: a round
+            # that adds only review rows made no progress toward the SLA floor.
+            if fp_after > fp_before:
                 zero_downstream_batches = 0
             else:
                 zero_downstream_batches += 1
-            if after >= target_final_pass_leads:
+            if fp_after >= target_final_pass_leads:
                 stop_reason = "final_pass_target_reached"
                 break
             if zero_downstream_batches >= zero_downstream_limit:
@@ -540,10 +571,12 @@ def run_final_pass_topup(
         "topup_unit_budget": config.JSEARCH_TOPUP_UNIT_BUDGET,
         "total_query_units": total_query_units,
         "run_global_unit_cap": config.JSEARCH_MAX_ESTIMATED_UNITS_PER_RUN,
-        "final_pass_leads": len(_final_pass_keys(_dedupe_leads_prefer_stronger(all_leads))),
-        "reviewable_leads": len(_surface_keys(_dedupe_leads_prefer_stronger(all_leads))),
+        "final_pass_leads": _final_pass_count(all_leads),
+        "reviewable_leads": _surface_count(all_leads),
         "stop_reason": stop_reason,
-        "deficit_remaining": max(0, target_final_pass_leads - len(_surface_keys(_dedupe_leads_prefer_stronger(all_leads)))),
+        # actual_final_pass_deficit = max(0, target - reconciled FINAL_PASS)
+        # (Section 4). Never computed against the review-row surface count.
+        "deficit_remaining": max(0, target_final_pass_leads - _final_pass_count(all_leads)),
     })
     combined = _combine(
         results=results,

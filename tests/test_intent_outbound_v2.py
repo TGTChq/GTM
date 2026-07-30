@@ -316,7 +316,7 @@ class ScraperV2Tests(unittest.TestCase):
                 "job_description": "Build backend APIs.",
             }
 
-            def fake_fetch(role: str):
+            def fake_fetch(role: str, *, page: int = 1, num_pages=None, **kwargs):
                 return [job] if role == "Backend Developer" else []
 
             with (
@@ -382,7 +382,7 @@ class ScraperV2Tests(unittest.TestCase):
 
     def test_max_queries_is_an_optional_runtime_cap(self):
         with tempfile.TemporaryDirectory() as temp_dir:
-            def fake_fetch(role: str):
+            def fake_fetch(role: str, *, page: int = 1, num_pages=None, **kwargs):
                 return [{
                     "job_id": f"job-{role}",
                     "job_title": role,
@@ -502,7 +502,7 @@ class ScrapeTestHarnessTests(unittest.TestCase):
 
     def test_env_query_cap_is_honored_when_runtime_override_is_omitted(self):
         with tempfile.TemporaryDirectory() as temp_dir:
-            def fake_fetch(role: str):
+            def fake_fetch(role: str, *, page: int = 1, num_pages=None, **kwargs):
                 return [{
                     "job_id": f"job-{role}",
                     "job_title": role,

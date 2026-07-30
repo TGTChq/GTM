@@ -527,7 +527,7 @@ class JSearchRoleSelectionTests(unittest.TestCase):
             "job_country": "US",
         }
 
-        def fake_fetch(role):
+        def fake_fetch(role, *, page: int = 1, num_pages=None, **kwargs):
             return [dict(shared)] if role in {"GTM Engineer", "AI Engineer"} else []
 
         class EmptyRegistry:
