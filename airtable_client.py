@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, Iterable, List, Set
+from typing import Dict, Iterable, List, Optional, Set
 from urllib.parse import quote
 
 import config
@@ -20,6 +22,45 @@ from http_utils import request_with_retry, safe_json
 
 logger = logging.getLogger(__name__)
 AIRTABLE_API_BASE = "https://api.airtable.com/v0"
+
+# Airtable retries only these transient statuses (mirrors http_utils); anything
+# else -- notably a 422 Unprocessable Entity schema rejection -- is deterministic
+# and must not be retried, and must be surfaced with the field-level error the
+# response body carries rather than collapsed to a bare status (Incident B, §10).
+_AIRTABLE_RETRYABLE_STATUS = {408, 425, 429, 500, 502, 503, 504}
+
+
+def _sanitize_airtable_error(exc: Exception) -> Dict[str, object]:
+    """Extract sanitized, non-secret diagnostic context from an Airtable API
+    failure. Airtable's error body is ``{"error": {"type", "message"}}`` and
+    names the offending field/value type -- it never contains credentials. The
+    request URL/headers (which hold the token) are deliberately not included."""
+    response = getattr(exc, "response", None)
+    status = getattr(response, "status_code", None)
+    error_type = ""
+    message = ""
+    if response is not None:
+        try:
+            body = response.json()
+        except (ValueError, TypeError):
+            body = None
+        if isinstance(body, dict):
+            err = body.get("error")
+            if isinstance(err, dict):
+                error_type = str(err.get("type") or "")
+                message = str(err.get("message") or "")
+            elif isinstance(err, str):
+                error_type = err
+        if not error_type and not message:
+            message = str(getattr(response, "text", "") or "")[:300]
+    if not error_type and not message:
+        message = str(exc)[:300]
+    return {
+        "status": status,
+        "error_type": error_type,
+        "message": message[:300],
+        "retryable": bool(status in _AIRTABLE_RETRYABLE_STATUS),
+    }
 
 
 REQUIRED_FIELDS = [
@@ -106,6 +147,53 @@ def _clean_fields(fields: Dict) -> Dict:
     return {key: value for key, value in fields.items() if value not in (None, "", [])}
 
 
+def _unix_to_iso(ts) -> Optional[str]:
+    value = float(ts)
+    if value > 1e12:  # milliseconds since epoch
+        value /= 1000.0
+    try:
+        return datetime.fromtimestamp(value, tz=timezone.utc).isoformat().replace("+00:00", "Z")
+    except (OverflowError, OSError, ValueError):
+        return None
+
+
+def _as_airtable_datetime(value) -> Optional[str]:
+    """Coerce a Posted-At value into a string Airtable's ``dateTime`` field
+    accepts. The ``job_posted_at_timestamp`` fallback is a raw unix integer;
+    Airtable rejects a bare integer in a date field with HTTP 422 even under
+    ``typecast``, so a numeric value (int/float or numeric string) is converted
+    to UTC ISO-8601 and an unparseable value is dropped rather than sent as-is.
+    An existing date-like string is passed through for typecast to parse."""
+    if value is None or value == "" or isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return _unix_to_iso(value)
+    text = str(value).strip()
+    if not text:
+        return None
+    if re.fullmatch(r"-?\d+(?:\.\d+)?", text):  # numeric string == unix timestamp
+        return _unix_to_iso(float(text))
+    return text
+
+
+def _as_airtable_number(value):
+    """Coerce a value for a numeric Airtable field, or return None to omit it.
+    Apollo firmographics (``company_employee_count``/``company_founded_year``)
+    are stored raw from the provider; a non-numeric string would be rejected by
+    a ``number`` field (422) and crashes ``company_size_band``. A non-numeric
+    value is dropped (missing), never fabricated into a partial number."""
+    if value is None or value == "" or isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return value
+    text = str(value).strip().replace(",", "")
+    if re.fullmatch(r"-?\d+", text):
+        return int(text)
+    if re.fullmatch(r"-?\d+\.\d+", text):
+        return float(text)
+    return None
+
+
 def _gate_state(job: Dict, gate: str) -> str:
     decision = (job.get("_gate_decisions") or {}).get(gate) or {}
     return str(decision.get("state") or job.get(f"_{gate}_gate_state") or "")
@@ -152,6 +240,9 @@ def _job_to_fields(job: Dict) -> Dict:
             "SOURCE_TEMPORARILY_UNAVAILABLE": "unverified_review",
             "SOURCE_UNRESOLVED": "unverified_review",
         }.get(source_state, source_state.lower())
+    # Apollo firmographics are raw provider values; coerce once so both the
+    # numeric "Employees" field and the size-band computation are int-safe.
+    _employee_count = _as_airtable_number(job.get("company_employee_count"))
     fields = {
         "Lead Key": job.get("lead_key"),
         "Company": job.get("canonical_company_name") or job.get("canonical_employer_name") or job.get("employer_name"),
@@ -169,9 +260,13 @@ def _job_to_fields(job: Dict) -> Dict:
         "Role Bucket": job.get("_role_bucket"),
         "Job URL": official_source,
         "Job Source": official_source_type or job.get("job_publisher"),
-        "Posted At": job.get("canonical_published_at") or job.get("job_posted_at_datetime_utc") or job.get("job_posted_at_timestamp"),
+        "Posted At": _as_airtable_datetime(
+            job.get("canonical_published_at")
+            or job.get("job_posted_at_datetime_utc")
+            or job.get("job_posted_at_timestamp")
+        ),
         "Job Freshness": job.get("job_freshness"),
-        "Job Age Days": job.get("job_age_days"),
+        "Job Age Days": _as_airtable_number(job.get("job_age_days")),
         "Job URL Status": canonical_active_status or job.get("job_url_status"),
         "Job URL Source": official_source_type,
         "Job Signal Notes": " | ".join(
@@ -184,7 +279,7 @@ def _job_to_fields(job: Dict) -> Dict:
         "Location": job.get("canonical_location") or job.get("_normalized_location") or job.get("job_location"),
         "Employment Type": job.get("canonical_employment_type") or job.get("job_employment_type"),
         "Relevance": relevance,
-        "Relevance Score": job.get("_role_relevance_score"),
+        "Relevance Score": _as_airtable_number(job.get("_role_relevance_score")),
         "Relevance Reason": " | ".join(relevance_reasons),
         "Hiring Manager": job.get("hiring_manager_name"),
         "HM Title": job.get("hiring_manager_title"),
@@ -195,9 +290,9 @@ def _job_to_fields(job: Dict) -> Dict:
         "Apollo Email Status": job.get("apollo_email_status"),
         "Hunter Email Status": job.get("hunter_email_status"),
         "Confidence": job.get("hiring_manager_confidence"),
-        "Employees": job.get("company_employee_count"),
-        "Size Band": config.company_size_band(job.get("company_employee_count")),
-        "Founded": job.get("company_founded_year"),
+        "Employees": _employee_count,
+        "Size Band": config.company_size_band(_employee_count),
+        "Founded": _as_airtable_number(job.get("company_founded_year")),
         "Industry": job.get("company_industry"),
         "Campaign ID": job.get("campaign_id"),
         "Job ID": job.get("canonical_job_id") or job.get("job_id"),
@@ -438,6 +533,7 @@ def push_leads(jobs: List[Dict], batch_size: int = 10) -> Dict:
     updated_missing_job_signals = 0
     failed = 0
     failed_lead_keys: List[str] = []
+    error_details: List[Dict] = []
     effective_batch_size = min(batch_size, 10)
 
     for index in range(0, len(to_create), effective_batch_size):
@@ -455,9 +551,14 @@ def push_leads(jobs: List[Dict], batch_size: int = 10) -> Dict:
             created += created_count
             created_lead_keys.extend(job["lead_key"] for job in batch)
         except Exception as exc:
-            logger.error("Airtable batch create failed: %s", exc)
+            detail = _sanitize_airtable_error(exc)
+            logger.error(
+                "Airtable batch create failed: HTTP %s type=%s retryable=%s detail=%s",
+                detail["status"], detail["error_type"] or "?", detail["retryable"], detail["message"],
+            )
             failed += len(batch)
             failed_lead_keys.extend(job["lead_key"] for job in batch)
+            error_details.append({**detail, "operation": "create", "batch_size": len(batch)})
         time.sleep(config.AIRTABLE_RATE_LIMIT_DELAY)
 
     for index in range(0, len(to_update), effective_batch_size):
@@ -475,9 +576,14 @@ def push_leads(jobs: List[Dict], batch_size: int = 10) -> Dict:
             updated_missing_role_focus += sum(1 for item in batch if item["updated_role_focus"])
             updated_missing_job_signals += sum(1 for item in batch if item["updated_job_signal"])
         except Exception as exc:
-            logger.error("Airtable generated-field repair failed: %s", exc)
+            detail = _sanitize_airtable_error(exc)
+            logger.error(
+                "Airtable generated-field repair failed: HTTP %s type=%s retryable=%s detail=%s",
+                detail["status"], detail["error_type"] or "?", detail["retryable"], detail["message"],
+            )
             failed += len(batch)
             failed_lead_keys.extend(item["lead_key"] for item in batch)
+            error_details.append({**detail, "operation": "update", "batch_size": len(batch)})
         time.sleep(config.AIRTABLE_RATE_LIMIT_DELAY)
 
     skipped_existing = len(existing_keys) - len(to_update)
@@ -502,6 +608,10 @@ def push_leads(jobs: List[Dict], batch_size: int = 10) -> Dict:
         "suppressed_company_lead_keys": suppressed_company_keys,
         "failed": failed,
         "failed_lead_keys": failed_lead_keys,
+        # Sanitized per-batch failure diagnostics (status, Airtable error type,
+        # field-level message, retryability) so a deterministic 422 identifies the
+        # offending field on the next run instead of being an opaque status.
+        "error_details": error_details,
         "skipped_no_contact": skipped_no_contact,
         "reviewable": len(unique_by_key),
         "final_pass": sum(job.get("_final_state") == "FINAL_PASS" for job in unique_by_key.values()),
