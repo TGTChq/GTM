@@ -593,6 +593,12 @@ def _adaptive_budget_remaining(
     return max(0, adaptive_cap + lookback_cap - extra_used)
 
 
+# JSearch returns at most this many postings per page. A page that returns
+# fewer proves the provider is exhausted for that query, so sequential base
+# pagination stops rather than paying for the next (empty) page.
+_JSEARCH_FULL_PAGE_SIZE = 10
+
+
 def run_daily_scrape(
     registry: Optional[SeenJobsRegistry] = None,
     *,
@@ -704,95 +710,172 @@ def run_daily_scrape(
 
     for search_role in roles_to_query:
         canonical_role = canonical_role_for_search(search_role)
-        stats["queries_attempted"] += 1
         logger.info("[%s] Searching JSearch...", search_role)
-        fetch_meta = JSearchFetchResult(jobs=[], duration_seconds=0.0, quota={})
-        try:
-            fetch_meta = _coerce_fetch_result(
-                fetch_jobs_for_role(search_role)
-                if base_num_pages is None
-                else fetch_jobs_for_role(search_role, num_pages=base_pages)
-            )
-            raw_jobs = fetch_meta.jobs
-            stats["queries_succeeded"] += 1
-            logger.info("[%s] Fetched %d raw postings", search_role, len(raw_jobs))
-            query_status = "ok"
-            query_error = ""
-        except QuotaExhaustedError:
-            logger.error(
-                "[%s] JSearch monthly/subscription quota is exhausted; aborting the "
-                "remaining query plan immediately.",
-                search_role,
-            )
-            raise
-        except Exception as exc:
-            logger.exception("[%s] Search failed: %s", search_role, exc)
-            raw_jobs = []
-            failed_roles.append(search_role)
-            stats["queries_failed"] += 1
-            query_status = "error"
-            query_error = str(exc)
-
-        quota = fetch_meta.quota or {}
-        remaining = _merge_quota_snapshot(stats, quota)
-
-        raw_role_counts[search_role] = len(raw_jobs)
-        query_ingest = _ingest_query_jobs(
-            raw_jobs=raw_jobs,
-            search_role=search_role,
-            canonical_role=canonical_role,
-            registry=registry,
-            candidates_by_job_id=candidates_by_job_id,
-            stats=stats,
-        )
-        stats["query_metrics"][search_role] = {
+        # Sequential base pagination: fetch pages 1..base_pages one unit at a
+        # time so a role with fewer than base_pages*10 live postings stops early
+        # instead of paying for empty pages, and every consumed page is recorded
+        # in query-state so adaptive deepening and FINAL_PASS top-up never
+        # re-request it (Incident 2). base_pages == 1 (default) preserves the
+        # validated single-page behavior exactly.
+        role_metric: Dict[str, object] = {
             "canonical_role": canonical_role,
-            "status": query_status,
-            "error": query_error,
-            "raw_jobs": len(raw_jobs),
-            "duration_seconds": fetch_meta.duration_seconds,
-            "quota_remaining_after": remaining,
-            "pages": [{
-                "page": 1,
-                "num_pages": base_pages,
-                "last_page": base_pages,
-                "query_variant": "base",
-                "query": build_search_query(search_role),
-                "raw_jobs": len(raw_jobs),
-                "duration_seconds": fetch_meta.duration_seconds,
-                "quota_remaining_after": remaining,
-                **query_ingest,
-            }],
-            **query_ingest,
+            "status": "ok",
+            "error": "",
+            "raw_jobs": 0,
+            "duration_seconds": 0.0,
+            "quota_remaining_after": None,
+            "pages": [],
         }
+        stats["query_metrics"][search_role] = role_metric
+        role_raw_total = 0
+        role_raw_jobs_all: List[Dict] = []
+        role_ingest_agg: Dict[str, int] = {}
+        role_duration_total = 0.0
+        role_query_succeeded = False
+        prev_page_fingerprint: Optional[frozenset] = None
+        base_stop_reason = ""
+
+        for page_number in range(1, base_pages + 1):
+            stats["queries_attempted"] += 1
+            fetch_meta = JSearchFetchResult(jobs=[], duration_seconds=0.0, quota={})
+            page_consumed = True
+            try:
+                fetch_meta = _coerce_fetch_result(
+                    fetch_jobs_for_role(search_role, page=page_number, num_pages=1)
+                )
+                raw_jobs = fetch_meta.jobs
+                stats["queries_succeeded"] += 1
+                role_query_succeeded = True
+                query_status = "ok"
+                query_error = ""
+            except QuotaExhaustedError:
+                logger.error(
+                    "[%s] JSearch monthly/subscription quota is exhausted; aborting the "
+                    "remaining query plan immediately.",
+                    search_role,
+                )
+                raise
+            except Exception as exc:
+                logger.exception("[%s] page %d search failed: %s", search_role, page_number, exc)
+                raw_jobs = []
+                # A failed page is NOT a consumed page: do not record page-state
+                # for it, so it remains retryable under the existing bounded HTTP
+                # retry policy rather than being skipped forever (Incident 2 §7).
+                page_consumed = False
+                if search_role not in failed_roles:
+                    failed_roles.append(search_role)
+                stats["queries_failed"] += 1
+                query_status = "error"
+                query_error = str(exc)
+                role_metric["status"] = "error"
+                role_metric["error"] = " | ".join(
+                    filter(None, [str(role_metric.get("error") or ""), query_error])
+                )
+
+            remaining = _merge_quota_snapshot(stats, fetch_meta.quota or {})
+            query_ingest = _ingest_query_jobs(
+                raw_jobs=raw_jobs,
+                search_role=search_role,
+                canonical_role=canonical_role,
+                registry=registry,
+                candidates_by_job_id=candidates_by_job_id,
+                stats=stats,
+            )
+            role_raw_total += len(raw_jobs)
+            raw_role_counts[search_role] = role_raw_total
+            role_raw_jobs_all.extend(raw_jobs)
+            role_duration_total += fetch_meta.duration_seconds
+            for key, value in query_ingest.items():
+                role_ingest_agg[key] = int(role_ingest_agg.get(key, 0)) + int(value)
+                role_metric[key] = int(role_metric.get(key, 0)) + int(value)
+            role_metric["raw_jobs"] = int(role_metric.get("raw_jobs", 0)) + len(raw_jobs)
+            role_metric["duration_seconds"] = round(
+                float(role_metric.get("duration_seconds") or 0.0) + fetch_meta.duration_seconds, 3
+            )
+            role_metric["quota_remaining_after"] = remaining
+            if page_consumed:
+                role_metric["pages"].append({
+                    "page": page_number,
+                    "num_pages": 1,
+                    "last_page": page_number,
+                    "query_variant": "base",
+                    "query": build_search_query(search_role),
+                    "raw_jobs": len(raw_jobs),
+                    "duration_seconds": fetch_meta.duration_seconds,
+                    "quota_remaining_after": remaining,
+                    **query_ingest,
+                })
+
+            if query_status == "error":
+                base_stop_reason = "provider_error"
+                break
+            page_fingerprint = frozenset(
+                str(job.get("job_id")) for job in raw_jobs if job.get("job_id")
+            )
+            if not raw_jobs:
+                base_stop_reason = "empty_page"
+                break
+            if (
+                prev_page_fingerprint is not None
+                and page_fingerprint
+                and page_fingerprint == prev_page_fingerprint
+            ):
+                # Identical page contents: the provider is repeating results.
+                # In-run job-id dedupe already prevented double counting; stop
+                # so we do not keep paying for the same rows.
+                base_stop_reason = "duplicate_page"
+                break
+            prev_page_fingerprint = page_fingerprint
+            if len(raw_jobs) < _JSEARCH_FULL_PAGE_SIZE:
+                # A partial page proves the provider has no deeper inventory for
+                # this query; fewer than base_pages*10 is a valid market fact.
+                base_stop_reason = "partial_page_provider_exhausted"
+                break
+            if (
+                config.JSEARCH_STOP_ON_LOW_QUOTA
+                and config.JSEARCH_MIN_REMAINING_REQUESTS > 0
+                and isinstance(remaining, int)
+                and remaining <= config.JSEARCH_MIN_REMAINING_REQUESTS
+            ):
+                base_stop_reason = "quota_reserve"
+                stats["query_plan_truncated"] = True
+                stats["query_stop_reason"] = (
+                    "quota_remaining="
+                    f"{remaining} <= JSEARCH_MIN_REMAINING_REQUESTS="
+                    f"{config.JSEARCH_MIN_REMAINING_REQUESTS}"
+                )
+                logger.warning("Stopping JSearch plan early: %s", stats["query_stop_reason"])
+                break
+            if page_number < base_pages:
+                time.sleep(config.SEARCH_DELAY_SECONDS)
+
+        role_metric["base_pages_fetched"] = len(role_metric["pages"])
+        role_metric["base_stop_reason"] = base_stop_reason
         _record_query_variant(
             stats,
             variant="base",
-            raw_jobs=raw_jobs,
-            ingest=query_ingest,
-            duration_seconds=fetch_meta.duration_seconds,
-            success=query_status == "ok",
+            raw_jobs=role_raw_jobs_all,
+            ingest=role_ingest_agg,
+            duration_seconds=role_duration_total,
+            success=role_query_succeeded,
+        )
+        logger.info(
+            "[%s] Fetched %d raw postings across %d base page(s)%s",
+            search_role,
+            role_raw_total,
+            len(role_metric["pages"]),
+            f" ({base_stop_reason})" if base_stop_reason else "",
         )
 
         # A successful query with zero matches is a valid market observation,
         # not an API failure. Track it separately so a broad role catalog does
         # not trip the production failure gate.
-        if not raw_jobs and search_role not in failed_roles:
+        if role_raw_total == 0 and search_role not in failed_roles:
             zero_result_roles.append(search_role)
 
-        if (
-            config.JSEARCH_STOP_ON_LOW_QUOTA
-            and config.JSEARCH_MIN_REMAINING_REQUESTS > 0
-            and isinstance(remaining, int)
-            and remaining <= config.JSEARCH_MIN_REMAINING_REQUESTS
-        ):
-            stats["query_plan_truncated"] = True
-            stats["query_stop_reason"] = (
-                "quota_remaining="
-                f"{remaining} <= JSEARCH_MIN_REMAINING_REQUESTS="
-                f"{config.JSEARCH_MIN_REMAINING_REQUESTS}"
-            )
-            logger.warning("Stopping JSearch plan early: %s", stats["query_stop_reason"])
+        # Only a quota-reserve trip aborts the remaining role plan; the pre-set
+        # "max_queries=..." truncation note must not be mistaken for a stop.
+        if base_stop_reason == "quota_reserve":
             break
 
         time.sleep(config.SEARCH_DELAY_SECONDS)
