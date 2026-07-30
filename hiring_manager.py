@@ -25,6 +25,7 @@ from evidence_types import EvidenceBundle
 from reason_codes import ReasonCode
 from reroute_state import RerouteRegistry
 from company_identity import (
+    canonical_candidate_key,
     company_names_compatible,
     domains_equivalent,
     email_matches_company,
@@ -35,9 +36,11 @@ from job_filter import extract_domain, get_safe_employer_domain, normalize_text
 from job_signal import annotate_job
 from role_focus import extract_role_focus
 from role_mapping import (
+    founder_allowed_for_employee_count,
     get_bucket_name_for_job,
     get_hiring_manager_bucket_for_job,
     get_target_titles_for_jobs,
+    is_founder_tier_title,
 )
 from review_policy import is_airtable_reviewable
 
@@ -58,6 +61,8 @@ class Step3Result:
     contactable_rate: float
     companies_considered: int = 0
     eligible_companies: int = 0
+    icp_pass_companies: int = 0
+    lead_capable_companies: int = 0
     company_criteria_excluded_companies: int = 0
     target_eligible_companies: Optional[int] = None
     target_reviewable_leads: Optional[int] = None
@@ -321,6 +326,35 @@ def _primary_job(jobs: List[Dict]) -> Dict:
 
 def _lead_key(domain: str, email: str, bucket: str) -> str:
     return f"{domain.lower()}|{email.lower()}|{bucket}"
+
+
+def _candidate_identity_key(candidate: Dict) -> str:
+    """Candidate-attempt tracking key, extended beyond a bare Apollo person
+    ID (identity-key audit, FINAL_30_PLUS_SYSTEM_SPEC.md section 18): a
+    candidate with a LinkedIn URL or email but no provider ID was previously
+    never tracked as "attempted" at all (every attempted_id_reasons/
+    attempted_ids write site guarded on a non-empty raw id), so it could be
+    re-selected and re-attempted every reroute round indefinitely.
+
+    The provider-person-ID tier is deliberately kept as the bare, unprefixed
+    ID -- not canonical_candidate_key()'s "pid:{id}" form -- to preserve
+    RerouteRegistry's existing persisted key shape exactly (it has always
+    been keyed by raw provider ID); only the new LinkedIn/email fallback
+    tiers use canonical_candidate_key()'s prefixed form, since those cases
+    were never tracked at all before and so have no legacy shape to break.
+    A truly unresolved candidate (no id, no LinkedIn, no email) still yields
+    "" here rather than a one-off random sentinel, since a value that can
+    never again match on a future lookup is not worth persisting --
+    preserves the existing not-tracked behavior for that narrow case exactly.
+    """
+    provider_id = str(candidate.get("id") or candidate.get("person_id") or "").strip()
+    if provider_id:
+        return provider_id
+    key = canonical_candidate_key(
+        linkedin_url=candidate.get("linkedin_url"),
+        email=candidate.get("email"),
+    )
+    return "" if key.startswith("unresolved:") else key
 
 
 def _build_no_contact_lead(
@@ -670,6 +704,7 @@ def _process_company_strict(company_jobs: List[Dict]) -> Tuple[List[Dict], Dict]
         domain=input_domain, name=company_name, website=enrichment_website
     )
     time.sleep(config.APOLLO_RATE_LIMIT_DELAY)
+    founder_allowed = founder_allowed_for_employee_count(org.employee_count)
 
     account_decision = AccountGate().evaluate(
         org=org,
@@ -735,7 +770,14 @@ def _process_company_strict(company_jobs: List[Dict]) -> Tuple[List[Dict], Dict]
             continue
 
         target_titles = get_target_titles_for_jobs(bucket_jobs, org.employee_count)
-        account_bucket_key = f"{search_domain}|{bucket}"
+        # Denylist-checked, not just search_domain trusted as already-safe by
+        # construction (identity-key audit, FINAL_30_PLUS_SYSTEM_SPEC.md
+        # section 19) -- deliberately kept as a bare domain (no "domain:"
+        # prefix) to preserve RerouteRegistry's existing persisted key shape
+        # exactly; canonical_company_key()'s prefixed format is used by
+        # recovery_inventory.py's stores, which already persist that shape.
+        safe_search_domain = safe_company_domain(search_domain, config.INTERMEDIARY_JOB_DOMAINS)
+        account_bucket_key = f"{safe_search_domain}|{bucket}"
         reroute_registry = RerouteRegistry()
         attempted_before = reroute_registry.attempted_ids(account_bucket_key)
 
@@ -770,8 +812,22 @@ def _process_company_strict(company_jobs: List[Dict]) -> Tuple[List[Dict], Dict]
                 company_had_title_match = True
             ranked_candidates = [
                 item for item in title_ranked_candidates
-                if str(item.get("id") or item.get("person_id") or "") not in attempted_before
+                if _candidate_identity_key(item) not in attempted_before
             ]
+            if not founder_allowed:
+                # Defensive safety net: target_titles already excludes
+                # founder-tier query titles when founder_allowed is False
+                # (role_mapping._founders_last), but Apollo's own similar-title
+                # expansion can still surface one. Drop it here too, before it
+                # can consume an attempt slot that ContactGate would reject
+                # deterministically anyway (ROOT_CAUSE_TABLE_STRUCTURAL.md row 2).
+                before_founder_filter = len(ranked_candidates)
+                ranked_candidates = [
+                    item for item in ranked_candidates
+                    if not is_founder_tier_title(str(item.get("title") or ""))
+                ]
+                if len(ranked_candidates) < before_founder_filter:
+                    stats["bucket_founder_tier_prefiltered"] += 1
             stats["row2_untried_candidates_total"] += len(ranked_candidates)
             if ranked_candidates:
                 stats["row2_buckets_with_untried_candidate"] += 1
@@ -806,22 +862,33 @@ def _process_company_strict(company_jobs: List[Dict]) -> Tuple[List[Dict], Dict]
         last_contact_decision: Optional[GateDecision] = None
         last_email_decision: Optional[GateDecision] = None
         attempted_ids: List[str] = []
+        attempted_id_reasons: Dict[str, str] = {}
         hunter_attempts = 0
-        founder_allowed = bool(
-            org.employee_count is not None
-            and org.employee_count <= config.FOUNDER_FALLBACK_MAX_EMPLOYEES
-        )
         max_attempts = min(
             max(1, config.CONTACT_MAX_REROUTE_ATTEMPTS_PER_BUCKET),
             max(1, len(ranked_candidates)),
         )
 
         for candidate in ranked_candidates[:max_attempts]:
-            candidate_id = str(candidate.get("id") or candidate.get("person_id") or "")
+            candidate_id = _candidate_identity_key(candidate)
             if candidate_id:
                 attempted_ids.append(candidate_id)
             stats["person_match_attempts"] += 1
-            person = apollo.match_person(candidate)
+            try:
+                person = apollo.match_person(candidate)
+            except Exception as exc:
+                # A transient/provider error must not abort the whole run (the
+                # same defect class already fixed for org enrichment and people
+                # search -- TECHNICAL_DESIGN.md D10). Count it distinctly and
+                # move on to the next candidate rather than crashing.
+                stats["candidate_match_error"] += 1
+                logger.warning(
+                    "Apollo match_person error for %s (candidate %s): %s",
+                    search_domain, candidate_id, exc,
+                )
+                if candidate_id:
+                    attempted_id_reasons[candidate_id] = "APOLLO_MATCH_ERROR"
+                continue
             time.sleep(config.APOLLO_RATE_LIMIT_DELAY)
             contact_decision = ContactGate().evaluate(
                 person=person,
@@ -832,11 +899,19 @@ def _process_company_strict(company_jobs: List[Dict]) -> Tuple[List[Dict], Dict]
                 founder_allowed=founder_allowed,
             )
             last_contact_decision = contact_decision
+            if contact_decision.state_value == GateState.NEEDS_CHECK.value:
+                # Real terminal state this candidate can reach (e.g. current
+                # employment unverified) that was previously invisible in the
+                # stats dict, since only hard failures were counted
+                # (TECHNICAL_DESIGN.md D12).
+                stats[f"contact_needs_check_reason__{_reason_family(str(contact_decision.primary_reason))}"] += 1
             if contact_decision.state_value not in {
                 GateState.PASS.value,
                 GateState.NEEDS_CHECK.value,
             }:
                 stats[f"contact_reason__{_reason_family(str(contact_decision.primary_reason))}"] += 1
+                if candidate_id:
+                    attempted_id_reasons[candidate_id] = str(contact_decision.primary_reason or "")
                 continue
 
             allowed_domains = set(company_domains)
@@ -844,7 +919,12 @@ def _process_company_strict(company_jobs: List[Dict]) -> Tuple[List[Dict], Dict]
                 allowed_domains.add(person.organization_domain)
             hunter_result: Optional[hunter.HunterResult] = None
             if person.email and config.VERIFY_WITH_HUNTER and config.HUNTER_API_KEY:
-                hunter_result = hunter.verify_email(person.email)
+                try:
+                    hunter_result = hunter.verify_email(person.email)
+                except Exception as exc:
+                    stats["email_verify_error"] += 1
+                    logger.warning("Hunter verify_email error for %s: %s", person.email, exc)
+                    hunter_result = None
                 time.sleep(config.HUNTER_RATE_LIMIT_DELAY)
             elif (
                 not person.email
@@ -855,11 +935,19 @@ def _process_company_strict(company_jobs: List[Dict]) -> Tuple[List[Dict], Dict]
             ):
                 hunter_attempts += 1
                 stats["hunter_fallback_attempts"] += 1
-                hunter_result = hunter.find_email(
-                    person.first_name, person.last_name, search_domain
-                )
+                try:
+                    hunter_result = hunter.find_email(
+                        person.first_name, person.last_name, search_domain
+                    )
+                except Exception as exc:
+                    stats["email_verify_error"] += 1
+                    logger.warning(
+                        "Hunter find_email error for %s %s: %s",
+                        person.first_name, person.last_name, exc,
+                    )
+                    hunter_result = None
                 time.sleep(config.HUNTER_RATE_LIMIT_DELAY)
-                if hunter_result.found and hunter_result.email:
+                if hunter_result and hunter_result.found and hunter_result.email:
                     person.email = hunter_result.email
                     person.email_found = True
                     person.email_source = "hunter"
@@ -870,11 +958,15 @@ def _process_company_strict(company_jobs: List[Dict]) -> Tuple[List[Dict], Dict]
                 company_domains=allowed_domains,
             )
             last_email_decision = email_decision
+            if email_decision.state_value == GateState.NEEDS_CHECK.value:
+                stats[f"email_needs_check_reason__{_reason_family(str(email_decision.primary_reason))}"] += 1
             if email_decision.state_value not in {
                 GateState.PASS.value,
                 GateState.NEEDS_CHECK.value,
             }:
                 stats[f"email_reason__{_reason_family(str(email_decision.primary_reason))}"] += 1
+                if candidate_id:
+                    attempted_id_reasons[candidate_id] = str(email_decision.primary_reason or "")
                 continue
 
             selected_person = person
@@ -969,10 +1061,18 @@ def _process_company_strict(company_jobs: List[Dict]) -> Tuple[List[Dict], Dict]
             final["_step3_reason"] = final.get("_final_primary_reason")
             final["hiring_manager_confidence"] = "none"
             if attempted_ids:
-                reroute_registry.record(
+                # Each candidate's own contact/email failure reason drives its
+                # own TTL (ROOT_CAUSE_TABLE_STRUCTURAL.md row 8 / TECHNICAL_DESIGN.md
+                # D9) -- a candidate never reached (e.g. loop broke early) or
+                # whose specific reason wasn't captured falls back to the
+                # bucket's overall final reason, matching the prior behavior.
+                fallback_reason = str(final.get("_final_primary_reason") or "")
+                reroute_registry.record_many(
                     account_bucket_key,
-                    attempted_ids,
-                    str(final.get("_final_primary_reason") or ""),
+                    {
+                        candidate_id: attempted_id_reasons.get(candidate_id, fallback_reason)
+                        for candidate_id in attempted_ids
+                    },
                 )
 
         final = annotate_job(final, probe_url=False)
@@ -1267,6 +1367,14 @@ def run_hiring_manager_identification(
         "total_output_leads": len(all_leads),
         "companies_considered": companies_considered,
         "eligible_companies": eligible_companies,
+        # "eligible_companies" means "not hard-rejected by firmographics/
+        # industry/business-model" -- it does NOT mean the company could
+        # actually reach a people search. icp_pass_companies is the same
+        # number under an honest name; lead_capable_companies is the number
+        # that were both ICP-eligible AND had a resolvable search domain
+        # (ROOT_CAUSE_TABLE_STRUCTURAL.md row 6 / TECHNICAL_DESIGN.md D8).
+        "icp_pass_companies": eligible_companies,
+        "lead_capable_companies": total_stats.get("row2_companies_with_people_search_call", 0),
         "company_criteria_excluded_companies": excluded_companies,
         "target_eligible_companies": target_eligible_companies,
         "target_reviewable_leads": target_reviewable_leads,
@@ -1321,6 +1429,8 @@ def run_hiring_manager_identification(
         contactable_rate=contactable_rate,
         companies_considered=companies_considered,
         eligible_companies=eligible_companies,
+        icp_pass_companies=eligible_companies,
+        lead_capable_companies=total_stats.get("row2_companies_with_people_search_call", 0),
         company_criteria_excluded_companies=excluded_companies,
         target_eligible_companies=target_eligible_companies,
         target_reviewable_leads=target_reviewable_leads,

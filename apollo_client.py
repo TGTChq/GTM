@@ -314,37 +314,53 @@ def search_people_at_company(domain: str, titles: List[str]) -> List[Dict[str, A
     if not domain or not titles:
         return []
 
-    # Apollo documents these as query parameters, including [] in array names.
-    params: List[tuple[str, str]] = [
-        ("q_organization_domains_list[]", domain),
-        ("include_similar_titles", "false"),
-        ("page", "1"),
-        ("per_page", "25"),
-    ]
-    params.extend(("person_titles[]", title) for title in titles)
+    per_page = 25
+    max_pages = max(1, int(getattr(config, "APOLLO_PEOPLE_SEARCH_MAX_PAGES", 1)))
+    all_people: List[Dict[str, Any]] = []
+    for page in range(1, max_pages + 1):
+        # Apollo documents these as query parameters, including [] in array names.
+        params: List[tuple[str, str]] = [
+            ("q_organization_domains_list[]", domain),
+            ("include_similar_titles", "false"),
+            ("page", str(page)),
+            ("per_page", str(per_page)),
+        ]
+        params.extend(("person_titles[]", title) for title in titles)
 
-    try:
-        response = request_with_retry(
-            "POST",
-            f"{APOLLO_BASE_URL}/mixed_people/api_search",
-            headers=_headers(),
-            params=params,
-        )
-        data = safe_json(response)
-        debug_dump("apollo_people_search", data)
-    except Exception as exc:
-        logger.error("Apollo people search failed for %s: %s", domain, exc)
-        raise
+        try:
+            response = request_with_retry(
+                "POST",
+                f"{APOLLO_BASE_URL}/mixed_people/api_search",
+                headers=_headers(),
+                params=params,
+            )
+            data = safe_json(response)
+            debug_dump("apollo_people_search", data)
+        except Exception as exc:
+            logger.error("Apollo people search failed for %s (page %d): %s", domain, page, exc)
+            if page == 1:
+                raise
+            # A later page failing is not fatal -- keep whatever was already
+            # found rather than discarding a successful first page.
+            break
 
-    people = data.get("people") or []
-    if not isinstance(people, list):
-        logger.warning("Apollo returned a non-list people payload for %s", domain)
-        return []
+        page_people = data.get("people") or []
+        if not isinstance(page_people, list):
+            logger.warning("Apollo returned a non-list people payload for %s (page %d)", domain, page)
+            break
+        all_people.extend(page_people)
+
+        pagination = data.get("pagination") if isinstance(data.get("pagination"), dict) else {}
+        total_pages = pagination.get("total_pages")
+        if len(page_people) < per_page:
+            break
+        if isinstance(total_pages, int) and page >= total_pages:
+            break
 
     # Defensive domain validation. Search filters can be loose, and wrong-company
     # contacts are more damaging than a lower match rate.
     validated: List[Dict[str, Any]] = []
-    for person in people:
+    for person in all_people:
         person_domain = _person_org_domain(person)
         if person_domain and person_domain != domain and not person_domain.endswith("." + domain):
             logger.warning(

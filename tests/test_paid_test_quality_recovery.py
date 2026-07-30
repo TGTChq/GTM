@@ -193,13 +193,23 @@ class EmployerQualityTests(unittest.TestCase):
         ):
             leads, stats = hiring_manager.process_company([job])
 
+        # Structural patch D2 (ROOT_CAUSE_TABLE_STRUCTURAL.md row 2): founder/CEO
+        # titles are now excluded from the Apollo search query itself whenever
+        # the company is already known too large for the founder-tier fallback
+        # (role_mapping.founder_allowed_for_employee_count), instead of being
+        # searched, ranked, and only rejected after an attempt is spent. The
+        # candidate this test mocks Apollo into returning therefore no longer
+        # matches any target title at all, and the bucket resolves via the
+        # earlier "no matching hiring manager" path rather than the legacy
+        # mid-loop founder-fallback check. The safety property this test exists
+        # to verify -- no match_person call is wasted on a doomed founder
+        # candidate at a too-large company -- still holds, and now holds one
+        # step earlier (no Apollo people-search would even include the title).
         match_person.assert_not_called()
         self.assertEqual(leads[0]["_step3_status"], "not_found")
-        self.assertEqual(
-            leads[0]["_step3_reason"],
-            "founder_fallback_disallowed_for_company_size",
-        )
-        self.assertEqual(stats["candidate_founder_fallback_disallowed"], 1)
+        self.assertEqual(leads[0]["_step3_reason"], "no_matching_hiring_manager")
+        self.assertEqual(stats["no_matching_hiring_manager"], 1)
+        self.assertEqual(stats.get("candidate_founder_fallback_disallowed", 0), 0)
 
 
 class AirtableQualityTests(unittest.TestCase):

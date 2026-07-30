@@ -78,6 +78,13 @@ FREE_SOURCE_MAX_RECORDS_PER_SOURCE = _env_int(
 FREE_SOURCE_MIN_SUCCESSFUL_SOURCES = _env_int(
     "FREE_SOURCE_MIN_SUCCESSFUL_SOURCES", 2
 )
+# Jobicy's public v2 API has no documented offset/page parameter -- unlike
+# Himalayas, a single `count` request is genuinely the whole retrieval
+# mechanism available, not a code-side pagination gap. Raise the requested
+# count above the previous hardcoded 50 so a single call captures more of
+# what's available, and the fetch marks pagination_supported=False in its
+# metadata so this remains an observable limitation, not a silent one.
+JOBICY_REQUEST_COUNT = _env_int("JOBICY_REQUEST_COUNT", 200)
 HIMALAYAS_PAGE_SIZE = _env_int("HIMALAYAS_PAGE_SIZE", 20)
 HIMALAYAS_MAX_PAGES = _env_int("HIMALAYAS_MAX_PAGES", 25)
 HIMALAYAS_COMPANY_PROFILE_MAX_REQUESTS = _env_int(
@@ -116,6 +123,12 @@ ATS_WORKDAY_DETAIL_MAX_REQUESTS_PER_BOARD = _env_int(
 )
 ATS_WORKDAY_DETAIL_MAX_REQUESTS_PER_RUN = _env_int(
     "ATS_WORKDAY_DETAIL_MAX_REQUESTS_PER_RUN", 100
+)
+# Cornerstone OnDemand (csod.com) tenant-based direct acquisition. See the
+# UNVERIFIED-OFFLINE notes in ats_board_registry.py's fetch_board_jobs() --
+# the real public API shape has not been confirmed against a live tenant.
+ATS_CORNERSTONE_MAX_PAGES_PER_BOARD = _env_int(
+    "ATS_CORNERSTONE_MAX_PAGES_PER_BOARD", 5
 )
 ATS_SMARTRECRUITERS_MAX_PAGES_PER_BOARD = _env_int(
     "ATS_SMARTRECRUITERS_MAX_PAGES_PER_BOARD", 3
@@ -264,6 +277,12 @@ READY_DAILY_DELIVERY_LIMIT = _env_int("READY_DAILY_DELIVERY_LIMIT", 0)
 CONTINUE_AFTER_FINAL_PASS_TARGET = _env_bool(
     "CONTINUE_AFTER_FINAL_PASS_TARGET", True
 )
+# Pre-contact capacity controller (Phase 13 section 5). Default OFF so
+# deployment does not silently change acquisition behavior until explicitly
+# activated. Targets are in *unique canonical searchable companies* per day.
+CAPACITY_CONTROLLER_ENABLED = _env_bool("CAPACITY_CONTROLLER_ENABLED", False)
+SEARCHABLE_COMPANY_DAILY_TARGET = _env_int("SEARCHABLE_COMPANY_DAILY_TARGET", 250)
+SEARCHABLE_COMPANY_HEADROOM_TARGET = _env_int("SEARCHABLE_COMPANY_HEADROOM_TARGET", 300)
 READY_INVENTORY_TTL_DAYS = _env_int("READY_INVENTORY_TTL_DAYS", 2)
 PIPELINE_LOCK_STALE_HOURS = _env_int("PIPELINE_LOCK_STALE_HOURS", 6)
 JOB_SOURCE_MIN_INDEPENDENT_PUBLISHERS = _env_int(
@@ -306,6 +325,17 @@ JSEARCH_MAX_QUERIES_PER_RUN = _env_int("JSEARCH_MAX_QUERIES_PER_RUN", 0)
 JSEARCH_MAX_ESTIMATED_UNITS_PER_RUN = _env_int(
     "JSEARCH_MAX_ESTIMATED_UNITS_PER_RUN", 150
 )
+# Independent from JSEARCH_MAX_ESTIMATED_UNITS_PER_RUN, which gates only the
+# base pass's own request-unit guard (jsearch_scraper.py). Before this setting
+# existed, final_pass_topup.py drew its per-microbatch budget from whatever
+# was left of that SAME 150-unit pool after the base pass ran -- an adaptive
+# base pass that deepens or looks back heavily could starve top-up down to
+# nearly nothing, with no way to give top-up its own allowance without also
+# inflating the base pass's ceiling. 0 means unlimited (paced by
+# FINAL_PASS_MICROBATCH_QUERY_UNITS per round, bounded by the run's other
+# circuit breakers -- iteration limit, runtime, zero-downstream-yield --
+# exactly like every other "0 = unlimited" JSearch setting in this file).
+JSEARCH_TOPUP_UNIT_BUDGET = _env_int("JSEARCH_TOPUP_UNIT_BUDGET", 150)
 JSEARCH_STOP_ON_LOW_QUOTA = _env_bool("JSEARCH_STOP_ON_LOW_QUOTA", True)
 JSEARCH_MIN_REMAINING_REQUESTS = _env_int("JSEARCH_MIN_REMAINING_REQUESTS", 500)
 # Onsite and hybrid postings are valid intent signals when the role itself can
@@ -397,6 +427,36 @@ AGE_RECOVERY_ENABLED = _env_bool("AGE_RECOVERY_ENABLED", True)
 # Railway value must not block a production run or silently change the window.
 MAX_JOB_AGE_DAYS = PRIMARY_MAX_JOB_AGE_DAYS
 
+# ---------- Tiered freshness beyond the 0-30 day window ----------
+# 31-60 and 61-90 day postings are not admitted merely for being younger than
+# 90 days -- they require corroborating current-active evidence (see
+# freshness_policy.py). This is a distinct, additive tier above the existing
+# 0-14 (primary) / 15-30 (recovery) window; it is inactive unless
+# EXTENDED_AGE_RECOVERY_ENABLED explicitly turns on the acquisition pass that
+# reprocesses inventory in this window.
+RECOVERY_EXTENDED_MIN_JOB_AGE_DAYS = _env_int("RECOVERY_EXTENDED_MIN_JOB_AGE_DAYS", 31)
+RECOVERY_EXTENDED_MAX_JOB_AGE_DAYS = _env_int("RECOVERY_EXTENDED_MAX_JOB_AGE_DAYS", 60)
+RECOVERY_DEEP_MIN_JOB_AGE_DAYS = _env_int("RECOVERY_DEEP_MIN_JOB_AGE_DAYS", 61)
+RECOVERY_DEEP_MAX_JOB_AGE_DAYS = _env_int("RECOVERY_DEEP_MAX_JOB_AGE_DAYS", 90)
+# Default OFF (Phase 13 §2): the 31-90 day extended pass is a capacity-
+# expansion lane that must not silently change production behavior until
+# explicitly activated. With it off, only the base 0-14 and recovery 15-30
+# lanes run, exactly as before this patch. The report and this default now
+# agree.
+EXTENDED_AGE_RECOVERY_ENABLED = _env_bool("EXTENDED_AGE_RECOVERY_ENABLED", False)
+# Title keywords used as one conservative, evidence-based signal that a role is
+# difficult to fill (required, in addition to confirmed-active evidence, for a
+# 61-90 day posting to be admitted -- spec-mandated stricter bar for that tier).
+DIFFICULT_TO_FILL_TITLE_KEYWORDS = [
+    "senior",
+    "sr.",
+    "staff",
+    "principal",
+    "lead",
+    "specialist",
+    "architect",
+]
+
 # Quality gates restore the paid-test standard before any Apollo/Hunter spend.
 # The 118-role catalog remains active, but only current full-time roles with
 # explicit US hiring evidence may reach enrichment.
@@ -441,6 +501,34 @@ EXCLUDED_TITLE_KEYWORDS = [
     "event marketing",
     "field marketing",
 ]
+
+# ---------- Adzuna (official) ----------
+# Kept disabled by default in every committed/default configuration
+# (FINAL_30_PLUS_SYSTEM_SPEC.md section 11). adzuna_client.py reads these same
+# variable names directly and does not import this module, so either surface
+# can be used to configure it; these constants exist so the orchestrator
+# (multi_source_acquisition.py) has one place, consistent with every other
+# source, to read Adzuna's enabled/credential state without importing secrets
+# through a second path.
+ADZUNA_ENABLED = _env_bool("ADZUNA_ENABLED", False)
+ADZUNA_APP_ID = os.getenv("ADZUNA_APP_ID", "")
+ADZUNA_APP_KEY = os.getenv("ADZUNA_APP_KEY", "")
+ADZUNA_COUNTRY = os.getenv("ADZUNA_COUNTRY", "us")
+ADZUNA_RESULTS_PER_PAGE = _env_int("ADZUNA_RESULTS_PER_PAGE", 50)
+ADZUNA_MAX_PAGES_PER_QUERY = _env_int("ADZUNA_MAX_PAGES_PER_QUERY", 3)
+ADZUNA_MAX_REQUESTS_PER_RUN = _env_int("ADZUNA_MAX_REQUESTS_PER_RUN", 40)
+ADZUNA_MAX_DAYS_OLD = _env_int("ADZUNA_MAX_DAYS_OLD", 30)
+ADZUNA_TIMEOUT_SECONDS = _env_int("ADZUNA_TIMEOUT_SECONDS", 20)
+# Role-catalog-derived query portfolio (Phase 13 section 4). Default OFF: when
+# disabled, Adzuna (if enabled at all) uses only the small fallback query list,
+# so turning ADZUNA_ENABLED on does not silently trigger a large query fan-out
+# until the portfolio is explicitly activated too.
+ADZUNA_QUERY_PORTFOLIO_ENABLED = _env_bool("ADZUNA_QUERY_PORTFOLIO_ENABLED", False)
+ADZUNA_MAX_QUERIES_PER_RUN = _env_int("ADZUNA_MAX_QUERIES_PER_RUN", 12)
+ADZUNA_PORTFOLIO_MAX_PAGES_PER_QUERY = _env_int("ADZUNA_PORTFOLIO_MAX_PAGES_PER_QUERY", 2)
+ADZUNA_PORTFOLIO_FRESHNESS_WINDOWS = _env_json("ADZUNA_PORTFOLIO_FRESHNESS_WINDOWS", [30])
+ADZUNA_PORTFOLIO_REMOTE_VARIANTS = _env_json("ADZUNA_PORTFOLIO_REMOTE_VARIANTS", ["", "remote"])
+ADZUNA_MARGINAL_MIN_NEW_COMPANIES = _env_int("ADZUNA_MARGINAL_MIN_NEW_COMPANIES", 1)
 
 # ---------- Health gates ----------
 MIN_JOBS_PER_RUN = _env_int("MIN_JOBS_PER_RUN", 10)
@@ -525,6 +613,14 @@ VERIFY_WITH_HUNTER = _env_bool("VERIFY_WITH_HUNTER", True)
 APOLLO_MAX_PERSON_MATCH_ATTEMPTS_PER_BUCKET = _env_int(
     "APOLLO_MAX_PERSON_MATCH_ATTEMPTS_PER_BUCKET", 3
 )
+# People search itself is free (only match_person/enrichment consumes
+# credits) -- apollo_client.search_people_at_company previously fetched only
+# page 1 (25 results) with no pagination at all, silently missing any
+# candidate beyond the first 25 regardless of title relevance. Paginating
+# further costs nothing extra and can only improve which candidates are
+# available for ranking before the (separately budgeted, credit-consuming)
+# match-attempt step. FINAL_30_PLUS_SYSTEM_SPEC.md section 16.
+APOLLO_PEOPLE_SEARCH_MAX_PAGES = _env_int("APOLLO_PEOPLE_SEARCH_MAX_PAGES", 4)
 HUNTER_MAX_FALLBACK_ATTEMPTS_PER_BUCKET = _env_int(
     "HUNTER_MAX_FALLBACK_ATTEMPTS_PER_BUCKET", 2
 )
@@ -926,6 +1022,13 @@ INTERMEDIARY_JOB_DOMAINS = [
     "successfactors.com",
     "bamboohr.com",
     "personio.com",
+    # Cornerstone OnDemand's shared domain -- the tenant subdomain (e.g.
+    # worldbankgroup.csod.com) is the employer's own identity, but
+    # normalize_company_domain() alone would collapse it down to just
+    # csod.com (same failure mode INTERMEDIARY_JOB_DOMAINS already guards
+    # against for myworkdayjobs.com); see ats_board_registry.py's dedicated
+    # tenant-domain-candidate extraction for the correct recovery path.
+    "csod.com",
     # Syndication/publisher domains observed in production. They may host a real
     # employer's listing, but they are never safe company identifiers for Apollo.
     "builtin.com",

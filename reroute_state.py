@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Dict, Iterable, Set
+from typing import Dict, Iterable, Mapping, Set
 
 import config
 
@@ -97,20 +97,36 @@ class RerouteRegistry:
         temp.replace(self.path)
 
     def record(self, account_bucket_key: str, person_ids: Iterable[str], reason: str) -> None:
+        """Record every ID in ``person_ids`` under one shared ``reason``.
+
+        Kept for simple single-reason callers. When multiple distinct
+        candidates were each attempted and each failed for their own reason,
+        use :meth:`record_many` instead -- applying one candidate's reason to
+        every other attempted candidate in the same call can under-block a
+        genuinely wrong-person match or over-block a candidate whose own
+        failure was actually transient (ROOT_CAUSE_TABLE_STRUCTURAL.md row 8).
+        """
+        self.record_many(account_bucket_key, {person_id: reason for person_id in person_ids if person_id})
+
+    def record_many(self, account_bucket_key: str, id_reason_map: Mapping[str, str]) -> None:
         accounts = self.payload.setdefault("accounts", {})
         current = accounts.setdefault(account_bucket_key, {"people": {}})
         people = current.setdefault("people", {})
-        expires = _expiry_for_reason(reason).isoformat()
-        for person_id in person_ids:
-            if person_id:
-                people[str(person_id)] = {
-                    "reason": str(reason or ""),
-                    "expires_at": expires,
-                    "recorded_at": _now().isoformat(),
-                }
-        current["last_reason"] = reason
-        current["updated_at"] = _now().isoformat()
-        self._persist()
+        last_reason = ""
+        for person_id, reason in id_reason_map.items():
+            if not person_id:
+                continue
+            expires = _expiry_for_reason(reason).isoformat()
+            people[str(person_id)] = {
+                "reason": str(reason or ""),
+                "expires_at": expires,
+                "recorded_at": _now().isoformat(),
+            }
+            last_reason = reason
+        if id_reason_map:
+            current["last_reason"] = last_reason
+            current["updated_at"] = _now().isoformat()
+            self._persist()
 
     def clear(self, account_bucket_key: str) -> None:
         accounts = self.payload.setdefault("accounts", {})

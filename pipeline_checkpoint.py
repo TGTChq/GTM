@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Dict, Iterable, List
 
 import config
-from job_filter import dedup_key
+from job_filter import job_reference_key
 
 
 def _now() -> datetime:
@@ -18,11 +18,7 @@ def _now() -> datetime:
 
 
 def _key(job: Dict) -> str:
-    job_id = str(job.get("job_id") or "").strip()
-    if job_id:
-        return f"id:{job_id}"
-    company, title = dedup_key(job)
-    return f"dedup:{company}|{title}"
+    return job_reference_key(job)
 
 
 class PipelineCheckpoint:

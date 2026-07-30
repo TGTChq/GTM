@@ -16,6 +16,7 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
 from urllib.parse import urljoin, urlparse
 
 import config
+from adzuna_client import AdzunaAdapter, AdzunaSettings
 from ats_board_registry import AtsBoardRegistry, detect_board_ref, fetch_board_jobs
 from free_job_sources import build_adapters, default_fetcher, html_to_text, provider_domain
 from job_filter import assess_pre_enrichment_viability, dedup_key, get_safe_employer_domain
@@ -702,6 +703,81 @@ def run_multi_source_acquisition(
     else:
         jsearch_stats["skipped_reason"] = "disabled"
 
+    adzuna_stats: Dict[str, Any] = {
+        "enabled": bool(config.ADZUNA_ENABLED),
+        "attempted": False,
+        "success": False,
+        "skipped_reason": "" if config.ADZUNA_ENABLED else "disabled_by_config",
+        "errors": [],
+        "jobs": 0,
+    }
+    if config.ADZUNA_ENABLED:
+        adzuna_stats["attempted"] = True
+        try:
+            adzuna_settings = AdzunaSettings(
+                enabled=True,
+                country=config.ADZUNA_COUNTRY,
+                app_id=config.ADZUNA_APP_ID,
+                app_key=config.ADZUNA_APP_KEY,
+                results_per_page=config.ADZUNA_RESULTS_PER_PAGE,
+                max_pages_per_query=config.ADZUNA_MAX_PAGES_PER_QUERY,
+                max_requests_per_run=config.ADZUNA_MAX_REQUESTS_PER_RUN,
+                max_days_old=config.ADZUNA_MAX_DAYS_OLD,
+                timeout_seconds=config.ADZUNA_TIMEOUT_SECONDS,
+            )
+            adzuna_portfolio = None
+            if config.ADZUNA_QUERY_PORTFOLIO_ENABLED:
+                from adzuna_client import build_query_portfolio
+                from role_catalog import DEFAULT_ACQUISITION_ROLES, get_function_bucket
+                adzuna_portfolio = build_query_portfolio(
+                    DEFAULT_ACQUISITION_ROLES,
+                    remote_variants=tuple(config.ADZUNA_PORTFOLIO_REMOTE_VARIANTS),
+                    freshness_windows=tuple(config.ADZUNA_PORTFOLIO_FRESHNESS_WINDOWS),
+                    max_pages=config.ADZUNA_PORTFOLIO_MAX_PAGES_PER_QUERY,
+                    max_queries=config.ADZUNA_MAX_QUERIES_PER_RUN,
+                    role_family_of=get_function_bucket,
+                )
+            adzuna_result = AdzunaAdapter(
+                settings=adzuna_settings,
+                portfolio=adzuna_portfolio,
+                marginal_min_new_companies=config.ADZUNA_MARGINAL_MIN_NEW_COMPANIES,
+            ).fetch(fetcher)
+            for job in adzuna_result.jobs:
+                job.setdefault("_acquisition_source", "adzuna")
+            all_jobs.extend(adzuna_result.jobs)
+            adzuna_stats.update({
+                "success": bool(adzuna_result.success),
+                "jobs": len(adzuna_result.jobs),
+                "errors": list(adzuna_result.errors),
+                "metadata": dict(adzuna_result.metadata),
+            })
+            source_metrics["adzuna"] = {
+                "success": bool(adzuna_result.success),
+                "requests_attempted": adzuna_result.requests_attempted,
+                "requests_succeeded": adzuna_result.requests_succeeded,
+                "pages": adzuna_result.pages,
+                "raw_records": adzuna_result.raw_records,
+                "normalized_jobs": len(adzuna_result.jobs),
+                "errors": list(adzuna_result.errors),
+                "metadata": dict(adzuna_result.metadata),
+            }
+            if not adzuna_result.success:
+                failed_sources.append("adzuna")
+        except Exception as exc:
+            logger.warning("Optional Adzuna acquisition failed; continuing with other sources: %s", exc)
+            adzuna_stats["errors"] = [str(exc)]
+            source_metrics["adzuna"] = {
+                "success": False,
+                "requests_attempted": 0,
+                "requests_succeeded": 0,
+                "pages": 0,
+                "raw_records": 0,
+                "normalized_jobs": 0,
+                "errors": [str(exc)],
+                "metadata": {},
+            }
+            failed_sources.append("adzuna")
+
     himalayas_profile_metrics = _enrich_himalayas_company_profiles(
         all_jobs, fetcher=fetcher
     )
@@ -771,6 +847,7 @@ def run_multi_source_acquisition(
                 "jobs": 0,
                 "errors": 0,
                 "detail_requests": 0,
+                "closed_or_removed_job_ids": 0,
             })
             metric["detail_requests"] += (
                 detail_requests
@@ -788,9 +865,17 @@ def run_multi_source_acquisition(
             metric["boards_succeeded"] += 1
             metric["jobs"] += len(jobs)
             ats_jobs.extend(jobs)
-            board_registry.record_result(
-                str(board.get("key") or ""), success=True, job_count=len(jobs), save=False
+            closed_or_removed = board_registry.record_result(
+                str(board.get("key") or ""),
+                success=True,
+                job_count=len(jobs),
+                save=False,
+                job_ids={str(job.get("job_id") or "") for job in jobs if job.get("job_id")},
             )
+            if closed_or_removed:
+                metric["closed_or_removed_job_ids"] = (
+                    metric.get("closed_or_removed_job_ids", 0) + closed_or_removed
+                )
         if ats_jobs:
             # Feed official ATS identity back into the registry so a weak or stale
             # discovery label can be upgraded without manual maintenance.
@@ -805,12 +890,15 @@ def run_multi_source_acquisition(
     enabled_sources = list(config.FREE_JOB_SOURCES)
     if config.MULTI_SOURCE_JSEARCH_ENABLED:
         enabled_sources.append("jsearch")
+    if config.ADZUNA_ENABLED:
+        enabled_sources.append("adzuna")
 
     stats: Dict[str, Any] = {
         "acquisition_mode": "multi_source",
         "enabled_sources": enabled_sources,
         "source_metrics": source_metrics,
         "jsearch": jsearch_stats,
+        "adzuna": adzuna_stats,
         "ats_metrics": ats_metrics,
         "ats_force_refresh": bool(force_ats_refresh),
         "ats_board_limit": ats_board_limit,

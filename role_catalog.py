@@ -99,7 +99,17 @@ _ROLE_DEFINITIONS = [
     _role("Full Stack Developer", "engineering", "engineering", "full-stack development, product integrations, and scalable applications", aliases=("Full-Stack Developer",)),
     _role("Software Engineer", "engineering", "engineering", "software development, system design, and production reliability"),
     _role("Cloud Engineer", "engineering", "engineering", "cloud infrastructure, deployment automation, and platform reliability"),
-    _role("DevOps Engineer", "engineering", "engineering", "deployment automation, cloud infrastructure, and platform reliability", aliases=("Dev Ops Engineer",)),
+    # "Technical Operations [Manager/Specialist]" was a genuine coverage gap
+    # (spec section 15). Aliased to DevOps Engineer rather than Systems
+    # Administrator: in this ICP's modern software/AI-adjacent companies, the
+    # title more often covers platform/release/infra operations than
+    # internal IT support -- flagged for false-positive review since this is
+    # a judgment call, not a certain mapping.
+    _role(
+        "DevOps Engineer", "engineering", "engineering",
+        "deployment automation, cloud infrastructure, and platform reliability",
+        aliases=("Dev Ops Engineer", "Technical Operations Manager", "Technical Operations Specialist"),
+    ),
     _role("QA Engineer", "engineering", "engineering", "software quality, test automation, and release reliability", aliases=("Quality Assurance Engineer",)),
     _role("QA Analyst", "engineering", "engineering", "software quality, test planning, and defect analysis", aliases=("Quality Assurance Analyst",)),
     _role("Data Analyst", "engineering", "data", "data analysis, reporting, and business insights"),
@@ -141,7 +151,14 @@ _ROLE_DEFINITIONS = [
     _role("CRM Marketing Specialist", "marketing", "marketing", "CRM campaigns, lifecycle automation, and audience segmentation"),
     _role("Brand Manager", "marketing", "marketing", "brand strategy, campaign execution, and cross-channel consistency"),
     _role("Marketing Analyst", "marketing", "marketing", "marketing analytics, attribution, and performance reporting"),
-    _role("Marketing Automation Specialist", "marketing", "marketing", "marketing automation, lifecycle workflows, and CRM operations"),
+    # "Marketing Operations [Specialist/Manager]" was a genuine coverage gap:
+    # no existing role or alias represented this named bucket (spec section
+    # 15). Same function/buyer as Marketing Automation Specialist.
+    _role(
+        "Marketing Automation Specialist", "marketing", "marketing",
+        "marketing automation, lifecycle workflows, and CRM operations",
+        aliases=("Marketing Operations Specialist", "Marketing Operations Manager"),
+    ),
     _role("Product Marketing Specialist", "marketing", "marketing", "product positioning, go-to-market execution, and sales enablement"),
 
     # Operations & Administration
@@ -177,8 +194,24 @@ _ROLE_DEFINITIONS = [
     _role("Lead Generation Specialist", "gtm_revenue", "gtm_revenue", "lead generation, prospect research, and outbound execution"),
     _role("Deal Desk Analyst", "gtm_revenue", "gtm_revenue", "deal operations, pricing support, and sales process governance"),
     _role("CRM Administrator", "gtm_revenue", "gtm_revenue", "CRM administration, data quality, and revenue workflows"),
-    _role("Sales Operations Analyst", "gtm_revenue", "gtm_revenue", "sales operations, pipeline reporting, and process optimization"),
-    _role("Revenue Operations Analyst", "gtm_revenue", "gtm_revenue", "revenue operations, funnel analysis, and GTM systems"),
+    # "Sales Automation [Specialist]" is an alias, not a new role -- same
+    # buyer function and bucket as Sales Operations Analyst (spec section 15
+    # explicit ontology coverage for the "Sales Automation" service bucket).
+    _role(
+        "Sales Operations Analyst", "gtm_revenue", "gtm_revenue",
+        "sales operations, pipeline reporting, and process optimization",
+        aliases=("Sales Automation Specialist",),
+    ),
+    # "Revenue Systems [Analyst/Engineer]" and "Revenue Automation [Specialist]"
+    # are aliases, not new roles: same buyer function and bucket as Revenue
+    # Operations Analyst, just an increasingly common title variant for the
+    # same work (FINAL_30_PLUS_SYSTEM_SPEC.md section 15 -- explicit ontology
+    # coverage for the "Revenue Systems"/"Revenue Automation" service buckets).
+    _role(
+        "Revenue Operations Analyst", "gtm_revenue", "gtm_revenue",
+        "revenue operations, funnel analysis, and GTM systems",
+        aliases=("Revenue Systems Analyst", "Revenue Systems Engineer", "Revenue Automation Specialist"),
+    ),
     _role("Sales Enablement Specialist", "gtm_revenue", "gtm_revenue", "sales enablement, content management, and rep productivity"),
     _role("Partnerships Manager", "gtm_revenue", "partnerships", "strategic partnerships, partner development, and channel growth"),
 

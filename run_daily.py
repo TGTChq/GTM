@@ -16,6 +16,8 @@ from pathlib import Path
 
 import airtable_client
 import config
+from capacity_controller import build_from_config
+from company_identity import canonical_company_key
 from audit_filter import run_audit
 from age_recovery import run_age_recovery
 from hiring_manager import run_hiring_manager_identification
@@ -148,6 +150,31 @@ def _load_jobs(path: str | None) -> list[dict]:
     return [dict(job) for job in payload.get("jobs", []) if isinstance(job, dict)]
 
 
+def _merge_precontact_capacity_jobs(hiring_input_path: str, extra_jobs: list[dict]) -> str:
+    """Append capacity-expansion contact-eligible jobs into the hiring-manager
+    input file, de-duplicated by job_id, and return the (same) path. The added
+    jobs then flow through the single, unchanged paid hiring_manager step --
+    no separate paid pass, no double-processing (company-level grouping and the
+    SeenJobsRegistry already dedupe downstream)."""
+    payload = json.loads(Path(hiring_input_path).read_text(encoding="utf-8"))
+    jobs = list(payload.get("jobs", []))
+    seen = {str(job.get("job_id") or "") for job in jobs if job.get("job_id")}
+    added = 0
+    for job in extra_jobs:
+        jid = str(job.get("job_id") or "")
+        if jid and jid in seen:
+            continue
+        jobs.append(job)
+        if jid:
+            seen.add(jid)
+        added += 1
+    payload["jobs"] = jobs
+    payload["total_jobs"] = len(jobs)
+    payload.setdefault("stats", {})["capacity_expansion_jobs_added"] = added
+    Path(hiring_input_path).write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    return hiring_input_path
+
+
 def _ready_targets(starting_ready_count: int) -> tuple[int, int]:
     """Return (minimum acquisition SLA, minimum delivery SLA).
 
@@ -173,12 +200,15 @@ def _ready_targets(starting_ready_count: int) -> tuple[int, int]:
     return acquisition_target, delivery_target
 
 
-def _jsearch_topup_enabled(
+def _jsearch_topup_gates(
     acquisition_mode: str,
     *,
     jsearch_available: bool,
     target_final_pass: int,
-) -> bool:
+) -> dict:
+    """Every condition top-up requires, individually, so a disabled top-up is
+    always attributable to a specific named gate instead of silently doing
+    nothing (TECHNICAL_DESIGN.md D1 / ROOT_CAUSE_TABLE_STRUCTURAL.md row 1)."""
     mode = str(acquisition_mode or "").strip().lower()
     if mode == "multi_source":
         topup_switch = config.MULTI_SOURCE_JSEARCH_TOPUP_ENABLED
@@ -189,16 +219,52 @@ def _jsearch_topup_enabled(
     legacy_rounds_enabled = (
         mode == "multi_source" or config.JSEARCH_TOPUP_MAX_ROUNDS > 0
     )
-    return bool(
-        jsearch_available
-        and topup_switch
-        and legacy_rounds_enabled
-        and int(target_final_pass) > 0
+    target_positive = int(target_final_pass) > 0
+    return {
+        "jsearch_available": bool(jsearch_available),
+        "topup_switch": bool(topup_switch),
+        "legacy_rounds_enabled": bool(legacy_rounds_enabled),
+        "target_final_pass_positive": bool(target_positive),
+    }
+
+
+def _jsearch_topup_enabled(
+    acquisition_mode: str,
+    *,
+    jsearch_available: bool,
+    target_final_pass: int,
+) -> bool:
+    gates = _jsearch_topup_gates(
+        acquisition_mode,
+        jsearch_available=jsearch_available,
+        target_final_pass=target_final_pass,
     )
+    return all(gates.values())
+
+
+def _jsearch_topup_disabled_reason(
+    acquisition_mode: str,
+    *,
+    jsearch_available: bool,
+    target_final_pass: int,
+) -> str:
+    gates = _jsearch_topup_gates(
+        acquisition_mode,
+        jsearch_available=jsearch_available,
+        target_final_pass=target_final_pass,
+    )
+    failed = [name for name, passed in gates.items() if not passed]
+    return "" if not failed else "disabled_by:" + ",".join(sorted(failed))
 
 
 def run_pipeline() -> dict:
     started = datetime.now()
+    # Hunter is optional corroboration, not a throughput dependency: reset its
+    # run-level circuit breaker so a run with restored quota attempts it again,
+    # while a mid-run quota exhaustion still stops further Hunter calls without
+    # ever blocking Apollo-verified leads (Phase 13 §1).
+    import hunter_client
+    hunter_client.reset_run_state()
     registry = SeenJobsRegistry()
     recovery_queue = RecoverableJobQueue()
     final_pass_inventory = FinalPassInventory()
@@ -233,6 +299,19 @@ def run_pipeline() -> dict:
         jsearch_available=jsearch_available,
         target_final_pass=target_final_pass,
     )
+    topup_disabled_reason = "" if topup_enabled else _jsearch_topup_disabled_reason(
+        acquisition_mode,
+        jsearch_available=jsearch_available,
+        target_final_pass=target_final_pass,
+    )
+    if topup_disabled_reason:
+        logger.warning(
+            "JSearch top-up (deficit recovery) is disabled this run: %s. "
+            "This is the sole mechanism that pursues new supply after the "
+            "primary pass falls short of the target -- confirm this is "
+            "intentional (e.g. deliberate cost control), not an accident.",
+            topup_disabled_reason,
+        )
     if checkpoint_jobs:
         logger.warning(
             "Resuming %d checkpoint jobs; skipping duplicate base acquisition",
@@ -406,6 +485,41 @@ def run_pipeline() -> dict:
         if config.PRODUCTION and not qualified.success:
             return _fail(summary, "qualification", qualified.errors)
 
+    # Pre-contact capacity expansion (Phase 13 integration correction). When
+    # CAPACITY_CONTROLLER_ENABLED, the controller inspects the unique canonical
+    # searchable-company pool and, while below target and a quality-safe
+    # strategy remains, invokes REAL pre-contact acquisition/recovery (wider
+    # age windows re-filtered + re-qualified through the same production
+    # functions) BEFORE any paid Apollo/Hunter call -- materially altering
+    # execution, not just reporting. Disabled -> strict no-op (baseline).
+    summary["steps"]["capacity_expansion"] = {"enabled": False, "stop_reason": "disabled"}
+    if config.CAPACITY_CONTROLLER_ENABLED and strict_runtime:
+        import time as _time
+        from capacity_strategies import expand_precontact_capacity
+        _current_jobs = _load_jobs(hiring_input_path)
+        _deadline = (
+            _time.monotonic() + config.FINAL_PASS_MAX_RUNTIME_SECONDS * 0.5
+            if config.FINAL_PASS_MAX_RUNTIME_SECONDS > 0 else None
+        )
+        _cap_state, _extra_jobs = expand_precontact_capacity(
+            config_module=config,
+            scrape_output_path=scrape.output_path,
+            registry=registry,
+            current_jobs=_current_jobs,
+            runtime_deadline=_deadline,
+        )
+        summary["steps"]["capacity_expansion"] = _cap_state
+        if _extra_jobs:
+            hiring_input_path = _merge_precontact_capacity_jobs(hiring_input_path, _extra_jobs)
+            logger.info(
+                "Capacity expansion added %d contact-eligible jobs "
+                "(searchable=%d/%d, stop=%s) before paid enrichment",
+                len(_extra_jobs),
+                _cap_state.get("searchable_companies_available"),
+                _cap_state.get("searchable_company_target"),
+                _cap_state.get("stop_reason"),
+            )
+
     logger.info("=== STEP 3: HIRING MANAGER ===")
     existing_airtable_company_keys: set[str] = set()
     if config.AIRTABLE_SUPPRESS_EXISTING_COMPANY:
@@ -468,8 +582,41 @@ def run_pipeline() -> dict:
                 str(age_recovery_summary["qualification_nonpass_output"])
             )
 
+    summary["steps"]["extended_age_recovery"] = {
+        "enabled": False,
+        "attempted": False,
+        "stop_reason": "not_applicable",
+    }
+    if strict_runtime and config.EXTENDED_AGE_RECOVERY_ENABLED:
+        # 31-90 day window (freshness_policy.py TIER_EXTENDED/TIER_DEEP).
+        # Reuses run_age_recovery's exact pass logic; the wider window's
+        # additional confirmed-active / difficult-to-fill evidence
+        # requirements are enforced inside job_filter.is_stale_job, not here.
+        enriched, extended_age_recovery_summary = run_age_recovery(
+            initial_scrape=scrape,
+            initial_enriched=enriched,
+            registry=registry,
+            target_final_pass_leads=target_final_pass,
+            max_eligible_companies=(
+                config.MAX_ELIGIBLE_COMPANIES_PER_RUN
+                if config.MAX_ELIGIBLE_COMPANIES_PER_RUN > 0
+                else None
+            ),
+            exclude_company_keys=existing_airtable_company_keys,
+            min_age_days=config.RECOVERY_EXTENDED_MIN_JOB_AGE_DAYS,
+            max_age_days=config.RECOVERY_DEEP_MAX_JOB_AGE_DAYS,
+            output_suffix="extended_age_recovery",
+            enabled_flag=True,
+        )
+        summary["steps"]["extended_age_recovery"] = extended_age_recovery_summary
+        if extended_age_recovery_summary.get("qualification_nonpass_output"):
+            precontact_nonpass_paths.append(
+                str(extended_age_recovery_summary["qualification_nonpass_output"])
+            )
+
     summary["steps"]["topup"] = {
         "enabled": topup_enabled,
+        "disabled_reason": topup_disabled_reason,
         "mode": "final_pass" if strict_runtime else "legacy_reviewable",
         "rounds": [],
         "initial_final_pass_leads": enriched.final_pass_leads,
@@ -661,8 +808,17 @@ def run_pipeline() -> dict:
     recovery_queue.remove([*terminal_jobs, *terminal_precontact_jobs])
     current_reviewable = [job for job in enriched_jobs if is_airtable_reviewable(job)]
     inventory_leads: list[dict] = []
+    stage_result: dict = {}
     if strict_runtime:
-        final_pass_inventory.stage(current_reviewable)
+        stage_result = final_pass_inventory.stage(current_reviewable)
+        summary["steps"]["final_pass_inventory_stage"] = stage_result
+        if stage_result.get("already_sent_same_bucket_suppressed"):
+            logger.info(
+                "Final-pass inventory: %d lead(s) suppressed as already-sent for "
+                "the same account+function (lead_keys=%s)",
+                stage_result["already_sent_same_bucket_suppressed"],
+                stage_result.get("already_sent_suppressed_lead_keys", []),
+            )
         inventory_leads = final_pass_inventory.available(
             limit=(
                 None
@@ -771,6 +927,109 @@ def run_pipeline() -> dict:
             f"net_airtable_created={net_created}/{delivery_target}"
         )
         logger.error(summary["warnings"][-1])
+
+    # Non-negotiable throughput policy reporting (spec: 30 is a minimum SLA,
+    # never a cap -- FINAL_PASS >= 30 is the success condition, not == 30).
+    # Every field below is assembled from counters already computed above;
+    # this does not change what gets delivered, only how it is reported.
+    total_final_pass_found = int(enriched.final_pass_leads)
+    total_delivered = net_created
+    above_sla_count = max(0, total_delivered - delivery_target)
+    omission_reasons = {
+        "already_sent_same_bucket_suppressed": int(stage_result.get("already_sent_same_bucket_suppressed", 0)),
+        "airtable_skipped_existing": int(airtable_result.get("skipped_existing", 0)),
+        "airtable_skipped_existing_company": int(airtable_result.get("skipped_existing_company", 0)),
+        "airtable_failed": int(airtable_result.get("failed", 0)),
+    }
+    total_omitted = max(0, total_final_pass_found - total_delivered)
+    unique_companies = int(enriched.companies_considered)
+    duplicate_leads_avoided = (
+        omission_reasons["already_sent_same_bucket_suppressed"]
+        + omission_reasons["airtable_skipped_existing"]
+        + omission_reasons["airtable_skipped_existing_company"]
+    )
+    summary["sla_report"] = {
+        "sla_minimum": delivery_target,
+        "success_condition": f"final_pass_delivered >= {delivery_target} (not ==)",
+        "total_final_pass_found": total_final_pass_found,
+        "total_delivered": total_delivered,
+        "above_sla_count": above_sla_count,
+        "total_omitted": total_omitted,
+        "omission_reasons": omission_reasons,
+        "unique_companies": unique_companies,
+        "duplicate_leads_avoided": duplicate_leads_avoided,
+    }
+    # Authoritative deficit-driven controller state (FINAL_30_PLUS_SYSTEM_SPEC.md
+    # section 6): consolidates fields already computed above and by each
+    # acquisition/recovery step into the one run-level view the spec asks
+    # for, rather than leaving them scattered across summary["steps"].
+    # Fields this run cannot measure (provider quota/reserve -- no client in
+    # this codebase currently exposes remaining Apollo/Hunter/JSearch quota)
+    # are reported as null with an explicit reason, never fabricated.
+    scrape_stats = summary["steps"].get("scrape", {}).get("stats", {})
+    topup_step = summary["steps"].get("topup", {})
+    deficit = max(0, delivery_target - net_created)
+    summary["controller_state"] = {
+        "target": delivery_target,
+        "acquisition_target": target_final_pass,
+        "final_pass_found": total_final_pass_found,
+        "final_pass_delivered": total_delivered,
+        "target_reached": bool(enriched.final_pass_target_reached),
+        "deficit": deficit,
+        "leads_above_target": above_sla_count,
+        "unique_companies": unique_companies,
+        "companies_considered": int(enriched.companies_considered),
+        "eligible_companies": int(enriched.eligible_companies),
+        "unresolved_companies": max(
+            0, int(enriched.eligible_companies) - int(getattr(enriched, "lead_capable_companies", 0))
+        ),
+        "upstream_ready_inventory_at_start": len(starting_ready_inventory),
+        "enabled_sources": list(scrape_stats.get("enabled_sources", [])),
+        "source_health": {
+            source: metric.get("success")
+            for source, metric in scrape_stats.get("source_metrics", {}).items()
+        },
+        "ats_closed_or_removed_job_ids": sum(
+            metric.get("closed_or_removed_job_ids", 0)
+            for metric in scrape_stats.get("ats_metrics", {}).values()
+        ),
+        "topup_enabled": bool(topup_step.get("enabled")),
+        "topup_disabled_reason": topup_step.get("disabled_reason", ""),
+        "topup_unit_budget": topup_step.get("topup_unit_budget"),
+        "topup_query_units_used": topup_step.get("topup_query_units"),
+        "adzuna_enabled": bool(scrape_stats.get("adzuna", {}).get("enabled")),
+        "provider_quota_remaining": None,
+        "provider_quota_reserve": None,
+        "provider_quota_not_observable_reason": (
+            "no Apollo/Hunter/JSearch client in this codebase currently "
+            "exposes remaining account-level quota; only per-run request/unit "
+            "counts are observable (see topup_query_units_used above)."
+        ),
+        # Hunter is optional corroboration: its unavailability is observable
+        # here but never blocks delivery of an Apollo-verified lead (Phase 13 §1).
+        "hunter": hunter_client.run_status(),
+        "stop_reason": enriched.stop_reason,
+    }
+
+    # Post-run capacity summary: the *authoritative* capacity control happens
+    # pre-contact (STEP 2C->3, summary["steps"]["capacity_expansion"]); this
+    # end-of-run block only mirrors the final unique-canonical searchable pool
+    # (post-enrichment, for observability) and never drives acquisition.
+    _post_capacity = build_from_config(config)
+    _post_capacity.register_searchable(
+        canonical_company_key(
+            domain=str(lead.get("canonical_domain") or lead.get("company_domain") or ""),
+            normalized_name=str(lead.get("canonical_company_name") or lead.get("employer_name") or "").lower(),
+            blocked_domains=config.INTERMEDIARY_JOB_DOMAINS,
+        )
+        for lead in enriched_jobs
+        if (lead.get("canonical_domain") or lead.get("company_domain"))
+    )
+    summary["capacity_controller_state"] = {
+        **_post_capacity.state(recovery_inventory_available=len(starting_ready_inventory)),
+        "note": "post-enrichment mirror; authoritative pre-contact control is in steps.capacity_expansion",
+    }
+
     # A checkpoint represents an interrupted technical run, not unmet commercial
     # inventory. Every clean completion clears it; retryable work is already in
     # RecoverableJobQueue and READY leads are already in FinalPassInventory.

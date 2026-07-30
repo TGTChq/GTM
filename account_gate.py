@@ -7,7 +7,14 @@ from typing import Dict, Optional
 import config
 from apollo_client import OrgEnrichment
 from business_model_classifier import classify_business_model
-from company_identity import company_names_compatible, domains_equivalent, safe_company_domain
+from company_identity import (
+    company_names_compatible,
+    company_names_exactly_equal,
+    domain_name_consistent,
+    domains_equivalent,
+    extract_domain_from_text,
+    safe_company_domain,
+)
 from company_source_resolver import CompanySourceResolver
 from decision_types import GateDecision, GateState
 from evidence_types import EvidenceBundle, EvidenceItem, EvidenceStatus, FactValue
@@ -50,11 +57,83 @@ class AccountGate:
         )
         canonical_domain = apollo_domain or input_safe
         canonical_name = str(org.name or input_company_name or "").strip()
+        domain_recovery_reason = (
+            "employer_website_verified" if input_safe
+            else "apollo_org_domain_recovered" if apollo_domain
+            else ""
+        )
 
         if not org.found:
             review_reasons.append(ReasonCode.UNVERIFIED_ORGANIZATION)
             canonical_name = str(input_company_name or canonical_name or "").strip()
             canonical_domain = input_safe or canonical_domain
+
+        # Last-resort fallback: an ATS-registry-sourced tenant-domain candidate
+        # (e.g. a Workday tenant slug), only ever used as *search* evidence when
+        # the registry's own company-name-vs-tenant compatibility check passed.
+        # Never used to upgrade account state beyond NEEDS_CHECK -- it unlocks
+        # person-search, it does not assert a verified account identity.
+        if not canonical_domain:
+            tenant_candidate = ""
+            tenant_verified = False
+            for job in jobs:
+                candidate = str(job.get("_ats_tenant_domain_candidate") or "").strip()
+                if candidate:
+                    tenant_candidate = safe_company_domain(candidate, config.INTERMEDIARY_JOB_DOMAINS)
+                    tenant_verified = bool(job.get("_ats_board_identity_verified"))
+                    if tenant_candidate:
+                        break
+            if tenant_candidate and tenant_verified:
+                canonical_domain = tenant_candidate
+                domain_recovery_reason = "workday_tenant_domain_recovered"
+                review_reasons.append(ReasonCode.UNVERIFIED_DOMAIN)
+
+        # Further last-resort fallback: a company-branded URL already present
+        # on the job record (official posting URL, apply link, or source
+        # URL) whose host both clears the intermediary denylist AND is
+        # name-consistent with the employer -- the denylist alone is not
+        # sufficient (an unlisted third-party job board passes it just as
+        # easily as a real corporate site; confirmed via direct evidence:
+        # "Great Minds DC" hosted at californiaconstructores.com, "Corning"
+        # on NC Biotech Center's board). Same search-only, NEEDS_CHECK-only
+        # trust boundary as the Workday-tenant fallback above -- it unlocks
+        # person-search, it never asserts a verified account identity.
+        if not canonical_domain:
+            for job in jobs:
+                for url_field in ("official_job_url", "canonical_source_url", "job_apply_link"):
+                    raw_url = str(job.get(url_field) or "").strip()
+                    if not raw_url:
+                        continue
+                    candidate = safe_company_domain(raw_url, config.INTERMEDIARY_JOB_DOMAINS)
+                    if candidate and domain_name_consistent(canonical_name or input_company_name, candidate):
+                        canonical_domain = candidate
+                        domain_recovery_reason = "company_url_domain_recovered"
+                        review_reasons.append(ReasonCode.UNVERIFIED_DOMAIN)
+                        break
+                if canonical_domain:
+                    break
+
+        # Further last-resort fallback: a domain or contact email mentioned
+        # in plain text on the job description itself (e.g. "visit us at
+        # acme.com"), for companies with no usable URL anywhere on the
+        # record at all. Confirmed via the 2026-07-29 corpus: recovers
+        # companies (amcor, wipfli, samsara, toast, etc.) that the URL-based
+        # fallback above cannot reach. Same denylist + name-consistency
+        # double-check, same search-only/NEEDS_CHECK-only trust boundary.
+        if not canonical_domain:
+            for job in jobs:
+                description = str(job.get("job_description") or "")
+                if not description:
+                    continue
+                candidate = extract_domain_from_text(
+                    description, canonical_name or input_company_name, config.INTERMEDIARY_JOB_DOMAINS
+                )
+                if candidate:
+                    canonical_domain = candidate
+                    domain_recovery_reason = "description_text_domain_recovered"
+                    review_reasons.append(ReasonCode.UNVERIFIED_DOMAIN)
+                    break
+
         if not canonical_domain:
             return self._unknown(
                 ReasonCode.UNVERIFIED_DOMAIN,
@@ -66,6 +145,7 @@ class AccountGate:
                     "employee_count": org.employee_count,
                     "industry": str(org.industry or "").strip(),
                     "business_model": "unknown",
+                    "domain_recovery_reason": "no_domain_evidence",
                 },
             )
 
@@ -85,6 +165,23 @@ class AccountGate:
             review_reasons.append(ReasonCode.UNVERIFIED_EMPLOYER_IDENTITY)
             canonical_domain = input_safe or canonical_domain
             canonical_name = str(input_company_name or canonical_name).strip()
+
+        # A name-only Apollo match with no domain to cross-check at all is a
+        # single, uncorroborated signal -- not the "two independent sources
+        # agree" confidence its VERIFIED_CROSS_SOURCE label implies elsewhere.
+        # A short/common company name can collide with an unrelated org this
+        # way (confirmed: an "Amazon" job posting matched Apollo's unrelated
+        # 22-person "Amazon Group" and was auto-rejected as too-small --
+        # ROOT_CAUSE_TABLE_STRUCTURAL.md row 7 / TECHNICAL_DESIGN.md D6). Route
+        # the firmographic size check to human review instead of an
+        # unrecoverable auto-reject in exactly this narrow situation; every
+        # other reject path (domain-confirmed size, industry, business model,
+        # staffing) is unaffected.
+        exact_name_match = company_names_exactly_equal(input_company_name, canonical_name)
+        domainless_name_only_match = bool(
+            org.found and not input_safe and not domain_matches
+            and name_matches and not exact_name_match
+        )
 
         organization_status = (
             EvidenceStatus.VERIFIED_CROSS_SOURCE
@@ -123,9 +220,15 @@ class AccountGate:
                 [EvidenceItem("employee_count", org.employee_count, EvidenceStatus.VERIFIED_CROSS_SOURCE, "apollo", confidence=0.9)]
             ))
             if org.employee_count < config.MIN_EMPLOYEES:
-                return self._reject(ReasonCode.REJECT_COMPANY_TOO_SMALL, bundle)
-            if org.employee_count > config.MAX_EMPLOYEES:
-                return self._reject(ReasonCode.REJECT_COMPANY_TOO_LARGE, bundle)
+                if domainless_name_only_match:
+                    review_reasons.append(ReasonCode.UNVERIFIED_EMPLOYER_IDENTITY)
+                else:
+                    return self._reject(ReasonCode.REJECT_COMPANY_TOO_SMALL, bundle)
+            elif org.employee_count > config.MAX_EMPLOYEES:
+                if domainless_name_only_match:
+                    review_reasons.append(ReasonCode.UNVERIFIED_EMPLOYER_IDENTITY)
+                else:
+                    return self._reject(ReasonCode.REJECT_COMPANY_TOO_LARGE, bundle)
 
         industry = str(org.industry or "").strip()
         if not industry:
@@ -204,6 +307,7 @@ class AccountGate:
             "industry": industry,
             "business_model": model.category,
             "company_source": source.to_dict(),
+            "domain_recovery_reason": domain_recovery_reason,
             "review_reasons": [
                 value.value if hasattr(value, "value") else str(value)
                 for value in review_reasons

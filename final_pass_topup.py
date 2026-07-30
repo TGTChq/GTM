@@ -350,10 +350,30 @@ def run_final_pass_topup(
             if eligible_remaining is not None and eligible_remaining <= 0:
                 stop_reason = "eligible_company_safety_cap_reached"
                 break
-            total_budget = config.JSEARCH_MAX_ESTIMATED_UNITS_PER_RUN
-            budget_remaining = max(0, total_budget - total_query_units) if total_budget > 0 else config.FINAL_PASS_MICROBATCH_QUERY_UNITS
+            # Top-up draws from its own independent budget (topup_units), not
+            # the base pass's shared JSEARCH_MAX_ESTIMATED_UNITS_PER_RUN pool
+            # -- a heavy adaptive base pass must not be able to starve top-up.
+            # A separate, optional run-global ceiling still applies on top of
+            # that if configured, so total cost keeps a hard backstop.
+            topup_budget_total = config.JSEARCH_TOPUP_UNIT_BUDGET
+            topup_budget_remaining = (
+                max(0, topup_budget_total - topup_units)
+                if topup_budget_total > 0
+                else float("inf")
+            )
+            run_global_cap = config.JSEARCH_MAX_ESTIMATED_UNITS_PER_RUN
+            run_global_remaining = (
+                max(0, run_global_cap - total_query_units)
+                if run_global_cap > 0
+                else float("inf")
+            )
+            budget_remaining = min(topup_budget_remaining, run_global_remaining)
             if budget_remaining <= 0:
-                stop_reason = "jsearch_unit_budget_exhausted"
+                stop_reason = (
+                    "jsearch_topup_budget_exhausted"
+                    if topup_budget_remaining <= 0
+                    else "jsearch_run_global_budget_exhausted"
+                )
                 break
             unit_budget = min(budget_remaining, max(1, config.FINAL_PASS_MICROBATCH_QUERY_UNITS))
             deficit = target_final_pass_leads - current
@@ -517,7 +537,9 @@ def run_final_pass_topup(
 
     details.update({
         "topup_query_units": topup_units,
+        "topup_unit_budget": config.JSEARCH_TOPUP_UNIT_BUDGET,
         "total_query_units": total_query_units,
+        "run_global_unit_cap": config.JSEARCH_MAX_ESTIMATED_UNITS_PER_RUN,
         "final_pass_leads": len(_final_pass_keys(_dedupe_leads_prefer_stronger(all_leads))),
         "reviewable_leads": len(_surface_keys(_dedupe_leads_prefer_stronger(all_leads))),
         "stop_reason": stop_reason,
