@@ -55,9 +55,18 @@ def _url_host(value: str) -> str:
     if "://" not in raw:
         raw = f"https://{raw}"
     try:
-        return (urlparse(raw).hostname or "").lower().lstrip("www.")
+        host = (urlparse(raw).hostname or "").lower().lstrip("www.")
     except ValueError:
         return ""
+    # A real hostname contains only letters, digits, hyphens and dots. urlparse
+    # leniently yields space-containing pseudo-hosts for non-URL strings such as
+    # company names with a trailing legal suffix ("Trimble Inc." -> "trimble
+    # inc.", "Acme Ltd." -> "acme ltd."). Reject those so a legitimate company
+    # name is not misread as a deployment hostname by the shell-name integrity
+    # check; genuine hostnames (e.g. "app.company.io") still validate.
+    if not host or not re.fullmatch(r"[a-z0-9.-]+", host):
+        return ""
+    return host
 
 
 def _host_matches(host: str, domain: str) -> bool:
@@ -317,6 +326,17 @@ def _trusted_structured_employer_identity(job: Dict, employer: str) -> bool:
                 "weworkremotely",
                 "remotive",
                 "remoteok",
+                # Adzuna is a first-party structured provider feed on the same
+                # footing as the free feeds above: it supplies the employer as a
+                # discrete ``company.display_name`` field (never scraped from the
+                # description) and sets ``_provider_record_structured=True``.
+                # Omitting it here made every legitimately-structured Adzuna
+                # posting fail posting_integrity as "insufficient_direct_employer
+                # _evidence"/"thin_syndicated_posting_without_company_domain".
+                # Generic/aggregator/placeholder employers are still rejected by
+                # the guards above, so this is trust-list completion, not a
+                # weakening of the integrity rule.
+                "adzuna",
             }
         )
     )
