@@ -6,7 +6,7 @@ import json
 import logging
 import re
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Set
 from urllib.parse import quote
@@ -157,13 +157,50 @@ def _unix_to_iso(ts) -> Optional[str]:
         return None
 
 
+_RELATIVE_UNIT_DAYS = {
+    "minute": 0, "minutes": 0, "hour": 0, "hours": 0,
+    "day": 1, "days": 1, "week": 7, "weeks": 7,
+    "month": 30, "months": 30, "year": 365, "years": 365,
+}
+
+
+def _iso_dt(dt: datetime) -> str:
+    return dt.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _resolve_relative_date(text: str) -> Optional[str]:
+    """Resolve a human-relative posting label ("Posted 30+ Days Ago", "Posted
+    Yesterday") to a UTC ISO-8601 datetime from the run timestamp, or None when
+    it cannot be resolved reliably. A human-readable label is NEVER returned."""
+    label = re.sub(r"^\s*posted\s+", "", text.strip(), flags=re.I).strip().lower()
+    if not label:
+        return None
+    now = datetime.now(timezone.utc)
+    if label in {"today", "just posted", "just now", "new", "new today"}:
+        return _iso_dt(now)
+    if label in {"yesterday", "a day ago", "1 day ago", "one day ago"}:
+        return _iso_dt(now - timedelta(days=1))
+    m = re.fullmatch(
+        r"(?:about\s+|over\s+|more than\s+|almost\s+)?(\d+)\s*\+?\s*"
+        r"(minute|minutes|hour|hours|day|days|week|weeks|month|months|year|years)\s*ago",
+        label,
+    )
+    if m:
+        return _iso_dt(now - timedelta(days=int(m.group(1)) * _RELATIVE_UNIT_DAYS[m.group(2)]))
+    if re.fullmatch(r"(?:an?|a few)\s+(?:minute|minutes|hour|hours)\s+ago", label):
+        return _iso_dt(now)  # same-day; resolve to the run time
+    return None
+
+
 def _as_airtable_datetime(value) -> Optional[str]:
-    """Coerce a Posted-At value into a string Airtable's ``dateTime`` field
-    accepts. The ``job_posted_at_timestamp`` fallback is a raw unix integer;
-    Airtable rejects a bare integer in a date field with HTTP 422 even under
-    ``typecast``, so a numeric value (int/float or numeric string) is converted
-    to UTC ISO-8601 and an unparseable value is dropped rather than sent as-is.
-    An existing date-like string is passed through for typecast to parse."""
+    """Coerce a Posted-At value to an ISO-8601 string Airtable's ``dateTime``
+    field accepts, or None to omit it. Airtable rejects BOTH a bare integer (the
+    ``job_posted_at_timestamp`` fallback) AND a human-readable label ("Posted
+    30+ Days Ago", "Posted Yesterday") in a date field with HTTP 422 under
+    ``typecast``. A unix timestamp is converted; an explicit ISO/calendar date
+    passes through for typecast to parse; a recognized relative label is resolved
+    from the run timestamp; anything else is dropped -- a human label is never
+    sent."""
     if value is None or value == "" or isinstance(value, bool):
         return None
     if isinstance(value, (int, float)):
@@ -173,7 +210,11 @@ def _as_airtable_datetime(value) -> Optional[str]:
         return None
     if re.fullmatch(r"-?\d+(?:\.\d+)?", text):  # numeric string == unix timestamp
         return _unix_to_iso(float(text))
-    return text
+    # An explicit ISO / calendar date -> let Airtable's typecast parse it.
+    if re.match(r"\d{4}-\d{2}-\d{2}", text) or re.match(r"\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b", text):
+        return text
+    # A human-relative label -> resolve from the run timestamp, else omit.
+    return _resolve_relative_date(text)
 
 
 def _as_airtable_number(value):

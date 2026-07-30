@@ -24,7 +24,9 @@ import re
 import airtable_client
 import config
 import http_utils
-from airtable_client import _sanitize_airtable_error, push_leads, _job_to_fields
+from airtable_client import (
+    _sanitize_airtable_error, push_leads, _job_to_fields, _as_airtable_datetime,
+)
 from http_utils import RETRYABLE_STATUS_CODES
 
 _ISO = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}")
@@ -178,6 +180,36 @@ class PayloadSchemaConformanceTests(unittest.TestCase):
         self.assertEqual(fields["Founded"], 2016)
         self.assertEqual(fields["Relevance Score"], 80)
         self.assertEqual(fields["Job Age Days"], 5)
+
+    # --- Human-relative Posted At labels (2026-07-30 live failure) -----------
+    def test_posted_at_relative_yesterday_resolves_to_iso(self):
+        v = _as_airtable_datetime("Posted Yesterday")
+        self.assertIsInstance(v, str)
+        self.assertRegex(v, _ISO)
+
+    def test_posted_at_relative_30_plus_days_ago_resolves_to_iso(self):
+        v = _as_airtable_datetime("Posted 30+ Days Ago")
+        self.assertIsInstance(v, str)
+        self.assertRegex(v, _ISO)
+
+    def test_posted_at_valid_iso_passthrough(self):
+        self.assertEqual(_as_airtable_datetime("2026-07-20T09:15:00Z"), "2026-07-20T09:15:00Z")
+
+    def test_posted_at_unix_timestamp_converted(self):
+        self.assertRegex(_as_airtable_datetime(1753000000), _ISO)
+        self.assertRegex(_as_airtable_datetime("1753000000"), _ISO)
+
+    def test_posted_at_unparseable_text_is_omitted(self):
+        for junk in ("Reposted", "some junk label", "Posted recently", "N/A"):
+            self.assertIsNone(_as_airtable_datetime(junk),
+                              f"{junk!r} must be omitted, never sent as a label")
+
+    def test_relative_label_never_reaches_payload_as_label(self):
+        fields = self._fields(job_posted_at_datetime_utc="Posted 30+ Days Ago")
+        # Either resolved to ISO or omitted -- never the raw human label.
+        self.assertNotEqual(fields.get("Posted At"), "Posted 30+ Days Ago")
+        if "Posted At" in fields:
+            self.assertRegex(fields["Posted At"], _ISO)
 
     def test_all_typed_fields_schema_valid_for_failed_shape(self):
         # Every number/dateTime field is now numeric or ISO or omitted.
