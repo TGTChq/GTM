@@ -13,6 +13,7 @@ from decision_types import GateDecision, GateState
 from evidence_types import EvidenceBundle, EvidenceItem, EvidenceStatus, FactValue
 from job_filter import normalize_text
 from reason_codes import ReasonCode
+from role_mapping import is_founder_tier_title
 
 
 FOREIGN_TERRITORY_PATTERNS = {
@@ -147,7 +148,7 @@ class ContactGate:
                 evidence=bundle, retryable=True, next_action="try_next_contact",
             )
 
-        if re.search(r"\b(?:founder|co[- ]?founder|owner|chief executive officer|ceo|president)\b", title, re.I) and not founder_allowed:
+        if is_founder_tier_title(title) and not founder_allowed:
             return GateDecision(
                 "contact", GateState.REROUTE, ReasonCode.REROUTE_SENIORITY_MISMATCH,
                 evidence=bundle, retryable=True, next_action="try_next_contact",

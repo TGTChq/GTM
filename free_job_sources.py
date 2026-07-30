@@ -401,7 +401,8 @@ class JobicyAdapter:
 
     def fetch(self, fetcher: Fetcher = default_fetcher) -> SourceResult:
         result = SourceResult(source=self.name, requests_attempted=1, pages=1)
-        payload = fetcher(self.endpoint, params={"count": 50, "geo": "usa"})
+        request_count = max(1, int(config.JOBICY_REQUEST_COUNT))
+        payload = fetcher(self.endpoint, params={"count": request_count, "geo": "usa"})
         if payload.status_code != 200:
             result.success = False
             result.errors.append(f"HTTP {payload.status_code or 'error'}: {payload.error or payload.text[:200]}")
@@ -447,6 +448,18 @@ class JobicyAdapter:
                 salary_currency=row.get("salaryCurrency"),
                 salary_period=row.get("salaryPeriod") or "annual",
             ))
+        # Jobicy's public v2 API has no documented offset/page parameter, so a
+        # single request is the whole retrieval mechanism available here --
+        # this is a genuine provider-API limitation, not a code-side gap, but
+        # it must stay observable rather than silent: if the response came
+        # back exactly at the requested count, more records likely exist and
+        # went unretrieved this run.
+        result.metadata = {
+            "endpoint": self.endpoint,
+            "count_requested": request_count,
+            "pagination_supported": False,
+            "response_at_requested_count": len(rows) >= request_count,
+        }
         return result
 
 

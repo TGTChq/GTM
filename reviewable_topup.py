@@ -17,7 +17,7 @@ from hiring_manager import (
     company_key_for_job,
     run_hiring_manager_identification,
 )
-from job_filter import run_filter
+from job_filter import normalize_title, run_filter
 from jsearch_scraper import ScrapeResult, run_targeted_topup_scrape
 from pipeline_state import SeenJobsRegistry
 
@@ -70,7 +70,7 @@ def _job_ref_key(job: Dict) -> Tuple[str, ...]:
     return (
         "fallback",
         company_key_for_job(job),
-        str(job.get("job_title") or "").strip().lower(),
+        normalize_title(job.get("job_title") or ""),
     )
 
 

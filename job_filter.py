@@ -18,6 +18,7 @@ from company_identity import safe_company_domain
 from domain_utils import normalize_company_domain
 
 import config
+import freshness_policy
 from job_quality import assess_quality_guard, normalize_job_identity
 from job_signal import classify_freshness
 from pipeline_state import SeenJobsRegistry
@@ -100,6 +101,22 @@ def dedup_key(job: Dict) -> Tuple[str, str]:
     domain = get_safe_employer_domain(job)[0]
     company = domain or normalize_text(job.get("employer_name", ""))
     return company, normalize_title(job.get("job_title", ""))
+
+
+def job_reference_key(job: Dict) -> str:
+    """One authoritative job-record reference key, used by both
+    RecoverableJobQueue/FinalPassInventory (recovery_inventory.py) and
+    PipelineCheckpoint (pipeline_checkpoint.py) -- an exhaustive identity-key
+    audit (FINAL_30_PLUS_SYSTEM_SPEC.md section 19) found the exact same
+    two-line function independently defined in both files. Prefers a stable
+    job id (including a canonical_job_id set by upstream recovery/dedup
+    logic) over the (company, title) dedup_key when no id is available.
+    """
+    job_id = str(job.get("job_id") or job.get("canonical_job_id") or "").strip()
+    if job_id:
+        return f"id:{job_id}"
+    company, title = dedup_key(job)
+    return f"dedup:{company}|{title}"
 
 
 def extract_domain(value: str) -> str:
@@ -258,6 +275,12 @@ def is_stale_job(
         return True, f"stale_job:{age_days}days"
     if age_days is not None and min_age_days is not None and age_days < int(min_age_days):
         return True, f"outside_recovery_window:{age_days}days"
+    if age_days is not None:
+        tier = freshness_policy.classify_age_tier(age_days)
+        job["_freshness_tier"] = tier
+        eligible, tier_reason = freshness_policy.is_age_tier_eligible(tier, job)
+        if not eligible:
+            return True, tier_reason
     return False, ""
 
 

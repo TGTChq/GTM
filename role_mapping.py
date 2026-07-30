@@ -14,11 +14,38 @@ from __future__ import annotations
 import re
 from typing import Dict, Iterable, List
 
+import config
 from role_catalog import (
     ROLE_DEFINITIONS,
     get_function_bucket,
     get_hiring_manager_bucket,
 )
+
+# Shared with contact_gate.py so search-title construction and the final
+# contact-eligibility gate can never disagree about what counts as a
+# founder/CEO-tier title.
+_FOUNDER_TIER_PATTERN = re.compile(
+    r"\b(?:founder|co[- ]?founder|owner|chief executive officer|ceo|president)\b", re.I
+)
+
+
+def is_founder_tier_title(title: str) -> bool:
+    return bool(_FOUNDER_TIER_PATTERN.search(str(title or "")))
+
+
+def founder_allowed_for_employee_count(employee_count: int | None) -> bool:
+    """Single source of truth for whether a founder/CEO-tier contact is in scope.
+
+    ``employee_count is None`` (org enrichment unresolved) also yields False --
+    matching the pre-existing hiring_manager.py behavior this replaces, not a
+    new restriction. Once domain/org-enrichment resolution improves for a given
+    company, employee_count becomes known and this can flip to True for
+    genuinely small companies on its own.
+    """
+    return bool(
+        employee_count is not None
+        and employee_count <= config.FOUNDER_FALLBACK_MAX_EMPLOYEES
+    )
 
 
 # Backward-compatible public mapping used by tests and reporting.
@@ -435,18 +462,21 @@ def _dedupe_titles(titles: Iterable[str]) -> List[str]:
     return result
 
 
-def _founders_last(titles: Iterable[str]) -> List[str]:
-    """Keep founder/CEO as true fallbacks, regardless of company size."""
-    founder_keys = {"founder", "co-founder", "co founder", "ceo"}
+def _founders_last(titles: Iterable[str], *, founder_allowed: bool = True) -> List[str]:
+    """Keep founder/CEO as true fallbacks, ordered last.
+
+    When ``founder_allowed`` is False (company already known too large for a
+    founder-tier contact), founder-tier titles are dropped entirely rather
+    than merely reordered -- this keeps them out of the Apollo search query
+    itself, instead of paying for a search + rank + attempt that ContactGate
+    would reject deterministically anyway (ROOT_CAUSE_TABLE_STRUCTURAL.md
+    row 2 / TECHNICAL_DESIGN.md D2).
+    """
     deduped = _dedupe_titles(titles)
-    functional = [
-        title for title in deduped
-        if title.lower().strip() not in founder_keys
-    ]
-    founders = [
-        title for title in deduped
-        if title.lower().strip() in founder_keys
-    ]
+    functional = [title for title in deduped if not is_founder_tier_title(title)]
+    if not founder_allowed:
+        return functional
+    founders = [title for title in deduped if is_founder_tier_title(title)]
     return functional + founders
 
 
@@ -494,7 +524,7 @@ def get_target_titles(
         list(BUCKET_DIRECT_TITLES.get(bucket, []))
         + list(BUCKET_TITLES.get(bucket, BUCKET_TITLES["gtm_revenue"]))
     )
-    return _founders_last(titles)
+    return _founders_last(titles, founder_allowed=founder_allowed_for_employee_count(employee_count))
 
 
 def _contextual_gtm_titles(job: Dict) -> List[str]:
@@ -519,8 +549,9 @@ def get_target_titles_for_job(
     hm_bucket = bucket_override or get_hiring_manager_bucket_for_job(job)
     direct = ROLE_DIRECT_MANAGER_TITLES.get(matched_role, [])
     base = get_target_titles(matched_role, employee_count, bucket_override=hm_bucket)
+    founder_allowed = founder_allowed_for_employee_count(employee_count)
     if hm_bucket != "gtm_revenue":
-        return _founders_last(direct + base)
+        return _founders_last(direct + base, founder_allowed=founder_allowed)
 
     combined = (
         direct
@@ -528,7 +559,7 @@ def get_target_titles_for_job(
         + base
         + _GTM_OPERATIONS_FALLBACK_TITLES
     )
-    return _founders_last(combined)
+    return _founders_last(combined, founder_allowed=founder_allowed)
 
 
 def get_target_titles_for_jobs(
@@ -543,4 +574,4 @@ def get_target_titles_for_jobs(
     combined: List[str] = []
     for job in jobs:
         combined.extend(get_target_titles_for_job(job, employee_count))
-    return _founders_last(combined)
+    return _founders_last(combined, founder_allowed=founder_allowed_for_employee_count(employee_count))

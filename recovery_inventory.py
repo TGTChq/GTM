@@ -14,8 +14,9 @@ from pathlib import Path
 from typing import Dict, Iterable, List
 
 import config
-from domain_utils import normalize_company_domain
-from job_filter import dedup_key, normalize_text
+import freshness_policy
+from company_identity import canonical_company_key
+from job_filter import job_reference_key, normalize_text
 from review_policy import is_airtable_reviewable
 
 
@@ -34,32 +35,54 @@ def _parse(value: str) -> datetime | None:
 
 
 def _key(job: Dict) -> str:
-    job_id = str(job.get("job_id") or job.get("canonical_job_id") or "").strip()
-    if job_id:
-        return f"id:{job_id}"
-    company, title = dedup_key(job)
-    return f"dedup:{company}|{title}"
+    return job_reference_key(job)
 
 
 
 
 def _account_key(lead: Dict) -> str:
-    domain = normalize_company_domain(
-        lead.get("canonical_domain")
-        or lead.get("company_domain")
-        or lead.get("employer_website")
-        or lead.get("website")
-        or ""
+    return canonical_company_key(
+        domain=(
+            lead.get("canonical_domain")
+            or lead.get("company_domain")
+            or lead.get("employer_website")
+            or lead.get("website")
+            or ""
+        ),
+        normalized_name=normalize_text(
+            lead.get("canonical_employer_name")
+            or lead.get("employer_name")
+            or lead.get("company_name")
+            or ""
+        ),
+        blocked_domains=config.INTERMEDIARY_JOB_DOMAINS,
     )
-    if domain:
-        return f"domain:{domain}"
-    name = normalize_text(
-        lead.get("canonical_employer_name")
-        or lead.get("employer_name")
-        or lead.get("company_name")
-        or ""
-    )
-    return f"name:{name}" if name else ""
+
+
+def _account_bucket_key(lead: Dict) -> str:
+    """Same-account, same-function suppression key.
+
+    A repeat of the *same* function at an already-contacted account is still
+    suppressed (correct -- avoids duplicate/unjustified outbound). A *different*
+    function/bucket at that same account is a genuinely distinct hiring signal
+    per the spec's own explicit allowance and must not be silently dropped
+    (ROOT_CAUSE_TABLE_STRUCTURAL.md row 4 / TECHNICAL_DESIGN.md D3 -- this
+    replaces the previous account-only key that suppressed every future lead
+    at an account regardless of function, with zero counter or reason code).
+    """
+    account = _account_key(lead)
+    if not account:
+        return ""
+    bucket = normalize_text(str(lead.get("bucket") or ""))
+    return f"{account}|{bucket}" if bucket else account
+
+
+_FINAL_STATE_RANK = {"FINAL_PASS": 0, "NEEDS_CHECK": 1, "UNVERIFIED": 2, "REROUTE": 3}
+
+
+def _final_state_rank(lead: Dict) -> int:
+    """Lower is higher-priority. Unknown states sort after every known one."""
+    return _FINAL_STATE_RANK.get(str(lead.get("_final_state") or "").upper(), 99)
 
 
 def _priority_score(lead: Dict) -> float:
@@ -218,7 +241,24 @@ class FinalPassInventory:
             try:
                 if age_at_validation is not None and validation_time is not None:
                     elapsed_days = max(0, (_now() - validation_time).days)
-                    job_too_old = (float(age_at_validation) + elapsed_days) >= float(config.MAX_JOB_AGE_DAYS)
+                    # Use the tier the lead actually qualified under (0-14,
+                    # 15-30, 31-60, 61-90) rather than the blanket primary
+                    # ceiling -- a lead admitted through age/extended recovery
+                    # has job_age_days >= 15 by construction, so checking it
+                    # against the 14-day primary ceiling would always be true
+                    # and prune every recovery-sourced lead on the very next
+                    # call, before it could ever be reserved or delivered.
+                    tier = str(lead.get("_freshness_tier") or "") or freshness_policy.classify_age_tier(
+                        int(age_at_validation)
+                    )
+                    ceiling = freshness_policy.tier_max_age_days(tier)
+                    # Strictly greater-than, matching job_filter.is_stale_job's
+                    # admission boundary (age_days > effective_max). A job at
+                    # exactly its tier ceiling remains eligible for that day and
+                    # expires only after exceeding it -- so admission and pruning
+                    # agree at 14 / 30 / 60 / 90, and a lead admitted at exactly
+                    # its ceiling is never pruned in the same run (Phase 13 §3).
+                    job_too_old = (float(age_at_validation) + elapsed_days) > ceiling
             except (TypeError, ValueError):
                 job_too_old = False
             # Sent records are retained for the TTL as a local idempotency aid;
@@ -234,27 +274,34 @@ class FinalPassInventory:
         if changed:
             self.save()
 
-    def stage(self, leads_to_stage: Iterable[Dict]) -> None:
+    def stage(self, leads_to_stage: Iterable[Dict]) -> Dict:
         leads = self.payload.setdefault("leads", {})
-        sent_accounts = {
-            _account_key(record.get("lead") or {})
+        sent_account_buckets = {
+            _account_bucket_key(record.get("lead") or {})
             for record in leads.values()
             if isinstance(record, dict)
             and record.get("status") == self.SENT_TO_AIRTABLE
             and isinstance(record.get("lead"), dict)
         }
+        staged_count = 0
+        already_sent_suppressed = 0
+        already_sent_suppressed_lead_keys: List[str] = []
         for lead in leads_to_stage:
             state = str(lead.get("_final_state") or "")
             if state == "FINAL_PASS":
                 pass
             elif not is_airtable_reviewable(lead):
                 continue
-            account = _account_key(lead)
-            if account and account in sent_accounts:
+            account_bucket = _account_bucket_key(lead)
+            if account_bucket and account_bucket in sent_account_buckets:
+                already_sent_suppressed += 1
+                already_sent_suppressed_lead_keys.append(str(lead.get("lead_key") or ""))
                 continue
             key = self._inventory_key(lead)
             current = leads.get(key) or {}
             if current.get("status") == self.SENT_TO_AIRTABLE:
+                already_sent_suppressed += 1
+                already_sent_suppressed_lead_keys.append(str(lead.get("lead_key") or ""))
                 continue
             staged = dict(lead)
             staged["priority_score"] = _priority_score(staged)
@@ -264,13 +311,19 @@ class FinalPassInventory:
                 "status": self.READY_UNUSED,
                 "lead": staged,
             }
+            staged_count += 1
         self.save()
+        return {
+            "staged": staged_count,
+            "already_sent_same_bucket_suppressed": already_sent_suppressed,
+            "already_sent_suppressed_lead_keys": already_sent_suppressed_lead_keys,
+        }
 
     def available(self, limit: int | None = None) -> List[Dict]:
         self._prune()
         records = self.payload.setdefault("leads", {})
-        sent_accounts = {
-            _account_key(record.get("lead") or {})
+        sent_account_buckets = {
+            _account_bucket_key(record.get("lead") or {})
             for record in records.values()
             if isinstance(record, dict)
             and record.get("status") == self.SENT_TO_AIRTABLE
@@ -282,24 +335,33 @@ class FinalPassInventory:
                 continue
             if isinstance(record.get("lead"), dict):
                 lead = dict(record["lead"])
-                account = _account_key(lead)
-                if account and account in sent_accounts:
+                account_bucket = _account_bucket_key(lead)
+                if account_bucket and account_bucket in sent_account_buckets:
                     continue
                 output.append(lead)
         output.sort(
             key=lambda lead: (
+                # _final_state is the primary sort key so a delivery limit can
+                # never bump a FINAL_PASS lead in favor of a NEEDS_CHECK one
+                # (TECHNICAL_DESIGN.md D11) -- signal-confidence scoring is
+                # only a tiebreaker within the same state tier.
+                _final_state_rank(lead),
                 -float(lead.get("priority_score") or 0),
                 str(lead.get("_validation_timestamp") or ""),
             )
         )
+        # Same-run collapse: one lead per (account, function/bucket) pair, not
+        # one per account -- a distinct function at the same account is a
+        # genuinely distinct hiring signal, not a duplicate (spec's explicit
+        # allowance; ROOT_CAUSE_TABLE_STRUCTURAL.md row 4).
         unique_accounts: List[Dict] = []
-        seen_accounts: set[str] = set()
+        seen_account_buckets: set[str] = set()
         for lead in output:
-            account = _account_key(lead)
-            if account and account in seen_accounts:
+            account_bucket = _account_bucket_key(lead)
+            if account_bucket and account_bucket in seen_account_buckets:
                 continue
-            if account:
-                seen_accounts.add(account)
+            if account_bucket:
+                seen_account_buckets.add(account_bucket)
             unique_accounts.append(lead)
             if limit and limit > 0 and len(unique_accounts) >= limit:
                 break

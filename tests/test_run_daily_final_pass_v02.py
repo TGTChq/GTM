@@ -116,6 +116,30 @@ class RunDailyFinalPassV02Tests(unittest.TestCase):
         self.assertIsNone(hm_mock.call_args.kwargs["target_reviewable_leads"])
         self.assertEqual(hm_mock.call_args.kwargs["exclude_company_keys"], {"old.com"})
 
+        # D15 (TECHNICAL_DESIGN.md): non-negotiable throughput-policy reporting.
+        sla_report = summary["sla_report"]
+        self.assertEqual(sla_report["total_final_pass_found"], 1)
+        self.assertEqual(sla_report["total_delivered"], 1)
+        self.assertEqual(sla_report["above_sla_count"], 0)
+        self.assertEqual(sla_report["total_omitted"], 0)
+        self.assertEqual(sla_report["unique_companies"], 1)
+        self.assertIn(">=", sla_report["success_condition"])
+        self.assertNotIn("==", sla_report["success_condition"].split("(")[0])
+
+        # Phase 9 (FINAL_30_PLUS_SYSTEM_SPEC.md section 6): one authoritative
+        # controller-state view, consolidating fields already computed
+        # elsewhere in the summary rather than leaving them scattered.
+        controller_state = summary["controller_state"]
+        self.assertEqual(controller_state["final_pass_found"], 1)
+        self.assertEqual(controller_state["final_pass_delivered"], 1)
+        self.assertTrue(controller_state["target_reached"])
+        self.assertEqual(controller_state["deficit"], 0)
+        self.assertEqual(controller_state["leads_above_target"], 0)
+        self.assertEqual(controller_state["unique_companies"], 1)
+        self.assertIn("stop_reason", controller_state)
+        self.assertIsNone(controller_state["provider_quota_remaining"])
+        self.assertTrue(controller_state["provider_quota_not_observable_reason"])
+
 
 if __name__ == "__main__":
     unittest.main()

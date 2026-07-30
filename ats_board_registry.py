@@ -10,6 +10,7 @@ from __future__ import annotations
 import html
 import json
 import logging
+import math
 import os
 import re
 import tempfile
@@ -82,6 +83,17 @@ def _valid_workday_identifier(value: Any) -> bool:
     )
 
 
+def _valid_cornerstone_identifier(value: Any) -> bool:
+    raw = str(value or "").strip().lower()
+    if "|" not in raw:
+        return False
+    tenant, site = raw.split("|", 1)
+    return bool(
+        re.fullmatch(r"[a-z0-9][a-z0-9-]{1,99}", tenant)
+        and re.fullmatch(r"[a-z0-9]{1,20}", site)
+    )
+
+
 def _valid_registry_entry(item: Mapping[str, Any]) -> bool:
     company = str(item.get("company_name") or "").strip()
     if company and is_placeholder_company_name(company):
@@ -91,6 +103,8 @@ def _valid_registry_entry(item: Mapping[str, Any]) -> bool:
         return _valid_workable_identifier(item.get("identifier"))
     if provider == "workday":
         return _valid_workday_identifier(item.get("identifier"))
+    if provider == "cornerstone_ondemand":
+        return _valid_cornerstone_identifier(item.get("identifier"))
     return True
 
 
@@ -215,6 +229,28 @@ def detect_board_ref(url: str) -> Optional[BoardRef]:
                 return None
             base = f"https://{host}"
             return BoardRef("workday", identifier, base, f"{base}/{site}")
+
+    # Cornerstone OnDemand: {tenant}.csod.com/ux/ats/careersite/{site_id}/...
+    # (documented public URL convention; the tenant subdomain is
+    # first-party-controlled by the employer, same trust basis as Workday's
+    # tenant slug). Found via the 2026-07-29 domain-recovery classification:
+    # a "world bank group" job hosted at worldbankgroup.csod.com.
+    cornerstone = re.fullmatch(r"([a-z0-9-]+)\.csod\.com", host)
+    if cornerstone:
+        tenant = cornerstone.group(1)
+        try:
+            index = parts.index("careersite")
+            site_id = parts[index + 1]
+        except (ValueError, IndexError):
+            site_id = ""
+        if site_id:
+            identifier = f"{tenant}|{site_id}"
+            if _valid_cornerstone_identifier(identifier):
+                base = f"https://{host}"
+                return BoardRef(
+                    "cornerstone_ondemand", identifier, base,
+                    f"{base}/ux/ats/careersite/{site_id}/home",
+                )
     return None
 
 
@@ -460,21 +496,42 @@ class AtsBoardRegistry:
         job_count: int = 0,
         error: str = "",
         save: bool = True,
-    ) -> None:
+        job_ids: Optional[Iterable[str]] = None,
+    ) -> int:
+        """Returns the number of job ids present in the previous fetch's
+        stored snapshot that are absent from ``job_ids`` this time -- an
+        explicit, observable closed/removed signal (never inferred silently;
+        0 whenever ``job_ids`` is not supplied, since no comparison is then
+        possible). Never deletes or mutates any job record elsewhere in the
+        pipeline; this only tracks a per-board id snapshot for comparison.
+
+        Not yet wired into any acquisition call site -- callers that have
+        the current fetch's job ids on hand should pass them as
+        ``job_ids={job.get("job_id") for job in jobs}`` to activate this.
+        """
         item = self.entries.get(key)
         if not item:
-            return
+            return 0
         item["last_checked_at"] = _now_iso()
         item["last_job_count"] = int(job_count)
+        closed_or_removed = 0
         if success:
             item["last_success_at"] = _now_iso()
             item["consecutive_failures"] = 0
             item["last_error"] = ""
+            if job_ids is not None:
+                current_ids = {str(value) for value in job_ids if value}
+                previous_ids = set(item.get("last_job_ids") or [])
+                if previous_ids:
+                    closed_or_removed = len(previous_ids - current_ids)
+                item["closed_or_removed_job_ids"] = closed_or_removed
+                item["last_job_ids"] = sorted(current_ids)[: max(1, config.ATS_MAX_JOBS_PER_BOARD)]
         else:
             item["consecutive_failures"] = int(item.get("consecutive_failures", 0) or 0) + 1
             item["last_error"] = str(error or "")[:1000]
         if save:
             self.save()
+        return closed_or_removed
 
 
 def _board_identity_verified(company_name: Any, identifier: Any) -> bool:
@@ -494,6 +551,36 @@ def _board_identity_verified(company_name: Any, identifier: Any) -> bool:
     # ``Acme`` vs ``acme-inc`` while rejecting collisions such as
     # ``Meta`` vs ``metabase``.
     return company_names_compatible(company, board_name)
+
+
+def _workday_tenant_domain_candidate(identifier: Any) -> str:
+    """Derive a plausible corporate domain from a Workday tenant slug.
+
+    The tenant slug (e.g. ``geico`` in ``geico.wd1.myworkdayjobs.com``) is
+    chosen by the employer when they configure their own Workday-hosted
+    careers site -- it is first-party-controlled, not a guess derived from
+    the posting's employer_name string. Still only ever a candidate, never
+    treated as verified: callers must check ``_ats_board_identity_verified``
+    (a company-name-vs-tenant compatibility check, already computed) before
+    trusting it at anything above medium confidence.
+    """
+    raw = str(identifier or "")
+    tenant = raw.split("|", 1)[0].strip().lower() if "|" in raw else ""
+    if not tenant or not re.fullmatch(r"[a-z0-9][a-z0-9-]{1,99}", tenant):
+        return ""
+    return f"{tenant}.com"
+
+
+def _cornerstone_ondemand_tenant_domain_candidate(identifier: Any) -> str:
+    """Mirrors _workday_tenant_domain_candidate for Cornerstone OnDemand
+    (csod.com) tenants. Same trust basis and same caller obligation to check
+    _ats_board_identity_verified before trusting it above medium confidence.
+    """
+    raw = str(identifier or "")
+    tenant = raw.split("|", 1)[0].strip().lower() if "|" in raw else ""
+    if not tenant or not re.fullmatch(r"[a-z0-9][a-z0-9-]{1,99}", tenant):
+        return ""
+    return f"{tenant}.com"
 
 
 def _timestamp(value: Any) -> str:
@@ -527,6 +614,12 @@ def _direct_job(
 ) -> Dict[str, Any]:
     company = str(board.get("company_name") or "").strip()
     domain = str(board.get("company_domain") or "").strip()
+    identity_verified = _board_identity_verified(company, board.get("identifier"))
+    tenant_domain_candidate = ""
+    if not domain and provider == "workday":
+        tenant_domain_candidate = _workday_tenant_domain_candidate(board.get("identifier"))
+    elif not domain and provider == "cornerstone_ondemand":
+        tenant_domain_candidate = _cornerstone_ondemand_tenant_domain_candidate(board.get("identifier"))
     job_url = str(url or "").strip()
     location_text = re.sub(r"\s+", " ", str(location or "")).strip()
     workplace = str(workplace_type or "").strip().lower()
@@ -570,8 +663,10 @@ def _direct_job(
         "_ats_board_company_name": company,
         "_ats_board_company_domain": domain,
         "_provider_record_structured": True,
-        "_ats_board_identity_verified": _board_identity_verified(
-            company, board.get("identifier")
+        "_ats_board_identity_verified": identity_verified,
+        "_ats_tenant_domain_candidate": tenant_domain_candidate,
+        "_ats_tenant_domain_confidence": (
+            ("high" if identity_verified else "medium") if tenant_domain_candidate else ""
         ),
     }
     if extra:
@@ -999,18 +1094,29 @@ def fetch_board_jobs(
         if not api_base:
             return [], "missing_workday_api_base"
         cxs_base = f"{api_base}/wday/cxs/{tenant}/{site}"
-        page_limit = max(1, int(getattr(config, "ATS_WORKDAY_MAX_PAGES_PER_BOARD", 5)))
+        workday_page_size = 20
+        configured_page_limit = max(1, int(getattr(config, "ATS_WORKDAY_MAX_PAGES_PER_BOARD", 5)))
+        # A page_limit fixed below ceil(max_jobs / page_size) silently
+        # undershoots this pipeline's own stated per-board cap: a tenant with
+        # more open reqs than configured_page_limit * workday_page_size has
+        # its remaining pages never fetched, with no truncation signal. Raise
+        # the effective limit to actually reach max_jobs while still letting
+        # an operator configure a deeper limit than that if desired.
+        page_limit = max(configured_page_limit, math.ceil(max_jobs / workday_page_size)) if max_jobs > 0 else configured_page_limit
         per_board_budget = max(0, int(getattr(config, "ATS_WORKDAY_DETAIL_MAX_REQUESTS_PER_BOARD", 25)))
         detail_limit = per_board_budget if workday_detail_budget is None else min(
             per_board_budget, max(0, int(workday_detail_budget))
         )
         rows: List[Dict[str, Any]] = []
         offset = 0
+        pages_fetched = 0
+        last_total = 0
         for _page in range(page_limit):
+            pages_fetched += 1
             payload = fetcher(
                 f"{cxs_base}/jobs",
                 method="POST",
-                json_body={"appliedFacets": {}, "limit": 20, "offset": offset, "searchText": ""},
+                json_body={"appliedFacets": {}, "limit": workday_page_size, "offset": offset, "searchText": ""},
                 headers={"Accept": "application/json", "Content-Type": "application/json"},
             )
             if payload.status_code != 200:
@@ -1025,8 +1131,17 @@ def fetch_board_jobs(
             rows.extend(row for row in page_rows if isinstance(row, dict))
             offset += len(page_rows)
             total = int(data.get("total", 0) or 0) if isinstance(data, dict) else 0
-            if len(page_rows) < 20 or (total and offset >= total) or len(rows) >= max_jobs:
+            last_total = total
+            if len(page_rows) < workday_page_size or (total and offset >= total) or len(rows) >= max_jobs:
                 break
+        else:
+            if last_total and offset < last_total:
+                logger.warning(
+                    "Workday board %s: page_limit=%d exhausted with %d/%d jobs still unfetched "
+                    "(tenant=%s site=%s) -- raise ATS_WORKDAY_MAX_PAGES_PER_BOARD or max_jobs "
+                    "to recover the remainder.",
+                    identifier, page_limit, max(0, last_total - offset), last_total, tenant, site,
+                )
 
         output: List[Dict[str, Any]] = []
         detail_calls = 0
@@ -1067,6 +1182,63 @@ def fetch_board_jobs(
                     "_workday_detail_request_made": detail_requested,
                     "_workday_detail_error": detail_error,
                 },
+            ))
+        return output, ""
+
+    if provider == "cornerstone_ondemand":
+        # UNVERIFIED-OFFLINE: Cornerstone OnDemand's public career-site JSON
+        # API response shape is not confirmed against a live tenant -- this
+        # targets the commonly-documented public search endpoint convention
+        # and defensively accepts a few plausible response-key names. If a
+        # real tenant's shape differs, this returns a clear parse error
+        # rather than fabricating job data; correct once verified live
+        # (FINAL_30_PLUS_SYSTEM_SPEC.md section 27 controlled validation).
+        if "|" not in identifier:
+            return [], "invalid_cornerstone_identifier"
+        tenant, site = identifier.split("|", 1)
+        api_base = str(board.get("api_base") or "").rstrip("/")
+        if not api_base:
+            return [], "missing_cornerstone_api_base"
+        page_size = 25
+        configured_page_limit = max(1, int(getattr(config, "ATS_CORNERSTONE_MAX_PAGES_PER_BOARD", 5)))
+        page_limit = (
+            max(configured_page_limit, math.ceil(max_jobs / page_size))
+            if max_jobs > 0 else configured_page_limit
+        )
+        rows: List[Dict[str, Any]] = []
+        for page in range(page_limit):
+            data, error = _fetch_json(
+                fetcher,
+                f"{api_base}/ux/ats/careersite/{site}/api/search",
+                params={"page": page + 1, "pageSize": page_size},
+                headers={"Accept": "application/json"},
+            )
+            if error:
+                if rows:
+                    break
+                return [], error
+            page_rows = (
+                (data.get("requisitions") or data.get("jobs") or data.get("results") or [])
+                if isinstance(data, dict) else (data if isinstance(data, list) else [])
+            )
+            if not isinstance(page_rows, list) or not page_rows:
+                break
+            rows.extend(row for row in page_rows if isinstance(row, dict))
+            if len(page_rows) < page_size or len(rows) >= max_jobs:
+                break
+
+        output = []
+        for row in rows[:max_jobs]:
+            output.append(_direct_job(
+                provider=provider,
+                board=board,
+                job_id=row.get("reqId") or row.get("id") or row.get("requisitionId"),
+                title=row.get("title") or row.get("jobTitle"),
+                description=row.get("description") or "",
+                url=row.get("applyUrl") or row.get("url") or board.get("board_url"),
+                location=row.get("location") or row.get("locationName") or "",
+                employment_type=row.get("employmentType") or "",
+                posted_at=row.get("postedDate") or row.get("datePosted") or "",
             ))
         return output, ""
 

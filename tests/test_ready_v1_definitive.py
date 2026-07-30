@@ -434,12 +434,16 @@ class ReadyV1BoundaryTests(unittest.TestCase):
             self.assertEqual([lead["lead_key"] for lead in inventory.available()], ["second"])
 
     def test_inventory_expires_signal_that_ages_out(self):
+        # Corrected boundary (Phase 13 section 3): a lead expires only after
+        # its age EXCEEDS the ceiling. job_age_days=8 + 1 elapsed day = 9 > 8,
+        # so it ages out. (Exactly-at-ceiling staying eligible is covered by
+        # test_structural_patch_tiered_freshness.FreshnessBoundaryTests.)
         with tempfile.TemporaryDirectory() as temp, patch.object(
             recovery_inventory, "_now", return_value=datetime(2026, 7, 22, tzinfo=timezone.utc)
         ), patch.object(config, "MAX_JOB_AGE_DAYS", 8):
             inventory = FinalPassInventory(str(Path(temp) / "inventory.json"))
             lead = self._lead("old")
-            lead["job_age_days"] = 7
+            lead["job_age_days"] = 8
             lead["_validation_timestamp"] = "2026-07-21T00:00:00+00:00"
             inventory.stage([lead])
             self.assertEqual(inventory.available(), [])
