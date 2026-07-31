@@ -778,6 +778,56 @@ def run_multi_source_acquisition(
             }
             failed_sources.append("adzuna")
 
+    # Additive Fantastic.jobs source. Disabled by default: when off, no request
+    # is issued and this block is a no-op, preserving baseline behaviour exactly.
+    # Fail-open: any Fantastic.jobs failure is contained and the pipeline
+    # continues with the other sources.
+    fantastic_stats: Dict[str, Any] = {
+        "enabled": bool(config.FANTASTIC_JOBS_ENABLED),
+        "attempted": False,
+        "success": False,
+        "jobs": 0,
+        "errors": [],
+    }
+    if config.FANTASTIC_JOBS_ENABLED:
+        fantastic_stats["attempted"] = True
+        try:
+            from fantastic_jobs_adapter import run_fantastic_jobs_acquisition
+            fj = run_fantastic_jobs_acquisition()
+            for job in fj.jobs:
+                job.setdefault("_acquisition_source", "fantastic_jobs")
+            all_jobs.extend(fj.jobs)
+            source_metrics["fantastic_jobs"] = {
+                "success": bool(fj.success),
+                "requests_attempted": fj.requests_attempted,
+                "requests_succeeded": fj.requests_succeeded,
+                "pages": 0,
+                "raw_records": fj.raw_records,
+                "normalized_jobs": len(fj.jobs),
+                "errors": list(fj.errors),
+                "metadata": dict(fj.metadata),
+            }
+            fantastic_stats.update({
+                "success": bool(fj.success),
+                "jobs": len(fj.jobs),
+                "metadata": dict(fj.metadata),
+                "errors": list(fj.errors),
+            })
+            if not fj.success:
+                failed_sources.append("fantastic_jobs")
+        except Exception as exc:  # last-resort fail-open guard
+            logger.warning(
+                "Optional Fantastic.jobs acquisition failed; continuing with other sources: %s",
+                type(exc).__name__,
+            )
+            fantastic_stats["errors"] = [type(exc).__name__]
+            source_metrics["fantastic_jobs"] = {
+                "success": False, "requests_attempted": 0, "requests_succeeded": 0,
+                "pages": 0, "raw_records": 0, "normalized_jobs": 0,
+                "errors": [type(exc).__name__], "metadata": {},
+            }
+            failed_sources.append("fantastic_jobs")
+
     himalayas_profile_metrics = _enrich_himalayas_company_profiles(
         all_jobs, fetcher=fetcher
     )
@@ -892,6 +942,8 @@ def run_multi_source_acquisition(
         enabled_sources.append("jsearch")
     if config.ADZUNA_ENABLED:
         enabled_sources.append("adzuna")
+    if config.FANTASTIC_JOBS_ENABLED:
+        enabled_sources.append("fantastic_jobs")
 
     stats: Dict[str, Any] = {
         "acquisition_mode": "multi_source",
@@ -899,6 +951,7 @@ def run_multi_source_acquisition(
         "source_metrics": source_metrics,
         "jsearch": jsearch_stats,
         "adzuna": adzuna_stats,
+        "fantastic_jobs": fantastic_stats,
         "ats_metrics": ats_metrics,
         "ats_force_refresh": bool(force_ats_refresh),
         "ats_board_limit": ats_board_limit,

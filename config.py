@@ -530,6 +530,74 @@ ADZUNA_PORTFOLIO_FRESHNESS_WINDOWS = _env_json("ADZUNA_PORTFOLIO_FRESHNESS_WINDO
 ADZUNA_PORTFOLIO_REMOTE_VARIANTS = _env_json("ADZUNA_PORTFOLIO_REMOTE_VARIANTS", ["", "remote"])
 ADZUNA_MARGINAL_MIN_NEW_COMPANIES = _env_int("ADZUNA_MARGINAL_MIN_NEW_COMPANIES", 1)
 
+# ---------- Fantastic.jobs (additive, disabled by default) ----------
+# Additive acquisition source. When FANTASTIC_JOBS_ENABLED is falsey the source
+# is never attempted and production behaviour is byte-for-byte the baseline.
+FANTASTIC_JOBS_ENABLED = _env_bool("FANTASTIC_JOBS_ENABLED", False)
+FANTASTIC_JOBS_API_KEY = os.getenv("FANTASTIC_JOBS_API_KEY", "")  # never logged/dumped
+FANTASTIC_JOBS_BASE_URL = os.getenv("FANTASTIC_JOBS_BASE_URL", "https://data.fantastic.jobs")
+FANTASTIC_JOBS_TIME_FRAME = os.getenv("FANTASTIC_JOBS_TIME_FRAME", "24h")
+FANTASTIC_JOBS_REQUEST_TIMEOUT_SECONDS = _env_int("FANTASTIC_JOBS_REQUEST_TIMEOUT_SECONDS", 30)
+FANTASTIC_JOBS_MAX_RETRIES = _env_int("FANTASTIC_JOBS_MAX_RETRIES", 2)
+FANTASTIC_JOBS_MAX_JOBS_PER_RUN = _env_int("FANTASTIC_JOBS_MAX_JOBS_PER_RUN", 400)
+FANTASTIC_JOBS_ATS_LIMIT = _env_int("FANTASTIC_JOBS_ATS_LIMIT", 300)
+FANTASTIC_JOBS_WELLFOUND_LIMIT = _env_int("FANTASTIC_JOBS_WELLFOUND_LIMIT", 50)
+FANTASTIC_JOBS_YCOMBINATOR_LIMIT = _env_int("FANTASTIC_JOBS_YCOMBINATOR_LIMIT", 40)
+FANTASTIC_JOBS_LINKEDIN_LIMIT = _env_int("FANTASTIC_JOBS_LINKEDIN_LIMIT", 10)
+FANTASTIC_JOBS_MIN_JOBS_QUOTA_REMAINING = _env_int("FANTASTIC_JOBS_MIN_JOBS_QUOTA_REMAINING", 90)
+FANTASTIC_JOBS_MIN_REQUESTS_QUOTA_REMAINING = _env_int("FANTASTIC_JOBS_MIN_REQUESTS_QUOTA_REMAINING", 20)
+FANTASTIC_JOBS_FAIL_OPEN = _env_bool("FANTASTIC_JOBS_FAIL_OPEN", True)
+FANTASTIC_JOBS_DESCRIPTION_FORMAT = os.getenv("FANTASTIC_JOBS_DESCRIPTION_FORMAT", "text").strip().lower()
+
+
+def validate_fantastic_jobs_config() -> None:
+    """Fail closed on misconfiguration BEFORE any network request.
+
+    Never raises merely because the source is disabled; never includes the API
+    key in any message.
+    """
+    if not FANTASTIC_JOBS_ENABLED:
+        return  # disabled: any/missing key is valid, no request will be made
+    if not FANTASTIC_JOBS_API_KEY:
+        raise ValueError("FANTASTIC_JOBS_API_KEY is required when FANTASTIC_JOBS_ENABLED=1")
+    if not str(FANTASTIC_JOBS_BASE_URL).lower().startswith("https://"):
+        raise ValueError("FANTASTIC_JOBS_BASE_URL must be HTTPS")
+    numerics = {
+        "FANTASTIC_JOBS_REQUEST_TIMEOUT_SECONDS": FANTASTIC_JOBS_REQUEST_TIMEOUT_SECONDS,
+        "FANTASTIC_JOBS_MAX_RETRIES": FANTASTIC_JOBS_MAX_RETRIES,
+        "FANTASTIC_JOBS_MAX_JOBS_PER_RUN": FANTASTIC_JOBS_MAX_JOBS_PER_RUN,
+        "FANTASTIC_JOBS_ATS_LIMIT": FANTASTIC_JOBS_ATS_LIMIT,
+        "FANTASTIC_JOBS_WELLFOUND_LIMIT": FANTASTIC_JOBS_WELLFOUND_LIMIT,
+        "FANTASTIC_JOBS_YCOMBINATOR_LIMIT": FANTASTIC_JOBS_YCOMBINATOR_LIMIT,
+        "FANTASTIC_JOBS_LINKEDIN_LIMIT": FANTASTIC_JOBS_LINKEDIN_LIMIT,
+        "FANTASTIC_JOBS_MIN_JOBS_QUOTA_REMAINING": FANTASTIC_JOBS_MIN_JOBS_QUOTA_REMAINING,
+        "FANTASTIC_JOBS_MIN_REQUESTS_QUOTA_REMAINING": FANTASTIC_JOBS_MIN_REQUESTS_QUOTA_REMAINING,
+    }
+    for name, value in numerics.items():
+        if not isinstance(value, int) or value < 0:
+            raise ValueError(f"{name} must be a non-negative integer")
+    segment_total = (
+        FANTASTIC_JOBS_ATS_LIMIT
+        + FANTASTIC_JOBS_WELLFOUND_LIMIT
+        + FANTASTIC_JOBS_YCOMBINATOR_LIMIT
+        + FANTASTIC_JOBS_LINKEDIN_LIMIT
+    )
+    if segment_total > FANTASTIC_JOBS_MAX_JOBS_PER_RUN:
+        raise ValueError(
+            "Fantastic.jobs segment limits "
+            f"({segment_total}) exceed FANTASTIC_JOBS_MAX_JOBS_PER_RUN="
+            f"{FANTASTIC_JOBS_MAX_JOBS_PER_RUN}"
+        )
+    if FANTASTIC_JOBS_DESCRIPTION_FORMAT not in {"text", "html"}:
+        raise ValueError("FANTASTIC_JOBS_DESCRIPTION_FORMAT must be 'text' or 'html'")
+
+
+# ---------- Railway startup guard (a deploy must not auto-run the pipeline) ----------
+# A Railway deploy starts `python run_daily.py`. With autorun disabled the deploy
+# builds and starts but the pipeline does not execute (no paid work). Default 0
+# so a merge/deploy can never silently launch a run.
+PIPELINE_AUTORUN_ENABLED = _env_bool("PIPELINE_AUTORUN_ENABLED", False)
+
 # ---------- Health gates ----------
 MIN_JOBS_PER_RUN = _env_int("MIN_JOBS_PER_RUN", 10)
 MIN_ROLES_WITH_RESULTS = _env_int("MIN_ROLES_WITH_RESULTS", 4)

@@ -1067,9 +1067,24 @@ def main() -> int:
     return 1
 
 
+def run_entrypoint() -> int:
+    """Railway/script entrypoint. Guards autorun so that starting a deployment
+    (``python run_daily.py``) can never execute the pipeline or consume paid
+    credits unless PIPELINE_AUTORUN_ENABLED is explicitly set. Tests and developer
+    tooling call run_pipeline()/main() directly and are unaffected."""
+    if not config.PIPELINE_AUTORUN_ENABLED:
+        logger.warning(
+            "PIPELINE_AUTORUN_ENABLED is disabled: deployment started but the "
+            "pipeline will not run. Set PIPELINE_AUTORUN_ENABLED=1 to authorize "
+            "one execution."
+        )
+        return 0
+    return main()
+
+
 if __name__ == "__main__":
     try:
-        exit_code = main()
+        exit_code = run_entrypoint()
     finally:
         # Explicitly close file handlers so one-shot Railway services terminate
         # cleanly after the run summary is persisted.
