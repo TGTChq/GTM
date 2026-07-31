@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
@@ -428,6 +429,11 @@ class RerouteExpirationTests(unittest.TestCase):
 
 
 class SchedulerBoundaryTests(unittest.TestCase):
+    def setUp(self):
+        # Intentionally executes the pipeline path; enable autorun explicitly
+        # (never silently) so the universal guard permits execution.
+        os.environ["PIPELINE_AUTORUN_ENABLED"] = "1"
+        self.addCleanup(os.environ.pop, "PIPELINE_AUTORUN_ENABLED", None)
     def test_daily_main_returns_distinct_code_when_sla_is_missed(self):
         import run_daily
         with (

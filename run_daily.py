@@ -258,6 +258,19 @@ def _jsearch_topup_disabled_reason(
 
 
 def run_pipeline() -> dict:
+    # UNIVERSAL autorun chokepoint. Executes before EVERY side effect (Hunter
+    # reset, registry/lock/state creation, source clients, all network calls).
+    # No caller can run the pipeline by importing this module and calling
+    # run_pipeline() while autorun is disabled. Runtime read (current env).
+    if not config.autorun_is_enabled():
+        logger.warning("Pipeline autorun disabled; no pipeline execution performed.")
+        return {
+            "success": True,
+            "autorun_disabled": True,
+            "technical_success": True,
+            "sla_success": None,
+            "steps": {},
+        }
     started = datetime.now()
     # Hunter is optional corroboration, not a throughput dependency: reset its
     # run-level circuit breaker so a run with restored quota attempts it again,
@@ -1042,6 +1055,10 @@ def run_pipeline() -> dict:
 
 
 def main() -> int:
+    # Guard before any side effect (including PipelineRunLock acquisition).
+    if not config.autorun_is_enabled():
+        logger.warning("Pipeline autorun disabled; no pipeline execution performed.")
+        return 0
     try:
         with PipelineRunLock():
             summary = run_pipeline()
@@ -1072,12 +1089,8 @@ def run_entrypoint() -> int:
     (``python run_daily.py``) can never execute the pipeline or consume paid
     credits unless PIPELINE_AUTORUN_ENABLED is explicitly set. Tests and developer
     tooling call run_pipeline()/main() directly and are unaffected."""
-    if not config.PIPELINE_AUTORUN_ENABLED:
-        logger.warning(
-            "PIPELINE_AUTORUN_ENABLED is disabled: deployment started but the "
-            "pipeline will not run. Set PIPELINE_AUTORUN_ENABLED=1 to authorize "
-            "one execution."
-        )
+    if not config.autorun_is_enabled():
+        logger.warning("Pipeline autorun disabled; no pipeline execution performed.")
         return 0
     return main()
 

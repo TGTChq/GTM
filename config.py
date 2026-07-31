@@ -598,6 +598,25 @@ def validate_fantastic_jobs_config() -> None:
 # so a merge/deploy can never silently launch a run.
 PIPELINE_AUTORUN_ENABLED = _env_bool("PIPELINE_AUTORUN_ENABLED", False)
 
+# Enabled/disabled token sets for the autorun guard (strict, no string-truthiness).
+_AUTORUN_ENABLED_TOKENS = frozenset({"1", "true", "yes", "on"})
+_AUTORUN_DISABLED_TOKENS = frozenset({"0", "false", "no", "off"})
+
+
+def autorun_is_enabled() -> bool:
+    """Single source of truth for whether the pipeline may execute.
+
+    Read at RUNTIME (never an import-time snapshot) so the current Railway
+    environment value governs immediately before any side effect. Fail-safe: only
+    an explicit enabled token permits execution; missing, empty, whitespace,
+    disabled, or invalid values all stop safely. A non-empty string such as "0" is
+    never treated as truthy. Never emits secrets or the environment.
+    """
+    raw = os.getenv("PIPELINE_AUTORUN_ENABLED")
+    if raw is None:
+        return False
+    return raw.strip().lower() in _AUTORUN_ENABLED_TOKENS
+
 # ---------- Health gates ----------
 MIN_JOBS_PER_RUN = _env_int("MIN_JOBS_PER_RUN", 10)
 MIN_ROLES_WITH_RESULTS = _env_int("MIN_ROLES_WITH_RESULTS", 4)
