@@ -196,15 +196,18 @@ def _bool(value: Any) -> bool:
     return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
 
 
-def map_record(record: Dict[str, Any], source_label: str) -> Tuple[Optional[Dict[str, Any]], str]:
+def map_record(record: Dict[str, Any], source_label: str, seg: Optional[Dict[str, Any]] = None) -> Tuple[Optional[Dict[str, Any]], str]:
     """Map one Fantastic.jobs record into the canonical schema.
 
     Returns (job, "") on success or (None, reason) when the record is rejected
-    (fail-closed at the identity level). PII is dropped before anything else.
+    (fail-closed at the identity level). PII is dropped before anything else; the
+    dropped-field count is accumulated into ``seg['pii_dropped']`` when provided.
     """
     if not isinstance(record, dict):
         return None, "not_a_record"
     record, _dropped = _strip_pii(record)
+    if seg is not None and _dropped:
+        seg["pii_dropped"] = seg.get("pii_dropped", 0) + _dropped
 
     job_id = str(record.get("id") or "").strip()
     if not job_id:
@@ -282,23 +285,41 @@ class FantasticQuotaError(Exception):
     pass
 
 
-def _request(endpoint: str, params: Dict[str, Any], http_get: HttpGet) -> Tuple[List[Dict[str, Any]], Dict[str, Optional[int]]]:
-    """One bounded request with retries. Raises FantasticAuthError on 401/403 and
-    FantasticQuotaError on 429. Never logs the key or headers."""
+class FantasticRequestError(Exception):
+    """Structured, sanitized request failure. Carries the failure stage, a safe
+    error code, and the HTTP status when a response was received. Never contains
+    the API key, Authorization header, request headers, raw body or PII."""
+
+    def __init__(self, stage: str, code: str, status: Optional[int] = None, retries: int = 0):
+        self.stage = stage    # dispatch | http_response | json_parsing | schema
+        self.code = code      # network_error:<ExcClass> | http_<status> | malformed_json | unexpected_schema
+        self.status = status  # HTTP status if a response was received, else None
+        self.retries = retries
+        super().__init__(code)
+
+
+def _request(endpoint: str, params: Dict[str, Any], http_get: HttpGet, seg: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], Dict[str, Optional[int]]]:
+    """One bounded request with retries. Records dispatch/status/retries into
+    ``seg`` even on failure. Raises FantasticAuthError (401/403),
+    FantasticQuotaError (429), or FantasticRequestError (structured). Never logs
+    the key or headers."""
     url = f"{config.FANTASTIC_JOBS_BASE_URL.rstrip('/')}{endpoint}"
     headers = {"Authorization": f"Bearer {config.FANTASTIC_JOBS_API_KEY}"}
     attempts = max(1, config.FANTASTIC_JOBS_MAX_RETRIES + 1)
     last_err = ""
     for attempt in range(attempts):
+        seg["dispatched"] = True          # a network dispatch was attempted
+        seg["retries"] = attempt
         try:
             resp = http_get(url, headers=headers, params=params, timeout=config.FANTASTIC_JOBS_REQUEST_TIMEOUT_SECONDS)
-        except Exception as exc:  # network/timeout/DNS
+        except Exception as exc:  # network/timeout/DNS (class name only; never the message)
             last_err = type(exc).__name__
             if attempt + 1 < attempts:
                 time.sleep(min(4.0, (2 ** attempt) * 0.2) + random.random() * 0.1)
                 continue
-            raise RuntimeError(f"fantastic_request_failed:{last_err}") from None
+            raise FantasticRequestError("dispatch", f"network_error:{last_err}", None, attempt) from None
         status = getattr(resp, "status_code", None)
+        seg["http_status"] = status       # record ACTUAL status, even on non-200
         if status in (401, 403):
             raise FantasticAuthError(f"auth_failed_status_{status}")
         if status == 429:
@@ -307,17 +328,17 @@ def _request(endpoint: str, params: Dict[str, Any], http_get: HttpGet) -> Tuple[
             time.sleep(min(4.0, (2 ** attempt) * 0.2) + random.random() * 0.1)
             continue
         if status != 200:
-            raise RuntimeError(f"fantastic_http_{status}")
+            raise FantasticRequestError("http_response", f"http_{status}", status, attempt)
         quota = _read_quota(getattr(resp, "headers", {}) or {})
         try:
             payload = resp.json()
         except Exception:
-            raise RuntimeError("fantastic_malformed_json") from None
+            raise FantasticRequestError("json_parsing", "malformed_json", status, attempt) from None
         rows = payload if isinstance(payload, list) else (payload.get("jobs") or payload.get("data") or payload.get("results") or [])
         if not isinstance(rows, list):
-            raise RuntimeError("fantastic_unexpected_schema")
+            raise FantasticRequestError("schema", "unexpected_schema", status, attempt)
         return rows, quota
-    raise RuntimeError(f"fantastic_request_failed:{last_err}")
+    raise FantasticRequestError("dispatch", f"network_error:{last_err}", None, attempts - 1)
 
 
 def _quota_would_breach(quota: _QuotaState, want: int) -> str:
@@ -333,9 +354,10 @@ def _fetch_segment(endpoint: str, base_params: Dict[str, Any], source_label: str
                    metrics: Dict[str, Any], accept_source: Optional[Tuple[str, ...]] = None) -> List[Dict[str, Any]]:
     jobs: List[Dict[str, Any]] = []
     seg = metrics["segments"].setdefault(source_label, {
-        "attempted": 0, "returned": 0, "schema_valid": 0, "schema_rejected": 0,
-        "pii_dropped": 0, "non_us": 0, "source_filtered_out": 0, "duplicates": 0,
-        "stop_reason": "", "http_status": None,
+        "attempted": 0, "requests_succeeded": 0, "returned": 0, "schema_valid": 0,
+        "schema_rejected": 0, "pii_dropped": 0, "non_us": 0, "source_filtered_out": 0,
+        "duplicates": 0, "stop_reason": "", "http_status": None, "dispatched": False,
+        "retries": 0, "failure_stage": "", "error_code": "", "error_class": "",
     })
     page = 1
     fingerprints: set = set()
@@ -349,9 +371,19 @@ def _fetch_segment(endpoint: str, base_params: Dict[str, Any], source_label: str
         params = dict(base_params)
         params.update({"limit": want, "offset": (page - 1) * want})
         seg["attempted"] += 1
-        rows, q = _request(endpoint, params, http_get)
+        try:
+            rows, q = _request(endpoint, params, http_get, seg)
+        except FantasticRequestError as exc:
+            # Per-segment fail-open: record sanitized diagnostics and stop THIS
+            # segment; other segments and the rest of the pipeline continue.
+            seg["failure_stage"] = exc.stage
+            seg["error_code"] = exc.code
+            seg["error_class"] = "FantasticRequestError"
+            seg["retries"] = exc.retries
+            seg["stop_reason"] = seg["stop_reason"] or "request_error"
+            break
         quota.requests_consumed += 1
-        seg["http_status"] = 200
+        seg["requests_succeeded"] += 1
         if q.get("jobs_remaining") is not None:
             quota.jobs_remaining = q["jobs_remaining"]
         if q.get("requests_remaining") is not None:
@@ -368,7 +400,7 @@ def _fetch_segment(endpoint: str, base_params: Dict[str, Any], source_label: str
         for record in rows:
             seg["returned"] += 1
             quota.jobs_consumed += 1
-            job, reason = map_record(record, source_label)
+            job, reason = map_record(record, source_label, seg)
             if job is None:
                 seg["schema_rejected"] += 1
                 continue
@@ -422,11 +454,16 @@ def run_fantastic_jobs_acquisition(http_get: HttpGet = _http_get) -> SourceResul
 
     quota = _QuotaState()
     seen_ids: set = set()
-    desc_param = {"description_type": config.FANTASTIC_JOBS_DESCRIPTION_FORMAT}
+    # NOTE: only parameters proven against the successful smoke test are sent.
+    # `description_type` was a guessed parameter (the smoke test that returned
+    # HTTP 200 never sent it) and was the divergence in the failed production
+    # request; it is not sent. Full descriptions are absent from this API by
+    # default (only AI-derived fields), which the mapper already handles by
+    # leaving job_description empty rather than fabricating one.
     try:
         # Segment priority: ATS first, then Wellfound, Y Combinator, LinkedIn.
         ats_params = {"time_frame": config.FANTASTIC_JOBS_TIME_FRAME,
-                      "include_basic_organization_details": "true", **desc_param}
+                      "include_basic_organization_details": "true"}
         result.jobs.extend(_fetch_segment(
             "/v1/active-ats", ats_params, ATS_SOURCE, config.FANTASTIC_JOBS_ATS_LIMIT,
             quota, http_get, seen_ids, metrics))
@@ -440,7 +477,7 @@ def run_fantastic_jobs_acquisition(http_get: HttpGet = _http_get) -> SourceResul
                 continue
             label, accept = JB_SEGMENTS[seg_key]
             jb_params = {"time_frame": config.FANTASTIC_JOBS_TIME_FRAME,
-                         "exclude_ats_duplicate": "true", "source": seg_key, **desc_param}
+                         "exclude_ats_duplicate": "true", "source": seg_key}
             remaining = config.FANTASTIC_JOBS_MAX_JOBS_PER_RUN - len(result.jobs)
             result.jobs.extend(_fetch_segment(
                 "/v1/active-jb", jb_params, label, min(cap, remaining),
@@ -458,15 +495,28 @@ def run_fantastic_jobs_acquisition(http_get: HttpGet = _http_get) -> SourceResul
         if not config.FANTASTIC_JOBS_FAIL_OPEN:
             raise
 
-    metrics["stop_reason"] = metrics["stop_reason"] or quota.stop_reason or "complete"
+    # Aggregate sanitized per-segment request errors (fail-open preserved).
+    segment_errors = []
+    for label, s in metrics["segments"].items():
+        if s.get("error_code"):
+            segment_errors.append({
+                "segment": label, "stage": s.get("failure_stage", ""),
+                "error_code": s.get("error_code", ""), "http_status": s.get("http_status"),
+                "dispatched": bool(s.get("dispatched")), "retries": s.get("retries", 0),
+            })
+            result.errors.append(f"{label}:{s.get('failure_stage','')}:{s.get('error_code','')}")
+    metrics["segment_errors"] = segment_errors
+    metrics["stop_reason"] = metrics["stop_reason"] or quota.stop_reason or ("request_error" if segment_errors else "complete")
     metrics["jobs_quota_consumed"] = quota.jobs_consumed
+    metrics["requests_attempted"] = sum(s.get("attempted", 0) for s in metrics["segments"].values())
     metrics["requests_consumed"] = quota.requests_consumed
     metrics["jobs_quota_remaining"] = quota.jobs_remaining
     metrics["requests_quota_remaining"] = quota.requests_remaining
     metrics["unique_jobs"] = len(result.jobs)
+    metrics["fail_open_result"] = "continued" if config.FANTASTIC_JOBS_FAIL_OPEN else "strict"
     result.raw_records = sum(s.get("returned", 0) for s in metrics["segments"].values())
-    result.requests_attempted = quota.requests_consumed
-    result.requests_succeeded = quota.requests_consumed
+    result.requests_attempted = metrics["requests_attempted"]  # actual dispatch attempts
+    result.requests_succeeded = quota.requests_consumed        # successful (200) requests
     result.metadata = metrics
     for job in result.jobs:
         job.setdefault("_acquisition_source", "fantastic_jobs")

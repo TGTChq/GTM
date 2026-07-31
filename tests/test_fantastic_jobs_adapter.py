@@ -315,5 +315,91 @@ class StartupGuardTests(unittest.TestCase):
         m.assert_called_once()
 
 
+
+class RequestDiagnosticsRepairTests(unittest.TestCase):
+    """Repair regression: the production active-ats failure is now diagnosable,
+    the guessed description_type param is gone, and counters are accurate."""
+    def tearDown(self):
+        _reload_config()
+
+    def _enable(self, **over):
+        env = dict(FANTASTIC_JOBS_ENABLED="1", FANTASTIC_JOBS_API_KEY="SECRETKEY",
+                   FANTASTIC_JOBS_ATS_LIMIT="5", FANTASTIC_JOBS_WELLFOUND_LIMIT="0",
+                   FANTASTIC_JOBS_YCOMBINATOR_LIMIT="0", FANTASTIC_JOBS_LINKEDIN_LIMIT="0",
+                   FANTASTIC_JOBS_MIN_JOBS_QUOTA_REMAINING="0",
+                   FANTASTIC_JOBS_MIN_REQUESTS_QUOTA_REMAINING="0", FANTASTIC_JOBS_MAX_RETRIES="0")
+        env.update(over)
+        return _reload_config(**env)
+
+    def test_active_ats_omits_description_type(self):
+        self._enable()
+        h = FakeHttp([FakeResp(200, [_ats_record()], {"x-api-jobs-remaining": "400"})])
+        fja.run_fantastic_jobs_acquisition(http_get=h)
+        params = h.calls[0]["params"]
+        self.assertNotIn("description_type", params)
+        self.assertEqual(params.get("time_frame"), "24h")
+        self.assertEqual(params.get("include_basic_organization_details"), "true")
+
+    def test_http_400_now_diagnosed_and_fail_open(self):
+        # Exact production failure mode: active-ats non-200 -> structured diagnostics.
+        self._enable()
+        h = FakeHttp([FakeResp(400, {"detail": "bad"})])
+        r = fja.run_fantastic_jobs_acquisition(http_get=h)
+        self.assertTrue(r.success)  # fail-open preserved
+        seg = r.metadata["segments"][fja.ATS_SOURCE]
+        self.assertEqual(seg["failure_stage"], "http_response")
+        self.assertEqual(seg["error_code"], "http_400")
+        self.assertEqual(seg["http_status"], 400)
+        self.assertTrue(seg["dispatched"])
+        self.assertEqual(r.requests_attempted, 1)   # recorded even on failure
+        self.assertEqual(r.requests_succeeded, 0)
+        self.assertEqual(r.metadata["segment_errors"][0]["error_code"], "http_400")
+
+    def test_network_error_diagnosed(self):
+        self._enable()
+        h = FakeHttp([ConnectionError("dns")])
+        r = fja.run_fantastic_jobs_acquisition(http_get=h)
+        seg = r.metadata["segments"][fja.ATS_SOURCE]
+        self.assertEqual(seg["failure_stage"], "dispatch")
+        self.assertTrue(seg["error_code"].startswith("network_error:"))
+        self.assertIsNone(seg["http_status"])
+        self.assertTrue(seg["dispatched"])
+
+    def test_malformed_json_diagnosed(self):
+        self._enable()
+        h = FakeHttp([FakeResp(200, ValueError("bad"), {"x-api-jobs-remaining": "400"})])
+        r = fja.run_fantastic_jobs_acquisition(http_get=h)
+        seg = r.metadata["segments"][fja.ATS_SOURCE]
+        self.assertEqual(seg["failure_stage"], "json_parsing")
+        self.assertEqual(seg["error_code"], "malformed_json")
+
+    def test_valid_200_dispatches_and_counts(self):
+        self._enable()
+        h = FakeHttp([FakeResp(200, [_ats_record()], {"x-api-jobs-remaining": "400", "x-api-requests-remaining": "48"})])
+        r = fja.run_fantastic_jobs_acquisition(http_get=h)
+        self.assertEqual(len(h.calls), 1)
+        self.assertEqual(r.requests_succeeded, 1)
+        seg = r.metadata["segments"][fja.ATS_SOURCE]
+        self.assertEqual(seg["http_status"], 200)
+        self.assertEqual(seg["requests_succeeded"], 1)
+        self.assertEqual(seg["pii_dropped"], 3)  # recruiter_name/url + hiring_manager email
+
+    def test_quota_metadata_optional(self):
+        self._enable()
+        h = FakeHttp([FakeResp(200, [_ats_record()], {})])
+        r = fja.run_fantastic_jobs_acquisition(http_get=h)
+        self.assertEqual(len(r.jobs), 1)  # unknown quota is not treated as exhausted
+
+    def test_no_key_or_auth_header_in_diagnostics(self):
+        self._enable()
+        h = FakeHttp([FakeResp(400, {"x": 1})])
+        r = fja.run_fantastic_jobs_acquisition(http_get=h)
+        import json as _j
+        blob = _j.dumps(r.metadata) + " ".join(r.errors)
+        self.assertNotIn("SECRETKEY", blob)
+        self.assertNotIn("Authorization", blob)
+
+
+
 if __name__ == "__main__":
     unittest.main()
