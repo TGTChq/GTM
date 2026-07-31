@@ -1,4 +1,5 @@
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -23,6 +24,11 @@ class _Registry:
 
 
 class RunDailyTopupIntegrationTests(unittest.TestCase):
+    def setUp(self):
+        # Intentionally executes the pipeline path; enable autorun explicitly
+        # (never silently) so the universal guard permits execution.
+        os.environ["PIPELINE_AUTORUN_ENABLED"] = "1"
+        self.addCleanup(os.environ.pop, "PIPELINE_AUTORUN_ENABLED", None)
     def _step3(self, path, reviewable, company_keys):
         return Step3Result(
             output_path=str(path),

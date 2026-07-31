@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -24,6 +25,11 @@ class _Registry:
 
 
 class RunDailyFinalPassV02Tests(unittest.TestCase):
+    def setUp(self):
+        # Intentionally executes the pipeline path; enable autorun explicitly
+        # (never silently) so the universal guard permits execution.
+        os.environ["PIPELINE_AUTORUN_ENABLED"] = "1"
+        self.addCleanup(os.environ.pop, "PIPELINE_AUTORUN_ENABLED", None)
     def test_strict_pipeline_counts_final_pass_and_writes_observability(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
