@@ -152,6 +152,38 @@ ATS_REGISTRY_MAX_HISTORY_FILE_BYTES = _env_int(
     "ATS_REGISTRY_MAX_HISTORY_FILE_BYTES", 25_000_000
 )
 
+# ---------- Deterministic ATS scheduler (Phase 1B-2B) ----------
+# Off by default. ``legacy_interval`` reproduces the existing
+# ``due_entries``-driven selection exactly; ``deterministic_partition`` enables
+# slot-based, overdue-bounded, retry-bounded scheduling. None of these values
+# changes behaviour while the mode is ``legacy_interval`` -- they are read only
+# on the partitioned path. No Railway variable is renamed or repurposed.
+ATS_SCHEDULER_MODE = os.getenv("ATS_SCHEDULER_MODE", "legacy_interval").strip().lower()
+# Runs to cover the whole registry once. ~145 boards over 7 runs is ~21/run.
+ATS_SCHEDULER_CYCLE_LENGTH = _env_int("ATS_SCHEDULER_CYCLE_LENGTH", 7)
+# Which slot this run covers. A cron writes the run index here; ``position %
+# cycle_length`` is the covered slot, so the sequence is stable and explicit.
+ATS_SCHEDULER_POSITION = _env_int("ATS_SCHEDULER_POSITION", 0)
+# Hard ceiling on boards attempted in one partitioned run. 0 means "no cap
+# beyond ATS_MAX_BOARDS_PER_RUN".
+ATS_SCHEDULER_BOARD_CAP = _env_int("ATS_SCHEDULER_BOARD_CAP", 0)
+# A board older than this is overdue and bypasses its slot. 0 disables the
+# freshness backstop (pure partitioning).
+ATS_SCHEDULER_MAX_AGE_HOURS = _env_int("ATS_SCHEDULER_MAX_AGE_HOURS", 168)
+# A board that has failed at most this many times is retried in the next run
+# rather than waiting a whole cycle. Beyond it, the board falls back to its
+# normal slot so a permanently broken board cannot monopolise the run.
+ATS_SCHEDULER_MAX_RETRY_ATTEMPTS = _env_int("ATS_SCHEDULER_MAX_RETRY_ATTEMPTS", 2)
+# Most overdue boards one run may take. Prevents the "whole registry overdue at
+# once" thundering herd. 0 means unbounded (overdue is not quota-limited).
+# When set it MUST be < the effective board cap so normal-slot work is never
+# fully displaced.
+ATS_SCHEDULER_OVERDUE_CAP = _env_int("ATS_SCHEDULER_OVERDUE_CAP", 0)
+# Where the minimal scheduler state (carried-forward overdue keys) is persisted.
+# Empty means no state file is written or read; the scheduler is then stateless
+# and every run is a pure function of registry + config + position.
+ATS_SCHEDULER_STATE_PATH = os.getenv("ATS_SCHEDULER_STATE_PATH", "").strip()
+
 # ---------- Paths ----------
 STATE_DIR = str(BASE_DIR / "data" / "state")
 ARTIFACT_ROOT = Path(os.getenv("PIPELINE_ARTIFACT_ROOT", str(BASE_DIR / "data")))

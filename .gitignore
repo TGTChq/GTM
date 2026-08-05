@@ -19,6 +19,7 @@ data/filtered/*
 data/enriched/*
 data/state/*
 data/replay/*
+data/retrieval_measurement/*
 *.corrupt.*
 
 # Keep production inputs tracked
@@ -35,3 +36,4 @@ Thumbs.db
 
 # Local archives
 *.zip
+data/orchestrator/

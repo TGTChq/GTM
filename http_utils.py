@@ -60,6 +60,16 @@ def request_with_retry(
     last_error: Exception | None = None
 
     for attempt in range(1, retries + 1):
+        if attempt > 1:
+            # Annotation only: declares that the next physical attempt is a
+            # retry. No-op unless a measurement trace is installed, and it
+            # changes no retry count, backoff, timeout, header or return value.
+            try:
+                from retrieval_measurement.request_trace import mark_retry
+
+                mark_retry()
+            except Exception:  # pragma: no cover - instrumentation is never fatal
+                pass
         try:
             response = requests.request(
                 method,

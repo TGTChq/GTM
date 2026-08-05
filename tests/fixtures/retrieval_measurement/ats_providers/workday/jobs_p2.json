@@ -1,0 +1,45 @@
+{
+  "jobPostings": [
+    {
+      "title": "Warehouse Associate",
+      "externalPath": "/en-US/careers/job/req-20",
+      "bulletFields": [
+        "REQ-20"
+      ],
+      "postedOn": "Posted 3 Days Ago"
+    },
+    {
+      "title": "Warehouse Associate",
+      "externalPath": "/en-US/careers/job/req-21",
+      "bulletFields": [
+        "REQ-21"
+      ],
+      "postedOn": "Posted 3 Days Ago"
+    },
+    {
+      "title": "Warehouse Associate",
+      "externalPath": "/en-US/careers/job/req-22",
+      "bulletFields": [
+        "REQ-22"
+      ],
+      "postedOn": "Posted 3 Days Ago"
+    },
+    {
+      "title": "Warehouse Associate",
+      "externalPath": "/en-US/careers/job/req-23",
+      "bulletFields": [
+        "REQ-23"
+      ],
+      "postedOn": "Posted 3 Days Ago"
+    },
+    {
+      "title": "Warehouse Associate",
+      "externalPath": "/en-US/careers/job/req-24",
+      "bulletFields": [
+        "REQ-24"
+      ],
+      "postedOn": "Posted 3 Days Ago"
+    }
+  ],
+  "total": 25
+}

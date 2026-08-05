@@ -1,0 +1,21 @@
+{
+  "jobPostings": [
+    {
+      "title": "Revenue Operations Manager",
+      "externalPath": "/en-US/careers/job/req-0",
+      "bulletFields": [
+        "REQ-0"
+      ],
+      "postedOn": "Posted 3 Days Ago"
+    },
+    {
+      "title": "Warehouse Associate",
+      "externalPath": "/en-US/careers/job/req-9",
+      "bulletFields": [
+        "REQ-9"
+      ],
+      "postedOn": "Posted 5 Days Ago"
+    }
+  ],
+  "total": 2
+}

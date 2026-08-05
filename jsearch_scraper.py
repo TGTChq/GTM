@@ -12,7 +12,7 @@ from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Callable, Dict, List, Optional
 
 import config
 from job_filter import assess_pre_enrichment_viability
@@ -114,7 +114,15 @@ def fetch_jobs_for_role(
     role: str, *, page: int = 1, num_pages: Optional[int] = None,
     date_posted: Optional[str] = None, intent_variant: bool = False,
     query_variant: Optional[str] = None,
+    transport: Optional[Callable] = None,
 ) -> JSearchFetchResult:
+    """Fetch one JSearch page.
+
+    ``transport`` is an optional injection seam with the exact signature of
+    ``http_utils.request_with_retry``. It defaults to that function, so
+    production behavior is unchanged. The retrieval measurement harness passes
+    a recording transport; no other caller supplies one.
+    """
     headers = {
         "x-rapidapi-key": config.RAPIDAPI_KEY,
         "x-rapidapi-host": config.JSEARCH_HOST,
@@ -132,7 +140,7 @@ def fetch_jobs_for_role(
     if config.JSEARCH_REMOTE_JOBS_ONLY:
         params[config.JSEARCH_REMOTE_FILTER_PARAMETER] = "true"
     started = time.perf_counter()
-    response = request_with_retry(
+    response = (transport or request_with_retry)(
         "GET",
         config.JSEARCH_ENDPOINT,
         headers=headers,
@@ -606,6 +614,8 @@ def run_daily_scrape(
     max_queries: Optional[int] = None,
     base_num_pages: Optional[int] = None,
     allow_adaptive: Optional[bool] = None,
+    transport: Optional[Callable] = None,
+    output_dir: Optional[str] = None,
 ) -> ScrapeResult:
     """Query target roles, then assign each posting to its strongest role match.
 
@@ -615,6 +625,14 @@ def run_daily_scrape(
     """
     validate_preflight()
     registry = registry or SeenJobsRegistry()
+
+    # Forwarded only when a transport was actually supplied, so the default
+    # call into fetch_jobs_for_role keeps its exact previous signature. That
+    # matters beyond style: several existing tests substitute a stub with a
+    # fixed keyword signature, and an unconditional transport= would break
+    # them -- which is the clearest possible evidence that it would not be a
+    # transparent change.
+    transport_kwargs = {"transport": transport} if transport is not None else {}
 
     planned_roles = list(search_roles if search_roles is not None else config.ROLES)
     effective_max = config.JSEARCH_MAX_QUERIES_PER_RUN if max_queries is None else max_queries
@@ -741,7 +759,9 @@ def run_daily_scrape(
             page_consumed = True
             try:
                 fetch_meta = _coerce_fetch_result(
-                    fetch_jobs_for_role(search_role, page=page_number, num_pages=1)
+                    fetch_jobs_for_role(
+                        search_role, page=page_number, num_pages=1, **transport_kwargs
+                    )
                 )
                 raw_jobs = fetch_meta.jobs
                 stats["queries_succeeded"] += 1
@@ -937,7 +957,9 @@ def run_daily_scrape(
                 fetch_meta = JSearchFetchResult(jobs=[], duration_seconds=0.0, quota={})
                 try:
                     fetch_meta = _coerce_fetch_result(
-                        fetch_jobs_for_role(search_role, page=page_number, num_pages=1)
+                        fetch_jobs_for_role(
+                            search_role, page=page_number, num_pages=1, **transport_kwargs
+                        )
                     )
                     raw_jobs = fetch_meta.jobs
                     stats["queries_succeeded"] += 1
@@ -1095,6 +1117,7 @@ def run_daily_scrape(
                         date_posted=config.JSEARCH_ADAPTIVE_LOOKBACK_DATE_POSTED,
                         intent_variant=query_variant == "hiring",
                         query_variant=query_variant,
+                        **transport_kwargs,
                     )
                 )
                 raw_jobs = fetch_meta.jobs
@@ -1184,10 +1207,15 @@ def run_daily_scrape(
         "jobs": selected_jobs,
     }
     serialized = json.dumps(payload, indent=2)
-    output_path = str(Path(config.OUTPUT_DIR) / f"jobs_{saved_at:%Y-%m-%d}.json")
+    # ``output_dir`` defaults to config.OUTPUT_DIR, so production behavior is
+    # unchanged. The measurement harness redirects writes into its own
+    # artifact root so a measured run never touches production raw output.
+    target_dir = Path(output_dir or config.OUTPUT_DIR)
+    target_dir.mkdir(parents=True, exist_ok=True)
+    output_path = str(target_dir / f"jobs_{saved_at:%Y-%m-%d}.json")
     Path(output_path).write_text(serialized, encoding="utf-8")
 
-    history_dir = Path(config.OUTPUT_DIR) / "history"
+    history_dir = target_dir / "history"
     history_dir.mkdir(parents=True, exist_ok=True)
     history_path = history_dir / f"jobs_{saved_at:%Y-%m-%d_%H-%M-%S_%f}.json"
     history_path.write_text(serialized, encoding="utf-8")

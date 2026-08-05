@@ -1,0 +1,49 @@
+{
+  "requisitions": [
+    {
+      "reqId": "CS-25",
+      "title": "Warehouse Associate",
+      "description": "x",
+      "applyUrl": "https://acme.csod.com/ux/ats/careersite/5/job/CS-25",
+      "location": "Remote",
+      "employmentType": "Full-Time",
+      "postedDate": "2026-07-08"
+    },
+    {
+      "reqId": "CS-26",
+      "title": "Warehouse Associate",
+      "description": "x",
+      "applyUrl": "https://acme.csod.com/ux/ats/careersite/5/job/CS-26",
+      "location": "Remote",
+      "employmentType": "Full-Time",
+      "postedDate": "2026-07-08"
+    },
+    {
+      "reqId": "CS-27",
+      "title": "Warehouse Associate",
+      "description": "x",
+      "applyUrl": "https://acme.csod.com/ux/ats/careersite/5/job/CS-27",
+      "location": "Remote",
+      "employmentType": "Full-Time",
+      "postedDate": "2026-07-08"
+    },
+    {
+      "reqId": "CS-28",
+      "title": "Warehouse Associate",
+      "description": "x",
+      "applyUrl": "https://acme.csod.com/ux/ats/careersite/5/job/CS-28",
+      "location": "Remote",
+      "employmentType": "Full-Time",
+      "postedDate": "2026-07-08"
+    },
+    {
+      "reqId": "CS-29",
+      "title": "Warehouse Associate",
+      "description": "x",
+      "applyUrl": "https://acme.csod.com/ux/ats/careersite/5/job/CS-29",
+      "location": "Remote",
+      "employmentType": "Full-Time",
+      "postedDate": "2026-07-08"
+    }
+  ]
+}

@@ -1,0 +1,31 @@
+[
+  {
+    "id": "L1",
+    "text": "Account Executive",
+    "categories": {
+      "location": "Remote",
+      "commitment": "Full-time"
+    },
+    "descriptionPlain": "Own the revenue operations stack. Remote, US-based. Salesforce, RevOps.",
+    "hostedUrl": "https://jobs.lever.co/acme/L1",
+    "createdAt": 1719792000000,
+    "workplaceType": "remote",
+    "lists": [
+      {
+        "content": "<p>Requirements</p>"
+      }
+    ]
+  },
+  {
+    "id": "L2",
+    "text": "Warehouse Associate",
+    "categories": {
+      "location": "Columbus, OH",
+      "commitment": "Full-time"
+    },
+    "descriptionPlain": "Lift boxes.",
+    "hostedUrl": "https://jobs.lever.co/acme/L2",
+    "createdAt": 1719792000000,
+    "workplaceType": "onsite"
+  }
+]

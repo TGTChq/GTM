@@ -1,0 +1,26 @@
+{
+  "jobs": [
+    {
+      "id": "A1",
+      "title": "Sales Development Representative",
+      "descriptionPlain": "Own the revenue operations stack. Remote, US-based. Salesforce, RevOps.",
+      "jobUrl": "https://jobs.ashbyhq.com/acme/A1",
+      "location": "Remote, US",
+      "employmentType": "FullTime",
+      "publishedAt": "2026-07-02T00:00:00Z",
+      "workplaceType": "Remote",
+      "isRemote": true,
+      "isListed": true,
+      "secondaryLocations": [
+        {
+          "location": "New York"
+        }
+      ]
+    },
+    {
+      "id": "A2",
+      "title": "Hidden Draft",
+      "isListed": false
+    }
+  ]
+}

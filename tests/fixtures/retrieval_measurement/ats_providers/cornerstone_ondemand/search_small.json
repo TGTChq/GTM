@@ -1,0 +1,22 @@
+{
+  "requisitions": [
+    {
+      "reqId": "CS-0",
+      "title": "Revenue Operations Manager",
+      "description": "Own RevOps.",
+      "applyUrl": "https://acme.csod.com/ux/ats/careersite/5/job/CS-0",
+      "location": "Remote",
+      "employmentType": "Full-Time",
+      "postedDate": "2026-07-08"
+    },
+    {
+      "reqId": "CS-9",
+      "title": "Warehouse Associate",
+      "description": "x",
+      "applyUrl": "https://acme.csod.com/ux/ats/careersite/5/job/CS-9",
+      "location": "Reno",
+      "employmentType": "Full-Time",
+      "postedDate": "2026-07-08"
+    }
+  ]
+}

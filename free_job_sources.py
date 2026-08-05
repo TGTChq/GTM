@@ -119,6 +119,16 @@ def default_fetcher(
     current_url = str(url or "").strip()
     current_params: Optional[Mapping[str, Any]] = params
     for _redirect in range(4):
+        if _redirect:
+            # Annotation only: the next physical attempt is a redirect hop.
+            # No-op unless a measurement trace is installed; redirect handling,
+            # headers, timeout and returned payload are unchanged.
+            try:
+                from retrieval_measurement.request_trace import mark_redirect
+
+                mark_redirect()
+            except Exception:  # pragma: no cover - instrumentation is never fatal
+                pass
         if not _safe_public_url(current_url):
             return FetchPayload(status_code=None, url=current_url, error="unsafe_or_unresolvable_url")
         try:

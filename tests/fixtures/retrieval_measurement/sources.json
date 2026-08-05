@@ -1,0 +1,149 @@
+{
+  "https://himalayas.app/jobs/api?limit=20&offset=4": {
+    "totalCount": 480,
+    "jobs": []
+  },
+  "https://himalayas.app/jobs/api?limit=20&offset=0": {
+    "totalCount": 480,
+    "jobs": [
+      {
+        "guid": "hm-1001",
+        "title": "Senior Software Engineer",
+        "companyName": "Northwind Systems",
+        "companySlug": "northwind-systems",
+        "excerpt": "We are hiring a senior software engineer to build our distributed ingestion platform. You will own service reliability end to end and mentor two engineers.",
+        "applicationLink": "https://boards.greenhouse.io/northwind/jobs/1001",
+        "pubDate": "2026-07-28T09:00:00Z",
+        "employmentType": "Full Time",
+        "locationRestrictions": [{"name": "United States", "alpha2": "US"}],
+        "categories": ["Engineering"],
+        "minSalary": 160000,
+        "maxSalary": 195000,
+        "currency": "USD",
+        "salaryPeriod": "yearly"
+      },
+      {
+        "guid": "hm-1002",
+        "title": "Senior Software Engineer",
+        "companyName": "Northwind Systems",
+        "companySlug": "northwind-systems",
+        "excerpt": "A second, genuinely distinct senior software engineer opening on the payments team. Same title, different team, different reporting line.",
+        "applicationLink": "https://boards.greenhouse.io/northwind/jobs/1002",
+        "pubDate": "2026-07-29T09:00:00Z",
+        "employmentType": "Full Time",
+        "locationRestrictions": [{"name": "United States", "alpha2": "US"}],
+        "categories": ["Engineering"]
+      },
+      {
+        "guid": "hm-1003",
+        "title": "VP of Engineering",
+        "companyName": "Contoso Labs",
+        "companySlug": "contoso-labs",
+        "excerpt": "Executive leadership role owning the whole engineering organisation across three product lines and a distributed team.",
+        "applicationLink": "https://jobs.lever.co/contoso/1003",
+        "pubDate": "2026-07-27T09:00:00Z",
+        "employmentType": "Full Time",
+        "locationRestrictions": [{"name": "United States", "alpha2": "US"}],
+        "categories": ["Engineering"]
+      },
+      {
+        "guid": "hm-1004",
+        "title": "Product Designer",
+        "companyName": "Fabrikam Studio",
+        "companySlug": "fabrikam-studio",
+        "excerpt": "Design end-to-end product experiences for our analytics suite, working directly with engineering and research.",
+        "applicationLink": "https://fabrikam.example.com/careers/1004",
+        "pubDate": "2026-07-26T09:00:00Z",
+        "employmentType": "Full Time",
+        "locationRestrictions": [],
+        "categories": ["Design"]
+      }
+    ]
+  },
+  "https://jobicy.com/api/v2/remote-jobs": {
+    "jobs": [
+      {
+        "id": 2001,
+        "jobTitle": "Account Executive",
+        "companyName": "Northwind Systems",
+        "jobExcerpt": "Own new business acquisition for our mid-market segment across North America and partner closely with sales engineering.",
+        "url": "https://jobicy.com/jobs/2001-account-executive",
+        "jobGeo": "USA",
+        "jobType": ["full-time"],
+        "jobIndustry": ["Sales"],
+        "jobLevel": "Senior",
+        "pubDate": "2026-07-28 10:00:00"
+      },
+      {
+        "id": 2002,
+        "jobTitle": "Senior Software Engineer",
+        "companyName": "Northwind Systems",
+        "jobExcerpt": "Cross-posted listing for the same distributed ingestion platform role that appears on other boards.",
+        "url": "https://jobicy.com/jobs/2002-senior-software-engineer",
+        "jobGeo": "USA",
+        "jobType": ["full-time"],
+        "jobIndustry": ["Engineering"],
+        "pubDate": "2026-07-28 11:00:00"
+      }
+    ]
+  },
+  "https://remotive.com/api/remote-jobs": {
+    "jobs": [
+      {
+        "id": 3001,
+        "title": "Data Engineer",
+        "company_name": "Contoso Labs",
+        "description": "Build and operate the batch and streaming pipelines that power our customer analytics product.",
+        "url": "https://remotive.com/remote-jobs/3001",
+        "candidate_required_location": "USA Only",
+        "job_type": "full_time",
+        "publication_date": "2026-07-25T08:00:00",
+        "category": "Data",
+        "tags": ["python", "sql"]
+      }
+    ]
+  },
+  "https://remoteok.com/api": [
+    {"legal": "Remote OK API terms"},
+    {
+      "id": "4001",
+      "position": "Engineering Manager",
+      "company": "Fabrikam Studio",
+      "description": "Lead a team of six engineers building our design systems platform, with direct ownership of delivery and hiring.",
+      "url": "https://remoteok.com/remote-jobs/4001",
+      "location": "United States",
+      "date": "2026-07-24T08:00:00+00:00",
+      "tags": ["engineering", "management"]
+    }
+  ],
+  "https://weworkremotely.com/remote-jobs.rss": "<?xml version=\"1.0\" encoding=\"UTF-8\"?><rss version=\"2.0\"><channel><title>We Work Remotely</title><item><title>Litware Inc: Backend Engineer</title><link>https://weworkremotely.com/remote-jobs/litware-backend-engineer</link><description>Litware is hiring a backend engineer to extend our billing platform and its public API surface.</description><pubDate>Thu, 23 Jul 2026 08:00:00 +0000</pubDate><region>United States</region></item></channel></rss>",
+  "https://api.adzuna.com/v1/api/jobs/us/search/1": {
+    "count": 1240,
+    "results": [
+      {
+        "id": "5001",
+        "title": "Senior Software Engineer",
+        "company": {"display_name": "Litware Inc"},
+        "description": "Litware is hiring a senior software engineer for the billing platform team, owning service design and delivery.",
+        "redirect_url": "https://www.adzuna.com/details/5001",
+        "created": "2026-07-28T12:00:00Z",
+        "location": {"display_name": "Remote, United States", "area": ["US"]},
+        "contract_time": "full_time"
+      },
+      {
+        "id": "5002",
+        "title": "Chief Technology Officer",
+        "company": {"display_name": "Litware Inc"},
+        "description": "Executive role owning the technology strategy and the whole engineering function for a growing SaaS business.",
+        "redirect_url": "https://www.adzuna.com/details/5002",
+        "created": "2026-07-27T12:00:00Z",
+        "location": {"display_name": "Remote, United States", "area": ["US"]},
+        "contract_time": "full_time"
+      }
+    ]
+  },
+  "https://api.adzuna.com/v1/api/jobs/us/search/": {
+    "count": 1240,
+    "results": []
+  }
+}

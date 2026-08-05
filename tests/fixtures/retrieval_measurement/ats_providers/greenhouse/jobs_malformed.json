@@ -1,0 +1,19 @@
+{
+  "jobs": [
+    {
+      "id": 201,
+      "title": "Revenue Operations Manager",
+      "content": "ok",
+      "absolute_url": "https://x/201",
+      "location": {
+        "name": "Remote"
+      }
+    },
+    "this is not a dict",
+    {
+      "title": "Warehouse Associate",
+      "content": "no id",
+      "location": {}
+    }
+  ]
+}

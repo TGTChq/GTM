@@ -1,0 +1,12 @@
+{
+  "$schema": "https://railway.com/railway.schema.json",
+  "build": {
+    "builder": "DOCKERFILE",
+    "dockerfilePath": "/Dockerfile"
+  },
+  "deploy": {
+    "startCommand": "python -u run_orchestrator.py --preflight-only --mode live_acquisition_and_enrichment --boards BOARDS_FINAL.json --artifact-root /app/data/state/orchestrator_v2",
+    "restartPolicyType": "NEVER",
+    "numReplicas": 1
+  }
+}

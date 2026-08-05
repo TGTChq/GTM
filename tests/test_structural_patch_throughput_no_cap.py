@@ -77,7 +77,12 @@ class ThroughputIsMinimumNotCapTests(unittest.TestCase):
     def test_stops_early_only_when_explicitly_configured_to_cap(self):
         result = self._run(continue_after_target=False)
         self.assertEqual(result.companies_considered, 1)
-        self.assertEqual(result.stop_reason, "airtable_review_target_reached")
+        # Phase 1A renamed this stop reason. The break is gated on reconciled
+        # FINAL_PASS reaching the target, so "airtable_review_target_reached"
+        # named a metric the condition does not read -- the same class of
+        # mislabelling that let a run report final_pass_target_reached at
+        # FINAL_PASS=15. Behaviour is unchanged: one company, stopped early.
+        self.assertEqual(result.stop_reason, "final_pass_target_reached")
 
 
 if __name__ == "__main__":

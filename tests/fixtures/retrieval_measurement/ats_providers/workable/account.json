@@ -1,0 +1,17 @@
+{
+  "name": "Acme Inc",
+  "jobs": [
+    {
+      "shortcode": "WK1",
+      "title": "Marketing Coordinator",
+      "description": "Own the revenue operations stack. Remote, US-based. Salesforce, RevOps.",
+      "url": "https://apply.workable.com/acme/j/WK1",
+      "city": "Austin",
+      "state": "TX",
+      "country": "US",
+      "employment_type": "full",
+      "published_on": "2026-07-04T00:00:00Z",
+      "telecommuting": true
+    }
+  ]
+}
