@@ -1,0 +1,21 @@
+{
+  "content": [
+    {
+      "id": "SRS1",
+      "name": "Warehouse Associate",
+      "location": {
+        "city": "Austin",
+        "country": "US"
+      }
+    },
+    {
+      "id": "SRS2",
+      "name": "Warehouse Associate",
+      "location": {
+        "city": "Reno",
+        "country": "US"
+      }
+    }
+  ],
+  "totalFound": 2
+}

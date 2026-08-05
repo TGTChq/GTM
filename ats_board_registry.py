@@ -7,6 +7,7 @@ public boards: Greenhouse, Lever (global/EU), Ashby, Recruitee, Workable, Person
 
 from __future__ import annotations
 
+import contextlib
 import html
 import json
 import logging
@@ -46,6 +47,23 @@ class BoardRef:
 # route, not a Job_Posting_Site_ID. Other common names such as External,
 # Careers, Jobs, Recruiting, and Default are legitimate customer-defined site
 # identifiers and must remain discoverable.
+@contextlib.contextmanager
+def _detail_request():
+    """Mark the enclosed fetch as a per-posting detail call.
+
+    Annotation only. It reimplements no transport, retry or redirect logic, and
+    resolves to a bare ``yield`` unless a measurement trace is installed --
+    which is the default, so the production fetch path is unchanged.
+    """
+    try:
+        from retrieval_measurement.request_trace import detail
+    except Exception:  # pragma: no cover - instrumentation is never fatal
+        yield
+        return
+    with detail():
+        yield
+
+
 _WORKDAY_RESERVED_SITE_IDENTIFIERS = {"job"}
 
 
@@ -760,10 +778,11 @@ def fetch_board_jobs(
             if detail_calls < detail_budget and _greenhouse_title_may_match(title):
                 detail_calls += 1
                 detail_requested = True
-                detail, detail_error = _fetch_json(
-                    fetcher,
-                    f"https://boards-api.greenhouse.io/v1/boards/{identifier}/jobs/{row.get('id')}",
-                )
+                with _detail_request():
+                    detail, detail_error = _fetch_json(
+                        fetcher,
+                        f"https://boards-api.greenhouse.io/v1/boards/{identifier}/jobs/{row.get('id')}",
+                    )
                 if isinstance(detail, dict):
                     posted_at = detail.get("first_published") or ""
                     expires_at = detail.get("application_deadline") or ""
@@ -1031,9 +1050,10 @@ def fetch_board_jobs(
             ):
                 detail_calls += 1
                 detail_requested = True
-                fetched, detail_error = _fetch_json(
-                    fetcher, f"{endpoint}/{posting_id}"
-                )
+                with _detail_request():
+                    fetched, detail_error = _fetch_json(
+                        fetcher, f"{endpoint}/{posting_id}"
+                    )
                 if isinstance(fetched, Mapping):
                     detail = fetched
             effective: Mapping[str, Any] = detail or row
@@ -1155,7 +1175,8 @@ def fetch_board_jobs(
             if posting_path and detail_calls < detail_limit and _greenhouse_title_may_match(title):
                 detail_calls += 1
                 detail_requested = True
-                detail, detail_error = _fetch_json(fetcher, f"{cxs_base}/job/{posting_path}")
+                with _detail_request():
+                    detail, detail_error = _fetch_json(fetcher, f"{cxs_base}/job/{posting_path}")
                 if isinstance(detail, dict) and isinstance(detail.get("jobPostingInfo"), dict):
                     detail_info = detail["jobPostingInfo"]
             description = detail_info.get("jobDescription") or ""

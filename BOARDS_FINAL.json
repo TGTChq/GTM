@@ -1,0 +1,91 @@
+{
+  "generated": "local-non-production",
+  "source": "read-only evidence (snapshot + prior live ledger)",
+  "note": "NOT the production registry; for validation run only",
+  "boards": [
+    {
+      "provider": "greenhouse",
+      "identifier": "dragos",
+      "company_name": "Dragos",
+      "evidence_source": "snapshot:ats_board_registry_20260804.json+ledger200",
+      "last_observed_result": "success@2026-08-02T21:02:10.943439+00:00",
+      "confidence": "high",
+      "expected_hostname": "boards-api.greenhouse.io",
+      "api_base": "https://boards-api.greenhouse.io",
+      "board_url": "https://boards.greenhouse.io/dragos",
+      "key": "greenhouse:dragos:https://boards-api.greenhouse.io"
+    },
+    {
+      "provider": "lever",
+      "identifier": "workwave",
+      "company_name": "WorkWave",
+      "evidence_source": "snapshot:ats_board_registry_20260804.json",
+      "last_observed_result": "success@2026-08-02T20:58:55.863633+00:00",
+      "confidence": "high",
+      "expected_hostname": "api.lever.co",
+      "api_base": "https://api.lever.co",
+      "board_url": "https://jobs.lever.co/workwave",
+      "key": "lever:workwave:https://api.lever.co"
+    },
+    {
+      "provider": "ashby",
+      "identifier": "Jasper%20AI",
+      "company_name": "Jasper",
+      "evidence_source": "snapshot:ats_board_registry_20260804.json+ledger200",
+      "last_observed_result": "success@2026-08-02T21:02:12.103033+00:00",
+      "confidence": "high",
+      "expected_hostname": "api.ashbyhq.com",
+      "api_base": "https://api.ashbyhq.com",
+      "board_url": "https://jobs.ashbyhq.com/Jasper%20AI",
+      "key": "ashby:Jasper%20AI:https://api.ashbyhq.com"
+    },
+    {
+      "provider": "workable",
+      "identifier": "pairedrecruiting",
+      "company_name": "Paired",
+      "evidence_source": "snapshot:ats_board_registry_20260804.json+ledger200",
+      "last_observed_result": "success@2026-08-02T21:00:57.274482+00:00",
+      "confidence": "high",
+      "expected_hostname": "apply.workable.com",
+      "api_base": "https://www.workable.com",
+      "board_url": "https://apply.workable.com/pairedrecruiting",
+      "key": "workable:pairedrecruiting:https://www.workable.com"
+    },
+    {
+      "provider": "smartrecruiters",
+      "identifier": "Expeditors",
+      "company_name": "Expeditors",
+      "evidence_source": "snapshot:ats_board_registry_20260804.json",
+      "last_observed_result": "success@2026-08-02T21:02:39.640712+00:00",
+      "confidence": "high",
+      "expected_hostname": "api.smartrecruiters.com",
+      "api_base": "https://api.smartrecruiters.com/v1",
+      "board_url": "https://careers.smartrecruiters.com/Expeditors",
+      "key": "smartrecruiters:Expeditors:https://api.smartrecruiters.com/v1"
+    },
+    {
+      "provider": "workday",
+      "identifier": "boeing|EXTERNAL_CAREERS",
+      "company_name": "The Boeing Company",
+      "evidence_source": "snapshot:ats_board_registry_20260804.json+ledger200",
+      "last_observed_result": "success@2026-08-02T21:00:56.858954+00:00",
+      "confidence": "high",
+      "expected_hostname": "{tenant}.myworkdayjobs.com",
+      "api_base": "https://boeing.wd1.myworkdayjobs.com",
+      "board_url": "https://boeing.wd1.myworkdayjobs.com/EXTERNAL_CAREERS",
+      "key": "workday:boeing|EXTERNAL_CAREERS:https://boeing.wd1.myworkdayjobs.com"
+    }
+  ],
+  "unavailable_providers": [
+    {
+      "provider": "recruitee",
+      "status": "UNAVAILABLE",
+      "reason": "no board evidence in snapshot or ledger"
+    },
+    {
+      "provider": "personio",
+      "status": "UNAVAILABLE",
+      "reason": "no board evidence in snapshot or ledger"
+    }
+  ]
+}

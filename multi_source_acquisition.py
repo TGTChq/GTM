@@ -7,6 +7,7 @@ deduplicated, and then passed through the unchanged downstream safety gates.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import re
@@ -605,13 +606,80 @@ def _save_raw(jobs: List[Dict[str, Any]], stats: Mapping[str, Any]) -> str:
     return str(daily)
 
 
+@contextlib.contextmanager
+def _null_board_scope():
+    """Stand-in scope when no ATS session is supplied. Yields None and does
+    nothing, so the default path allocates and writes nothing."""
+    yield None
+
+
+def _select_ats_boards(board_registry, *, ats_board_limit, force_ats_refresh):
+    """Choose this run's ATS boards at the single real selection boundary.
+
+    Returns ``(selected_boards, decision, scheduler_config)``.
+
+    ``ATS_SCHEDULER_MODE`` decides which of two algorithms runs -- never both.
+    The default, ``legacy_interval``, returns ``due_entries`` untouched with no
+    decision and no config, so the production path is byte-identical to before:
+    nothing from ``retrieval_measurement`` is even imported. Only
+    ``deterministic_partition`` engages the slot scheduler, its config is
+    validated *before* any board is touched, and its minimal carried-forward
+    state is read/written only when ``ATS_SCHEDULER_STATE_PATH`` is set.
+    """
+    mode = str(getattr(config, "ATS_SCHEDULER_MODE", "legacy_interval")).strip().lower()
+    if mode == "legacy_interval":
+        due_boards = list(
+            board_registry.due_entries(limit=ats_board_limit, force=force_ats_refresh)
+        )
+        return due_boards, None, None
+
+    from retrieval_measurement import ats_schedule
+
+    sched_cfg = ats_schedule.SchedulerConfig.from_config(config)
+    sched_cfg.validate()  # raises SchedulerConfigError before acquisition
+
+    # The partitioned scheduler needs the whole eligible registry, not just the
+    # age-due subset: it rotates by stable slot, not by staleness. force=True
+    # returns every valid board regardless of age.
+    candidates = list(board_registry.due_entries(limit=config.ATS_MAX_BOARDS_PER_RUN, force=True))
+
+    carried: list = []
+    state = None
+    if sched_cfg.state_path:
+        state = ats_schedule.SchedulerState.load(sched_cfg.state_path)
+        carried = list(state.carried_overdue)
+
+    caps = [c for c in (sched_cfg.board_cap, ats_board_limit) if c]
+    effective_cap = min(caps) if caps else None
+    decision = ats_schedule.select_boards(
+        candidates,
+        config=sched_cfg,
+        carried_overdue=carried,
+        max_boards_per_run=effective_cap,
+    )
+
+    if sched_cfg.state_path:
+        ats_schedule.SchedulerState(
+            carried_overdue=list(decision.carried_forward),
+            last_position=sched_cfg.position,
+        ).save(sched_cfg.state_path)
+
+    return list(decision.selected), decision, sched_cfg
+
+
 def run_multi_source_acquisition(
     registry: Optional[SeenJobsRegistry] = None,
     *,
     fetcher=default_fetcher,
     force_ats_refresh: bool = False,
     ats_board_limit: Optional[int] = None,
+    ats_session: Optional[Any] = None,
 ) -> ScrapeResult:
+    """``ats_session`` is an optional passive observer
+    (``retrieval_measurement.ats_checkpoint.AtsBoardSession``). When supplied it
+    persists each ATS board the moment that board finishes, so a later board
+    raising cannot take completed work with it. When omitted -- the default --
+    every hook below is skipped and this function behaves exactly as before."""
     registry = registry or SeenJobsRegistry()
     board_registry = AtsBoardRegistry()
     history_seed = board_registry.seed_from_history() if config.ATS_REGISTRY_AUTO_SEED_HISTORY else {
@@ -854,23 +922,71 @@ def run_multi_source_acquisition(
         ),
     )
     if config.ATS_DIRECT_ACQUISITION_ENABLED:
-        for board in board_registry.due_entries(limit=ats_board_limit, force=force_ats_refresh):
-            provider = str(board.get("provider") or "unknown")
-            jobs, error = fetch_board_jobs(
-                board,
-                fetcher,
-                greenhouse_detail_budget=(
-                    greenhouse_detail_remaining if provider == "greenhouse" else None
-                ),
-                workday_detail_budget=(
-                    workday_detail_remaining if provider == "workday" else None
-                ),
-                smartrecruiters_detail_budget=(
-                    smartrecruiters_detail_remaining
-                    if provider == "smartrecruiters"
-                    else None
-                ),
+        selected_boards, schedule_decision, scheduler_config = _select_ats_boards(
+            board_registry,
+            ats_board_limit=ats_board_limit,
+            force_ats_refresh=force_ats_refresh,
+        )
+        ats_budget = getattr(ats_session, "budget", None) if ats_session is not None else None
+        if ats_session is not None:
+            ats_session.plan(
+                selected_boards,
+                decision=schedule_decision,
+                scheduler_config=scheduler_config,
             )
+        for board in selected_boards:
+            provider = str(board.get("provider") or "unknown")
+            identifier = str(board.get("identifier") or "")
+            # Pre-emptive budget skip: if the next request could not be afforded
+            # in any scope, the board never enters the transport. Zero requests
+            # go out, an explicit skip record is persisted, and the board stays
+            # outside boards_attempted. Provider/lane exhaustion skips only that
+            # scope's boards; run exhaustion skips every remaining board.
+            if ats_session is not None and ats_budget is not None:
+                block = ats_budget.would_block(
+                    lane="ats",
+                    source=f"ats_{provider}",
+                    board=f"{provider}:{identifier}",
+                )
+                if block is not None:
+                    ats_session.skip_for_budget(
+                        board,
+                        block["scope"],
+                        exhausted_scope=block["scope"],
+                        stop_reason=f"budget_exhausted:{block['scope']}",
+                    )
+                    continue
+            board_state = None
+            board_scope = (
+                ats_session.board(board) if ats_session is not None else _null_board_scope()
+            )
+            with board_scope as board_state:
+                try:
+                    jobs, error = fetch_board_jobs(
+                        board,
+                        fetcher,
+                        greenhouse_detail_budget=(
+                            greenhouse_detail_remaining if provider == "greenhouse" else None
+                        ),
+                        workday_detail_budget=(
+                            workday_detail_remaining if provider == "workday" else None
+                        ),
+                        smartrecruiters_detail_budget=(
+                            smartrecruiters_detail_remaining
+                            if provider == "smartrecruiters"
+                            else None
+                        ),
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    # Previously this unwound the whole function and discarded
+                    # every completed board's postings along with it. A board
+                    # that raises is now a board-level error like any other.
+                    if ats_session is None:
+                        raise
+                    jobs, error = [], f"{type(exc).__name__}: {exc}"
+                    logger.warning("ATS board %s raised: %s", board.get("key"), error)
+            if ats_session is not None and board_state is not None:
+                ats_session.record(board_state, jobs=jobs, error=error)
             detail_requests = sum(
                 1 for job in jobs if job.get("_greenhouse_detail_request_made")
             )
@@ -953,6 +1069,9 @@ def run_multi_source_acquisition(
         "adzuna": adzuna_stats,
         "fantastic_jobs": fantastic_stats,
         "ats_metrics": ats_metrics,
+        # Board-level accounting, present only when a session was supplied.
+        # Absent by default, so no existing consumer sees a new key.
+        **({"ats_board_accounting": ats_session.to_dict()} if ats_session is not None else {}),
         "ats_force_refresh": bool(force_ats_refresh),
         "ats_board_limit": ats_board_limit,
         "history_registry_seed": history_seed,

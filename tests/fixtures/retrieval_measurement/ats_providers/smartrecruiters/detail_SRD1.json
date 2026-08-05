@@ -1,0 +1,31 @@
+{
+  "id": "SRD1",
+  "name": "Account Executive",
+  "active": true,
+  "company": {
+    "name": "Acme Corporation"
+  },
+  "location": {
+    "city": "Austin",
+    "region": "TX",
+    "country": "US",
+    "remote": false
+  },
+  "typeOfEmployment": {
+    "label": "Full-time"
+  },
+  "jobAd": {
+    "sections": {
+      "companyDescription": {
+        "title": "About",
+        "text": "Acme."
+      },
+      "jobDescription": {
+        "title": "The Role",
+        "text": "Own the revenue operations stack. Remote, US-based. Salesforce, RevOps."
+      }
+    }
+  },
+  "postingUrl": "https://jobs.smartrecruiters.com/Acme/SRD1",
+  "releasedDate": "2026-07-06T00:00:00Z"
+}

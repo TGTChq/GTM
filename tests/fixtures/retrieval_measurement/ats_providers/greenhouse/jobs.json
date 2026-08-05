@@ -1,0 +1,24 @@
+{
+  "jobs": [
+    {
+      "id": 101,
+      "title": "Revenue Operations Manager",
+      "content": "&lt;p&gt;RevOps&lt;/p&gt;",
+      "absolute_url": "https://boards.greenhouse.io/acme/jobs/101",
+      "updated_at": "2026-07-01T12:00:00Z",
+      "location": {
+        "name": "Remote - US"
+      }
+    },
+    {
+      "id": 102,
+      "title": "Warehouse Associate",
+      "content": "&lt;p&gt;Warehouse&lt;/p&gt;",
+      "absolute_url": "https://boards.greenhouse.io/acme/jobs/102",
+      "updated_at": "2026-07-01T12:00:00Z",
+      "location": {
+        "name": "Columbus, OH"
+      }
+    }
+  ]
+}

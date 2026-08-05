@@ -1282,14 +1282,23 @@ def run_hiring_manager_identification(
         if (
             strict_input
             and target_final_pass_leads is not None
-            and reviewable_leads >= target_final_pass_leads
+            # Reviewable rows must never satisfy a FINAL_PASS target. This
+            # compared reviewable_leads against target_final_pass_leads, which
+            # is the defect that let production report
+            # final_pass_target_reached at FINAL_PASS=15 against a target of 30
+            # because the review surface had reached 30. The counterpart in
+            # final_pass_topup.py:356-362 was already hardened for the same
+            # incident; this site was not.
+            and final_pass_leads >= target_final_pass_leads
             and not config.CONTINUE_AFTER_FINAL_PASS_TARGET
         ):
-            stop_reason = "airtable_review_target_reached"
+            stop_reason = "final_pass_target_reached"
             logger.info(
-                "Reached daily target of %d Airtable-reviewable leads after considering %d companies",
+                "Reached daily target of %d FINAL_PASS leads after considering %d companies "
+                "(%d reviewable rows, reported separately)",
                 target_final_pass_leads,
                 companies_considered,
+                reviewable_leads,
             )
             break
         if (

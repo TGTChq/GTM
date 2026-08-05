@@ -1,0 +1,22 @@
+{
+  "offers": [
+    {
+      "id": 11,
+      "title": "Customer Success Manager",
+      "description": "Own the revenue operations stack. Remote, US-based. Salesforce, RevOps.",
+      "careers_url": "https://acme.recruitee.com/o/csm-11",
+      "slug": "csm-11",
+      "location": "Remote",
+      "employment_type": "full_time",
+      "published_at": "2026-07-03T00:00:00Z",
+      "status": "published",
+      "remote": true
+    },
+    {
+      "id": 12,
+      "title": "Closed Role",
+      "slug": "closed-12",
+      "status": "closed"
+    }
+  ]
+}

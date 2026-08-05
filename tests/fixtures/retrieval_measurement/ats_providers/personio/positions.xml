@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<workzag-jobs>
+  <position>
+    <id>P1</id>
+    <name>Revenue Operations Manager</name>
+    <office>Remote</office>
+    <employmentType>permanent</employmentType>
+    <createdAt>2026-07-05T00:00:00Z</createdAt>
+    <jobDescriptions>
+      <jobDescription><name>Role</name><value>Own RevOps. Remote, US.</value></jobDescription>
+      <jobDescription><name>Requirements</name><value>Salesforce.</value></jobDescription>
+    </jobDescriptions>
+  </position>
+  <position>
+    <id>P2</id>
+    <name>Warehouse Associate</name>
+    <office>Columbus</office>
+    <employmentType>permanent</employmentType>
+    <createdAt>2026-07-05T00:00:00Z</createdAt>
+    <jobDescriptions>
+      <jobDescription><name>Role</name><value>Lift boxes.</value></jobDescription>
+    </jobDescriptions>
+  </position>
+</workzag-jobs>
