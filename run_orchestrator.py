@@ -75,13 +75,17 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
-def _preflight_only(a) -> int:
-    """Safe start command for the isolated validation service. Makes ZERO network
-    requests, prints only PRESENT/ABSENT (never secret values), and exits 0."""
-    import shutil, hashlib
-    print("=== replacement-orchestrator preflight-only (zero network) ===")
-    print(f"mode(requested)      {a.mode}")
-    # Package integrity: verify committed files against the SHA-256 manifest.
+#: A single definitive run's worst-case artifacts + margin. Preflight refuses if
+#: the volume has less free space than this.
+MIN_FREE_BYTES_FOR_RUN = 250 * 1024 * 1024
+
+
+def _preflight_checks(a):
+    """Zero-network integrity/config/space checks. Returns (results, lines);
+    never prints or returns a secret value."""
+    import shutil, hashlib, collections
+    res: Dict[str, Any] = {}
+    lines: List[str] = []
     manifest = Path("orchestrator.MANIFEST.sha256")
     if manifest.is_file():
         miss = absent = checked = 0
@@ -89,42 +93,95 @@ def _preflight_only(a) -> int:
             parts = line.split()
             if len(parts) < 3:
                 continue
-            sha, _bytes, fname = parts[0], parts[1], parts[2]
+            sha, _b, fname = parts[0], parts[1], parts[2]
             fp = Path(fname)
             if not fp.is_file():
                 absent += 1
                 continue
-            actual = hashlib.sha256(fp.read_bytes().replace(b"\r\n", b"\n")).hexdigest()
             checked += 1
-            if actual != sha:
+            if hashlib.sha256(fp.read_bytes().replace(b"\r\n", b"\n")).hexdigest() != sha:
                 miss += 1
-        print(f"package_integrity    checked={checked} mismatch={miss} absent={absent} "
-              f"({'OK' if miss == 0 and absent == 0 else 'FAILED'})")
+        res["integrity_ok"] = (miss == 0 and absent == 0)
+        lines.append(f"package_integrity    checked={checked} mismatch={miss} absent={absent} "
+                     f"({'OK' if res['integrity_ok'] else 'FAILED'})")
     else:
-        print("package_integrity    manifest absent (skipped)")
-    for k in ("RAPIDAPI_KEY", "APOLLO_API_KEY", "HUNTER_API_KEY"):
-        print(f"{k:20} {'PRESENT' if getattr(config, k, None) else 'ABSENT'}")
-    for k in ("AIRTABLE_WRITE_ENABLED", "INSTANTLY_ENROLLMENT_ENABLED",
-              "PRODUCTION_STATE_WRITE_ENABLED"):
-        print(f"{k:32} {getattr(config, k, '0')} (delivery/prod-writes must be off)")
+        res["integrity_ok"] = False
+        lines.append("package_integrity    manifest ABSENT (FAILED)")
+    for k in ("RAPIDAPI_KEY", "APOLLO_API_KEY", "HUNTER_API_KEY",
+              "AIRTABLE_TOKEN", "AIRTABLE_BASE_ID", "AIRTABLE_TABLE_NAME"):
+        res[k] = bool(getattr(config, k, None))
+        lines.append(f"{k:20} {'PRESENT' if res[k] else 'ABSENT'}")
     boards_path = a.boards or "BOARDS_FINAL.json"
     try:
         from retrieval_measurement.drivers import load_boards_readonly
         boards, err = load_boards_readonly(boards_path)
-        import collections
+        res["boards_ok"] = (len(boards) > 0 and not err)
         by = collections.Counter(b.get("provider") for b in boards)
-        print(f"boards               {len(boards)} from {boards_path} err={err or 'none'}")
+        lines.append(f"boards               {len(boards)} from {boards_path} err={err or 'none'}")
         for prov, n in sorted(by.items()):
-            print(f"  {prov:16} {n}")
+            lines.append(f"  {prov:16} {n}")
     except Exception as exc:  # noqa: BLE001
-        print(f"boards               ERROR {type(exc).__name__}: {exc}")
+        res["boards_ok"] = False
+        lines.append(f"boards               ERROR {type(exc).__name__}")
     root = Path(a.artifact_root)
     root.mkdir(parents=True, exist_ok=True)
-    writable = os.access(str(root), os.W_OK)
-    print(f"artifact_root        {root} writable={writable}")
-    print(f"disk_free_gb         {round(shutil.disk_usage(str(root)).free/1e9, 1)}")
+    res["writable"] = os.access(str(root), os.W_OK)
+    free = shutil.disk_usage(str(root)).free
+    res["free_ok"] = free >= MIN_FREE_BYTES_FOR_RUN
+    res["lock_free"] = not (root / ".run.lock").exists()
+    lines.append(f"artifact_root        {root} writable={res['writable']}")
+    lines.append(f"disk_free_gb         {round(free/1e9, 1)} "
+                 f"(min {round(MIN_FREE_BYTES_FOR_RUN/1e9, 2)} GB, "
+                 f"{'OK' if res['free_ok'] else 'INSUFFICIENT'})")
+    lines.append(f"run_lock             {'free' if res['lock_free'] else 'HELD'}")
+    lines.append("delivery             airtable=review-staging(Pending) auto_approve=OFF instantly=OFF")
+    return res, lines
+
+
+def _preflight_only(a) -> int:
+    """Safe idle start command: ZERO network, PRESENT/ABSENT only, exit 0."""
+    res, lines = _preflight_checks(a)
+    print("=== replacement-orchestrator preflight-only (zero network) ===")
+    for line in lines:
+        print(line)
     print("network_contacted    NONE")
     print("PREFLIGHT OK")
+    return 0
+
+
+def _strict_preflight(a, policy) -> int:
+    """Strict gate for a live run: refuse (exit 2) BEFORE any external call if a
+    mandatory dependency is missing. Hunter is optional (fallback-only)."""
+    res, lines = _preflight_checks(a)
+    print("=== strict preflight (before any external call) ===")
+    for line in lines:
+        print(line)
+    lanes = [x.strip() for x in a.lanes.split(",") if x.strip()] or ["ats"]
+    problems: List[str] = []
+    if not res.get("integrity_ok"):
+        problems.append("package integrity")
+    if not res.get("boards_ok"):
+        problems.append("BOARDS_FINAL.json")
+    if not res.get("writable"):
+        problems.append("artifact root not writable")
+    if not res.get("free_ok"):
+        problems.append("insufficient free volume space")
+    if not res.get("lock_free"):
+        problems.append("a run is already active (lock held)")
+    if "jsearch" in lanes and not res.get("RAPIDAPI_KEY"):
+        problems.append("RAPIDAPI_KEY (jsearch selected)")
+    if policy.allow_enrichment and not res.get("APOLLO_API_KEY"):
+        problems.append("APOLLO_API_KEY (live enrichment)")
+    if a.airtable_write and policy.allow_airtable_write and not (
+            res.get("AIRTABLE_TOKEN") and res.get("AIRTABLE_BASE_ID") and res.get("AIRTABLE_TABLE_NAME")):
+        problems.append("Airtable credentials (--airtable-write)")
+    if not res.get("HUNTER_API_KEY"):
+        print("hunter               ABSENT -> fallback disabled cleanly (does NOT block the run)")
+    if problems:
+        print("PREFLIGHT FAILED — refusing before any external request: "
+              + "; ".join(problems), file=sys.stderr)
+        return 2
+    print("PREFLIGHT OK — proceeding to the definitive run.")
     return 0
 
 
@@ -188,6 +245,13 @@ def main(argv=None) -> int:
               file=sys.stderr)
         return 2
 
+    # Strict preflight for any LIVE mode: refuse before constructing a live lane
+    # or making a single external call if a mandatory dependency is missing.
+    if mode not in OFFLINE_MODES:
+        gate = _strict_preflight(a, policy)
+        if gate != 0:
+            return gate
+
     ctx = RunContext.create(mode, vars(a), run_id=a.run_id)
     state = StateManager(a.artifact_root, policy, run_id=ctx.run_id)
     budget = build_budget(a)
@@ -220,7 +284,9 @@ def main(argv=None) -> int:
 
     plan = OrchestratorPlan(
         lanes=lanes, lane_runners=lane_runners,
-        enrichment_engine=RealEnrichmentStage(target_final_pass=int(a.target)),
+        enrichment_engine=RealEnrichmentStage(
+            target_final_pass=int(a.target),
+            workdir=str(state.run_dir() / "enrichment")),
         delivery_manager=RealDelivery(
             enable_airtable_write=bool(a.airtable_write) and policy.allow_airtable_write,
             auto_approve=bool(a.auto_approve),

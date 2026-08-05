@@ -36,6 +36,27 @@ from orchestrator.waterfall import StageResult, reconcile_stage
 SEAM_MODULES = ("apollo_client", "hunter_client", "airtable_client", "instantly_client")
 
 
+@contextlib.contextmanager
+def _output_dirs_under(qualification_dir: Path, enrichment_dir: Path):
+    """Temporarily point the legacy qualification/enrichment output dirs under the
+    run root, restoring the previous values in ``finally`` so no legacy config is
+    permanently changed and no state leaks between runs or tests."""
+    import config
+    names = ("FILTERED_OUTPUT_DIR", "STEP3_OUTPUT_DIR")
+    saved = {n: getattr(config, n, None) for n in names}
+    config.FILTERED_OUTPUT_DIR = str(qualification_dir)
+    config.STEP3_OUTPUT_DIR = str(enrichment_dir)
+    try:
+        yield
+    finally:
+        for n, v in saved.items():
+            if v is None:
+                if hasattr(config, n):
+                    delattr(config, n)
+            else:
+                setattr(config, n, v)
+
+
 class FakeResponse:
     """Minimal requests.Response stand-in for the faked seam."""
 
@@ -213,21 +234,32 @@ class RealEnrichmentStage:
         self.target_final_pass = target_final_pass
         self.workdir = Path(workdir or tempfile.mkdtemp())
 
-    def run(self, opportunities: List[Dict[str, Any]]) -> EnrichmentReport:
+    def run(self, opportunities: List[Dict[str, Any]],
+            *, exclude_company_keys=None) -> EnrichmentReport:
         from qualification_pipeline import run_precontact_qualification
         import hiring_manager
 
-        self.workdir.mkdir(parents=True, exist_ok=True)
+        qual_dir = self.workdir / "qualification"
+        enr_dir = self.workdir / "enrichment"
+        qual_dir.mkdir(parents=True, exist_ok=True)
+        enr_dir.mkdir(parents=True, exist_ok=True)
         raw = self.workdir / "postings.json"
         raw.write_text(json.dumps({"jobs": opportunities}), encoding="utf-8")
 
-        # 1) Real JobGate + RoleGate (offline: no source fetch).
-        qual = run_precontact_qualification(str(raw), output_dir=str(self.workdir),
-                                            fetch_sources=False)
-
-        # 2) Real company identity + Apollo + Hunter + contact gates + FINAL_PASS.
-        step3 = hiring_manager.run_hiring_manager_identification(
-            qual.output_path, target_final_pass_leads=self.target_final_pass)
+        # Keep every real-module write UNDER the run root. The legacy config
+        # output dirs are overridden only for the duration of this block and
+        # restored in the finally, so no legacy configuration is changed and no
+        # write lands outside orchestrator_v2.
+        with _output_dirs_under(qual_dir, enr_dir):
+            # 1) Real JobGate + RoleGate (offline: no source fetch).
+            qual = run_precontact_qualification(str(raw), output_dir=str(qual_dir),
+                                                fetch_sources=False)
+            # 2) Real company identity + Apollo + Hunter + contact gates + FINAL_PASS.
+            #    No company-wide exclusion is invented; posting-level dedup upstream
+            #    already prevents re-processing the same opportunity.
+            step3 = hiring_manager.run_hiring_manager_identification(
+                qual.output_path, target_final_pass_leads=self.target_final_pass,
+                exclude_company_keys=exclude_company_keys)
 
         leads = self._load_leads(step3.output_path)
         report = self._to_report(qual, step3, leads)
@@ -311,7 +343,8 @@ class RealDeliveryReport:
     reviewable_submitted: int = 0
     created: int = 0
     skipped: int = 0
-    skipped_existing: int = 0        # idempotency duplicates
+    skipped_existing: int = 0        # idempotency duplicates (Airtable server-side)
+    skipped_already_delivered: int = 0  # local cross-run lead_key idempotency
     failed: int = 0
     enrolled: int = 0
     instantly_contacts: int = 0      # MUST be 0 in review-staging
@@ -319,6 +352,7 @@ class RealDeliveryReport:
     needs_check: int = 0
     other_reviewable: int = 0
     failed_rows: List[Dict[str, Any]] = field(default_factory=list)
+    delivered_lead_keys: List[str] = field(default_factory=list)
     detail: Dict[str, Any] = field(default_factory=dict)
 
     def reconciles(self) -> bool:
@@ -345,7 +379,10 @@ class RealDeliveryReport:
             "mode": self.mode, "entered": self.entered,
             "reviewable_submitted": self.reviewable_submitted,
             "created": self.created, "skipped": self.skipped,
-            "skipped_existing": self.skipped_existing, "failed": self.failed,
+            "skipped_existing": self.skipped_existing,
+            "skipped_already_delivered": self.skipped_already_delivered,
+            "delivered_lead_keys": len(self.delivered_lead_keys),
+            "failed": self.failed,
             "final_pass": self.final_pass, "needs_check": self.needs_check,
             "other_reviewable": self.other_reviewable,
             "instantly_contacts": self.instantly_contacts, "enrolled": self.enrolled,
@@ -397,7 +434,9 @@ class RealDelivery:
             rows.append(base)
         return rows
 
-    def deliver(self, leads: List[Lead], *, run_id: str = "", source: str = "") -> RealDeliveryReport:
+    def deliver(self, leads: List[Lead], *, run_id: str = "", source: str = "",
+                known_delivered=None) -> RealDeliveryReport:
+        known_delivered = {str(k) for k in (known_delivered or set())}
         rep = RealDeliveryReport(entered=len(leads))
         by = {d: [l for l in leads if l.disposition is d] for d in Disposition}
         reviewable = [l for l in leads if l.disposition in _REVIEWABLE]
@@ -412,10 +451,14 @@ class RealDelivery:
             return rep
 
         # What we actually submit: FINAL_PASS only when auto-approving, else the
-        # whole reviewable set (never REJECT).
-        submit = by[Disposition.FINAL_PASS] if self.auto_approve else reviewable
+        # whole reviewable set (never REJECT). Cross-run local idempotency: a
+        # lead_key already delivered in a prior run is not re-submitted (this is
+        # in addition to Airtable's own server-side lead_key dedup).
+        candidates = by[Disposition.FINAL_PASS] if self.auto_approve else reviewable
+        submit = [l for l in candidates if l.contact_key not in known_delivered]
         rep.mode = "auto_approve" if self.auto_approve else "review_staging"
         rep.reviewable_submitted = len(submit)
+        rep.skipped_already_delivered = len(candidates) - len(submit)
 
         import airtable_client
         result = airtable_client.push_leads(self._rows(submit, run_id=run_id, source=source))
@@ -430,6 +473,11 @@ class RealDelivery:
                        + len(result.get("suppressed_company_lead_keys", []) or []))
         rep.skipped = rep.entered - rep.created - rep.failed      # entered reconciles
         rep.failed_rows = [{"lead_key": k} for k in (result.get("failed_lead_keys", []) or [])]
+        # Delivered = created + repaired-existing this run, PLUS the ones we
+        # skipped because they were already delivered. NEVER a failed row.
+        rep.delivered_lead_keys = sorted(
+            set(result.get("persisted_lead_keys", []) or [])
+            | {l.contact_key for l in candidates if l.contact_key in known_delivered})
         rep.detail = {"airtable": result, "other_skips": other_skips}
 
         # Instantly: ONLY in auto-approve mode and only when explicitly enabled.

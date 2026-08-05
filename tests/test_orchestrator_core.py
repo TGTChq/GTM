@@ -73,7 +73,7 @@ class StateTests(unittest.TestCase):
         base = self.sm.store_path("run_artifacts")
         for name in ("20260101T000000Z-a", "20260102T000000Z-b", "20260103T000000Z-c"):
             (base / name).mkdir()
-        removed = self.sm.prune(keep=1)
+        removed = self.sm.prune(keep=1)["removed"]
         self.assertEqual(len(removed), 2)
 
 
