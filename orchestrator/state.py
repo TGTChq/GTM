@@ -31,7 +31,7 @@ import os
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional
+from typing import Any, Dict, Iterable, List, Mapping, Optional
 
 from orchestrator import SCHEMA_VERSION
 from orchestrator.modes import ModePolicy
@@ -149,19 +149,63 @@ class StateManager:
 
     # -- retention ---------------------------------------------------------
 
-    def prune(self, keep: int) -> List[str]:
-        """Keep at most ``keep`` newest run directories under run_artifacts."""
+    def dir_size(self, path: Optional[str | Path] = None) -> int:
+        base = Path(path) if path else self.root
+        total = 0
+        for p in base.rglob("*"):
+            if p.is_file():
+                try:
+                    total += p.stat().st_size
+                except OSError:
+                    pass
+        return total
+
+    def free_bytes(self) -> int:
+        return shutil.disk_usage(str(self.root)).free
+
+    def prune(
+        self,
+        keep: int,
+        *,
+        max_bytes: Optional[int] = None,
+        protect: Iterable[str] = (),
+    ) -> Dict[str, Any]:
+        """Bounded retention by BOTH count and total size.
+
+        Never removes: a protected run (e.g. the active run), the newest
+        completed run, or the newest ``keep`` runs. Prunes oldest-first. Only
+        touches ``run_artifacts`` under the orchestrator root; legacy state and
+        the ``checkpoints``/``seen_suppression`` stores are never deleted here.
+        """
         base = self._paths["run_artifacts"]
-        runs = sorted(
-            [d for d in base.iterdir() if d.is_dir()],
-            key=lambda d: d.name,
-            reverse=True,
-        )
+        keep = max(1, int(keep))
+        protect = {str(p) for p in protect}
+        newest_first = sorted((d for d in base.iterdir() if d.is_dir()),
+                              key=lambda d: d.name, reverse=True)
+        keepers = protect | {d.name for d in newest_first[:keep]}
+        if newest_first:
+            keepers.add(newest_first[0].name)  # latest completed always retained
         removed: List[str] = []
-        for stale in runs[max(0, keep):]:
-            shutil.rmtree(stale, ignore_errors=True)
-            removed.append(stale.name)
-        return removed
+        # 1) count-based: prune oldest beyond `keep`
+        for d in newest_first[keep:]:
+            if d.name in keepers:
+                continue
+            shutil.rmtree(d, ignore_errors=True)
+            removed.append(d.name)
+        # 2) size-based: prune oldest until under max_bytes, never a keeper
+        if max_bytes is not None:
+            oldest_first = sorted((d for d in base.iterdir() if d.is_dir()),
+                                  key=lambda d: d.name)
+            i = 0
+            while self.dir_size() > int(max_bytes) and i < len(oldest_first):
+                d = oldest_first[i]
+                i += 1
+                if d.name in keepers:
+                    continue
+                shutil.rmtree(d, ignore_errors=True)
+                removed.append(d.name)
+        return {"removed": removed, "total_bytes": self.dir_size(),
+                "free_bytes": self.free_bytes()}
 
     def to_dict(self) -> Dict[str, Any]:
         return {

@@ -5,7 +5,7 @@
     "dockerfilePath": "/Dockerfile"
   },
   "deploy": {
-    "startCommand": "python -u run_orchestrator.py --preflight-only --mode live_acquisition_and_enrichment --boards BOARDS_FINAL.json --artifact-root /app/data/state/orchestrator_v2",
+    "startCommand": "python -u run_orchestrator.py --mode live_acquisition_and_enrichment --lanes ats,jsearch,free_feeds --boards BOARDS_FINAL.json --target 300 --airtable-write --global-budget 500 --ats-lane-budget 400 --reserved-non-ats 100 --board-budget 100 --provider-budget 120 --max-boards 8 --artifact-root /app/data/state/orchestrator_v2",
     "restartPolicyType": "NEVER",
     "numReplicas": 1
   }

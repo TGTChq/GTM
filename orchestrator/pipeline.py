@@ -27,10 +27,15 @@ from orchestrator.reasons import ReasonCode, StageOutcome
 from orchestrator.runcontrol import RunContext, RunStatus
 from orchestrator.runlock import RunLock, RunLockHeld
 from orchestrator.state import StateManager
+from orchestrator.suppression import SuppressionStore
 from orchestrator.waterfall import WaterfallReport, reconcile_stage
 
-#: Bounded retention: keep at most this many run directories on the volume.
-RETENTION_KEEP_RUNS = 8
+#: Bounded retention sized for the ~1.3 GB volume headroom: keep at most this many
+#: completed runs AND at most this many bytes under run_artifacts (whichever binds
+#: first). ~150 MB/run worst case -> 4 runs <= ~600 MB, leaving >700 MB emergency
+#: headroom for one more complete run on the existing gtm-volume.
+RETENTION_KEEP_RUNS = 4
+RETENTION_MAX_BYTES = 600 * 1024 * 1024
 
 
 @dataclass
@@ -141,7 +146,8 @@ class Orchestrator:
                 pass
             lock.release()
             try:
-                self.state.prune(keep=int(retention_keep))
+                self.state.prune(keep=int(retention_keep), max_bytes=RETENTION_MAX_BYTES,
+                                 protect={self.ctx.run_id})
             except Exception:  # noqa: BLE001
                 pass
 
@@ -156,8 +162,12 @@ class Orchestrator:
             postings.extend(r.jobs)
         report.set_unit("postings", len(postings))
 
-        seen = self.state.seen_snapshot()
-        opportunities, dedup_stage = self._dedup(postings, seen)
+        # Cross-run dedup: skip postings whose exact identity was processed to
+        # completion in a prior run (a NEW posting from the same company is not
+        # blocked). Read before acquisition-dedup, delivery reads its own set.
+        supp = SuppressionStore(self.state)
+        seen_postings = supp.seen_postings()
+        opportunities, dedup_stage = self._dedup(postings, seen_postings)
         report.add(dedup_stage)
         report.set_unit("opportunities", len(opportunities))
 
@@ -174,9 +184,18 @@ class Orchestrator:
             report.set_unit("contacts", len([l for l in enrichment.leads if l.contact]))
             report.set_unit("final_pass_leads", len(enrichment.final_pass()))
 
-            delivery = plan.delivery_manager.deliver(enrichment.leads, run_id=self.ctx.run_id)
+            delivery = plan.delivery_manager.deliver(
+                enrichment.leads, run_id=self.ctx.run_id,
+                known_delivered=supp.delivered_leads())
             report.set_unit("delivered_rows", delivery.created)
             report.set_unit("enrolled_contacts", delivery.enrolled)
+
+            # Safe commit: only AFTER the stages completed do we mark these
+            # postings processed and these lead_keys delivered. A failure before
+            # here leaves them recoverable for the next run. Failed deliveries are
+            # never recorded as delivered (RealDelivery excludes failed_lead_keys).
+            supp.commit_postings(o.get("posting_id", "") for o in opportunities)
+            supp.commit_delivered(getattr(delivery, "delivered_lead_keys", []) or [])
 
             capacity = build_capacity_report(
                 raw_postings=len(postings),
@@ -218,6 +237,7 @@ class Orchestrator:
             "target_satisfied_by_final_pass_only": target_ok,
             "budget": self.budget.to_dict(),
             "run_lock": lock.to_dict() if lock is not None else None,
+            "suppression": supp.to_dict(),
             "all_reconcile": all_reconcile,
         }
         # Immutable run artifacts.

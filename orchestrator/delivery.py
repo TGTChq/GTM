@@ -75,6 +75,7 @@ class DeliveryReport:
     skip_reasons: Dict[str, int] = field(default_factory=dict)
     audit: List[Dict[str, Any]] = field(default_factory=list)
     rollback_tokens: List[str] = field(default_factory=list)
+    delivered_lead_keys: List[str] = field(default_factory=list)
 
     def reconciles(self) -> bool:
         return self.entered == self.created + self.skipped + self.failed
@@ -124,7 +125,9 @@ class DeliveryManager:
     def _persist_delivered(self) -> None:
         self.state.write_json("delivery_state", "delivered.json", {"keys": sorted(self._delivered)})
 
-    def deliver(self, leads: List[Lead], *, run_id: str = "") -> DeliveryReport:
+    def deliver(self, leads: List[Lead], *, run_id: str = "", known_delivered=None) -> DeliveryReport:
+        if known_delivered:
+            self._delivered |= {str(k) for k in known_delivered}
         report = DeliveryReport(entered=len(leads))
         skip: Dict[str, int] = {}
         to_write: List[Dict[str, Any]] = []
@@ -173,6 +176,7 @@ class DeliveryManager:
         for rec in created_records:
             report.created += 1
             report.rollback_tokens.append(rec["airtable_id"])
+            report.delivered_lead_keys.append(rec["contact_key"])
             report.audit.append({"event": "created", "airtable_id": rec["airtable_id"],
                                  "contact_key": rec["contact_key"]})
             self._delivered.add(rec["contact_key"])
