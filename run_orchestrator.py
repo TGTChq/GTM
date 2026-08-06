@@ -72,6 +72,18 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--preflight-only", action="store_true",
                    help="Zero-network readiness check: report PRESENT/ABSENT config, "
                         "boards, artifact root; contact nothing; exit without running.")
+    p.add_argument("--inspect-run-lock", action="store_true",
+                   help="Zero-network: print the run lock's redacted metadata, "
+                        "classification and age; exit without running.")
+    p.add_argument("--recover-stale-run-lock", action="store_true",
+                   help="Zero-network audited recovery of a provably-stale lock. "
+                        "Requires --expected-run-id and --expected-ownership-token to "
+                        "match the on-disk lock exactly; refuses an active/changed lock.")
+    p.add_argument("--expected-run-id", default="",
+                   help="For --recover-stale-run-lock: the lock run_id you inspected.")
+    p.add_argument("--expected-ownership-token", default="",
+                   help="For --recover-stale-run-lock: the lock ownership token from "
+                        "--inspect-run-lock (or LEGACY-NO-TOKEN for a pre-hotfix lock).")
     return p
 
 
@@ -128,12 +140,29 @@ def _preflight_checks(a):
     res["writable"] = os.access(str(root), os.W_OK)
     free = shutil.disk_usage(str(root)).free
     res["free_ok"] = free >= MIN_FREE_BYTES_FOR_RUN
-    res["lock_free"] = not (root / ".run.lock").exists()
     lines.append(f"artifact_root        {root} writable={res['writable']}")
     lines.append(f"disk_free_gb         {round(free/1e9, 1)} "
                  f"(min {round(MIN_FREE_BYTES_FOR_RUN/1e9, 2)} GB, "
                  f"{'OK' if res['free_ok'] else 'INSUFFICIENT'})")
-    lines.append(f"run_lock             {'free' if res['lock_free'] else 'HELD'}")
+    # Run lock: CLASSIFY, do not treat mere existence as a blocker. A stale lock
+    # left by a gone container is auto-recovered at acquisition; only a live
+    # (foreign_active) or unprovable (indeterminate) lock blocks a live run.
+    from orchestrator.runlock import describe_lock
+    lk = describe_lock(root / ".run.lock")
+    res["lock"] = lk
+    cls = lk["classification"] if lk["present"] else "absent"
+    res["lock_class"] = cls
+    res["lock_blocks"] = lk["present"] and cls in ("foreign_active", "indeterminate", "current")
+    res["lock_free"] = not lk["present"]  # kept for back-compat readers
+    if not lk["present"]:
+        lines.append("run_lock             free (none)")
+    else:
+        lines.append(f"run_lock             {cls} run_id={lk['run_id']} pid={lk['pid']} "
+                     f"age_s={None if lk['age_seconds'] is None else int(lk['age_seconds'])}")
+        lines.append(f"  lock_identity      deployment={lk['deployment_id']} "
+                     f"replica={lk['replica_id']} service={lk['service']} "
+                     f"boot={(str(lk['boot_id'])[:8] + '...') if lk['boot_id'] else 'none'} "
+                     f"token={'yes' if lk['has_ownership_token'] else 'legacy-none'}")
     lines.append("delivery             airtable=review-staging(Pending) auto_approve=OFF instantly=OFF")
     return res, lines
 
@@ -147,6 +176,68 @@ def _preflight_only(a) -> int:
     print("network_contacted    NONE")
     print("PREFLIGHT OK")
     return 0
+
+
+def _inspect_run_lock(a) -> int:
+    """Zero-network: print the lock's redacted metadata, classification and age.
+    Reveals the ownership token (needed for --recover-stale-run-lock) because this
+    is an explicit operator diagnostic, not a normal run log."""
+    from orchestrator.runlock import describe_lock, LEGACY_TOKEN_SENTINEL
+    lock_path = Path(a.artifact_root) / ".run.lock"
+    lk = describe_lock(lock_path, reveal_token=True)
+    print("=== run-lock inspection (zero network) ===")
+    print(f"lock_path            {lk['path']}")
+    if not lk["present"]:
+        print("present              NO (no lock; a run may start normally)")
+        print("network_contacted    NONE")
+        return 0
+    print(f"present              YES")
+    print(f"classification       {lk['classification']}")
+    print(f"run_id               {lk['run_id']}")
+    print(f"pid                  {lk['pid']}")
+    print(f"created_at           {lk['created_at']}")
+    print(f"age_seconds          {None if lk['age_seconds'] is None else int(lk['age_seconds'])}")
+    print(f"deployment_id        {lk['deployment_id']}")
+    print(f"replica_id           {lk['replica_id']}")
+    print(f"service              {lk['service']}")
+    print(f"boot_id              {lk['boot_id']}")
+    print(f"owned_by_current     {lk['owned_by_current_invocation']}")
+    tok = lk["ownership_token"] if lk["has_ownership_token"] else LEGACY_TOKEN_SENTINEL
+    print(f"ownership_token      {tok}")
+    root = Path(a.artifact_root)
+    if lk["classification"] in ("stale",):
+        print("recovery             not required: acquisition auto-recovers a stale lock.")
+    elif lk["classification"] in ("indeterminate",):
+        print("recovery             if you are CERTAIN the owner is dead, run:")
+        print(f"  python run_orchestrator.py --recover-stale-run-lock --artifact-root {root} "
+              f"--expected-run-id {lk['run_id']} --expected-ownership-token {tok}")
+    elif lk["classification"] in ("foreign_active",):
+        print("recovery             REFUSED: the owner is verifiably active; do not recover.")
+    print("network_contacted    NONE")
+    return 0
+
+
+def _recover_run_lock(a) -> int:
+    """Zero-network audited recovery of a stale lock with exact identity match."""
+    from orchestrator.runlock import recover_stale_lock
+    lock_path = Path(a.artifact_root) / ".run.lock"
+    out = recover_stale_lock(
+        lock_path,
+        expected_run_id=a.expected_run_id,
+        expected_token=a.expected_ownership_token,
+        audit_dir=Path(a.artifact_root) / "run_lock_audit",
+    )
+    print("=== run-lock recovery (zero network) ===")
+    print(f"lock_path            {lock_path}")
+    print(f"recovered            {out.get('recovered')}")
+    print(f"classification       {out.get('classification')}")
+    print(f"reason               {out.get('reason', 'ok')}")
+    if out.get("recovered"):
+        print(f"audit_path           {out.get('audit_path')}")
+        print("network_contacted    NONE")
+        return 0
+    print("network_contacted    NONE")
+    return 2
 
 
 def _strict_preflight(a, policy) -> int:
@@ -166,8 +257,25 @@ def _strict_preflight(a, policy) -> int:
         problems.append("artifact root not writable")
     if not res.get("free_ok"):
         problems.append("insufficient free volume space")
-    if not res.get("lock_free"):
-        problems.append("a run is already active (lock held)")
+    # Run-lock: a stale lock is not a blocker (acquisition auto-recovers it); a
+    # live or indeterminate lock is. Emit a rich, actionable diagnostic.
+    lk = res.get("lock") or {}
+    if res.get("lock_blocks"):
+        root = Path(a.artifact_root)
+        tok = ("LEGACY-NO-TOKEN" if not lk.get("has_ownership_token")
+               else "<TOKEN-from --inspect-run-lock>")
+        print(f"run_lock             BLOCKS: classification={lk.get('classification')} "
+              f"owned_by_this_invocation=False", file=sys.stderr)
+        print("  a run lock is held and cannot be proven gone. If you are certain the "
+              "owner is dead, recover it explicitly:", file=sys.stderr)
+        print(f"    python run_orchestrator.py --inspect-run-lock --artifact-root {root}",
+              file=sys.stderr)
+        print(f"    python run_orchestrator.py --recover-stale-run-lock --artifact-root {root} "
+              f"--expected-run-id {lk.get('run_id')} --expected-ownership-token {tok}",
+              file=sys.stderr)
+        problems.append(f"run lock held ({lk.get('classification')})")
+    elif lk.get("present") and lk.get("classification") == "stale":
+        print("run_lock             stale -> acquisition will safely auto-recover it (audited)")
     if "jsearch" in lanes and not res.get("RAPIDAPI_KEY"):
         problems.append("RAPIDAPI_KEY (jsearch selected)")
     if policy.allow_enrichment and not res.get("APOLLO_API_KEY"):
@@ -232,6 +340,10 @@ def _live_ats_runner(a: argparse.Namespace):
 
 def main(argv=None) -> int:
     a = build_parser().parse_args(argv)
+    if a.inspect_run_lock:
+        return _inspect_run_lock(a)
+    if a.recover_stale_run_lock:
+        return _recover_run_lock(a)
     if a.preflight_only:
         return _preflight_only(a)
     mode = ExecutionMode(a.mode)
@@ -307,8 +419,13 @@ def main(argv=None) -> int:
         seam_ctx = seam_fake(lambda method, url, **k: FakeResponse(
             {"records": [], "people": [], "contacts": [], "organizations": [], "data": {}}))
 
-    with seam_ctx:
-        result = Orchestrator(ctx, state, budget).run(plan, resume=bool(a.resume))
+    from orchestrator.runlock import RunLockHeld
+    try:
+        with seam_ctx:
+            result = Orchestrator(ctx, state, budget).run(plan, resume=bool(a.resume))
+    except RunLockHeld as exc:
+        print(f"run_lock             HELD\n{exc}", file=sys.stderr)
+        return 2
 
     print(f"run_id      {ctx.run_id}")
     print(f"mode        {mode.value}")
