@@ -91,6 +91,40 @@ def build_parser() -> argparse.ArgumentParser:
 #: the volume has less free space than this.
 MIN_FREE_BYTES_FOR_RUN = 250 * 1024 * 1024
 
+#: Maintenance-only CLI arguments that must NEVER enter the persisted run
+#: identity: the lock inspect/recover flags and their recovery-authorization
+#: values. ``expected_ownership_token`` in particular is secret-bearing, and even
+#: its empty default carries a secret-looking NAME that the identity secret
+#: detector refuses to persist. These do not describe an execution, so a normal
+#: run must not pass them to ``RunContext.create``.
+_MAINTENANCE_ARGS = frozenset({
+    "inspect_run_lock",
+    "recover_stale_run_lock",
+    "expected_run_id",
+    "expected_ownership_token",
+})
+
+
+def _identity_arguments(a: argparse.Namespace) -> Dict[str, Any]:
+    """Execution-relevant, non-secret arguments only, for RunContext.create.
+
+    Excludes the maintenance-only lock inspect/recover flags and, defensively,
+    ANY argument whose name the identity secret-detector classifies as secret
+    (so a future ``--*-token`` / ``--*-secret`` maintenance flag can never leak
+    into the run identity either). The detector itself is unchanged and still
+    guards everything that remains -- this only stops secret-bearing maintenance
+    values from being handed to it in the first place.
+    """
+    from retrieval_measurement.identity import _is_secret
+    out: Dict[str, Any] = {}
+    for key, value in vars(a).items():
+        if key in _MAINTENANCE_ARGS:
+            continue
+        if _is_secret(f"RUN_ARG_{key.upper()}"):
+            continue
+        out[key] = value
+    return out
+
 
 def _preflight_checks(a):
     """Zero-network integrity/config/space checks. Returns (results, lines);
@@ -364,7 +398,7 @@ def main(argv=None) -> int:
         if gate != 0:
             return gate
 
-    ctx = RunContext.create(mode, vars(a), run_id=a.run_id)
+    ctx = RunContext.create(mode, _identity_arguments(a), run_id=a.run_id)
     state = StateManager(a.artifact_root, policy, run_id=ctx.run_id)
     budget = build_budget(a)
 
