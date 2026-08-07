@@ -775,6 +775,13 @@ AIRTABLE_STATUS_ENROLLED = os.getenv("AIRTABLE_STATUS_ENROLLED", "Enrolled")
 AIRTABLE_STATUS_ERROR = os.getenv("AIRTABLE_STATUS_ERROR", "Error")
 APPROVED_REVALIDATION_MAX_AGE_HOURS = _env_int("APPROVED_REVALIDATION_MAX_AGE_HOURS", 24)
 APPROVED_REVALIDATE_JOB_SOURCE = _env_bool("APPROVED_REVALIDATE_JOB_SOURCE", True)
+# Approved-sync worker: keep the fail-closed Apollo/Hunter revalidation ON by
+# default in production (re-checks current employment/email immediately before
+# Instantly enrollment). When set false, the worker still fail-closes on the
+# zero-network validation fingerprint + Airtable Approved status + email/campaign/
+# suppression checks, but makes no provider call. The definitive production
+# worker runs with this true.
+APPROVED_SYNC_REVALIDATE_PROVIDERS = _env_bool("APPROVED_SYNC_REVALIDATE_PROVIDERS", True)
 SLA_REQUIRE_NET_NEW_AIRTABLE = _env_bool("SLA_REQUIRE_NET_NEW_AIRTABLE", True)
 # A commercial volume miss is reported in the run summary but is not a process
 # failure. Keep this disabled for Railway services to avoid restart loops.

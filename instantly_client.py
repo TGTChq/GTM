@@ -45,7 +45,7 @@ def _flat(value):
     return str(value)
 
 
-def airtable_record_to_lead(record: Dict) -> Dict:
+def airtable_record_to_lead(record: Dict, *, probe: bool = True) -> Dict:
     fields = record.get("fields") or {}
 
     # Defense in depth: only validated actionable states may be enrolled, and
@@ -57,7 +57,9 @@ def airtable_record_to_lead(record: Dict) -> Dict:
     if final_decision and not validation_version:
         raise ValueError("Approved validated row is missing Validation Version")
 
-    signal_block = enrollment_block_reason(fields)
+    # ``probe=False`` keeps this builder zero-network (job-URL status is not
+    # fetched) so the approved-sync preflight and local revalidation stay hermetic.
+    signal_block = enrollment_block_reason(fields, probe_missing=probe)
     if signal_block:
         raise ValueError(signal_block)
 
