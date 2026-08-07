@@ -200,7 +200,23 @@ def main(argv=None) -> int:
         logger.exception("Approved-lead sync crashed")
         return 1
 
+    _print_sync_summary(result)
     return 1 if int(result.get("failed", 0)) > 0 else 0
+
+
+def _print_sync_summary(result: dict) -> None:
+    """Emit the Approved-Sync business metrics to stdout so the Railway operator
+    can read the worker's outcome from logs. Counts only -- never PII."""
+    approved = int(result.get("approved", 0) or 0)
+    revalidation_failed = int(result.get("revalidation_failed", 0) or 0)
+    print("============ APPROVED SYNC SUMMARY ============")
+    print(f"{'APPROVED_FOUND':<24}{approved}")
+    print(f"{'REVALIDATED':<24}{approved - revalidation_failed}")
+    print(f"{'REVALIDATION_FAILED':<24}{revalidation_failed}")
+    print(f"{'SENT_TO_INSTANTLY':<24}{int(result.get('enrolled', 0) or 0)}")
+    print(f"{'DUPLICATES_SKIPPED':<24}{int(result.get('duplicates', 0) or 0)}")
+    print(f"{'FAILED':<24}{int(result.get('failed', 0) or 0)}")
+    print("==============================================")
 
 
 if __name__ == "__main__":

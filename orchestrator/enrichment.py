@@ -73,6 +73,9 @@ class EnrichmentReport:
     leads: List[Lead] = field(default_factory=list)
     stages: List[StageResult] = field(default_factory=list)
     loss_census: Dict[str, int] = field(default_factory=dict)
+    #: Optional cross-stage funnel counts (companies considered, ICP eligible/
+    #: rejected, hiring managers found, ...) surfaced for operator observability.
+    funnel: Dict[str, Any] = field(default_factory=dict)
 
     def dispositions(self) -> List[Disposition]:
         return [lead.disposition for lead in self.leads]
@@ -100,6 +103,7 @@ class EnrichmentReport:
             "leads": len(self.leads),
             "final_pass": len(self.final_pass()),
             "loss_census": dict(sorted(self.loss_census.items())),
+            "funnel": dict(self.funnel),
             "stages": [s.to_dict() for s in self.stages],
             "sample": [l.to_dict() for l in self.leads[:10]],
         }

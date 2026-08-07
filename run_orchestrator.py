@@ -461,17 +461,82 @@ def main(argv=None) -> int:
         print(f"run_lock             HELD\n{exc}", file=sys.stderr)
         return 2
 
-    print(f"run_id      {ctx.run_id}")
-    print(f"mode        {mode.value}")
-    print(f"status      {result['run']['status']}")
-    print(f"postings    {result['waterfall']['unit_totals'].get('postings')}")
-    print(f"final_pass  {result['waterfall'].get('final_pass_count')}")
-    if result.get("delivery"):
-        print(f"delivered   {result['delivery']['created']} "
-              f"(reconciles={result['delivery']['airtable_reconciles']})")
-    print(f"reconcile   {result['all_reconcile']}")
-    print(f"artifacts   {state.run_dir()}")
+    _print_run_summary(ctx, mode, result, state)
     return 0 if result["all_reconcile"] else 1
+
+
+def _print_run_summary(ctx, mode, result, state) -> None:
+    """Emit the full business funnel to stdout so a Railway operator can read the
+    whole run from logs WITHOUT mounting the volume (Defect G). Every value is
+    already computed in-memory; nothing here recomputes or contacts anything.
+    No PII is printed -- counts and reason codes only."""
+    wf = result.get("waterfall") or {}
+    units = wf.get("unit_totals") or {}
+    census = wf.get("disposition_census") or {}
+    enr = result.get("enrichment") or {}
+    funnel = (enr or {}).get("funnel") or {}
+    deliv = result.get("delivery") or {}
+
+    raw = units.get("postings")
+    unique = units.get("opportunities")
+    contacts = units.get("contacts")
+    fp = wf.get("final_pass_count", census.get("FINAL_PASS", 0))
+    nc = census.get("NEEDS_CHECK", 0)
+    uv = census.get("UNVERIFIED", 0)
+    usable_emails = int(fp or 0) + int(uv or 0)  # verified + pending-verification
+    at_created = deliv.get("created")
+    at_existing = deliv.get("skipped_existing")
+    at_failed = deliv.get("failed")
+    at_submitted = deliv.get("reviewable_submitted")
+
+    # Top rejection reasons across the boundaries the orchestrator can see:
+    # cross-run dedup, pre-contact qualification, and enrichment loss.
+    reasons: Dict[str, int] = {}
+    for st in wf.get("stages") or []:
+        for r, n in (st.get("primary_reasons") or {}).items():
+            reasons[r] = reasons.get(r, 0) + int(n)
+    for r, n in (funnel.get("qual_reason_counts") or {}).items():
+        reasons[r] = reasons.get(r, 0) + int(n)
+    for r, n in (enr.get("loss_census") or {}).items():
+        reasons[r] = reasons.get(r, 0) + int(n)
+    top5 = sorted(reasons.items(), key=lambda kv: kv[1], reverse=True)[:5]
+
+    def line(k, v):
+        print(f"{k:<26}{v}")
+
+    print("================ RUN SUMMARY ================")
+    line("run_id", ctx.run_id)
+    line("mode", mode.value)
+    line("status", result["run"]["status"])
+    print("---- Brett's daily metrics ----")
+    line("JOBS_ANALYZED", raw)
+    line("QUALIFIED", funnel.get("target_role_eligible", funnel.get("icp_eligible_companies")))
+    line("CONTACTS_FOUND", contacts)
+    line("SENT_TO_AIRTABLE", at_created)
+    print("---- Funnel ----")
+    line("raw_postings", raw)
+    line("unique_opportunities", unique)
+    line("target_role_eligible", funnel.get("target_role_eligible"))
+    line("companies_considered", funnel.get("companies_considered"))
+    line("icp_eligible_companies", funnel.get("icp_eligible_companies"))
+    line("icp_rejected_companies", funnel.get("icp_rejected_companies"))
+    line("hiring_managers_found", funnel.get("hiring_managers_found"))
+    line("contacts_with_email", contacts)
+    line("usable_emails", usable_emails)
+    line("FINAL_PASS", fp)
+    line("NEEDS_CHECK", nc)
+    line("UNVERIFIED", uv)
+    print("---- Airtable (review-staging, Status=Pending) ----")
+    line("airtable_submitted", at_submitted)
+    line("airtable_created", at_created)
+    line("airtable_existing", at_existing)
+    line("airtable_failed", at_failed)
+    print("---- Top rejection reasons ----")
+    for r, n in top5:
+        print(f"  {r} = {n}")
+    line("reconcile", result["all_reconcile"])
+    line("artifacts", state.run_dir())
+    print("=============================================")
 
 
 if __name__ == "__main__":  # pragma: no cover

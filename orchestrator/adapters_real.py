@@ -371,6 +371,31 @@ class RealEnrichmentStage:
 
         dispo = [(self._STAGE_OUTCOME[l.disposition], l.primary_reason, None) for l in leads]
         stage = reconcile_stage("hiring_manager", "lead", dispo)
+        # Cross-stage funnel for operator observability (Defect G). Every value is
+        # already computed by the real qualification + hiring-manager stages; we
+        # only surface it so the operator can read the funnel from Railway logs.
+        qual_reasons = {k[len("reason__"):]: v
+                        for k, v in (getattr(qual, "stats", {}) or {}).items()
+                        if str(k).startswith("reason__")}
+        funnel = {
+            "qualification_input": int(getattr(qual, "input_jobs", 0) or 0),
+            "target_role_eligible": int(getattr(qual, "contact_eligible_jobs", 0) or 0),
+            "qual_rejected": int(getattr(qual, "rejected_jobs", 0) or 0),
+            "qual_needs_check": int(getattr(qual, "needs_check_jobs", 0) or 0),
+            "qual_unverified": int(getattr(qual, "unverified_jobs", 0) or 0),
+            "companies_considered": int(getattr(step3, "companies_considered", 0) or 0),
+            "icp_eligible_companies": int(getattr(step3, "eligible_companies", 0) or 0),
+            "icp_rejected_companies": int(getattr(step3, "company_criteria_excluded_companies", 0) or 0),
+            "hiring_managers_found": int(getattr(step3, "hiring_manager_found", 0) or 0),
+            "hiring_managers_not_found": int(getattr(step3, "hiring_manager_not_found", 0) or 0),
+            "contactable_hiring_managers": int(getattr(step3, "contactable_hiring_managers", 0) or 0),
+            "final_pass": authoritative[Disposition.FINAL_PASS],
+            "needs_check": authoritative[Disposition.NEEDS_CHECK],
+            "unverified": authoritative[Disposition.UNVERIFIED],
+            "reroute": authoritative[Disposition.REROUTE],
+            "rejected": authoritative[Disposition.REJECT],
+            "qual_reason_counts": qual_reasons,
+        }
         return EnrichmentReport(
             leads=leads,
             stages=[stage],
@@ -381,6 +406,7 @@ class RealEnrichmentStage:
                 "needs_check": authoritative[Disposition.NEEDS_CHECK],
                 "unverified": authoritative[Disposition.UNVERIFIED],
             },
+            funnel=funnel,
         )
 
 
