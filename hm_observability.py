@@ -406,24 +406,56 @@ def domain_resolution_summary(all_leads: List[Dict[str, Any]]) -> Dict[str, Any]
     by_class: Dict[str, int] = defaultdict(int)
     by_reason: Dict[str, int] = defaultdict(int)
     by_method: Dict[str, int] = defaultdict(int)
+    by_source: Dict[str, int] = defaultdict(int)
+    by_source_unresolved: Dict[str, int] = defaultdict(int)
+    staffing_or_hidden = aggregator = intermediary = ats_known = direct = 0
+    unlocked_by_recovery = 0
     for lead in eligible:
         diag = _diag(lead)
+        src = str(_first(lead, "_acquisition_source", "job_publisher", default="unknown") or "unknown")
+        by_source[src] += 1
         if _has_domain(lead) or _searched(lead):
             resolved += 1
+            method = str(diag.get("domain_resolution_method") or "enrichment_resolved")
             by_class["direct_employer"] += 1
-            by_method[str(diag.get("domain_resolution_method") or "enrichment_resolved")] += 1
+            by_method[method] += 1
+            direct += 1
+            # a recovered (non-enrichment) method is a search unlocked by this layer
+            if method not in ("enrichment_resolved", "none", ""):
+                unlocked_by_recovery += 1
         else:
             unresolved += 1
-            by_class[str(diag.get("domain_classification") or "unresolved_no_evidence")] += 1
+            cls = str(diag.get("domain_classification") or "unresolved_no_evidence")
+            by_class[cls] += 1
             by_reason[str(diag.get("domain_unresolved_reason") or "unknown")] += 1
+            by_source_unresolved[src] += 1
+            if cls == "intermediary_unknown_client" or cls == "intermediary_known_client":
+                intermediary += 1
+                staffing_or_hidden += 1
+            elif cls == "aggregator_employer_unresolved":
+                aggregator += 1
+            elif cls == "ats_employer_known":
+                ats_known += 1
     return {
+        # Units: these are company×role_bucket "postings evaluated" for HM search.
+        "postings_evaluated": len(eligible),
         "eligible_company_buckets": len(eligible),
-        "resolved": resolved,
-        "unresolved": unresolved,
+        "employer_resolved": resolved,
+        "employer_unresolved": unresolved,
+        "domain_resolved": resolved,
+        "domain_unresolved": unresolved,
         "resolution_rate": round(resolved / len(eligible), 4) if eligible else 0.0,
+        "hm_searches_unlocked_by_recovery": unlocked_by_recovery,
+        "direct_employer": direct,
+        "ats_employer_known": ats_known,
+        "aggregator": aggregator,
+        "intermediary": intermediary,
+        "staffing_or_hidden_client": staffing_or_hidden,
         "classification": dict(sorted(by_class.items())),
         "resolved_by_method": dict(sorted(by_method.items())),
         "unresolved_by_reason": dict(sorted(by_reason.items())),
+        "by_source": dict(sorted(by_source.items())),
+        "unresolved_by_source": dict(sorted(by_source_unresolved.items())),
     }
 
 
@@ -465,13 +497,16 @@ def stdout_summary(hm: Dict[str, Any], mf: Dict[str, Any],
     # in a healthy run; a no_search_domain shortfall never counts here.
     lines.append(f"{'true_collapse_detected':<32}{mf.get('true_collapse_count', 0)}")
     if dr:
-        lines.append("---- Domain Resolution ----")
-        lines.append(f"{'eligible_company_buckets':<32}{dr.get('eligible_company_buckets', 0)}")
-        lines.append(f"{'resolved':<32}{dr.get('resolved', 0)}")
-        lines.append(f"{'unresolved':<32}{dr.get('unresolved', 0)}")
-        lines.append(f"{'resolution_rate':<32}{dr.get('resolution_rate', 0.0)}")
+        lines.append("---- Employer / Domain Resolution ----")
+        for key in ("postings_evaluated", "direct_employer", "ats_employer_known",
+                    "aggregator", "intermediary", "staffing_or_hidden_client",
+                    "employer_resolved", "employer_unresolved",
+                    "hm_searches_unlocked_by_recovery", "resolution_rate"):
+            lines.append(f"{key:<34}{dr.get(key, 0)}")
         for reason, n in (dr.get("unresolved_by_reason") or {}).items():
-            lines.append(f"  unresolved:{reason:<22} {n}")
+            lines.append(f"  unresolved:{reason:<24} {n}")
+        for src, n in (dr.get("unresolved_by_source") or {}).items():
+            lines.append(f"  by_source:{src:<25} {n}")
     return lines
 
 
@@ -507,6 +542,7 @@ def write_run_artifacts(all_leads: List[Dict[str, Any]],
         "hiring_manager_summary_json": out / "hiring_manager_summary.json",
         "multi_function_summary_json": out / "multi_function_summary.json",
         "domain_resolution_summary_json": out / "domain_resolution_summary.json",
+        "employer_resolution_summary_json": out / "employer_resolution_summary.json",
     }
     _write_csv(paths["hiring_manager_failures_csv"], HM_FAILURE_COLUMNS, failure_rows)
     _write_csv(paths["multi_function_accounts_csv"], MULTI_FUNCTION_COLUMNS, mf_rows)
@@ -515,6 +551,9 @@ def write_run_artifacts(all_leads: List[Dict[str, Any]],
     paths["multi_function_summary_json"].write_text(
         json.dumps(mf_sum, indent=2), encoding="utf-8")
     paths["domain_resolution_summary_json"].write_text(
+        json.dumps(dr_sum, indent=2), encoding="utf-8")
+    # Richer employer/source-vs-employer view (superset of domain_resolution).
+    paths["employer_resolution_summary_json"].write_text(
         json.dumps(dr_sum, indent=2), encoding="utf-8")
 
     return {

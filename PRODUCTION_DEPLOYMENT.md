@@ -154,6 +154,48 @@ Decision`/`Validation Version`/fingerprint → all classified legacy → never e
 3. If any row is eligible that you did not intend to enroll, STOP and inspect it —
    do not enable the cron.
 
+## Employer / domain resolution (source ≠ employer)
+
+The dominant HM-failure cause is `no_search_domain` (353/452 in the first run; 77%
+Himalayas, ~20% JSearch aggregator, only 5 ATS). Root cause is **source quality**:
+the aggregator feeds carry no first-party employer domain. This pass adds a
+deterministic, evidence-only layer (`domain_resolution.py`) that never guesses:
+
+- **Preserve early.** Free feeds forced `is_direct=False` even when the
+  `applicationLink` was the employer's own host; now `_canonical_job` marks it
+  `is_direct=True` **only** when the host clears the intermediary denylist AND its
+  registrable domain is name-consistent with the employer, so the standard
+  employer-domain path can use it. ATS/board hosts (`boards.greenhouse.io`,
+  `jobs.lever.co`, `*.myworkdayjobs.com`, …) are denylisted and never accepted.
+- **Resolution chain (first-party first):** enrichment-resolved → direct
+  `apply_options` host → **name-consistent first-party host** (from any apply/source
+  URL) → curated `COMPANY_DOMAIN_ALIASES` → unresolved. Every step is denylist-safe
+  and evidence-backed; a job-board host that does not match the employer name is
+  rejected (no misattribution).
+- **Explicit classification** (source ≠ employer): `direct_employer`,
+  `ats_employer_known` (first-party name known, domain unresolved — searchable by
+  name), `aggregator_employer_unresolved`, `intermediary_unknown_client`
+  (staffing/hidden client — not a technical failure; Apollo is not wasted on the
+  wrong org), `known_employer_unresolved_domain`, `unresolved_no_evidence`.
+- **Observability:** each run emits `employer_resolution_summary.json` +
+  `domain_resolution_summary.json` and a `---- Employer / Domain Resolution ----`
+  log block (postings_evaluated, direct/aggregator/intermediary/staffing,
+  employer_resolved/unresolved, hm_searches_unlocked_by_recovery, by_source,
+  by_unresolved_reason). Units are company×role_bucket "postings evaluated".
+
+**Curated aliases.** `reports/domain_alias_candidates_<run>.csv` lists recognizable
+employers in the unresolved set. Domains are proposed ONLY when name-consistent and
+evidence-backed (0 auto-safe in the first run); 5 employers (J&J, Philip Morris,
+HII, VTG, HP) carry an observed first-party careers host but an acronym/brand
+mismatch, so they are flagged **manual_review** — verify before adding to
+`COMPANY_DOMAIN_ALIASES_JSON`. Never add a domain guessed from a company name.
+
+Honest impact: **observed historical recovery ≈ 0** (the artifact is evidence-barren);
+**expected future recovery** is the subset of future free-feed/JSearch postings whose
+apply/source URL is a name-consistent employer host (bounded, source-dependent) plus
+any curated aliases. ~331/353 Himalayas/aggregator failures are structurally
+unresolvable from what those sources expose and need a different source.
+
 ## Cutover sequence (staged — do not release the historical backlog automatically)
 
 1. Merge the final PR.
