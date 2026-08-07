@@ -17,7 +17,7 @@ from domain_utils import normalize_company_domain
 from job_filter import normalize_text
 from job_signal import annotate_job
 from review_policy import is_airtable_reviewable
-from validation_integrity import validation_fingerprint, utc_now_iso
+from validation_integrity import validation_fingerprint, fingerprint_matches, utc_now_iso
 from http_utils import request_with_retry, safe_json
 
 logger = logging.getLogger(__name__)
@@ -427,6 +427,50 @@ def _company_identity_keys_from_job(job: Dict) -> Set[str]:
     return _company_identity_keys_from_fields(fields)
 
 
+def _company_function_keys_from_fields(fields: Dict) -> Set[str]:
+    """Company identity keys qualified by role bucket (function), e.g.
+    ``domain:acme.com|bucket:marketing``. This is what makes review/delivery dedup
+    FUNCTION-aware: Acme+Marketing and Acme+Sales are distinct opportunities and
+    must NOT suppress each other. A record with no ``Role Bucket`` yields an empty
+    set (it can only ever match the company-level account path, never a bucket)."""
+    bucket = str(fields.get("Role Bucket") or "").strip().lower()
+    if not bucket:
+        return set()
+    return {f"{k}|bucket:{bucket}" for k in _company_identity_keys_from_fields(fields)}
+
+
+def _company_function_keys_from_job(job: Dict) -> Set[str]:
+    fields = {
+        "Website": (
+            f"https://{job.get('company_domain')}"
+            if job.get("company_domain")
+            else job.get("employer_website")
+        ),
+        "Company": job.get("employer_name"),
+        "Role Bucket": job.get("_role_bucket"),
+    }
+    return _company_function_keys_from_fields(fields)
+
+
+def _active_existing_company_function_keys(existing: Dict[str, Dict]) -> Set[str]:
+    """Bucket-aware sibling of ``_active_existing_company_keys``: an active
+    (Pending/Approved/Enrolled/blank) record blocks only the SAME company+function,
+    not the whole company. Error/Rejected remain retryable, exactly as the
+    company-level path."""
+    keys: Set[str] = set()
+    retryable_statuses = {
+        str(config.AIRTABLE_STATUS_ERROR).strip().lower(),
+        str(config.AIRTABLE_STATUS_REJECTED).strip().lower(),
+    }
+    for record in existing.values():
+        fields = record.get("fields") or {}
+        status = str(fields.get("Status") or "").strip().lower()
+        if status in retryable_statuses:
+            continue
+        keys.update(_company_function_keys_from_fields(fields))
+    return keys
+
+
 def _active_existing_company_keys(existing: Dict[str, Dict]) -> Set[str]:
     keys: Set[str] = set()
     for record in existing.values():
@@ -504,18 +548,36 @@ def push_leads(jobs: List[Dict], batch_size: int = 10) -> Dict:
     existing = _get_existing_leads()
 
     existing_keys = [key for key in unique_by_key if key in existing]
-    existing_company_keys = (
+    # Two INDEPENDENT suppression tiers (see config.AIRTABLE_SUPPRESS_* docs):
+    #  (a) ACCOUNT-LEVEL (company-only, bucket-blind): the optional CRM/active-
+    #      pipeline "one account at a time" rule. Checked FIRST and hard-suppresses
+    #      the whole company regardless of function. Default OFF -- enable only when
+    #      an account-level exclusion policy is intended.
+    #  (b) FUNCTION-LEVEL (company+role_bucket): the review/delivery dedup. Suppresses
+    #      only the SAME company+function, so a DIFFERENT function (Acme+Sales when
+    #      Acme+Marketing exists) is preserved as its own opportunity. Default ON.
+    existing_account_keys = (
         _active_existing_company_keys(existing)
-        if config.AIRTABLE_SUPPRESS_EXISTING_COMPANY
+        if config.AIRTABLE_SUPPRESS_ACCOUNT_LEVEL
         else set()
     )
+    existing_company_function_keys = (
+        _active_existing_company_function_keys(existing)
+        if config.AIRTABLE_SUPPRESS_EXISTING_COMPANY_FUNCTION
+        else set()
+    )
+    suppressed_account_keys: List[str] = []
     suppressed_company_keys: List[str] = []
     to_create: List[Dict] = []
     for key, job in unique_by_key.items():
         if key in existing:
             continue
-        company_keys = _company_identity_keys_from_job(job)
-        if company_keys and company_keys & existing_company_keys:
+        account_keys = _company_identity_keys_from_job(job)
+        if account_keys and account_keys & existing_account_keys:
+            suppressed_account_keys.append(key)
+            continue
+        function_keys = _company_function_keys_from_job(job)
+        if function_keys and function_keys & existing_company_function_keys:
             suppressed_company_keys.append(key)
             continue
         to_create.append(job)
@@ -629,6 +691,7 @@ def push_leads(jobs: List[Dict], batch_size: int = 10) -> Dict:
 
     skipped_existing = len(existing_keys) - len(to_update)
     skipped_existing_company = len(suppressed_company_keys)
+    skipped_existing_account = len(suppressed_account_keys)
     skipped_no_contact = len(jobs) - len(reviewable)
     signal_review_required = sum(
         bool(job.get("job_signal_review_required")) for job in unique_by_key.values()
@@ -636,6 +699,7 @@ def push_leads(jobs: List[Dict], batch_size: int = 10) -> Dict:
     persisted_lead_keys = list(dict.fromkeys([
         *existing_keys,
         *suppressed_company_keys,
+        *suppressed_account_keys,
         *created_lead_keys,
     ]))
     return {
@@ -647,6 +711,8 @@ def push_leads(jobs: List[Dict], batch_size: int = 10) -> Dict:
         "skipped_existing": skipped_existing,
         "skipped_existing_company": skipped_existing_company,
         "suppressed_company_lead_keys": suppressed_company_keys,
+        "skipped_existing_account": skipped_existing_account,
+        "suppressed_account_lead_keys": suppressed_account_keys,
         "failed": failed,
         "failed_lead_keys": failed_lead_keys,
         # Sanitized per-batch failure diagnostics (status, Airtable error type,
@@ -827,25 +893,85 @@ def fetch_status_records(status: str) -> List[Dict]:
     return records
 
 
-def get_approved_leads() -> List[Dict]:
-    records = fetch_status_records(config.AIRTABLE_STATUS_APPROVED)
+#: Final Decision values that can be enrolled (an actionable validated decision).
+_ACTIONABLE_FINAL_DECISIONS = {"FINAL_PASS", "NEEDS_CHECK", "UNVERIFIED"}
 
-    if config.FINAL_PASS_PIPELINE_ENABLED:
-        safe_records = [
-            record for record in records
-            if str((record.get("fields") or {}).get("Final Decision") or "").strip()
-            in {"FINAL_PASS", "NEEDS_CHECK", "UNVERIFIED"}
-            and str((record.get("fields") or {}).get("Validation Version") or "").strip()
-            and str((record.get("fields") or {}).get("Email") or "").strip()
-        ]
-        skipped = len(records) - len(safe_records)
-        if skipped:
-            logger.error(
-                "Blocked %d Approved Airtable row(s) without an actionable validated decision",
-                skipped,
-            )
-        return safe_records
-    return records
+
+def approved_row_eligibility(fields: Dict) -> tuple[str, str]:
+    """Classify one Status=Approved row for Instantly enrollment. Returns
+    ``(category, reason)`` where category is:
+
+      * ``"eligible"`` -- Approved AND carries a CURRENT, correctly-signed,
+        actionable validated decision with an email and a resolvable campaign.
+      * ``"legacy"``   -- Approved but NOT authorized by the current pipeline
+        (missing/old ``Final Decision`` / ``Validation Version`` / fingerprint).
+        These are NEVER enrolled and NEVER written -- they are simply skipped.
+      * ``"invalid"``  -- authorized shape but unusable (no email, or no campaign
+        configured). A misconfiguration/data gap, also skipped without a write.
+
+    This is fail-closed: any doubt classifies away from ``"eligible"``. It is the
+    single guard that stops the legacy Approved backlog (rows without the current
+    validation metadata) from ever reaching Instantly."""
+    fd = str(fields.get("Final Decision") or "").strip()
+    if fd not in _ACTIONABLE_FINAL_DECISIONS:
+        return "legacy", "no_actionable_final_decision"
+    # Exact version match -- a row signed under an OLD Validation Version (even with
+    # a self-consistent fingerprint) is legacy, not current authorization.
+    if str(fields.get("Validation Version") or "").strip() != str(config.VALIDATION_VERSION):
+        return "legacy", "validation_version_mismatch"
+    if not str(fields.get("Validation Fingerprint") or "").strip():
+        return "legacy", "missing_validation_fingerprint"
+    if not fingerprint_matches(fields):
+        return "legacy", "validation_fingerprint_mismatch"
+    if not str(fields.get("Email") or "").strip():
+        return "invalid", "missing_email"
+    campaign = str(fields.get("Campaign ID") or "").strip() or config.resolve_campaign_id(
+        str(fields.get("Role Bucket") or ""), fields.get("Employees"))
+    if not str(campaign or "").strip():
+        return "invalid", "no_campaign_configured"
+    return "eligible", "eligible"
+
+
+def select_eligible_approved() -> tuple[List[Dict], Dict[str, int]]:
+    """Partition Status=Approved rows into the enrollable set + skip counts.
+
+    Legacy/invalid rows are dropped here, BEFORE any revalidation or Instantly
+    call, and WITHOUT any Airtable write (a legacy row must never be marked Error
+    just because it is not authorized for the current worker). This runs
+    unconditionally -- it does NOT depend on ``FINAL_PASS_PIPELINE_ENABLED`` -- so a
+    stale env flag can never release the legacy backlog."""
+    records = fetch_status_records(config.AIRTABLE_STATUS_APPROVED)
+    eligible: List[Dict] = []
+    counts = {"approved_seen": len(records), "approved_eligible": 0,
+              "approved_skipped_legacy": 0, "approved_skipped_invalid": 0}
+    reasons: Dict[str, int] = {}
+    for record in records:
+        category, reason = approved_row_eligibility(record.get("fields") or {})
+        if category == "eligible":
+            eligible.append(record)
+            counts["approved_eligible"] += 1
+        elif category == "legacy":
+            counts["approved_skipped_legacy"] += 1
+            reasons[reason] = reasons.get(reason, 0) + 1
+        else:
+            counts["approved_skipped_invalid"] += 1
+            reasons[reason] = reasons.get(reason, 0) + 1
+    skipped = counts["approved_skipped_legacy"] + counts["approved_skipped_invalid"]
+    if skipped:
+        logger.info(
+            "Approved-sync eligibility: seen=%d eligible=%d skipped_legacy=%d "
+            "skipped_invalid=%d (no writes for skipped) reasons=%s",
+            counts["approved_seen"], counts["approved_eligible"],
+            counts["approved_skipped_legacy"], counts["approved_skipped_invalid"],
+            dict(sorted(reasons.items())))
+    return eligible, counts
+
+
+def get_approved_leads() -> List[Dict]:
+    """Back-compat wrapper: only the eligible (current, authorized) Approved rows.
+    Legacy/invalid rows are skipped with no write. See ``select_eligible_approved``."""
+    eligible, _counts = select_eligible_approved()
+    return eligible
 
 
 def mark_status(record_ids: Iterable[str], status: str, error: str = "") -> None:

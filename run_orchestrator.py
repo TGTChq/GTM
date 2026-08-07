@@ -710,7 +710,8 @@ def _print_run_summary(ctx, mode, result, state) -> None:
         try:
             import hm_observability
             for ln in hm_observability.stdout_summary(
-                    hm_obs.get("hiring_manager") or {}, hm_obs.get("multi_function") or {}):
+                    hm_obs.get("hiring_manager") or {}, hm_obs.get("multi_function") or {},
+                    hm_obs.get("domain_resolution") or {}):
                 print(ln)
         except Exception:  # noqa: BLE001 - summary is best-effort, never fatal
             pass

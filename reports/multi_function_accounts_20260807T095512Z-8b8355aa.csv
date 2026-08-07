@@ -1,2 +1,56 @@
-# BLOCKED: per-row data for run 20260807T095512Z-8b8355aa lives in /app/data/state/orchestrator_v2/run_artifacts/20260807T095512Z-8b8355aa/ (and jobs_enriched_*.json) on the Railway gtm-volume, which is attached to the EXITED 'GTM' cron container. It cannot be read without starting a container that mounts the volume (a production mutation), which was explicitly forbidden. Railway deploy logs expose only the tail summary, not per-company detail. These files carry the FINAL schema; the new hm_observability emitter auto-populates identical files on the next run.
-company,domain,relevant_jobs,functions,num_functions,expected_hm_searches,actual_hm_searches,contacts_found_by_function,leads_by_function,collapse_detected,collapse_boundary
+company,domain,relevant_jobs,functions,num_functions,expected_hm_searches,actual_hm_searches,contacts_found_by_function,leads_by_function,true_collapse_detected,search_shortfall,no_search_domain_shortfall,excluded_buckets,shortfall_cause
+CVS Health,,244,customer_support;gtm_revenue;operations,3,0,0,customer_support:0;gtm_revenue:0;operations:0,customer_support:1;gtm_revenue:1;operations:1,False,0,0,3,
+Socket,socket.dev,22,gtm_revenue;marketing,2,2,2,gtm_revenue:1;marketing:1,gtm_revenue:1;marketing:1,False,0,0,0,
+Robert Half,,15,customer_success;customer_support;finance;marketing;people_hr,5,0,0,customer_success:0;customer_support:0;finance:0;marketing:0;people_hr:0,customer_success:1;customer_support:1;finance:1;marketing:1;people_hr:1,False,0,0,5,
+TEKsystems,,7,customer_support;engineering;gtm_revenue;people_hr,4,0,0,customer_support:0;engineering:0;gtm_revenue:0;people_hr:0,customer_support:1;engineering:1;gtm_revenue:1;people_hr:1,False,0,0,4,
+Aston Carter,,5,finance;operations;people_hr,3,0,0,finance:0;operations:0;people_hr:0,finance:1;operations:1;people_hr:1,False,0,0,3,
+Ultimate Staffing,,3,customer_success;operations,2,0,0,customer_success:0;operations:0,customer_success:1;operations:1,False,0,0,2,
+Evlo AI,evlo.ai,4,engineering;gtm_revenue,2,2,2,engineering:0;gtm_revenue:0,engineering:1;gtm_revenue:1,False,0,0,0,
+Apex Systems,,4,customer_support;engineering;product,3,0,0,customer_support:0;engineering:0;product:0,customer_support:1;engineering:1;product:1,False,0,0,3,
+Colliers,,3,gtm_revenue;marketing,2,0,0,gtm_revenue:0;marketing:0,gtm_revenue:1;marketing:1,False,0,0,2,
+Fortinet,,3,gtm_revenue;marketing,2,0,0,gtm_revenue:0;marketing:0,gtm_revenue:1;marketing:1,False,0,0,2,
+Randstad USA,,2,engineering;finance,2,0,0,engineering:0;finance:0,engineering:1;finance:1,False,0,0,2,
+Varsity Brands,,2,finance;product,2,0,0,finance:0;product:0,finance:1;product:1,False,0,0,2,
+DoorDash,,3,customer_success;gtm_revenue,2,0,0,customer_success:0;gtm_revenue:0,customer_success:1;gtm_revenue:1,False,0,0,2,
+Capital One,,5,engineering;marketing,2,0,0,engineering:0;marketing:0,engineering:1;marketing:1,False,0,0,2,
+System One,,2,engineering;marketing,2,0,0,engineering:0;marketing:0,engineering:1;marketing:1,False,0,0,2,
+Veralto Global,,60,customer_support;gtm_revenue,2,0,0,customer_support:0;gtm_revenue:0,customer_support:1;gtm_revenue:1,False,0,0,2,
+Upwork,,21,ecommerce;engineering;marketing,3,0,0,ecommerce:0;engineering:0;marketing:0,ecommerce:1;engineering:1;marketing:1,False,0,0,3,
+Amazon,,7,customer_support;gtm_revenue,2,0,0,customer_support:0;gtm_revenue:0,customer_support:1;gtm_revenue:1,False,0,0,2,
+Walmart,,7,customer_success;gtm_revenue;marketing;people_hr,4,0,0,customer_success:0;gtm_revenue:0;marketing:0;people_hr:0,customer_success:1;gtm_revenue:1;marketing:1;people_hr:1,False,0,0,4,
+CoStar Group,,6,finance;marketing,2,0,0,finance:0;marketing:0,finance:1;marketing:1,False,0,0,2,
+BAE Systems,,5,customer_support;engineering,2,0,0,customer_support:0;engineering:0,customer_support:1;engineering:1,False,0,0,2,
+BairesDev,,5,engineering;gtm_revenue;marketing,3,0,0,engineering:0;gtm_revenue:0;marketing:0,engineering:1;gtm_revenue:1;marketing:1,False,0,0,3,
+DataAnnotation,,4,engineering;product,2,0,0,engineering:0;product:0,engineering:1;product:1,False,0,0,2,
+EchoStar,,4,customer_success;gtm_revenue,2,0,0,customer_success:0;gtm_revenue:0,customer_success:1;gtm_revenue:1,False,0,0,2,
+Accenture,,5,customer_success;gtm_revenue;people_hr,3,1,0,customer_success:0;gtm_revenue:0;people_hr:0,customer_success:1;gtm_revenue:1;people_hr:1,False,1,1,2,no_search_domain:1
+Amgen,,4,engineering;product,2,0,0,engineering:0;product:0,engineering:1;product:1,False,0,0,2,
+Cisco,,5,gtm_revenue;people_hr,2,1,0,gtm_revenue:0;people_hr:0,gtm_revenue:2;people_hr:1,False,1,1,1,no_search_domain:1
+Charles Schwab,,3,customer_support;engineering,2,0,0,customer_support:0;engineering:0,customer_support:1;engineering:1,False,0,0,2,
+Fortive,,5,customer_success;gtm_revenue,2,1,0,customer_success:0;gtm_revenue:0,customer_success:1;gtm_revenue:2,False,1,1,1,no_search_domain:1
+Oliver Wyman Group,,3,finance;people_hr,2,0,0,finance:0;people_hr:0,finance:1;people_hr:1,False,0,0,2,
+"CBX Solutions, LLC",cbxsolutions.com,3,finance;people_hr,2,2,2,finance:0;people_hr:0,finance:1;people_hr:1,False,0,0,0,
+Insight Global,,3,customer_support;gtm_revenue;people_hr,3,0,0,customer_support:0;gtm_revenue:0;people_hr:0,customer_support:1;gtm_revenue:1;people_hr:1,False,0,0,3,
+Arrow Electronics,,3,engineering;gtm_revenue,2,0,0,engineering:0;gtm_revenue:0,engineering:1;gtm_revenue:1,False,0,0,2,
+Kelly Services,,2,customer_support;operations,2,0,0,customer_support:0;operations:0,customer_support:1;operations:1,False,0,0,2,
+Intuit,,2,engineering;finance,2,0,0,engineering:0;finance:0,engineering:1;finance:1,False,0,0,2,
+Nestlé,,2,customer_success;finance,2,0,0,customer_success:0;finance:0,customer_success:1;finance:1,False,0,0,2,
+US Tech Solutions,,2,finance;product,2,0,0,finance:0;product:0,finance:1;product:1,False,0,0,2,
+Brainrider,,3,gtm_revenue;marketing,2,1,0,gtm_revenue:0;marketing:0,gtm_revenue:1;marketing:1,False,1,1,1,no_search_domain:1
+PepsiCo,,2,engineering;marketing,2,0,0,engineering:0;marketing:0,engineering:1;marketing:1,False,0,0,2,
+TripleTen,,4,gtm_revenue;marketing,2,1,0,gtm_revenue:0;marketing:0,gtm_revenue:1;marketing:1,False,1,1,1,no_search_domain:1
+Royal Caribbean Group,royalcaribbeangroup.com,2,engineering;marketing,2,2,2,engineering:1;marketing:1,engineering:1;marketing:1,False,0,0,0,
+Astreya,,2,gtm_revenue;operations,2,1,0,gtm_revenue:0;operations:0,gtm_revenue:1;operations:1,False,1,1,1,no_search_domain:1
+Twilio,,3,finance;gtm_revenue,2,1,0,finance:0;gtm_revenue:0,finance:1;gtm_revenue:1,False,1,1,1,no_search_domain:1
+Cardinal Health,,2,engineering;gtm_revenue,2,1,0,engineering:0;gtm_revenue:0,engineering:1;gtm_revenue:1,False,1,1,1,no_search_domain:1
+"Staples, Inc.",,3,customer_support;gtm_revenue,2,0,0,customer_support:0;gtm_revenue:0,customer_support:1;gtm_revenue:1,False,0,0,2,
+The Little Clinic,krogerfamilycareers.com,2,customer_support;ecommerce,2,2,2,customer_support:0;ecommerce:0,customer_support:1;ecommerce:1,False,0,0,0,
+Mondelēz International,,2,gtm_revenue;marketing,2,1,0,gtm_revenue:0;marketing:0,gtm_revenue:1;marketing:1,False,1,1,1,no_search_domain:1
+Airspace,airspace.com,2,engineering;gtm_revenue,2,2,2,engineering:1;gtm_revenue:1,engineering:1;gtm_revenue:1,False,0,0,0,
+CFS,,4,customer_support;finance,2,2,0,customer_support:0;finance:0,customer_support:1;finance:1,False,2,2,0,no_search_domain:2
+Bright Vision Technologies,,4,engineering;gtm_revenue,2,2,0,engineering:0;gtm_revenue:0,engineering:1;gtm_revenue:1,False,2,2,0,no_search_domain:2
+"Johnson & Johnson Services, Inc.",,4,engineering;operations,2,2,0,engineering:0;operations:0,engineering:1;operations:1,False,2,2,0,no_search_domain:2
+Cosmoquick,,3,ecommerce;marketing,2,2,0,ecommerce:0;marketing:0,ecommerce:1;marketing:1,False,2,2,0,no_search_domain:2
+Jobgether,,3,customer_success;gtm_revenue,2,2,0,customer_success:0;gtm_revenue:0,customer_success:1;gtm_revenue:1,False,2,2,0,no_search_domain:2
+NVIDIA,,3,engineering;gtm_revenue,2,2,0,engineering:0;gtm_revenue:0,engineering:1;gtm_revenue:1,False,2,2,0,no_search_domain:2
+Cherry Bekaert,,2,engineering;gtm_revenue,2,2,0,engineering:0;gtm_revenue:0,engineering:1;gtm_revenue:1,False,2,2,0,no_search_domain:2

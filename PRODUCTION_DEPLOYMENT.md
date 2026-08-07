@@ -103,6 +103,57 @@ can borrow the volume with a harmless idle command and no Git change:
 `sleep infinity` is a **runtime UI value only**; it is intentionally NOT committed
 to `railway.json` or any config-as-code.
 
+## Final production-readiness hardening (this PR)
+
+**Airtable dedup is now FUNCTION-aware.** Review/delivery dedup keys on
+company + `role_bucket`, so a company already in Airtable for one function (e.g.
+Marketing) no longer suppresses a *different* function (e.g. Sales). Two explicit,
+independent flags replace the old bucket-blind `AIRTABLE_SUPPRESS_EXISTING_COMPANY`:
+- `AIRTABLE_SUPPRESS_EXISTING_COMPANY_FUNCTION` (default **True**) — same
+  company+function dedup (intended production behaviour).
+- `AIRTABLE_SUPPRESS_ACCOUNT_LEVEL` (default **False**) — optional company-wide
+  CRM/active-pipeline exclusion; enable only for a deliberate one-account-at-a-time
+  policy. It is checked first and is strictly stronger than the function dedup.
+- `AIRTABLE_SUPPRESS_EXISTING_COMPANY` is **deprecated**. If it is still set in the
+  Railway env it acts as a back-compat alias that turns the account-level tier on;
+  to get function-aware behaviour, **unset it** (or set
+  `AIRTABLE_SUPPRESS_ACCOUNT_LEVEL=0`).
+
+**Domain-resolution observability.** The dominant HM-failure cause in the first run
+was `no_search_domain` (78%), which is a source-quality problem (aggregator-only
+postings with the employer stripped), not a resolver gap. Each run now emits
+`domain_resolution_summary.json` and a `---- Domain Resolution ----` log block
+classifying every company as `direct_employer` / `intermediary_unresolved` /
+`known_employer_unresolved_domain` / `unresolved_no_evidence`. A deterministic,
+denylist-safe recovery chain (direct `apply_options` host + curated
+`COMPANY_DOMAIN_ALIASES`) is in place; populate `COMPANY_DOMAIN_ALIASES_JSON` with
+known acronym employers (e.g. `{"johnson & johnson":"jnj.com","hp":"hp.com"}`) to
+unlock their searches. It never turns a staffing/board host into an employer domain.
+
+**Approved Sync is legacy-safe.** `select_eligible_approved()` enrolls ONLY a
+Status=Approved row that also carries the current authorization: an actionable
+`Final Decision`, an EXACT `Validation Version` match, a valid `Validation
+Fingerprint`, an `Email`, and a resolvable campaign. Legacy/invalid rows are
+skipped *before* any revalidation or Instantly call and with **no Airtable write**
+(a legacy row is never `mark_error`-ed just for being unauthorized). This is
+unconditional (no longer gated on `FINAL_PASS_PIPELINE_ENABLED`), so a stale flag
+can never release the backlog. The 42 legacy rows fail on missing/old `Final
+Decision`/`Validation Version`/fingerprint → all classified legacy → never enrolled.
+
+### Approved Sync production activation (the only remaining manual step)
+1. With auto-deploy still disabled, run the zero-write preflight to confirm the
+   eligible count: `python -u run_approved.py --preflight-only` (reads Airtable,
+   writes nothing, calls no Instantly). Expect `eligible = 0` for the legacy
+   backlog. The hardened `select_eligible_approved()` logs
+   `seen / eligible / skipped_legacy / skipped_invalid`.
+2. Only if `eligible = 0` (or every eligible row is deliberately authorized), set
+   **GTM Approved Sync** Start Command `python -u run_approved.py`, Restart NEVER,
+   Cron `*/5 * * * *`, and (optionally) re-create its GitHub deploy trigger.
+   Railway crons run the command on schedule, not on deploy, so re-enabling the
+   trigger does not itself enroll anyone.
+3. If any row is eligible that you did not intend to enroll, STOP and inspect it —
+   do not enable the cron.
+
 ## Cutover sequence (staged — do not release the historical backlog automatically)
 
 1. Merge the final PR.

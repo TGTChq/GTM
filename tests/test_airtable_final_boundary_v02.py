@@ -72,18 +72,34 @@ class AirtableFinalBoundaryTests(unittest.TestCase):
     @patch.object(airtable_client, "validate_preflight")
     @patch.object(airtable_client, "request_with_retry")
     def test_approved_poll_accepts_actionable_validated_rows(self, request_mock, _preflight):
+        from validation_integrity import validation_fingerprint
+
+        def _signed(rid, decision, email):
+            fields = {
+                "Status": "Approved", "Final Decision": decision,
+                "Validation Version": config.VALIDATION_VERSION, "Email": email,
+                "Company": "Example", "Role Bucket": "finance",
+                "Campaign ID": "camp-1", "Website": "https://example.com",
+            }
+            fields["Validation Fingerprint"] = validation_fingerprint(fields)
+            return {"id": rid, "fields": fields}
+
         response = Mock()
         response.json.return_value = {
             "records": [
-                {"id": "pass", "fields": {"Final Decision": "FINAL_PASS", "Validation Version": "v", "Email": "a@example.com"}},
-                {"id": "review", "fields": {"Final Decision": "NEEDS_CHECK", "Validation Version": "v", "Email": "b@example.com"}},
-                {"id": "legacy", "fields": {}},
+                _signed("pass", "FINAL_PASS", "a@example.com"),
+                _signed("review", "NEEDS_CHECK", "b@example.com"),
+                # legacy: no current validation metadata -> must be dropped (no write)
+                {"id": "legacy", "fields": {"Status": "Approved"}},
+                # stale version, even if otherwise shaped -> dropped
+                {"id": "stale", "fields": {"Status": "Approved", "Final Decision": "FINAL_PASS",
+                                           "Validation Version": "v0", "Email": "c@example.com"}},
             ]
         }
         response.text = ""
         request_mock.return_value = response
-        with patch.object(config, "FINAL_PASS_PIPELINE_ENABLED", True):
-            records = airtable_client.get_approved_leads()
+        records = airtable_client.get_approved_leads()
+        # Only current, correctly-signed, actionable rows are accepted.
         self.assertEqual([row["id"] for row in records], ["pass", "review"])
 
     def test_instantly_rejects_terminal_decision(self):

@@ -1,0 +1,16 @@
+{
+  "eligible_company_buckets": 566,
+  "resolved": 213,
+  "unresolved": 353,
+  "resolution_rate": 0.3763,
+  "classification": {
+    "direct_employer": 213,
+    "unresolved_no_evidence": 353
+  },
+  "resolved_by_method": {
+    "enrichment_resolved": 213
+  },
+  "unresolved_by_reason": {
+    "unknown": 353
+  }
+}

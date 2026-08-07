@@ -1,0 +1,13 @@
+{
+  "multi_function_companies": 55,
+  "total_role_buckets": 124,
+  "eligible_role_buckets": 35,
+  "excluded_role_buckets": 89,
+  "expected_hm_searches": 35,
+  "actual_hm_searches": 12,
+  "search_shortfall_count": 23,
+  "no_search_domain_shortfall_count": 23,
+  "true_collapse_count": 0,
+  "contacts_found": 6,
+  "leads_created": 6
+}

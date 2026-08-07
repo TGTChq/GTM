@@ -558,8 +558,10 @@ class RealDelivery:
         updated = max(0, len(result.get("persisted_lead_keys", []) or []) - rep.created)
         other_skips = (updated
                        + int(result.get("skipped_existing_company", 0))
+                       + int(result.get("skipped_existing_account", 0))
                        + int(result.get("skipped_no_contact", 0))
-                       + len(result.get("suppressed_company_lead_keys", []) or []))
+                       + len(result.get("suppressed_company_lead_keys", []) or [])
+                       + len(result.get("suppressed_account_lead_keys", []) or []))
         rep.skipped = rep.entered - rep.created - rep.failed      # entered reconciles
         rep.failed_rows = [{"lead_key": k} for k in (result.get("failed_lead_keys", []) or [])]
         # Delivered = created + repaired-existing this run, PLUS the ones we
