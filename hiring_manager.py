@@ -16,6 +16,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 import apollo_client as apollo
 import config
+import domain_resolution
 import hunter_client as hunter
 from account_gate import AccountGate
 from contact_gate import ContactGate
@@ -737,6 +738,18 @@ def _process_company_strict(company_jobs: List[Dict]) -> Tuple[List[Dict], Dict]
             or org.domain
             or ""
         )
+        # Additive, deterministic domain recovery + explicit classification. This
+        # NEVER overrides an already-resolved domain and never accepts an
+        # intermediary host; when the domain is empty it tries two safe evidence
+        # steps (direct apply_options host, curated employer alias) that can unlock
+        # a live Apollo search, and it always classifies WHY a company is
+        # unresolved so staffing/aggregator posters are not conflated with genuine
+        # resolver failures (the real cause of this run's 353 no_search_domain).
+        domain_res = domain_resolution.recover_search_domain(
+            search_domain, primary, company_name)
+        if not search_domain and domain_res.resolved_domain:
+            search_domain = domain_res.resolved_domain
+            stats[f"domain_recovered__{domain_res.resolution_method}"] += 1
         if account_decision.state_value == GateState.REJECT.value or not search_domain:
             final = annotate_final_decision(
                 lead,
@@ -762,9 +775,17 @@ def _process_company_strict(company_jobs: List[Dict]) -> Tuple[List[Dict], Dict]
                     if account_decision.state_value == GateState.REJECT.value
                     else "no_search_domain"
                 ),
+                # Explicit domain-resolution evidence so a no_search_domain failure
+                # is classified (staffing/aggregator vs known-employer-acronym vs
+                # no-evidence) rather than opaque.
+                "domain_classification": domain_res.classification,
+                "domain_unresolved_reason": domain_res.unresolved_reason,
+                "domain_resolution_method": domain_res.resolution_method,
             }
             leads.append(final)
             stats[f"final_{str(final.get('_final_state')).lower()}"] += 1
+            if not search_domain:
+                stats[f"domain_unresolved__{domain_res.unresolved_reason or 'unknown'}"] += 1
             continue
 
         target_titles = get_target_titles_for_jobs(bucket_jobs, org.employee_count)
@@ -1598,8 +1619,10 @@ def run_hiring_manager_identification(
         hm_observability = {
             "hiring_manager": _obs["hiring_manager"],
             "multi_function": _obs["multi_function"],
+            "domain_resolution": _obs["domain_resolution"],
         }
-        for _line in _hm_obs.stdout_summary(_obs["hiring_manager"], _obs["multi_function"]):
+        for _line in _hm_obs.stdout_summary(_obs["hiring_manager"], _obs["multi_function"],
+                                            _obs["domain_resolution"]):
             logger.info(_line)
     except Exception as exc:  # noqa: BLE001 - observability must never break a run
         logger.warning("hm_observability artifact emission failed (non-fatal): %s", exc)
