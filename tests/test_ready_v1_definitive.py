@@ -417,7 +417,11 @@ class ReadyV1BoundaryTests(unittest.TestCase):
             "lead_key": key,
             "_final_state": "FINAL_PASS",
             "_airtable_relevance": "accept",
-            "_validation_timestamp": "2026-07-22T12:00:00+00:00",
+            # Dynamic recent timestamp so inventory freshness/TTL is evaluated
+            # relative to "now", not a hardcoded date that silently goes stale and
+            # turns this into a time-bomb fixture. Tests needing a stale lead
+            # override this and patch recovery_inventory._now explicitly.
+            "_validation_timestamp": datetime.now(timezone.utc).isoformat(),
             "priority_score": 10,
         }
 

@@ -940,10 +940,16 @@ def assess_employment_quality(job: Dict) -> EmploymentEvidence:
             f"employment_type_ambiguous_no_negative_evidence:{employment_type_raw}",
             "unknown",
         )
-    if config.REQUIRE_FULL_TIME_ROLES and employment_type_raw:
-        return EmploymentEvidence(False, f"unsupported_employment_type:{employment_type_raw}", "unknown")
-    # Some JSearch sources omit employment type entirely. Keep the job when no
-    # contrary part-time/contract signal exists, but preserve the uncertainty.
+    # Evidence-first full-time rule (TGTC rule): reject ONLY on explicit negative
+    # evidence (part-time / contract / temporary / internship / non-paying, handled
+    # above). An employment type that is present but simply not a recognised
+    # full-time/part-time/ambiguous value carries NO negative evidence, so it is
+    # ALLOWED as "unknown" and surfaced for human review rather than rejected.
+    # Likewise a missing employment type is allowed. Missing/unknown metadata must
+    # never become a false-negative source: we do NOT require an explicit
+    # "Full-time" label for a posting to survive.
+    if employment_type_raw:
+        return EmploymentEvidence(True, f"employment_type_unknown_no_negative_evidence:{employment_type_raw}", "unknown")
     return EmploymentEvidence(True, "employment_type_missing_no_negative_evidence", "unknown")
 
 
