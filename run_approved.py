@@ -75,11 +75,27 @@ def run(*, revalidate_providers: bool | None = None) -> dict:
     if revalidate_providers is None:
         revalidate_providers = config.APPROVED_SYNC_REVALIDATE_PROVIDERS
 
-    approved = airtable_client.get_approved_leads()
+    # Eligibility partition first: legacy/invalid Approved rows (the ~42-row
+    # legacy backlog without current validation metadata) are dropped here with NO
+    # Airtable write and NO Instantly call. Only current, authorized rows proceed.
+    approved, eligibility = airtable_client.select_eligible_approved()
+    base_metrics = {
+        "approved_seen": eligibility["approved_seen"],
+        "approved_eligible": eligibility["approved_eligible"],
+        "approved_skipped_legacy": eligibility["approved_skipped_legacy"],
+        "approved_skipped_invalid": eligibility["approved_skipped_invalid"],
+        "approved_attempted": 0,
+        "instantly_success": 0, "instantly_failed": 0,
+        "airtable_marked_enrolled": 0, "airtable_mark_error": 0,
+        "duplicates_suppressed": 0,
+    }
     if not approved:
         result = {"approved": 0, "enrolled": 0, "duplicates": 0, "failed": 0,
-                  "revalidation_failed": 0}
-        logger.info("No approved leads waiting")
+                  "revalidation_failed": 0, **base_metrics}
+        logger.info("No eligible approved leads waiting (seen=%d, skipped_legacy=%d, "
+                    "skipped_invalid=%d)", eligibility["approved_seen"],
+                    eligibility["approved_skipped_legacy"],
+                    eligibility["approved_skipped_invalid"])
         return result
 
     safe_records = []
@@ -112,10 +128,21 @@ def run(*, revalidate_providers: bool | None = None) -> dict:
     for failure in result["failures"]:
         airtable_client.mark_error([failure["record_id"]], failure["error"])
 
-    result["failures"] = [*revalidation_failures, *result["failures"]]
+    instantly_failures = list(result["failures"])
+    result["failures"] = [*revalidation_failures, *instantly_failures]
     result["failed"] = len(result["failures"])
     result["revalidation_failed"] = len(revalidation_failures)
     result["approved"] = len(approved)
+    # Explicit, unit-labelled metrics (eligible/legacy/invalid never conflated).
+    result.update(base_metrics)
+    result["approved_attempted"] = len(safe_records)
+    result["instantly_success"] = int(result.get("enrolled", 0)) + int(result.get("duplicates", 0))
+    result["instantly_failed"] = len(instantly_failures)
+    result["airtable_marked_enrolled"] = len(result["enrolled_record_ids"])
+    # mark_error writes only for ELIGIBLE rows that failed (revalidation or Instantly)
+    # -- never for legacy/invalid rows, which were skipped before this point.
+    result["airtable_mark_error"] = len(revalidation_failures) + len(instantly_failures)
+    result["duplicates_suppressed"] = int(result.get("duplicates", 0))
     logger.info("Enrollment result: %s", json.dumps(result, indent=2))
     return result
 

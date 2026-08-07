@@ -455,8 +455,11 @@ class SchedulerBoundaryTests(unittest.TestCase):
     def test_approved_sync_never_enrolls_failed_revalidation(self):
         import run_approved
         record = {"id": "rec1", "fields": {"Email": "alex@example.com"}}
+        eligibility = {"approved_seen": 1, "approved_eligible": 1,
+                       "approved_skipped_legacy": 0, "approved_skipped_invalid": 0}
         with (
-            patch.object(run_approved.airtable_client, "get_approved_leads", return_value=[record]),
+            patch.object(run_approved.airtable_client, "select_eligible_approved",
+                         return_value=([record], eligibility)),
             patch.object(run_approved, "revalidate_approved_record", return_value=(False, "stale job")),
             patch.object(run_approved.airtable_client, "mark_error") as mark_error,
             patch.object(run_approved.instantly_client, "enroll_approved_leads") as enroll,

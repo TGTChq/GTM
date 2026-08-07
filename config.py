@@ -774,11 +774,38 @@ AIRTABLE_TOKEN = os.getenv("AIRTABLE_TOKEN", "")
 AIRTABLE_BASE_ID = os.getenv("AIRTABLE_BASE_ID", "")
 AIRTABLE_TABLE_NAME = os.getenv("AIRTABLE_TABLE_NAME", "Leads")
 AIRTABLE_RATE_LIMIT_DELAY = _env_float("AIRTABLE_RATE_LIMIT_DELAY", 0.25)
-# Suppress a company already present anywhere in the review/outbound table, even
-# when a new manager or role would otherwise generate a different Lead Key.
+# Airtable review/delivery dedup is now FUNCTION-aware (company + role_bucket).
+# Two independent, explicit tiers replace the old bucket-blind company suppressor:
+#
+#  * AIRTABLE_SUPPRESS_EXISTING_COMPANY_FUNCTION (default True) -- the review/
+#    delivery dedup. Suppresses only the SAME company+function; a DIFFERENT function
+#    at a company that already has a lead (Acme+Sales when Acme+Marketing exists) is
+#    PRESERVED as its own opportunity. This is the intended production behaviour.
+#
+#  * AIRTABLE_SUPPRESS_ACCOUNT_LEVEL (default False) -- an OPTIONAL company-wide
+#    (bucket-blind) CRM/active-pipeline exclusion: when enabled, any active row for a
+#    company hard-suppresses ALL functions of that company. Enable ONLY when an
+#    account-level "one opportunity per company at a time" policy is intended; it is
+#    checked before, and is strictly stronger than, the function-level dedup.
+#
+# The legacy AIRTABLE_SUPPRESS_EXISTING_COMPANY flag is DEPRECATED. It no longer
+# drives push_leads (that would silently collapse distinct functions); if it is
+# explicitly set it is honoured ONLY as a back-compat alias that turns the
+# account-level tier on/off, and validate_setup emits a deprecation notice.
+# Legacy flag: retained (default True) ONLY for the retired run_daily pre-Apollo
+# exclusion path. It NO LONGER drives the production orchestrator's Airtable
+# suppression -- that path uses the two explicit flags below. Deprecated.
 AIRTABLE_SUPPRESS_EXISTING_COMPANY = _env_bool(
     "AIRTABLE_SUPPRESS_EXISTING_COMPANY", True
 )
+# Production orchestrator review/delivery dedup: function-aware by default.
+AIRTABLE_SUPPRESS_EXISTING_COMPANY_FUNCTION = _env_bool(
+    "AIRTABLE_SUPPRESS_EXISTING_COMPANY_FUNCTION", True
+)
+# Optional company-wide (bucket-blind) account exclusion. Decoupled from the legacy
+# flag and OFF by default so distinct functions are preserved unless an operator
+# deliberately opts into a one-account-at-a-time policy.
+AIRTABLE_SUPPRESS_ACCOUNT_LEVEL = _env_bool("AIRTABLE_SUPPRESS_ACCOUNT_LEVEL", False)
 AIRTABLE_STATUS_PENDING = os.getenv("AIRTABLE_STATUS_PENDING", "Pending")
 AIRTABLE_STATUS_APPROVED = os.getenv("AIRTABLE_STATUS_APPROVED", "Approved")
 AIRTABLE_STATUS_REJECTED = os.getenv("AIRTABLE_STATUS_REJECTED", "Rejected")

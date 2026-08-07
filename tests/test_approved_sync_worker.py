@@ -86,7 +86,9 @@ def _rec(rid, *, status="Approved", final="FINAL_PASS", **overrides):
     fields = {
         "Status": status,
         "Final Decision": final,
-        "Validation Version": "v1",
+        # Current, authorized version -- the hardened worker enrolls ONLY rows
+        # whose Validation Version matches the running pipeline exactly.
+        "Validation Version": config.VALIDATION_VERSION,
         "Email": "jane@acme.com",
         "Company": "Acme",
         "Open Role": "VP Marketing",
