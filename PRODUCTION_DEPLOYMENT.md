@@ -46,9 +46,11 @@ Set on **GTM**:
 - `ATS_SCHEDULER_STATE_PATH=/app/data/state/orchestrator_v2/scheduler_state/ats_carried_overdue.json`
   (persists overdue carry-forward so no board starves)
 - `ATS_REGISTRY_AUTO_SEED_HISTORY=1` (registry grows from job history)
-- `ENFORCE_FOUNDED_BEFORE=1` (activate the "founded after 2010 → reject" rule;
-  known ≤2010 pass, unknown allow)
 - `PIPELINE_ARTIFACT_ROOT=/app/data/state/orchestrator_v2` (all state on the volume)
+
+Founding year is intentionally **neutral** for qualification in the definitive
+ICP: it is enriched/persisted/shown when available but never rejects a company.
+`ENFORCE_FOUNDED_BEFORE` / `FOUNDED_BEFORE_YEAR` are therefore inert (leave unset).
 
 Set on **GTM Approved Sync** (unchanged intent): `APPROVED_SYNC_REVALIDATE_PROVIDERS=true`.
 

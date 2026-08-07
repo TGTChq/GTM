@@ -198,18 +198,10 @@ def passes_company_criteria(
     if org.employee_count > config.MAX_EMPLOYEES:
         return False, f"too_large:{org.employee_count}", False
 
-    if (
-        config.ENFORCE_FOUNDED_BEFORE
-        and org.founded_year is not None
-        and org.founded_year > config.FOUNDED_BEFORE_YEAR
-    ):
-        # Rule #6: reject only companies founded AFTER the cutoff; the cutoff year
-        # itself (<=) passes. UNKNOWN founded year is allowed below.
-        return False, f"founded_too_recent:{org.founded_year}", False
-
-    if config.ENFORCE_FOUNDED_BEFORE and org.founded_year is None:
-        return True, "unknown_founded_year", True
-
+    # Founding year is intentionally NEUTRAL for qualification in the definitive
+    # simplified ICP: it never rejects and never changes the qualification state
+    # (known-new, known-old and unknown are all treated identically). It is still
+    # enriched and persisted elsewhere for display.
     return True, "passes", False
 
 

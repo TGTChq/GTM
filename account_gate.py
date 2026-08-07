@@ -256,26 +256,18 @@ class AccountGate:
                 [EvidenceItem("industry", industry, EvidenceStatus.VERIFIED_CROSS_SOURCE, "apollo", excerpt=industry, confidence=0.82)]
             ))
 
-        # Founding-year rule (TGTC business rule #6): no companies founded AFTER
-        # the cutoff. Known year <= cutoff -> PASS; known > cutoff -> REJECT;
-        # UNKNOWN/missing -> ALLOW (never a missing-data rejection). Evidence-first
-        # and unknown-safe, exactly like the size/industry gates above.
-        if config.ENFORCE_FOUNDED_BEFORE and org.founded_year is not None:
-            try:
-                founded = int(org.founded_year)
-            except (TypeError, ValueError):
-                founded = None
-            if founded is not None:
-                bundle.add(FactValue(
-                    "founded_year", founded, EvidenceStatus.VERIFIED_CROSS_SOURCE,
-                    [EvidenceItem("founded_year", founded, EvidenceStatus.VERIFIED_CROSS_SOURCE, "apollo", excerpt=str(founded), confidence=0.9)]
-                ))
-                if founded > int(config.FOUNDED_BEFORE_YEAR):
-                    return self._reject(
-                        ReasonCode.REJECT_FOUNDED_AFTER_CUTOFF, bundle,
-                        metadata={"founded_year": founded,
-                                  "founded_before_year": int(config.FOUNDED_BEFORE_YEAR)},
-                    )
+        # Founding year is DELIBERATELY neutral for qualification (definitive
+        # simplified ICP): it is enriched, persisted and shown in Airtable when
+        # available, but it never rejects a company, never changes the
+        # qualification state, and never enters suppression. Known-new,
+        # known-old, and unknown are all treated identically here. (Record it as
+        # evidence only when present, so Airtable can display it.)
+        if org.founded_year is not None:
+            bundle.add(FactValue(
+                "founded_year", org.founded_year, EvidenceStatus.VERIFIED_CROSS_SOURCE,
+                [EvidenceItem("founded_year", org.founded_year, EvidenceStatus.VERIFIED_CROSS_SOURCE,
+                              "apollo", excerpt=str(org.founded_year), confidence=0.9)]
+            ))
 
         source = self.resolver.resolve(canonical_domain, fetch=fetch_company)
         raw = org.raw or {}

@@ -46,30 +46,38 @@ def _org(**overrides):
     return OrgEnrichment(**values)
 
 
-class FoundedYearRuleTests(unittest.TestCase):
-    def _decide(self, founded):
-        with patch.object(config, "ENFORCE_FOUNDED_BEFORE", True), \
+class FoundedYearNeutralTests(unittest.TestCase):
+    """Founding year is intentionally NEUTRAL for qualification: it never rejects
+    or changes the qualification state, whether the company is new, old, or the
+    year is unknown. Even with the legacy ENFORCE_FOUNDED_BEFORE flag forced on,
+    founding year must not affect the outcome."""
+
+    def _decide(self, founded, enforce=False):
+        with patch.object(config, "ENFORCE_FOUNDED_BEFORE", enforce), \
              patch.object(config, "FOUNDED_BEFORE_YEAR", 2010):
             return AccountGate(_Resolver()).evaluate(
                 org=_org(founded_year=founded), input_company_name="Example Corp",
                 input_domain="example.com", jobs=[])
 
-    def test_founded_after_cutoff_rejects(self):
-        d = self._decide(2015)
-        self.assertEqual(d.state, GateState.REJECT)
-        self.assertIn("REJECT_FOUNDED_AFTER_CUTOFF", str(d.primary_reason))
+    def test_newer_company_is_not_rejected(self):
+        self.assertNotEqual(self._decide(2015).state, GateState.REJECT)
+        # Not neutralized only because the flag is off -- forcing it on changes nothing.
+        self.assertNotEqual(self._decide(2015, enforce=True).state, GateState.REJECT)
 
-    def test_cutoff_year_itself_passes(self):
-        # Rule: <= cutoff PASS (no off-by-one). 2010 must NOT be rejected.
-        self.assertNotEqual(self._decide(2010).state, GateState.REJECT)
-
-    def test_older_than_cutoff_passes(self):
+    def test_older_company_is_not_rejected(self):
         self.assertNotEqual(self._decide(2001).state, GateState.REJECT)
 
-    def test_unknown_founded_year_is_allowed(self):
-        # UNKNOWN -> never a founding rejection (no missing-data rejection).
-        d = self._decide(None)
-        self.assertNotEqual(d.state, GateState.REJECT)
+    def test_unknown_founded_year_is_not_rejected(self):
+        self.assertNotEqual(self._decide(None).state, GateState.REJECT)
+
+    def test_founded_year_does_not_change_state_new_vs_old_vs_unknown(self):
+        # New, old, and unknown must all yield the SAME qualification state.
+        states = {self._decide(y).state for y in (2001, 2015, None)}
+        self.assertEqual(len(states), 1)
+
+    def test_no_founded_after_cutoff_reason_code_exists(self):
+        from reason_codes import ReasonCode
+        self.assertFalse(hasattr(ReasonCode, "REJECT_FOUNDED_AFTER_CUTOFF"))
 
 
 class FullTimeEvidenceFirstTests(unittest.TestCase):
