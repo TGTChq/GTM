@@ -801,13 +801,18 @@ def repair_missing_job_signals(batch_size: int = 10) -> Dict:
     }
 
 
-def get_approved_leads() -> List[Dict]:
+def fetch_status_records(status: str) -> List[Dict]:
+    """Read-only paginated fetch of every row whose ``Status`` equals ``status``.
+
+    A pure GET (no write). Shared by :func:`get_approved_leads` and the approved-
+    sync zero-write preflight so both select rows identically.
+    """
     validate_preflight()
     records: List[Dict] = []
     offset = None
     while True:
         params: List[tuple[str, str | int]] = [
-            ("filterByFormula", f"{{Status}} = '{config.AIRTABLE_STATUS_APPROVED}'"),
+            ("filterByFormula", f"{{Status}} = '{status}'"),
             ("pageSize", 100),
         ]
         if offset:
@@ -819,6 +824,11 @@ def get_approved_leads() -> List[Dict]:
         if not offset:
             break
         time.sleep(config.AIRTABLE_RATE_LIMIT_DELAY)
+    return records
+
+
+def get_approved_leads() -> List[Dict]:
+    records = fetch_status_records(config.AIRTABLE_STATUS_APPROVED)
 
     if config.FINAL_PASS_PIPELINE_ENABLED:
         safe_records = [
