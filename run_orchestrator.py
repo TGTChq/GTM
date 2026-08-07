@@ -647,6 +647,16 @@ def _print_run_summary(ctx, mode, result, state) -> None:
     print("---- Top rejection reasons ----")
     for r, n in top5:
         print(f"  {r} = {n}")
+    # Hiring-manager coverage + multi-function handling (non-PII counts only).
+    hm_obs = funnel.get("hm_observability") or {}
+    if hm_obs:
+        try:
+            import hm_observability
+            for ln in hm_observability.stdout_summary(
+                    hm_obs.get("hiring_manager") or {}, hm_obs.get("multi_function") or {}):
+                print(ln)
+        except Exception:  # noqa: BLE001 - summary is best-effort, never fatal
+            pass
     line("reconcile", result["all_reconcile"])
     line("artifacts", state.run_dir())
     print("=============================================")
