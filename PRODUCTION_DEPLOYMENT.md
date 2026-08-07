@@ -25,7 +25,7 @@ Instantly worker** (`run_approved.py`). `run_daily.py` is retired from productio
 | Setting | Value |
 |---|---|
 | Start Command | `python -u run_approved.py` (**service-level override — required**) |
-| Cron | `*/5 * * * *` |
+| Cron | `*/5 * * * *` — **but not enabled until the historical Approved backlog is explicitly authorized** (see cutover sequence) |
 | Restart policy | NEVER |
 | Selection | Airtable `Status = Approved` only (never Pending/Enrolled/Error) |
 | Behaviour | revalidate the approved record → enroll in Instantly → mark `Enrolled` only on confirmed success/idempotent duplicate. Cannot run acquisition. |
@@ -80,7 +80,22 @@ full funnel, the ATS coverage block, and the top-5 rejection reasons. Approved
 Sync prints `APPROVED_FOUND / REVALIDATED / SENT_TO_INSTANTLY / DUPLICATES_SKIPPED
 / FAILED`. No volume mount required.
 
-## Cutover and rollback
+## Cutover sequence (staged — do not release the historical backlog automatically)
+
+1. Merge the final PR.
+2. Configure **GTM** (Start Command + env above).
+3. Configure **GTM Approved Sync** Start Command `python -u run_approved.py`,
+   Restart NEVER — **but do NOT enable the `*/5` cron yet.** The 42 existing
+   Approved rows are legacy manual approvals with no `Final Decision`/
+   `Validation Version`, so `get_approved_leads()` already blocks all 42 (fail-
+   closed); still, leave the cron unset until authorized.
+4. Run and validate **GTM** production acquisition; inspect the new funnel logs.
+5. Separately authorize the 42 existing Approved records (or decide how to handle
+   them — they must be re-run through the pipeline to get a validated `Final
+   Decision` before they can enroll).
+6. Enable the normal `*/5 * * * *` Approved Sync cron.
+
+## Rollback
 
 See the final readiness report for the exact, ordered cutover steps.
 
