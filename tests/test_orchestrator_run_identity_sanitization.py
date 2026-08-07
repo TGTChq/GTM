@@ -185,16 +185,23 @@ class ZeroNetworkTests(unittest.TestCase):
 
 
 class PreservedBehaviorTests(unittest.TestCase):
-    # (7) Railway Start Command unchanged.
-    def test_railway_start_command_unchanged(self):
+    # (7) Railway Start Command is service-managed, NOT config-as-code.
+    def test_railway_json_does_not_define_start_command(self):
+        # railway.json must NOT pin the GTM Start Command: it is managed at the
+        # Railway service level so it can be edited/restored from the UI (including a
+        # temporary maintenance 'sleep infinity') with no Git change. If no Start
+        # Command is set, the image falls back to the SAFE zero-network preflight,
+        # never acquisition.
         rc = json.loads(Path("railway.json").read_text(encoding="utf-8"))
-        cmd = rc["deploy"]["startCommand"]
-        self.assertIn("--mode live_acquisition_and_enrichment", cmd)
-        self.assertIn("--airtable-write", cmd)
-        self.assertIn("--artifact-root /app/data/state/orchestrator_v2", cmd)
-        self.assertNotIn("--auto-approve", cmd)
-        self.assertNotIn("--instantly", cmd)
+        self.assertNotIn("startCommand", rc.get("deploy", {}))
+        # Acquisition flags must not leak into config-as-code anywhere in the file.
+        blob = json.dumps(rc)
+        self.assertNotIn("live_acquisition_and_enrichment", blob)
+        self.assertNotIn("--airtable-write", blob)
         self.assertEqual(rc["deploy"]["restartPolicyType"], "NEVER")
+        dockerfile = Path("Dockerfile").read_text(encoding="utf-8")
+        self.assertIn('CMD ["python", "-u", "run_orchestrator.py", "--preflight-only"]',
+                      dockerfile)
 
     # (8)(9) Airtable review-staging; Instantly + auto-approval disabled.
     def test_live_policy_keeps_review_staging_and_instantly_off(self):

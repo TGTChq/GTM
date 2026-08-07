@@ -372,12 +372,15 @@ class WorkerIsolationTests(_Base):
         self.assertNotIn(config.INSTANTLY_API_KEY, blob)
         self.assertNotIn(config.AIRTABLE_TOKEN, blob)
 
-    def test_acquisition_start_command_unchanged(self):
+    def test_railway_json_does_not_control_start_command(self):
+        # The GTM Start Command is deliberately service-managed (editable from the
+        # Railway UI), NOT config-as-code: railway.json must not define it, so an
+        # operator can set/restore it (or a maintenance 'sleep infinity') without a
+        # Git change. The image CMD is the safe fallback if no Start Command is set.
         rc = json.loads(Path("railway.json").read_text(encoding="utf-8"))
-        cmd = rc["deploy"]["startCommand"]
-        # The acquisition service's Start Command is the orchestrator, not the sync.
-        self.assertIn("run_orchestrator.py", cmd)
-        self.assertNotIn("run_approved.py", cmd)
+        self.assertNotIn("startCommand", rc.get("deploy", {}))
+        dockerfile = Path("Dockerfile").read_text(encoding="utf-8")
+        self.assertIn("--preflight-only", dockerfile)  # safe, zero-network fallback
 
     def test_package_integrity_passes(self):
         import run_orchestrator as R

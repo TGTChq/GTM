@@ -14,7 +14,7 @@ Instantly worker** (`run_approved.py`). `run_daily.py` is retired from productio
 | Setting | Value |
 |---|---|
 | Start Command | `python -u run_orchestrator.py --mode live_acquisition_and_enrichment --lanes ats,jsearch,free_feeds --target 300 --airtable-write --global-budget 1500 --ats-lane-budget 1200 --reserved-non-ats 200 --board-budget 120 --provider-budget 300 --artifact-root /app/data/state/orchestrator_v2` |
-| Source | `railway.json` `startCommand` (authoritative; overrides Docker CMD) |
+| Source | **Railway service-level Start Command (set/edit in the Railway UI).** `railway.json` deliberately does NOT define `startCommand`, so this is paste-managed and can be changed without a Git commit/merge. If the field is left empty the image falls back to the safe `--preflight-only` CMD (never acquisition). |
 | Restart policy | NEVER |
 | Volume | `gtm-volume` at `/app/data/state` (state under `/app/data/state/orchestrator_v2`) |
 | ATS boards | full `ats_board_registry.json` on the volume, health-aware deterministic scheduling. **No `--boards`, no `BOARDS_FINAL.json`.** |
@@ -79,6 +79,29 @@ GTM prints `JOBS_ANALYZED / QUALIFIED / CONTACTS_FOUND / SENT_TO_AIRTABLE`, the
 full funnel, the ATS coverage block, and the top-5 rejection reasons. Approved
 Sync prints `APPROVED_FOUND / REVALIDATED / SENT_TO_INSTANTLY / DUPLICATES_SKIPPED
 / FAILED`. No volume mount required.
+
+## Maintenance: read the volume without running acquisition
+
+The `gtm-volume` (run artifacts, file logs) is only reachable from a **running**
+GTM container, and GTM's normal container exits when the run completes. Because
+GTM's Start Command is now **service-managed** (not pinned in `railway.json`), you
+can borrow the volume with a harmless idle command and no Git change:
+
+1. **Record** the normal Start Command (copy it from the row above / keep this doc open).
+2. In the Railway UI, set **GTM → Start Command** to: `sh -c "sleep infinity"`.
+3. **Redeploy GTM.** The container starts, mounts `gtm-volume` at `/app/data/state`,
+   and idles — it runs **no** acquisition and makes **no** external calls.
+4. Read read-only, e.g.:
+   - `railway ssh -s GTM "ls -la /app/data/state/orchestrator_v2/run_artifacts"`
+   - `railway ssh -s GTM "tar -czf - -C /app/data/state/orchestrator_v2/run_artifacts <run_id>" > run_artifacts.tgz`
+   - or `railway volume files --volume gtm-volume download /orchestrator_v2/run_artifacts/<run_id> ./out`
+     (works now because a GTM instance is running to serve the session).
+5. **Restore:** set **GTM → Start Command** back to the normal acquisition command
+   (row above) — or clear it to leave the safe `--preflight-only` fallback — and
+   redeploy. No Git commit/merge is involved in any of these steps.
+
+`sleep infinity` is a **runtime UI value only**; it is intentionally NOT committed
+to `railway.json` or any config-as-code.
 
 ## Cutover sequence (staged — do not release the historical backlog automatically)
 
