@@ -417,7 +417,11 @@ class ReadyV1BoundaryTests(unittest.TestCase):
             "lead_key": key,
             "_final_state": "FINAL_PASS",
             "_airtable_relevance": "accept",
-            "_validation_timestamp": "2026-07-22T12:00:00+00:00",
+            # Dynamic recent timestamp so inventory freshness/TTL is evaluated
+            # relative to "now", not a hardcoded date that silently goes stale and
+            # turns this into a time-bomb fixture. Tests needing a stale lead
+            # override this and patch recovery_inventory._now explicitly.
+            "_validation_timestamp": datetime.now(timezone.utc).isoformat(),
             "priority_score": 10,
         }
 
@@ -573,8 +577,12 @@ class ReadyV1BoundaryTests(unittest.TestCase):
         self.assertFalse(result.eligible)
         self.assertEqual(result.reason, "untrustworthy_employer_identity")
 
-    def test_acquisition_catalog_is_bounded_and_covers_distinct_supply_families(self):
-        self.assertEqual(len(DEFAULT_ACQUISITION_ROLES), 50)
+    def test_acquisition_catalog_covers_every_target_title(self):
+        # Definitive high-volume config: every target title is queried directly,
+        # so no role depends on incidental appearance in broad ATS/free feeds.
+        from role_catalog import ROLE_DEFINITIONS
+        self.assertEqual(len(DEFAULT_ACQUISITION_ROLES), 118)
+        self.assertEqual(set(DEFAULT_ACQUISITION_ROLES), set(ROLE_DEFINITIONS))
         for role in (
             "Customer Success Associate",
             "Technical Support Specialist",
@@ -597,6 +605,11 @@ class ReadyV1BoundaryTests(unittest.TestCase):
         self.assertFalse(is_excluded_title("Sr. Backend Developer"))
         self.assertTrue(is_excluded_title("VP of Engineering"))
         self.assertTrue(is_excluded_title("Marketing Director"))
+        # "Head" is NOT a documented job-title exclusion: high-recall postings
+        # whose title contains "Head" must survive acquisition.
+        self.assertFalse(is_excluded_title("Head of Growth"))
+        self.assertFalse(is_excluded_title("Head of Engineering"))
+        self.assertFalse(is_excluded_title("Department Head"))
 
     def test_representative_query_classifies_against_full_catalog(self):
         class Registry:

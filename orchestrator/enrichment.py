@@ -34,6 +34,14 @@ class EnrichmentAdapter(Protocol):
     def same_day_eligible(self, posting: Dict[str, Any]) -> bool: ...
 
 
+#: Dispositions that are SAFE-TERMINAL for cross-run posting suppression: a
+#: delivered/qualified FINAL_PASS or a genuine business REJECT (ICP/size/founded/
+#: industry/CRM/duplicate). Provider-deferred outcomes (NEEDS_CHECK, UNVERIFIED,
+#: REROUTE) are deliberately excluded so an Apollo/Hunter outage never permanently
+#: suppresses a posting that was never really processed (Defect B).
+TERMINAL_DISPOSITIONS = frozenset({Disposition.FINAL_PASS, Disposition.REJECT})
+
+
 @dataclass
 class Lead:
     posting_id: str
@@ -43,6 +51,10 @@ class Lead:
     primary_reason: ReasonCode
     email_status: str = ""
     contact_key: str = ""
+    #: Other postings folded into this lead (company+bucket dedup) -- carried so
+    #: cross-run suppression can mark every genuinely-processed posting, not just
+    #: the primary one, without over-suppressing deferred work.
+    related_posting_ids: List[str] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -61,6 +73,9 @@ class EnrichmentReport:
     leads: List[Lead] = field(default_factory=list)
     stages: List[StageResult] = field(default_factory=list)
     loss_census: Dict[str, int] = field(default_factory=dict)
+    #: Optional cross-stage funnel counts (companies considered, ICP eligible/
+    #: rejected, hiring managers found, ...) surfaced for operator observability.
+    funnel: Dict[str, Any] = field(default_factory=dict)
 
     def dispositions(self) -> List[Disposition]:
         return [lead.disposition for lead in self.leads]
@@ -68,11 +83,27 @@ class EnrichmentReport:
     def final_pass(self) -> List[Lead]:
         return [l for l in self.leads if l.disposition is Disposition.FINAL_PASS]
 
+    def terminal_posting_ids(self) -> set:
+        """Postings that reached a SAFE-TERMINAL outcome and may be committed to
+        cross-run suppression. Deferred outcomes are excluded so a provider outage
+        never permanently suppresses an unprocessed posting (Defect B)."""
+        out: set = set()
+        for lead in self.leads:
+            if lead.disposition not in TERMINAL_DISPOSITIONS:
+                continue
+            if lead.posting_id:
+                out.add(str(lead.posting_id))
+            for pid in lead.related_posting_ids:
+                if pid:
+                    out.add(str(pid))
+        return out
+
     def to_dict(self) -> Dict[str, Any]:
         return {
             "leads": len(self.leads),
             "final_pass": len(self.final_pass()),
             "loss_census": dict(sorted(self.loss_census.items())),
+            "funnel": dict(self.funnel),
             "stages": [s.to_dict() for s in self.stages],
             "sample": [l.to_dict() for l in self.leads[:10]],
         }

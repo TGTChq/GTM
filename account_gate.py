@@ -256,6 +256,19 @@ class AccountGate:
                 [EvidenceItem("industry", industry, EvidenceStatus.VERIFIED_CROSS_SOURCE, "apollo", excerpt=industry, confidence=0.82)]
             ))
 
+        # Founding year is DELIBERATELY neutral for qualification (definitive
+        # simplified ICP): it is enriched, persisted and shown in Airtable when
+        # available, but it never rejects a company, never changes the
+        # qualification state, and never enters suppression. Known-new,
+        # known-old, and unknown are all treated identically here. (Record it as
+        # evidence only when present, so Airtable can display it.)
+        if org.founded_year is not None:
+            bundle.add(FactValue(
+                "founded_year", org.founded_year, EvidenceStatus.VERIFIED_CROSS_SOURCE,
+                [EvidenceItem("founded_year", org.founded_year, EvidenceStatus.VERIFIED_CROSS_SOURCE,
+                              "apollo", excerpt=str(org.founded_year), confidence=0.9)]
+            ))
+
         source = self.resolver.resolve(canonical_domain, fetch=fetch_company)
         raw = org.raw or {}
         apollo_description = " ".join(

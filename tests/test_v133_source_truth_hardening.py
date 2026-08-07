@@ -2,7 +2,14 @@ from __future__ import annotations
 
 import json
 import unittest
+from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
+
+
+def _recent_iso(days_ago: int = 2) -> str:
+    """A recent UTC timestamp so freshness-sensitive fixtures don't silently go
+    stale as the calendar advances (avoids time-bomb test failures)."""
+    return (datetime.now(timezone.utc) - timedelta(days=days_ago)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 from ats_board_registry import fetch_board_jobs
 from free_job_sources import FetchPayload
@@ -39,7 +46,7 @@ class AshbySourceTruthTests(unittest.TestCase):
                 "isRemote": True,
                 "workplaceType": "Hybrid",
                 "employmentType": "FullTime",
-                "publishedAt": "2026-07-20T23:41:31Z",
+                "publishedAt": _recent_iso(),
                 "descriptionPlain": (
                     "This is a full-time role that can be held from our Foster City, CA office. "
                     "The role has an in-office requirement of Monday, Wednesday, and Friday."

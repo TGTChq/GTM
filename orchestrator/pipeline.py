@@ -180,8 +180,11 @@ class Orchestrator:
             for st in enrichment.stages:
                 report.add(st)
             report.census(enrichment.dispositions())
-            report.set_unit("companies", len({l.company.get("name") for l in enrichment.leads if l.company}))
-            report.set_unit("contacts", len([l for l in enrichment.leads if l.contact]))
+            report.set_unit("companies", len({l.company.get("name") for l in enrichment.leads
+                                               if l.company and l.company.get("name")}))
+            # A "contact" is a lead we actually resolved an email for (usable or
+            # pending verification) -- not merely a lead that carries a row.
+            report.set_unit("contacts", len([l for l in enrichment.leads if l.contact.get("email")]))
             report.set_unit("final_pass_leads", len(enrichment.final_pass()))
 
             delivery = plan.delivery_manager.deliver(
@@ -190,11 +193,15 @@ class Orchestrator:
             report.set_unit("delivered_rows", delivery.created)
             report.set_unit("enrolled_contacts", delivery.enrolled)
 
-            # Safe commit: only AFTER the stages completed do we mark these
-            # postings processed and these lead_keys delivered. A failure before
-            # here leaves them recoverable for the next run. Failed deliveries are
-            # never recorded as delivered (RealDelivery excludes failed_lead_keys).
-            supp.commit_postings(o.get("posting_id", "") for o in opportunities)
+            # Safe commit: only AFTER the stages completed do we mark postings
+            # processed. Crucially, ONLY postings that reached a safe-terminal
+            # disposition (delivered FINAL_PASS or a genuine business REJECT) are
+            # committed to cross-run suppression. Provider-deferred outcomes
+            # (NEEDS_CHECK / UNVERIFIED / REROUTE) stay retryable, so an Apollo or
+            # Hunter outage never permanently suppresses an unprocessed posting
+            # (Defect B). Failed deliveries are never recorded as delivered
+            # (RealDelivery excludes failed_lead_keys).
+            supp.commit_postings(enrichment.terminal_posting_ids())
             supp.commit_delivered(getattr(delivery, "delivered_lead_keys", []) or [])
 
             capacity = build_capacity_report(

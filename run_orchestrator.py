@@ -157,13 +157,27 @@ def _preflight_checks(a):
               "AIRTABLE_TOKEN", "AIRTABLE_BASE_ID", "AIRTABLE_TABLE_NAME"):
         res[k] = bool(getattr(config, k, None))
         lines.append(f"{k:20} {'PRESENT' if res[k] else 'ABSENT'}")
-    boards_path = a.boards or "BOARDS_FINAL.json"
+    # Definitive production path uses the FULL board registry (no --boards). A
+    # static board file is a validation/offline-only override.
     try:
-        from retrieval_measurement.drivers import load_boards_readonly
-        boards, err = load_boards_readonly(boards_path)
+        if a.boards:
+            from retrieval_measurement.drivers import load_boards_readonly
+            boards, err = load_boards_readonly(a.boards)
+            source = a.boards
+        else:
+            from ats_board_registry import AtsBoardRegistry
+            reg = AtsBoardRegistry()
+            if config.ATS_REGISTRY_AUTO_SEED_HISTORY:
+                try:
+                    reg.seed_from_history()
+                except Exception:  # noqa: BLE001
+                    pass
+            boards = list(reg.due_entries(limit=int(config.ATS_MAX_BOARDS_PER_RUN), force=True))
+            err = "" if boards else "ats_board_registry has no valid boards"
+            source = f"ats_board_registry ({len(reg.entries)} tracked)"
         res["boards_ok"] = (len(boards) > 0 and not err)
         by = collections.Counter(b.get("provider") for b in boards)
-        lines.append(f"boards               {len(boards)} from {boards_path} err={err or 'none'}")
+        lines.append(f"boards               {len(boards)} from {source} err={err or 'none'}")
         for prov, n in sorted(by.items()):
             lines.append(f"  {prov:16} {n}")
     except Exception as exc:  # noqa: BLE001
@@ -353,23 +367,106 @@ def _offline_lane_runner(postings):
     return runner
 
 
+def _ats_detail_budgets() -> Dict[str, int]:
+    """Per-provider detail-fetch budgets, from config (no legacy hardcode)."""
+    return {
+        "greenhouse": int(getattr(config, "ATS_GREENHOUSE_DETAIL_BUDGET_PER_RUN", 100) or 100),
+        "workday": int(getattr(config, "ATS_WORKDAY_DETAIL_BUDGET_PER_RUN", 100) or 100),
+        "smartrecruiters": int(getattr(config, "ATS_SMARTRECRUITERS_DETAIL_BUDGET_PER_RUN", 100) or 100),
+    }
+
+
+def _record_ats_board_health(registry, result: LaneResult) -> None:
+    """Persist per-board outcomes into the shared ATS registry so health-aware
+    scheduling actually accrues across runs: a success resets consecutive_failures
+    (recovery back into normal rotation); a failure increments it (bounded retry,
+    then slot-only deprioritization). Without this the registry health goes stale
+    and the scheduler degrades to blind rotation."""
+    boards = (((result.accounting or {}).get("session") or {}).get("boards")) or []
+    updated = 0
+    for b in boards:
+        if b.get("skipped_by_budget") or b.get("skipped_by_scheduler"):
+            continue  # never attempted this run; don't penalize or credit
+        key = b.get("key") or f"{b.get('provider') or ''}:{b.get('identifier') or ''}"
+        if key == ":":
+            continue
+        error = str(b.get("error") or "")
+        job_count = int(b.get("canonical_records") or 0)
+        registry.record_result(key, success=(not error), job_count=job_count,
+                               error=error, save=False)
+        updated += 1
+    if updated:
+        try:
+            registry.save()
+        except Exception as exc:  # noqa: BLE001 - health persistence must never fail the run
+            result.notes.append(f"ats_registry_health_save_failed:{type(exc).__name__}")
+    result.attribution["ats_registry_health_updated"] = updated
+
+
 def _live_ats_runner(a: argparse.Namespace):
-    from retrieval_measurement.drivers import load_boards_readonly
+    """Definitive production ATS lane: driven by the FULL production board
+    registry with health-aware deterministic scheduling -- NOT the 6-board
+    validation snapshot. A static ``--boards`` file is honoured only when
+    explicitly supplied (offline/validation); the production command omits it and
+    uses the registry."""
     from free_job_sources import default_fetcher
     from retrieval_measurement import ats_schedule
-    boards, err = (load_boards_readonly(a.boards, limit=int(a.max_boards))
-                   if a.boards else ([], "no --boards"))
 
-    def runner(m: LaneManager) -> LaneResult:
-        if err:
-            return LaneResult(lane="ats", status="failed", errors=[err])
-        cfg = ats_schedule.SchedulerConfig(mode=config.ATS_SCHEDULER_MODE)
-        return real_ats_runner(boards, default_fetcher,
-                               checkpoint_dir=str(Path(a.artifact_root) / "checkpoints_ats"),
-                               scheduler_config=cfg,
-                               detail_budgets={"greenhouse": 100, "workday": 100,
-                                               "smartrecruiters": 100})(m)
-    return runner
+    sched_cfg = ats_schedule.SchedulerConfig.from_config(config)
+    sched_cfg.validate()  # raises before any board is touched
+
+    # Explicit static board file (offline/validation only).
+    if a.boards:
+        from retrieval_measurement.drivers import load_boards_readonly
+        boards, err = load_boards_readonly(a.boards, limit=int(a.max_boards))
+
+        def runner_static(m: LaneManager) -> LaneResult:
+            if err:
+                return LaneResult(lane="ats", status="failed", errors=[err])
+            return real_ats_runner(boards, default_fetcher,
+                                   checkpoint_dir=str(Path(a.artifact_root) / "checkpoints_ats"),
+                                   scheduler_config=sched_cfg,
+                                   detail_budgets=_ats_detail_budgets())(m)
+        return runner_static
+
+    # Definitive path: the full production registry (auto-seeded, health-tracked).
+    # Force health-aware deterministic partitioning here regardless of the legacy
+    # ATS_SCHEDULER_MODE env toggle -- the definitive production lane is always
+    # health-scheduled (slot rotation + overdue backstop + bounded retry), never
+    # the legacy age-interval herd. cycle_length / caps still come from config.
+    if sched_cfg.mode != "deterministic_partition":
+        sched_cfg.mode = "deterministic_partition"
+        sched_cfg.validate()
+    from ats_board_registry import AtsBoardRegistry
+    registry = AtsBoardRegistry()
+    if config.ATS_REGISTRY_AUTO_SEED_HISTORY:
+        try:
+            registry.seed_from_history()
+        except Exception:  # noqa: BLE001 - seeding is best-effort, never fatal
+            pass
+    # The partitioned scheduler rotates by stable slot over the WHOLE eligible
+    # registry, not the age-due subset, so force=True returns every valid board;
+    # the scheduler (inside run_ats) then applies slot/overdue/retry health logic.
+    candidates = list(registry.due_entries(limit=int(config.ATS_MAX_BOARDS_PER_RUN), force=True))
+
+    def runner_registry(m: LaneManager) -> LaneResult:
+        if not candidates:
+            return LaneResult(lane="ats", status="failed",
+                              errors=["ATS registry has no valid boards; refusing to "
+                                      "silently fall back to the validation snapshot"])
+        result = real_ats_runner(candidates, default_fetcher,
+                                 checkpoint_dir=str(Path(a.artifact_root) / "checkpoints_ats"),
+                                 scheduler_config=sched_cfg,
+                                 detail_budgets=_ats_detail_budgets())(m)
+        _record_ats_board_health(registry, result)
+        # Per-provider + registry-size reporting for the operator.
+        import collections as _c
+        by_provider = _c.Counter(str(b.get("provider") or "?") for b in candidates)
+        result.attribution["ats_registry_size"] = len(registry.entries)
+        result.attribution["ats_candidates"] = len(candidates)
+        result.attribution["ats_candidates_by_provider"] = dict(by_provider)
+        return result
+    return runner_registry
 
 
 def main(argv=None) -> int:
@@ -461,17 +558,98 @@ def main(argv=None) -> int:
         print(f"run_lock             HELD\n{exc}", file=sys.stderr)
         return 2
 
-    print(f"run_id      {ctx.run_id}")
-    print(f"mode        {mode.value}")
-    print(f"status      {result['run']['status']}")
-    print(f"postings    {result['waterfall']['unit_totals'].get('postings')}")
-    print(f"final_pass  {result['waterfall'].get('final_pass_count')}")
-    if result.get("delivery"):
-        print(f"delivered   {result['delivery']['created']} "
-              f"(reconciles={result['delivery']['airtable_reconciles']})")
-    print(f"reconcile   {result['all_reconcile']}")
-    print(f"artifacts   {state.run_dir()}")
+    _print_run_summary(ctx, mode, result, state)
     return 0 if result["all_reconcile"] else 1
+
+
+def _print_run_summary(ctx, mode, result, state) -> None:
+    """Emit the full business funnel to stdout so a Railway operator can read the
+    whole run from logs WITHOUT mounting the volume (Defect G). Every value is
+    already computed in-memory; nothing here recomputes or contacts anything.
+    No PII is printed -- counts and reason codes only."""
+    wf = result.get("waterfall") or {}
+    units = wf.get("unit_totals") or {}
+    census = wf.get("disposition_census") or {}
+    enr = result.get("enrichment") or {}
+    funnel = (enr or {}).get("funnel") or {}
+    deliv = result.get("delivery") or {}
+
+    raw = units.get("postings")
+    unique = units.get("opportunities")
+    contacts = units.get("contacts")
+    fp = wf.get("final_pass_count", census.get("FINAL_PASS", 0))
+    nc = census.get("NEEDS_CHECK", 0)
+    uv = census.get("UNVERIFIED", 0)
+    usable_emails = int(fp or 0) + int(uv or 0)  # verified + pending-verification
+    at_created = deliv.get("created")
+    at_existing = deliv.get("skipped_existing")
+    at_failed = deliv.get("failed")
+    at_submitted = deliv.get("reviewable_submitted")
+
+    # Top rejection reasons across the boundaries the orchestrator can see:
+    # cross-run dedup, pre-contact qualification, and enrichment loss.
+    reasons: Dict[str, int] = {}
+    for st in wf.get("stages") or []:
+        for r, n in (st.get("primary_reasons") or {}).items():
+            reasons[r] = reasons.get(r, 0) + int(n)
+    for r, n in (funnel.get("qual_reason_counts") or {}).items():
+        reasons[r] = reasons.get(r, 0) + int(n)
+    for r, n in (enr.get("loss_census") or {}).items():
+        reasons[r] = reasons.get(r, 0) + int(n)
+    top5 = sorted(reasons.items(), key=lambda kv: kv[1], reverse=True)[:5]
+
+    def line(k, v):
+        print(f"{k:<26}{v}")
+
+    print("================ RUN SUMMARY ================")
+    line("run_id", ctx.run_id)
+    line("mode", mode.value)
+    line("status", result["run"]["status"])
+    print("---- Brett's daily metrics ----")
+    line("JOBS_ANALYZED", raw)
+    line("QUALIFIED", funnel.get("target_role_eligible", funnel.get("icp_eligible_companies")))
+    line("CONTACTS_FOUND", contacts)
+    line("SENT_TO_AIRTABLE", at_created)
+    print("---- Funnel ----")
+    line("raw_postings", raw)
+    line("unique_opportunities", unique)
+    line("target_role_eligible", funnel.get("target_role_eligible"))
+    line("companies_considered", funnel.get("companies_considered"))
+    line("icp_eligible_companies", funnel.get("icp_eligible_companies"))
+    line("icp_rejected_companies", funnel.get("icp_rejected_companies"))
+    line("hiring_managers_found", funnel.get("hiring_managers_found"))
+    line("contacts_with_email", contacts)
+    line("usable_emails", usable_emails)
+    line("FINAL_PASS", fp)
+    line("NEEDS_CHECK", nc)
+    line("UNVERIFIED", uv)
+    print("---- Airtable (review-staging, Status=Pending) ----")
+    line("airtable_submitted", at_submitted)
+    line("airtable_created", at_created)
+    line("airtable_existing", at_existing)
+    line("airtable_failed", at_failed)
+    ats = (result.get("lanes") or {}).get("ats") or {}
+    if ats:
+        attr = ats.get("attribution") or {}
+        acct = ats.get("accounting") or {}
+        print("---- ATS coverage ----")
+        line("ats_registry_size", attr.get("ats_registry_size"))
+        line("ats_candidates", attr.get("ats_candidates"))
+        line("ats_boards_attempted", acct.get("boards_attempted"))
+        line("ats_boards_completed", acct.get("boards_completed"))
+        line("ats_boards_failed", acct.get("boards_failed"))
+        line("ats_boards_skipped", acct.get("boards_skipped_budget", acct.get("boards_skipped")))
+        line("ats_jobs", ats.get("jobs"))
+        line("ats_physical_requests", ats.get("physical_requests"))
+        if attr.get("ats_candidates_by_provider"):
+            for prov, n in sorted((attr.get("ats_candidates_by_provider") or {}).items()):
+                print(f"  {prov} = {n}")
+    print("---- Top rejection reasons ----")
+    for r, n in top5:
+        print(f"  {r} = {n}")
+    line("reconcile", result["all_reconcile"])
+    line("artifacts", state.run_dir())
+    print("=============================================")
 
 
 if __name__ == "__main__":  # pragma: no cover
