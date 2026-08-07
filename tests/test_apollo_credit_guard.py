@@ -79,14 +79,21 @@ class ApolloCreditGuardTests(unittest.TestCase):
         self.assertEqual(mocked_request.call_count, 1)
 
     @patch("apollo_client.request_with_retry")
-    def test_long_retry_window_becomes_clear_apollo_error(self, mocked_request):
+    def test_long_retry_window_is_rate_limit_not_credit_exhaustion(self, mocked_request):
+        # A long 429 Retry-After window is a THROTTLE, not exhausted credits. It
+        # must surface as ApolloRateLimited (a clear, distinct Apollo error), never
+        # as ApolloCreditsExhaustedError -- that conflation aborted a full run.
         response = _response(429, "too many requests", "1900")
         mocked_request.side_effect = http_utils.RetryWindowTooLong(
             "retry window too long", response=response, retry_after=1900.0
         )
 
-        with self.assertRaises(apollo_client.ApolloCreditsExhaustedError):
+        with self.assertRaises(apollo_client.ApolloRateLimited):
             apollo_client.enrich_organization(domain="databricks.com")
+        self.assertNotIsInstance(
+            apollo_client.ApolloRateLimited("x"),
+            apollo_client.ApolloCreditsExhaustedError,
+        )
 
 
 if __name__ == "__main__":
