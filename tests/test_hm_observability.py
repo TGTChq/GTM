@@ -121,7 +121,8 @@ def test_marketing_success_does_not_suppress_sales_search(leads):
     # Both functions were searched even though marketing already found a contact.
     assert acme["expected_hm_searches"] == 2
     assert acme["actual_hm_searches"] == 2
-    assert acme["collapse_detected"] is False
+    assert acme["true_collapse_detected"] is False
+    assert acme["search_shortfall"] == 0
     # The unfound Sales bucket still surfaces as its own failure row.
     sales_failures = [r for r in O.hm_failure_rows(leads)
                       if r["company"] == "Acme" and r["role_bucket"] == "gtm_revenue"]
@@ -206,7 +207,11 @@ def test_summaries_reconcile_and_all_artifacts_written(tmp_path, leads):
     # Multi-function reconciliation: Acme + Delta are multi-function.
     assert mf["multi_function_companies"] == 2
     assert mf["expected_hm_searches"] == mf["actual_hm_searches"] == 4
-    assert mf["collapse_count"] == 0
+    assert mf["true_collapse_count"] == 0
+    # Reconciliation invariants (the semantic-bug guard):
+    assert mf["expected_hm_searches"] == mf["actual_hm_searches"] + mf["search_shortfall_count"]
+    assert mf["search_shortfall_count"] == (
+        mf["no_search_domain_shortfall_count"] + mf["true_collapse_count"])
 
     # All four permanent artifacts exist and parse.
     for name in ("hiring_manager_failures.csv", "multi_function_accounts.csv",
@@ -214,6 +219,44 @@ def test_summaries_reconcile_and_all_artifacts_written(tmp_path, leads):
         assert (tmp_path / name).exists()
     json.loads((tmp_path / "hiring_manager_summary.json").read_text(encoding="utf-8"))
     json.loads((tmp_path / "multi_function_summary.json").read_text(encoding="utf-8"))
+
+
+def test_no_search_domain_shortfall_never_counts_as_true_collapse():
+    """The semantic-bug guard: a multi-function company where an eligible bucket
+    could NOT be searched because it had NO resolvable domain is a
+    no_search_domain shortfall, NEVER a true collapse."""
+    # StaffCo: an unresolvable employer (a staffing/agency-style poster) with two
+    # eligible functions but NO resolvable domain anywhere -> both are
+    # no_search_domain shortfalls (grouped by name), never a collapse. This is the
+    # exact population that wrongly showed collapse_count=16 before the fix.
+    def _nodomain(bucket):
+        l = _lead("StaffCo", "", bucket, found=False, status="unverified",
+                  reason="no_search_domain")
+        l["company_domain"] = ""
+        l["_row2_diagnostic"]["people_search_call"] = False
+        return l
+    mkt, sales = _nodomain("marketing"), _nodomain("gtm_revenue")
+    mf = O.multi_function_summary([mkt, sales])
+    assert mf["multi_function_companies"] == 1
+    assert mf["expected_hm_searches"] == 2 and mf["actual_hm_searches"] == 0
+    assert mf["search_shortfall_count"] == 2
+    assert mf["no_search_domain_shortfall_count"] == 2
+    assert mf["true_collapse_count"] == 0          # <-- the bug that must stay fixed
+    row = O.multi_function_rows([mkt, sales])[0]
+    assert row["true_collapse_detected"] is False
+    assert "no_search_domain" in row["shortfall_cause"]
+
+
+def test_true_collapse_fires_only_when_searchable_bucket_skipped():
+    """A genuine collapse: an eligible bucket that HAD a resolvable domain (search
+    was possible) but was not searched -> true_collapse increments."""
+    mkt = _lead("Beta", "beta.com", "marketing", found=True, status="found")
+    sales = _lead("Beta", "beta.com", "gtm_revenue", found=False, status="unverified")
+    sales["company_domain"] = "beta.com"                    # domain WAS available
+    sales["_row2_diagnostic"]["people_search_call"] = False # yet not searched
+    mf = O.multi_function_summary([mkt, sales])
+    assert mf["true_collapse_count"] == 1
+    assert mf["no_search_domain_shortfall_count"] == 0
 
 
 def test_empty_run_yields_header_only_artifacts(tmp_path):

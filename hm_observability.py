@@ -95,6 +95,14 @@ def _searched(lead: Dict[str, Any]) -> bool:
     return bool(_diag(lead).get("people_search_call"))
 
 
+def _has_domain(lead: Dict[str, Any]) -> bool:
+    """True iff the lead carries a resolvable company domain -- i.e. a search
+    was *possible*. A bucket with a domain that was still not searched is the
+    only thing that could indicate a genuine within-run collapse; a bucket with
+    NO domain is a domain-resolution shortfall, never a collapse."""
+    return bool(str(_first(lead, "company_domain", default="") or "").strip())
+
+
 # --------------------------------------------------------------------------
 # Per-company aggregation (functions present, jobs, searches)
 # --------------------------------------------------------------------------
@@ -201,29 +209,72 @@ MULTI_FUNCTION_COLUMNS = [
     "actual_hm_searches",
     "contacts_found_by_function",
     "leads_by_function",
-    "collapse_detected",
-    "collapse_boundary",
+    "true_collapse_detected",
+    "search_shortfall",
+    "no_search_domain_shortfall",
+    "excluded_buckets",
+    "shortfall_cause",
 ]
 
 
-def _company_search_stats(leads: List[Dict[str, Any]]) -> Tuple[int, int, Dict[str, int], Dict[str, int]]:
-    """Return (expected_searches, actual_searches, found_by_bucket, leads_by_bucket)
-    for one company's leads. Expected = eligible buckets (a search is warranted);
-    actual = buckets that actually issued an Apollo people-search."""
+def _company_bucket_stats(leads: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Per-company multi-function accounting with a STRICT collapse definition.
+
+    For each function bucket at the company we know whether it was ICP-eligible,
+    whether a resolvable domain existed (a search was *possible*), whether a
+    people-search was actually issued, and whether a contact was found.
+
+    * expected_hm_searches   = eligible buckets (a search is warranted)
+    * actual_hm_searches     = buckets that issued a people-search
+    * search_shortfall       = eligible buckets that did NOT get searched (any cause)
+    * no_search_domain       = eligible+unsearched buckets that had NO domain
+                               (a domain-resolution shortfall, NOT a collapse)
+    * true_collapse          = eligible buckets that HAD a resolvable domain (so a
+                               search was possible) yet were NOT searched -- the only
+                               signal that a distinct function was collapsed/suppressed
+                               within the run. By construction a no_search_domain
+                               bucket can never be a true_collapse.
+    """
     buckets = sorted({_bucket(l) for l in leads})
-    found_by_bucket: Dict[str, int] = defaultdict(int)
-    leads_by_bucket: Dict[str, int] = defaultdict(int)
-    expected = 0
-    actual = 0
+    found_by_bucket: Dict[str, int] = {}
+    leads_by_bucket: Dict[str, int] = {}
+    expected = actual = search_shortfall = no_domain = true_collapse = excluded = 0
+    causes: Dict[str, int] = defaultdict(int)
     for bucket in buckets:
-        bleads = [l for l in leads if _bucket(l) == bucket]
-        leads_by_bucket[bucket] = len(bleads)
-        if any(_is_eligible(l) for l in bleads):
-            expected += 1
-        if any(_searched(l) for l in bleads):
+        bl = [l for l in leads if _bucket(l) == bucket]
+        leads_by_bucket[bucket] = len(bl)
+        found_by_bucket[bucket] = sum(1 for l in bl if _has_hm(l))
+        eligible = any(_is_eligible(l) for l in bl)
+        searched = any(_searched(l) for l in bl)
+        has_domain = any(_has_domain(l) for l in bl)
+        if not eligible:
+            excluded += 1
+            continue
+        expected += 1
+        if searched:
             actual += 1
-        found_by_bucket[bucket] = sum(1 for l in bleads if _has_hm(l))
-    return expected, actual, dict(found_by_bucket), dict(leads_by_bucket)
+            continue
+        # eligible but not searched -> a shortfall; classify the cause
+        search_shortfall += 1
+        if not has_domain:
+            no_domain += 1
+            causes["no_search_domain"] += 1
+        else:
+            # eligible AND a domain existed AND still no search == genuine collapse
+            true_collapse += 1
+            causes["true_collapse"] += 1
+    return {
+        "buckets": buckets,
+        "found_by_bucket": found_by_bucket,
+        "leads_by_bucket": leads_by_bucket,
+        "expected_hm_searches": expected,
+        "actual_hm_searches": actual,
+        "search_shortfall": search_shortfall,
+        "no_search_domain_shortfall": no_domain,
+        "true_collapse": true_collapse,
+        "excluded_buckets": excluded,
+        "causes": dict(causes),
+    }
 
 
 def multi_function_rows(all_leads: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -232,26 +283,27 @@ def multi_function_rows(all_leads: List[Dict[str, Any]]) -> List[Dict[str, Any]]
         functions = sorted({_bucket(l) for l in leads})
         if len(functions) < 2:
             continue
-        expected, actual, found_by_bucket, leads_by_bucket = _company_search_stats(leads)
-        # Within a single run the pipeline issues one people-search per eligible
-        # bucket, so a shortfall (actual < expected) is the ONLY in-run collapse
-        # signal. Cross-run company suppression is a delivery-layer effect and is
-        # reported in the multi-function SUMMARY, not per row.
-        collapse = actual < expected
+        s = _company_bucket_stats(leads)
         rows.append({
             "company": _company_label(leads[0]),
             "domain": _first(leads[0], "company_domain", default=""),
             "relevant_jobs": _distinct_job_count(leads),
             "functions": ";".join(functions),
             "num_functions": len(functions),
-            "expected_hm_searches": expected,
-            "actual_hm_searches": actual,
+            "expected_hm_searches": s["expected_hm_searches"],
+            "actual_hm_searches": s["actual_hm_searches"],
             "contacts_found_by_function": ";".join(
-                f"{b}:{n}" for b, n in sorted(found_by_bucket.items())),
+                f"{b}:{n}" for b, n in sorted(s["found_by_bucket"].items())),
             "leads_by_function": ";".join(
-                f"{b}:{n}" for b, n in sorted(leads_by_bucket.items())),
-            "collapse_detected": collapse,
-            "collapse_boundary": "hm_search_shortfall" if collapse else "",
+                f"{b}:{n}" for b, n in sorted(s["leads_by_bucket"].items())),
+            # TRUE collapse only: a distinct function that had a resolvable domain
+            # (search was possible) but was not searched. A no_search_domain
+            # shortfall is reported separately and is NEVER a collapse.
+            "true_collapse_detected": bool(s["true_collapse"]),
+            "search_shortfall": s["search_shortfall"],
+            "no_search_domain_shortfall": s["no_search_domain_shortfall"],
+            "excluded_buckets": s["excluded_buckets"],
+            "shortfall_cause": ";".join(f"{k}:{v}" for k, v in sorted(s["causes"].items())),
         })
     return rows
 
@@ -308,30 +360,70 @@ def multi_function_summary(all_leads: List[Dict[str, Any]]) -> Dict[str, Any]:
     multi = {ck: leads for ck, leads in by_company.items()
              if len({_bucket(l) for l in leads}) >= 2}
 
-    total_buckets = 0
-    expected_searches = 0
-    actual_searches = 0
-    contacts_found = 0
-    leads_created = 0
-    collapse_count = 0
+    total_buckets = eligible_buckets = excluded_buckets = 0
+    expected_searches = actual_searches = 0
+    search_shortfall = no_domain_shortfall = true_collapse = 0
+    contacts_found = leads_created = 0
     for leads in multi.values():
-        expected, actual, found_by_bucket, _ = _company_search_stats(leads)
-        total_buckets += len({_bucket(l) for l in leads})
-        expected_searches += expected
-        actual_searches += actual
-        contacts_found += sum(found_by_bucket.values())
+        s = _company_bucket_stats(leads)
+        total_buckets += len(s["buckets"])
+        excluded_buckets += s["excluded_buckets"]
+        eligible_buckets += s["expected_hm_searches"]
+        expected_searches += s["expected_hm_searches"]
+        actual_searches += s["actual_hm_searches"]
+        search_shortfall += s["search_shortfall"]
+        no_domain_shortfall += s["no_search_domain_shortfall"]
+        true_collapse += s["true_collapse"]
+        contacts_found += sum(s["found_by_bucket"].values())
         leads_created += sum(1 for l in leads if _has_hm(l))
-        if actual < expected:
-            collapse_count += 1
 
+    # Reconciliation invariant (asserted in tests): every eligible multi-function
+    # bucket is either searched, a no_search_domain shortfall, or a true collapse.
+    #   expected_hm_searches == actual_hm_searches + search_shortfall
+    #   search_shortfall     == no_search_domain_shortfall + true_collapse
     return {
         "multi_function_companies": len(multi),
         "total_role_buckets": total_buckets,
+        "eligible_role_buckets": eligible_buckets,
+        "excluded_role_buckets": excluded_buckets,
         "expected_hm_searches": expected_searches,
         "actual_hm_searches": actual_searches,
+        "search_shortfall_count": search_shortfall,
+        "no_search_domain_shortfall_count": no_domain_shortfall,
+        "true_collapse_count": true_collapse,
         "contacts_found": contacts_found,
         "leads_created": leads_created,
-        "collapse_count": collapse_count,
+    }
+
+
+def domain_resolution_summary(all_leads: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Per-run employer-domain resolution metrics (non-PII). An eligible company×
+    bucket either resolved a domain (a people-search was possible) or is classified
+    by why it did not -- so staffing/aggregator posters are never conflated with a
+    genuine resolver failure. Reconciles: resolved + unresolved == eligible buckets."""
+    eligible = [l for l in all_leads if _is_eligible(l)]
+    resolved = unresolved = 0
+    by_class: Dict[str, int] = defaultdict(int)
+    by_reason: Dict[str, int] = defaultdict(int)
+    by_method: Dict[str, int] = defaultdict(int)
+    for lead in eligible:
+        diag = _diag(lead)
+        if _has_domain(lead) or _searched(lead):
+            resolved += 1
+            by_class["direct_employer"] += 1
+            by_method[str(diag.get("domain_resolution_method") or "enrichment_resolved")] += 1
+        else:
+            unresolved += 1
+            by_class[str(diag.get("domain_classification") or "unresolved_no_evidence")] += 1
+            by_reason[str(diag.get("domain_unresolved_reason") or "unknown")] += 1
+    return {
+        "eligible_company_buckets": len(eligible),
+        "resolved": resolved,
+        "unresolved": unresolved,
+        "resolution_rate": round(resolved / len(eligible), 4) if eligible else 0.0,
+        "classification": dict(sorted(by_class.items())),
+        "resolved_by_method": dict(sorted(by_method.items())),
+        "unresolved_by_reason": dict(sorted(by_reason.items())),
     }
 
 
@@ -345,7 +437,8 @@ _MAJOR_BUCKETS = (
 )
 
 
-def stdout_summary(hm: Dict[str, Any], mf: Dict[str, Any]) -> List[str]:
+def stdout_summary(hm: Dict[str, Any], mf: Dict[str, Any],
+                   dr: Optional[Dict[str, Any]] = None) -> List[str]:
     lines: List[str] = []
     lines.append("---- Hiring Manager Coverage ----")
     for key in ("eligible_companies", "eligible_company_buckets", "hm_searches",
@@ -366,7 +459,19 @@ def stdout_summary(hm: Dict[str, Any], mf: Dict[str, Any]) -> List[str]:
     lines.append(f"{'separate_searches':<32}"
                  f"{mf.get('actual_hm_searches', 0)}/{mf.get('expected_hm_searches', 0)}")
     lines.append(f"{'contacts_found':<32}{mf.get('contacts_found', 0)}")
-    lines.append(f"{'collapse_detected':<32}{mf.get('collapse_count', 0)}")
+    lines.append(f"{'search_shortfall':<32}{mf.get('search_shortfall_count', 0)}")
+    lines.append(f"{'no_search_domain_shortfall':<32}{mf.get('no_search_domain_shortfall_count', 0)}")
+    # TRUE collapse only -- a distinct function suppressed by another. Must be 0
+    # in a healthy run; a no_search_domain shortfall never counts here.
+    lines.append(f"{'true_collapse_detected':<32}{mf.get('true_collapse_count', 0)}")
+    if dr:
+        lines.append("---- Domain Resolution ----")
+        lines.append(f"{'eligible_company_buckets':<32}{dr.get('eligible_company_buckets', 0)}")
+        lines.append(f"{'resolved':<32}{dr.get('resolved', 0)}")
+        lines.append(f"{'unresolved':<32}{dr.get('unresolved', 0)}")
+        lines.append(f"{'resolution_rate':<32}{dr.get('resolution_rate', 0.0)}")
+        for reason, n in (dr.get("unresolved_by_reason") or {}).items():
+            lines.append(f"  unresolved:{reason:<22} {n}")
     return lines
 
 
@@ -394,12 +499,14 @@ def write_run_artifacts(all_leads: List[Dict[str, Any]],
     mf_rows = multi_function_rows(all_leads)
     hm_sum = hm_summary(all_leads)
     mf_sum = multi_function_summary(all_leads)
+    dr_sum = domain_resolution_summary(all_leads)
 
     paths = {
         "hiring_manager_failures_csv": out / "hiring_manager_failures.csv",
         "multi_function_accounts_csv": out / "multi_function_accounts.csv",
         "hiring_manager_summary_json": out / "hiring_manager_summary.json",
         "multi_function_summary_json": out / "multi_function_summary.json",
+        "domain_resolution_summary_json": out / "domain_resolution_summary.json",
     }
     _write_csv(paths["hiring_manager_failures_csv"], HM_FAILURE_COLUMNS, failure_rows)
     _write_csv(paths["multi_function_accounts_csv"], MULTI_FUNCTION_COLUMNS, mf_rows)
@@ -407,11 +514,14 @@ def write_run_artifacts(all_leads: List[Dict[str, Any]],
         json.dumps(hm_sum, indent=2), encoding="utf-8")
     paths["multi_function_summary_json"].write_text(
         json.dumps(mf_sum, indent=2), encoding="utf-8")
+    paths["domain_resolution_summary_json"].write_text(
+        json.dumps(dr_sum, indent=2), encoding="utf-8")
 
     return {
         "paths": {k: str(v) for k, v in paths.items()},
         "hiring_manager": hm_sum,
         "multi_function": mf_sum,
+        "domain_resolution": dr_sum,
         "failure_row_count": len(failure_rows),
         "multi_function_row_count": len(mf_rows),
     }

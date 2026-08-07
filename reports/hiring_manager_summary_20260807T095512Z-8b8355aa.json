@@ -1,0 +1,41 @@
+{
+  "hm_not_found_unit": "company_x_role_bucket",
+  "eligible_companies": 553,
+  "eligible_company_buckets": 566,
+  "hm_searches": 213,
+  "hm_found": 114,
+  "hm_not_found": 452,
+  "distinct_companies_with_hm": 111,
+  "distinct_companies_without_hm": 442,
+  "failure_counts_by_bucket": {
+    "customer_success": 13,
+    "customer_support": 18,
+    "ecommerce": 9,
+    "engineering": 30,
+    "finance": 15,
+    "gtm_revenue": 311,
+    "marketing": 33,
+    "operations": 6,
+    "people_hr": 14,
+    "product": 3
+  },
+  "failure_counts_by_reason": {
+    "all_candidates_previously_attempted": 7,
+    "attempted": 15,
+    "no_search_domain": 353,
+    "no_title_match": 12,
+    "zero_apollo_people": 65
+  },
+  "hm_coverage_by_bucket": {
+    "customer_success": 0.35,
+    "customer_support": 0.25,
+    "ecommerce": 0.0,
+    "engineering": 0.3478,
+    "finance": 0.3182,
+    "gtm_revenue": 0.1456,
+    "marketing": 0.3265,
+    "operations": 0.1429,
+    "people_hr": 0.3,
+    "product": 0.4
+  }
+}
