@@ -12,47 +12,111 @@ from domain_utils import normalize_company_domain
 import requests
 
 import config
-from http_utils import RetryWindowTooLong, debug_dump, request_with_retry, safe_json
+from apollo_errors import (
+    ApolloErrorCategory,
+    ApolloErrorClassification,
+    build_error_record,
+    classify_apollo_error,
+    write_error_artifact,
+)
+from http_utils import debug_dump, request_with_retry, safe_json
 
 logger = logging.getLogger(__name__)
 APOLLO_BASE_URL = "https://api.apollo.io/api/v1"
 
 
 class ApolloCreditsExhaustedError(RuntimeError):
-    """Raised when Apollo cannot perform credit-consuming enrichment."""
+    """Raised only when Apollo's response explicitly reports exhausted credits."""
 
 
-def _response_body(exc: requests.HTTPError) -> str:
-    response = exc.response
-    if response is None:
-        return ""
-    try:
-        return response.text or ""
-    except Exception:
-        return ""
+class ApolloAuthorizationError(requests.HTTPError):
+    """Raised when Apollo rejects the API key or scope (HTTP 401/403).
+
+    Subclasses ``requests.HTTPError`` so existing callers that catch that type
+    still stop the run; the distinct type lets the enrichment loop open an
+    Apollo-only circuit instead of mislabeling the failure as exhausted credits.
+    """
 
 
-def _looks_like_credit_exhaustion(exc: requests.HTTPError) -> bool:
-    body = _response_body(exc).lower()
-    credit_markers = (
-        "shared credits",
-        "credits are used up",
-        "credits used up",
-        "out of credits",
-        "insufficient credits",
-        "credit limit",
-        "no credits remaining",
-        "buy more credits",
+class ApolloRateLimited(requests.HTTPError):
+    """Raised for a genuine rate-limit stop (HTTP 429 / impractical retry window).
+
+    A rate limit is NOT credit exhaustion. Subclasses ``requests.HTTPError`` for
+    backward compatibility while remaining separately catchable.
+    """
+
+
+#: Failures that mean Apollo is unusable for the WHOLE run. The enrichment loop
+#: opens a circuit and preserves completed work rather than crashing.
+GLOBAL_FATAL_ERRORS = (
+    ApolloCreditsExhaustedError,
+    ApolloAuthorizationError,
+    ApolloRateLimited,
+)
+
+
+def _apollo_error_dir():
+    from pathlib import Path
+
+    return Path(config.LOG_DIR) / "apollo_errors"
+
+
+def _record_apollo_error(
+    classification: ApolloErrorClassification,
+    *,
+    company_key: str = "",
+    domain: str = "",
+    retry_decision: str = "",
+    final_outcome: str = "",
+) -> None:
+    """Persist a sanitized evidence artifact for one classified Apollo failure."""
+    record = build_error_record(
+        classification,
+        company_key=company_key,
+        domain=domain,
+        retry_decision=retry_decision,
+        final_outcome=final_outcome,
     )
-    return any(marker in body for marker in credit_markers)
+    write_error_artifact(_apollo_error_dir(), record)
 
 
-def _raise_credit_error(exc: requests.HTTPError) -> None:
+def _raise_credit_error(exc: BaseException) -> None:
     raise ApolloCreditsExhaustedError(
-        "Apollo credit-consuming enrichment is unavailable. The team's shared "
-        "credits appear to be exhausted. Ask an Apollo admin to add credits, "
-        "then rerun the daily pipeline."
+        "Apollo credit-consuming enrichment is unavailable. Apollo's response "
+        "explicitly reports the team's shared credits are exhausted. Ask an "
+        "Apollo admin to add credits, then rerun the daily pipeline."
     ) from exc
+
+
+def _raise_global_fatal(classification: ApolloErrorClassification, exc: BaseException) -> None:
+    """Raise the correct global-fatal Apollo exception for a global category.
+
+    CREDIT_EXHAUSTED, AUTHORIZATION and RATE_LIMIT are kept strictly distinct so a
+    422 validation error or a 429 rate limit is never reported as exhausted credits.
+    """
+    category = classification.category
+    response = getattr(exc, "response", None)
+    if category is ApolloErrorCategory.CREDIT_EXHAUSTED:
+        _raise_credit_error(exc)
+    if category is ApolloErrorCategory.AUTHORIZATION:
+        raise ApolloAuthorizationError(
+            f"Apollo rejected the request (HTTP {classification.status}): "
+            "the API key or its scope is invalid. Fix the Apollo credential, "
+            "then rerun the pipeline.",
+            response=response,
+        ) from exc
+    if category is ApolloErrorCategory.RATE_LIMIT:
+        window = (
+            f" (requested {classification.retry_after:.0f}s retry window)"
+            if classification.retry_after
+            else ""
+        )
+        raise ApolloRateLimited(
+            f"Apollo is rate limiting requests (HTTP {classification.status})"
+            f"{window}. This is a throttle, not credit exhaustion; the run is "
+            "preserved and Apollo calls are paused.",
+            response=response,
+        ) from exc
 
 
 @dataclass
@@ -177,24 +241,32 @@ def enrich_organization(
             params, debug_name="apollo_organization_enrich"
         )
     except requests.HTTPError as exc:
-        status = exc.response.status_code if exc.response is not None else None
-        if isinstance(exc, RetryWindowTooLong) or _looks_like_credit_exhaustion(exc):
+        classification = classify_apollo_error(exc)
+        ctx_domain = normalized_domain or domain
+        # Global-fatal (credit / auth / rate limit): stop Apollo for the whole run.
+        if classification.global_fatal:
             logger.error(
-                "Apollo organization enrichment is unavailable due to exhausted "
-                "credits or an excessively long retry window."
+                "Apollo organization enrichment stopped for %s/%s: %s (HTTP %s).",
+                domain, name, classification.category.value, classification.status,
             )
-            _raise_credit_error(exc)
-        if status in {404, 422}:
-            # A company-level enrichment miss must not abort the whole daily run.
-            # When a multi-identifier request is rejected, retry once with the
-            # normalized domain only. This removes any stale/noisy name or website
-            # value while keeping the strongest company identifier.
+            _record_apollo_error(
+                classification, domain=ctx_domain, retry_decision="none",
+                final_outcome="apollo_global_stop",
+            )
+            _raise_global_fatal(classification, exc)
+        # Record-specific validation (404/422): retry once with domain only, then
+        # continue with unknown firmographics -- one company never aborts the run.
+        if classification.category is ApolloErrorCategory.VALIDATION:
             if normalized_domain and params != {"domain": normalized_domain}:
                 logger.warning(
                     "Apollo organization enrichment returned HTTP %s for %s; "
                     "retrying once with domain only.",
-                    status,
-                    normalized_domain,
+                    classification.status, normalized_domain,
+                )
+                _record_apollo_error(
+                    classification, domain=normalized_domain,
+                    retry_decision="retry_domain_only",
+                    final_outcome="validation_retry",
                 )
                 try:
                     data = _organization_enrichment_request(
@@ -202,41 +274,40 @@ def enrich_organization(
                         debug_name="apollo_organization_enrich_domain_only",
                     )
                 except requests.HTTPError as retry_exc:
-                    retry_status = (
-                        retry_exc.response.status_code
-                        if retry_exc.response is not None
-                        else None
-                    )
-                    if isinstance(retry_exc, RetryWindowTooLong) or _looks_like_credit_exhaustion(retry_exc):
-                        logger.error(
-                            "Apollo organization enrichment is unavailable due to "
-                            "exhausted credits or an excessively long retry window."
+                    retry_class = classify_apollo_error(retry_exc)
+                    if retry_class.global_fatal:
+                        _record_apollo_error(
+                            retry_class, domain=normalized_domain,
+                            retry_decision="none", final_outcome="apollo_global_stop",
                         )
-                        _raise_credit_error(retry_exc)
-                    if retry_status in {404, 422}:
+                        _raise_global_fatal(retry_class, retry_exc)
+                    if retry_class.category is ApolloErrorCategory.VALIDATION:
                         logger.warning(
                             "Apollo organization enrichment unavailable for %s "
                             "after domain-only retry (HTTP %s). Continuing with "
                             "unknown firmographics and the input domain.",
-                            normalized_domain,
-                            retry_status,
+                            normalized_domain, retry_class.status,
+                        )
+                        _record_apollo_error(
+                            retry_class, domain=normalized_domain,
+                            retry_decision="none", final_outcome="unresolved_organization",
                         )
                         return _unresolved_organization(
                             domain=normalized_domain, name=name
                         )
+                    _record_apollo_error(
+                        retry_class, domain=normalized_domain,
+                        retry_decision="none", final_outcome="record_failed",
+                    )
                     logger.error(
                         "Apollo organization enrichment failed for %s/%s: %s",
-                        domain,
-                        name,
-                        retry_exc,
+                        domain, name, retry_exc,
                     )
                     raise
                 except Exception as retry_exc:
                     logger.error(
                         "Apollo organization enrichment failed for %s/%s: %s",
-                        domain,
-                        name,
-                        retry_exc,
+                        domain, name, retry_exc,
                     )
                     raise
             else:
@@ -244,19 +315,23 @@ def enrich_organization(
                     "Apollo organization enrichment unavailable for %s/%s "
                     "(HTTP %s). Continuing with unknown firmographics and the "
                     "input domain.",
-                    normalized_domain or domain,
-                    name,
-                    status,
+                    ctx_domain, name, classification.status,
                 )
-                return _unresolved_organization(
-                    domain=normalized_domain or domain, name=name
+                _record_apollo_error(
+                    classification, domain=ctx_domain, retry_decision="none",
+                    final_outcome="unresolved_organization",
                 )
+                return _unresolved_organization(domain=ctx_domain, name=name)
         else:
+            # Server / unknown: retries already happened in http_utils. Mark the
+            # provider failure and let the enrichment loop contain it per-company.
+            _record_apollo_error(
+                classification, domain=ctx_domain, retry_decision="none",
+                final_outcome="record_failed",
+            )
             logger.error(
                 "Apollo organization enrichment failed for %s/%s: %s",
-                domain,
-                name,
-                exc,
+                domain, name, exc,
             )
             raise
     except Exception as exc:
@@ -418,14 +493,18 @@ def match_person(person: Dict[str, Any]) -> PersonMatch:
             redact_keys=("email", "personal_emails", "phone_numbers", "phone_number"),
         )
     except requests.HTTPError as exc:
-        status = exc.response.status_code if exc.response is not None else None
-        if isinstance(exc, RetryWindowTooLong) or _looks_like_credit_exhaustion(exc):
+        classification = classify_apollo_error(exc)
+        if classification.global_fatal:
             logger.error(
-                "Apollo person enrichment is unavailable due to exhausted credits "
-                "or an excessively long retry window."
+                "Apollo person enrichment stopped: %s (HTTP %s).",
+                classification.category.value, classification.status,
             )
-            _raise_credit_error(exc)
-        if status in {404, 422}:
+            _record_apollo_error(
+                classification, retry_decision="none",
+                final_outcome="apollo_global_stop",
+            )
+            _raise_global_fatal(classification, exc)
+        if classification.category is ApolloErrorCategory.VALIDATION:
             # Apollo can occasionally return a search-result person ID that its
             # enrichment endpoint can no longer resolve. This is a record-level
             # miss, not a pipeline-level failure. Preserve the candidate identity
@@ -434,10 +513,16 @@ def match_person(person: Dict[str, Any]) -> PersonMatch:
             logger.warning(
                 "Apollo person enrichment skipped for %s: HTTP %s. "
                 "Keeping search-result identity and continuing to Hunter fallback.",
-                person_id,
-                status,
+                person_id, classification.status,
+            )
+            _record_apollo_error(
+                classification, retry_decision="none",
+                final_outcome="record_miss_hunter_fallback",
             )
             return base
+        _record_apollo_error(
+            classification, retry_decision="none", final_outcome="record_failed",
+        )
         logger.error("Apollo person enrichment failed for %s: %s", person_id, exc)
         raise
     except Exception as exc:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import time
 from collections import defaultdict
@@ -786,6 +787,10 @@ def _process_company_strict(company_jobs: List[Dict]) -> Tuple[List[Dict], Dict]
         apollo_error = False
         try:
             people = apollo.search_people_at_company(search_domain, target_titles)
+        except apollo.GLOBAL_FATAL_ERRORS:
+            # A whole-account Apollo outage must propagate to open the run-level
+            # circuit, not be masked as an empty-people result for this one bucket.
+            raise
         except Exception as exc:
             apollo_error = True
             people = []
@@ -876,6 +881,10 @@ def _process_company_strict(company_jobs: List[Dict]) -> Tuple[List[Dict], Dict]
             stats["person_match_attempts"] += 1
             try:
                 person = apollo.match_person(candidate)
+            except apollo.GLOBAL_FATAL_ERRORS:
+                # A whole-account Apollo outage must propagate to open the
+                # run-level circuit, not be masked as a per-candidate match error.
+                raise
             except Exception as exc:
                 # A transient/provider error must not abort the whole run (the
                 # same defect class already fixed for org enrichment and people
@@ -1176,6 +1185,122 @@ def _job_state_ref(job: Dict) -> Dict:
     }
 
 
+_ENRICHMENT_PROGRESS_SCHEMA = "hiring-manager-enrichment-progress/1"
+_ENRICHMENT_PROGRESS_FILE = "enrichment_progress.json"
+
+
+class _EnrichmentProgress:
+    """Per-company enrichment checkpoint written beside the Step 3 output.
+
+    Only SUCCESSFULLY enriched companies are recorded. A resumed run reuses them
+    instead of re-calling Apollo (no re-consumed credits), while any company that
+    failed -- record-level or a whole-account Apollo outage -- is deliberately not
+    recorded, so it stays recoverable on the next run.
+    """
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self.companies: Dict[str, Dict] = {}
+
+    @classmethod
+    def load(cls, directory: str) -> "_EnrichmentProgress":
+        path = Path(directory) / _ENRICHMENT_PROGRESS_FILE
+        progress = cls(path)
+        try:
+            if path.is_file():
+                data = json.loads(path.read_text(encoding="utf-8"))
+                if isinstance(data, dict) and data.get("schema") == _ENRICHMENT_PROGRESS_SCHEMA:
+                    companies = data.get("companies")
+                    if isinstance(companies, dict):
+                        progress.companies = companies
+        except Exception:  # noqa: BLE001 - a corrupt checkpoint just starts fresh
+            logger.warning(
+                "Could not read enrichment progress checkpoint at %s; starting fresh.",
+                path,
+            )
+            progress.companies = {}
+        return progress
+
+    def get(self, company_key: str) -> Optional[Tuple[List[Dict], Dict]]:
+        entry = self.companies.get(company_key)
+        if not isinstance(entry, dict):
+            return None
+        leads = entry.get("leads")
+        stats = entry.get("stats")
+        if isinstance(leads, list) and isinstance(stats, dict):
+            return leads, stats
+        return None
+
+    def record(self, company_key: str, leads: List[Dict], stats: Dict) -> None:
+        self.companies[company_key] = {"leads": leads, "stats": dict(stats)}
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = self.path.with_suffix(self.path.suffix + ".tmp")
+            tmp.write_text(
+                json.dumps(
+                    {"schema": _ENRICHMENT_PROGRESS_SCHEMA, "companies": self.companies},
+                    default=str,
+                ),
+                encoding="utf-8",
+            )
+            os.replace(tmp, self.path)  # atomic
+        except Exception:  # noqa: BLE001 - checkpointing is never fatal
+            logger.warning(
+                "Could not persist enrichment progress checkpoint at %s.",
+                self.path,
+                exc_info=True,
+            )
+
+
+def _apollo_circuit_reason(exc: BaseException) -> str:
+    if isinstance(exc, apollo.ApolloCreditsExhaustedError):
+        return "apollo_credit_exhausted"
+    if isinstance(exc, apollo.ApolloAuthorizationError):
+        return "apollo_authorization"
+    if isinstance(exc, apollo.ApolloRateLimited):
+        return "apollo_rate_limited"
+    return "apollo_unavailable"
+
+
+def _degraded_company_leads(
+    company_jobs: List[Dict], *, reason: str
+) -> Tuple[List[Dict], Dict]:
+    """Emit an honest UNVERIFIED lead for a company Apollo could not enrich.
+
+    Never FINAL_PASS (there is no verified contact), never fabricates firmographics
+    or an email. The rest of the batch continues; this company stays reviewable as
+    UNVERIFIED and recoverable on a later run.
+    """
+    first = company_jobs[0]
+    input_domain = _best_input_domain(first)
+    company_name = str(
+        first.get("canonical_employer_name") or first.get("employer_name") or ""
+    )
+    lead = dict(first)
+    lead.update(
+        {
+            "_role_bucket": get_bucket_name_for_job(first),
+            "company_domain": input_domain or None,
+            "canonical_company_name": company_name or None,
+            "_final_state": "UNVERIFIED",
+            "_final_primary_reason": reason,
+            "_step3_status": "unverified",
+            "_step3_reason": reason,
+            "hiring_manager_name": None,
+            "hiring_manager_email": None,
+            "hiring_manager_confidence": "none",
+            "_company_needs_review": True,
+            "_apollo_enrichment_failed": True,
+        }
+    )
+    stats: Dict[str, int] = {
+        "final_unverified": 1,
+        "apollo_degraded_companies": 1,
+        f"apollo_degraded_reason__{reason}": 1,
+    }
+    return [lead], stats
+
+
 def run_hiring_manager_identification(
     input_path: Optional[str] = None,
     *,
@@ -1244,9 +1369,55 @@ def run_hiring_manager_identification(
     stop_reason = "candidate_pool_exhausted"
     processed_company_keys: List[str] = sorted(skipped_existing_company_keys)
 
+    # Per-company enrichment checkpoint: a resumed run reuses already-enriched
+    # companies instead of re-calling Apollo. The Apollo circuit stays closed until
+    # a whole-account failure (credit/auth/rate-limit) trips it, after which no
+    # further Apollo calls are made and completed work is preserved.
+    progress = _EnrichmentProgress.load(config.STEP3_OUTPUT_DIR)
+
     for index, (company_key, company_jobs) in enumerate(company_items, 1):
-        logger.info("[%d/%d] Enriching %s", index, total_candidate_companies, company_key)
-        leads, stats = process_company(company_jobs)
+        cached = progress.get(company_key)
+        if cached is not None:
+            leads, stats = cached
+            total_stats["enrichment_resume_reused_companies"] += 1
+            logger.info(
+                "[%d/%d] Reusing checkpointed enrichment for %s",
+                index, total_candidate_companies, company_key,
+            )
+        else:
+            logger.info("[%d/%d] Enriching %s", index, total_candidate_companies, company_key)
+            try:
+                leads, stats = process_company(company_jobs)
+            except apollo.GLOBAL_FATAL_ERRORS as exc:
+                # Apollo is unusable for the WHOLE run. Open the circuit, preserve
+                # every company already completed, and stop cleanly with a
+                # reconciled stop reason -- never crash the pipeline. The company
+                # that tripped the circuit is left unprocessed (not checkpointed)
+                # so a later run retries it once Apollo recovers.
+                circuit_reason = _apollo_circuit_reason(exc)
+                logger.error(
+                    "Apollo unavailable for the whole run (%s) after %d companies; "
+                    "opening the Apollo circuit and preserving completed work: %s",
+                    circuit_reason, companies_considered, exc,
+                )
+                total_stats["apollo_circuit_open"] = 1
+                total_stats[f"apollo_circuit_reason__{circuit_reason}"] = 1
+                stop_reason = "apollo_circuit_open"
+                break
+            except Exception as exc:  # noqa: BLE001 - one company never aborts the run
+                # Record-level failure for THIS company only: mark UNVERIFIED and
+                # continue with the rest of the batch. Not checkpointed, so it
+                # stays recoverable on a later run.
+                logger.warning(
+                    "Apollo enrichment failed for %s: %s; marking UNVERIFIED and continuing.",
+                    company_key, exc,
+                )
+                total_stats["apollo_company_record_failures"] += 1
+                leads, stats = _degraded_company_leads(
+                    company_jobs, reason="apollo_record_error"
+                )
+            else:
+                progress.record(company_key, leads, stats)
         companies_considered += 1
         processed_company_keys.append(company_key)
         processed_jobs.extend(company_jobs)
