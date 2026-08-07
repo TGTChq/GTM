@@ -1,8 +1,14 @@
-"""Production entry point for Steps 1-4.
+"""RETIRED FROM PRODUCTION -- historical/reference/testing only.
 
-Runs scrape -> filter -> audit -> hiring-manager enrichment -> Airtable review
-queue. Instantly enrollment remains a separate approval-driven process handled
-by run_approved.py (or an n8n schedule calling it every minute).
+The definitive production acquisition spine is ``run_orchestrator.py`` (Railway
+service "GTM"); Instantly enrollment is ``run_approved.py`` (service "GTM
+Approved Sync"). This module is NO LONGER a production entry point and is NOT the
+Docker CMD or a Railway Start Command. It remains in the repository only for
+historical reference and for the tests that still exercise its legacy multi-source
+path. Do not deploy it as a production service.
+
+(Legacy behaviour, for reference: scrape -> filter -> audit -> hiring-manager
+enrichment -> Airtable review queue.)
 """
 
 from __future__ import annotations

@@ -1,3 +1,7 @@
+> **SUPERSEDED — see `PRODUCTION_DEPLOYMENT.md` for the definitive config.**
+> This document predates the single-spine `run_orchestrator.py` cutover and
+> describes the retired `run_daily.py` path. Kept for history only.
+
 # TGTC Production Deployment — Railway
 
 This package adds only deployment files. Copy them into the root of the current working project before pushing to GitHub.

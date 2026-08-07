@@ -1,3 +1,6 @@
+> **SUPERSEDED — see `PRODUCTION_DEPLOYMENT.md` for the definitive config.**
+> Predates the single-spine `run_orchestrator.py` cutover; kept for history only.
+
 # TGTC Production Handoff Checklist
 
 ## Ownership

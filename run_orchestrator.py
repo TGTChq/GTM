@@ -430,6 +430,13 @@ def _live_ats_runner(a: argparse.Namespace):
         return runner_static
 
     # Definitive path: the full production registry (auto-seeded, health-tracked).
+    # Force health-aware deterministic partitioning here regardless of the legacy
+    # ATS_SCHEDULER_MODE env toggle -- the definitive production lane is always
+    # health-scheduled (slot rotation + overdue backstop + bounded retry), never
+    # the legacy age-interval herd. cycle_length / caps still come from config.
+    if sched_cfg.mode != "deterministic_partition":
+        sched_cfg.mode = "deterministic_partition"
+        sched_cfg.validate()
     from ats_board_registry import AtsBoardRegistry
     registry = AtsBoardRegistry()
     if config.ATS_REGISTRY_AUTO_SEED_HISTORY:
