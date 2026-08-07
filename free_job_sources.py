@@ -26,6 +26,7 @@ from xml.etree import ElementTree
 import requests
 
 import config
+from company_identity import safe_company_domain, domain_name_consistent
 
 logger = logging.getLogger(__name__)
 
@@ -286,6 +287,15 @@ def _canonical_job(
     if not location_text:
         location_text = "Remote"
     job_id = _provider_job_id(source, source_id, company_text, title_text, url_text)
+    # Preserve first-party evidence EARLY: a free-feed applicationLink is normally an
+    # aggregator/ATS host, but when it is the employer's own host (clears the
+    # intermediary denylist AND its registrable domain is name-consistent with the
+    # employer) it IS a direct-employer signal. Mark it direct so the standard
+    # employer-domain path (job_filter.get_safe_employer_domain) can use it. Never a
+    # guess: a non-matching board host (e.g. governmentjobs.com) stays is_direct=False.
+    _apply_dom = safe_company_domain(str(url_text or ""), config.INTERMEDIARY_JOB_DOMAINS)
+    apply_is_direct = bool(
+        _apply_dom and company_text and domain_name_consistent(company_text, _apply_dom))
     job: Dict[str, Any] = {
         "job_id": job_id,
         "job_title": title_text,
@@ -294,7 +304,7 @@ def _canonical_job(
         "job_publisher": source_name,
         "job_description": description_text,
         "job_apply_link": url_text,
-        "job_apply_is_direct": False,
+        "job_apply_is_direct": apply_is_direct,
         "job_google_link": "",
         "job_location": location_text,
         "job_country": country_text,
@@ -307,7 +317,7 @@ def _canonical_job(
         "job_salary_currency": str(salary_currency or "").strip(),
         "job_salary_period": str(salary_period or "").strip(),
         "job_required_skills": [str(item) for item in (tags or []) if str(item or "").strip()],
-        "apply_options": ([{"publisher": source_name, "apply_link": url_text, "is_direct": False}] if url_text else []),
+        "apply_options": ([{"publisher": source_name, "apply_link": url_text, "is_direct": apply_is_direct}] if url_text else []),
         "canonical_source_url": url_text,
         "_acquisition_source": source,
         "_source_home_url": source_home,

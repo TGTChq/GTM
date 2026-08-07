@@ -24,7 +24,9 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence
 from urllib.parse import urlparse
 
 import config
-from company_identity import safe_company_domain, is_intermediary_domain
+from company_identity import (
+    safe_company_domain, is_intermediary_domain, domain_name_consistent,
+)
 from domain_utils import normalize_company_domain
 
 # Resolution confidence tiers.
@@ -32,11 +34,18 @@ VERIFIED = "verified"        # a first-party employer host
 SEARCH_ONLY = "search_only"  # good enough to search Apollo, not a delivery identity
 NONE = "none"
 
-# Classification of a company's employer-domain state.
-DIRECT_EMPLOYER = "direct_employer"
-INTERMEDIARY_UNRESOLVED = "intermediary_unresolved"
-KNOWN_EMPLOYER_UNRESOLVED_DOMAIN = "known_employer_unresolved_domain"
+# Classification of a posting's EMPLOYER identity vs its SOURCE platform. The
+# source (Himalayas, a job board, a staffing agency) is never confused with the
+# employer.
+DIRECT_EMPLOYER = "direct_employer"                       # employer domain resolved
+ATS_EMPLOYER_KNOWN = "ats_employer_known"                 # first-party name known (ATS), domain unresolved
+KNOWN_EMPLOYER_UNRESOLVED_DOMAIN = "known_employer_unresolved_domain"  # acronym/short-brand
+AGGREGATOR_EMPLOYER_UNRESOLVED = "aggregator_employer_unresolved"      # employer not visible in aggregator payload
+INTERMEDIARY_UNKNOWN_CLIENT = "intermediary_unknown_client"           # staffing/recruiting, hidden client
+INTERMEDIARY_KNOWN_CLIENT = "intermediary_known_client"               # staffing with a named client (reserved)
 UNRESOLVED_NO_EVIDENCE = "unresolved_no_evidence"
+# Back-compat alias (pre-existing name kept so older callers/tests still resolve).
+INTERMEDIARY_UNRESOLVED = INTERMEDIARY_UNKNOWN_CLIENT
 
 
 @dataclass
@@ -109,6 +118,33 @@ def _apply_options_direct_host(job: Mapping[str, Any]) -> str:
     return ""
 
 
+def _name_consistent_first_party_host(job: Mapping[str, Any], employer_name: str) -> str:
+    """Return a first-party employer domain drawn from ANY apply/source URL on the
+    posting whose registrable host (a) clears the intermediary denylist AND (b) is
+    NAME-CONSISTENT with the employer (`domain_name_consistent`). This is the safe
+    way to use the ``applicationLink``/``canonical_source_url`` that free feeds
+    preserve but mark ``is_direct=False``: a company host that matches the employer
+    name is accepted; a job-board host (e.g. governmentjobs.com) that does not match
+    is rejected -- so we never misattribute a board as the employer. Evidence-backed,
+    never a guess."""
+    if not employer_name:
+        return ""
+    urls: List[str] = []
+    for key in ("employer_website", "job_apply_link", "official_job_url",
+                "canonical_source_url"):
+        v = job.get(key)
+        if v:
+            urls.append(str(v))
+    for opt in (job.get("apply_options") or []):
+        if isinstance(opt, Mapping) and (opt.get("apply_link") or opt.get("url")):
+            urls.append(str(opt.get("apply_link") or opt.get("url")))
+    for u in urls:
+        dom = _safe(u)
+        if dom and domain_name_consistent(employer_name, dom):
+            return dom
+    return ""
+
+
 def _any_non_intermediary_host_present(job: Mapping[str, Any]) -> bool:
     """True iff ANY host anywhere on the posting is non-intermediary (used only to
     distinguish 'only aggregator hosts' from 'no host evidence at all')."""
@@ -152,26 +188,46 @@ def recover_search_domain(existing_search_domain: str, primary_job: Mapping[str,
         return DomainResolution(resolved_domain=dom, resolution_method="apply_options_direct_host",
                                 resolution_confidence=VERIFIED, classification=DIRECT_EMPLOYER)
 
-    # Additive recovery step 2: curated deterministic alias for a known employer.
+    # Additive recovery step 2: a name-consistent first-party host from any
+    # apply/source URL (the applicationLink free feeds preserve but flag is_direct=
+    # False). Accepted only when the host matches the employer name -- never a guess.
+    dom = _name_consistent_first_party_host(primary_job, employer_name)
+    if dom:
+        return DomainResolution(resolved_domain=dom, resolution_method="name_consistent_first_party_host",
+                                resolution_confidence=SEARCH_ONLY, classification=DIRECT_EMPLOYER)
+
+    # Additive recovery step 3: curated deterministic alias for a known employer.
     dom = _alias_domain(employer_name)
     if dom:
         return DomainResolution(resolved_domain=dom, resolution_method="employer_alias_map",
                                 resolution_confidence=SEARCH_ONLY, classification=DIRECT_EMPLOYER)
 
-    # Unresolved -> classify why (never a false employer domain).
+    # Unresolved -> classify WHY (never a false employer domain), source-aware so
+    # a hidden-client/aggregator case is not counted as a technical resolver failure.
+    source = str(primary_job.get("_acquisition_source") or "").strip().lower()
     if _staffing_poster(employer_name):
-        return DomainResolution(unresolved_reason="staffing_poster",
-                                classification=INTERMEDIARY_UNRESOLVED)
+        # A staffing/recruiting poster: the row is an intermediary. We cannot tell
+        # from the payload whether it is hiring internally or for a hidden client,
+        # so classify as unknown-client and do NOT waste Apollo on a wrong org.
+        return DomainResolution(unresolved_reason="staffing_or_hidden_client",
+                                classification=INTERMEDIARY_UNKNOWN_CLIENT)
+    if source.startswith("ats_"):
+        # ATS board -> the employer NAME is first-party/deterministic (the company
+        # hosts the board). Domain unresolved, but Apollo can still search by name.
+        return DomainResolution(unresolved_reason="ats_employer_known_domain_unresolved",
+                                classification=ATS_EMPLOYER_KNOWN)
     if _any_non_intermediary_host_present(primary_job):
-        # A real, non-intermediary host exists but did not clear name-consistency
-        # (e.g. an acronym/short brand): a known employer whose domain we can't
-        # safely assert without an alias entry.
+        # A real non-intermediary host exists but is not name-consistent (acronym/
+        # short brand): a known employer whose domain we won't assert without an alias.
         return DomainResolution(unresolved_reason="known_employer_acronym_domain",
                                 classification=KNOWN_EMPLOYER_UNRESOLVED_DOMAIN)
-    # Only intermediary/aggregator hosts, or none at all.
-    return DomainResolution(unresolved_reason="intermediary_or_no_host_evidence",
-                            classification=INTERMEDIARY_UNRESOLVED
-                            if _has_any_host(primary_job) else UNRESOLVED_NO_EVIDENCE)
+    if _has_any_host(primary_job):
+        # Only intermediary/aggregator hosts -> the employer is not visible in the
+        # aggregator payload.
+        return DomainResolution(unresolved_reason="aggregator_employer_unresolved",
+                                classification=AGGREGATOR_EMPLOYER_UNRESOLVED)
+    return DomainResolution(unresolved_reason="no_host_evidence",
+                            classification=UNRESOLVED_NO_EVIDENCE)
 
 
 def _has_any_host(job: Mapping[str, Any]) -> bool:
