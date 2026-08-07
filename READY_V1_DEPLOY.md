@@ -13,7 +13,13 @@
 
 ## Railway migration
 
-Keep the service Start Command as `sh -c "sleep infinity"` until the controlled live audit is complete.
+The GTM Start Command is **service-managed** (set in the Railway UI, not pinned in
+`railway.json` — see `PRODUCTION_DEPLOYMENT.md`). `sh -c "sleep infinity"` is NOT
+the normal running state; it is only a **temporary maintenance mode** you paste
+into the UI when you need an idle container (e.g. to read the volume), and you
+restore the normal acquisition Start Command afterward. The normal state is the
+acquisition command (or, if the field is left empty, the image's safe
+`--preflight-only` fallback — never `sleep infinity`).
 
 1. Deploy the patched code.
 2. Remove `ROLES_JSON` if it contains the historical 118-role list.

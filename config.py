@@ -159,8 +159,14 @@ ATS_REGISTRY_MAX_HISTORY_FILE_BYTES = _env_int(
 # changes behaviour while the mode is ``legacy_interval`` -- they are read only
 # on the partitioned path. No Railway variable is renamed or repurposed.
 ATS_SCHEDULER_MODE = os.getenv("ATS_SCHEDULER_MODE", "legacy_interval").strip().lower()
-# Runs to cover the whole registry once. ~145 boards over 7 runs is ~21/run.
-ATS_SCHEDULER_CYCLE_LENGTH = _env_int("ATS_SCHEDULER_CYCLE_LENGTH", 7)
+# Runs to cover the whole registry once, when position advances each run. With
+# ~145 boards, cycle_length=3 attempts ~48 boards/run (+ any overdue) for full
+# coverage every 3 runs (~1.5 days at 2 runs/day) at ~650 physical requests --
+# ~54% of the 1200 ATS lane budget, leaving headroom for overdue/provider skew.
+# Lower it further (2 => ~73/run, ~81% budget) only if faster coverage is worth
+# the tighter margin. Requires the slot to actually rotate: run_orchestrator's
+# ATS lane advances SchedulerConfig.position via the persisted scheduler state.
+ATS_SCHEDULER_CYCLE_LENGTH = _env_int("ATS_SCHEDULER_CYCLE_LENGTH", 3)
 # Which slot this run covers. A cron writes the run index here; ``position %
 # cycle_length`` is the covered slot, so the sequence is stable and explicit.
 ATS_SCHEDULER_POSITION = _env_int("ATS_SCHEDULER_POSITION", 0)

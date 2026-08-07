@@ -395,6 +395,10 @@ class RealEnrichmentStage:
             "reroute": authoritative[Disposition.REROUTE],
             "rejected": authoritative[Disposition.REJECT],
             "qual_reason_counts": qual_reasons,
+            # Non-PII HM + multi-function observability, surfaced to the operator
+            # run summary so coverage-by-bucket and multi-function handling are
+            # readable straight from Railway logs (see hm_observability.py).
+            "hm_observability": dict(getattr(step3, "hm_observability", {}) or {}),
         }
         return EnrichmentReport(
             leads=leads,

@@ -437,6 +437,32 @@ def _live_ats_runner(a: argparse.Namespace):
     if sched_cfg.mode != "deterministic_partition":
         sched_cfg.mode = "deterministic_partition"
         sched_cfg.validate()
+
+    # Advance the rotation slot across runs. `SchedulerConfig.position` is read
+    # once from the static ATS_SCHEDULER_POSITION (0), so without this every run
+    # would cover slot 0 only and the other cycle_length-1 slots would be reached
+    # ONLY via the 168h overdue backstop -- never by fair slot rotation. Persist
+    # last_position in the scheduler state file and advance it deterministically so
+    # every board's slot comes round exactly once per cycle_length runs. Best-
+    # effort: an unreadable/absent state file just restarts the rotation at 0.
+    sched_state = None
+    if sched_cfg.state_path:
+        try:
+            sched_state = ats_schedule.SchedulerState.load(sched_cfg.state_path)
+            prev = sched_state.last_position
+            sched_cfg.position = (
+                ((int(prev) + 1) if prev is not None else 0) % max(1, sched_cfg.cycle_length)
+            )
+            sched_cfg.carried_overdue = list(sched_state.carried_overdue)
+        except Exception as exc:  # noqa: BLE001 - state is best-effort, never fatal
+            logger.warning("ATS scheduler state unreadable (%s); starting rotation at "
+                           "position 0", exc)
+            sched_cfg.position = 0
+    logger.info("ATS scheduler: mode=%s cycle_length=%d position=%d (covers slot %d; "
+                "full registry every %d runs)", sched_cfg.mode, sched_cfg.cycle_length,
+                sched_cfg.position, sched_cfg.position % max(1, sched_cfg.cycle_length),
+                sched_cfg.cycle_length)
+
     from ats_board_registry import AtsBoardRegistry
     registry = AtsBoardRegistry()
     if config.ATS_REGISTRY_AUTO_SEED_HISTORY:
@@ -465,6 +491,17 @@ def _live_ats_runner(a: argparse.Namespace):
         result.attribution["ats_registry_size"] = len(registry.entries)
         result.attribution["ats_candidates"] = len(candidates)
         result.attribution["ats_candidates_by_provider"] = dict(by_provider)
+        # Persist the slot we just covered so the NEXT run advances to the next
+        # slot (fair rotation). Best-effort: a save failure never fails the run.
+        if sched_cfg.state_path:
+            try:
+                st = sched_state or ats_schedule.SchedulerState()
+                st.last_position = sched_cfg.position
+                # carried_overdue is round-tripped unchanged: it stays empty while
+                # ATS_SCHEDULER_OVERDUE_CAP is disabled (nothing is carried forward).
+                st.save(sched_cfg.state_path)
+            except Exception as exc:  # noqa: BLE001 - state persistence never fatal
+                result.notes.append(f"ats_scheduler_state_save_failed:{type(exc).__name__}")
         return result
     return runner_registry
 
@@ -638,7 +675,27 @@ def _print_run_summary(ctx, mode, result, state) -> None:
         line("ats_boards_attempted", acct.get("boards_attempted"))
         line("ats_boards_completed", acct.get("boards_completed"))
         line("ats_boards_failed", acct.get("boards_failed"))
-        line("ats_boards_skipped", acct.get("boards_skipped_budget", acct.get("boards_skipped")))
+        # Correct key: the accounting dict exposes boards_skipped_by_budget (the
+        # previous boards_skipped_budget/boards_skipped keys never existed, so this
+        # line always printed blank).
+        line("ats_boards_skipped_budget", acct.get("boards_skipped_by_budget"))
+        # Rotation visibility: boards deferred to a future slot this run, and why.
+        # boards_skipped_by_scheduler == candidates not selected == awaiting their
+        # slot; with position now advancing they are covered within cycle_length
+        # runs (they are NOT lost). Selection reason breakdown makes the 145->N
+        # narrowing self-explaining.
+        deferred = acct.get("boards_skipped_by_scheduler")
+        line("ats_boards_deferred", deferred)
+        line("ats_boards_remaining", deferred)  # not-yet-covered this cycle
+        sched = acct.get("scheduler") or {}
+        if sched:
+            cyc = sched.get("cycle_length")
+            print(f"  ats_deferred_reason = awaiting_slot_rotation "
+                  f"(cycle_length={cyc}, position={sched.get('position')}; "
+                  f"full registry covered every {cyc} runs)")
+        line("ats_boards_selected_normal", acct.get("boards_selected_normal"))
+        line("ats_boards_selected_overdue", acct.get("boards_selected_overdue"))
+        line("ats_boards_selected_retry", acct.get("boards_selected_retry"))
         line("ats_jobs", ats.get("jobs"))
         line("ats_physical_requests", ats.get("physical_requests"))
         if attr.get("ats_candidates_by_provider"):
@@ -647,6 +704,16 @@ def _print_run_summary(ctx, mode, result, state) -> None:
     print("---- Top rejection reasons ----")
     for r, n in top5:
         print(f"  {r} = {n}")
+    # Hiring-manager coverage + multi-function handling (non-PII counts only).
+    hm_obs = funnel.get("hm_observability") or {}
+    if hm_obs:
+        try:
+            import hm_observability
+            for ln in hm_observability.stdout_summary(
+                    hm_obs.get("hiring_manager") or {}, hm_obs.get("multi_function") or {}):
+                print(ln)
+        except Exception:  # noqa: BLE001 - summary is best-effort, never fatal
+            pass
     line("reconcile", result["all_reconcile"])
     line("artifacts", state.run_dir())
     print("=============================================")

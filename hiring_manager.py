@@ -82,6 +82,9 @@ class Step3Result:
     stop_reason: str = "candidate_pool_exhausted"
     processed_company_keys: List[str] = field(default_factory=list)
     stats: Dict = field(default_factory=dict)
+    #: Non-PII hiring-manager + multi-function observability summaries, surfaced
+    #: to the operator run summary (see hm_observability.write_run_artifacts).
+    hm_observability: Dict = field(default_factory=dict)
     success: bool = True
     errors: List[str] = field(default_factory=list)
 
@@ -1584,6 +1587,23 @@ def run_hiring_manager_identification(
     }
     Path(output_path).write_text(json.dumps(output_payload, indent=2), encoding="utf-8")
 
+    # Permanent per-run HM + multi-function observability (non-PII). Emitting
+    # these here means the failure population, multi-function handling, and
+    # coverage-by-bucket are always reconstructable from artifacts + logs,
+    # without ever mounting the volume by hand. Never fatal to the run.
+    hm_observability: Dict[str, Any] = {}
+    try:
+        import hm_observability as _hm_obs
+        _obs = _hm_obs.write_run_artifacts(all_leads, config.STEP3_OUTPUT_DIR)
+        hm_observability = {
+            "hiring_manager": _obs["hiring_manager"],
+            "multi_function": _obs["multi_function"],
+        }
+        for _line in _hm_obs.stdout_summary(_obs["hiring_manager"], _obs["multi_function"]):
+            logger.info(_line)
+    except Exception as exc:  # noqa: BLE001 - observability must never break a run
+        logger.warning("hm_observability artifact emission failed (non-fatal): %s", exc)
+
     errors: List[str] = []
     if config.ENFORCE_HM_MATCH_RATE and eligible_buckets and match_rate < config.MIN_HIRING_MANAGER_MATCH_RATE:
         errors.append(
@@ -1623,6 +1643,7 @@ def run_hiring_manager_identification(
         stop_reason=stop_reason,
         processed_company_keys=processed_company_keys,
         stats=dict(total_stats),
+        hm_observability=hm_observability,
         success=not errors,
         errors=errors,
     )

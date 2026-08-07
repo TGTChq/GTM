@@ -406,14 +406,17 @@ class PreservedBehaviorTests(unittest.TestCase):
         self.assertFalse(p.allow_instantly_enrollment)     # Instantly unreachable
         self.assertFalse(p.allow_production_state_write)
 
-    def test_railway_start_command_unchanged(self):
+    def test_railway_json_does_not_define_start_command(self):
+        # GTM's Start Command is service-managed (Railway UI), NOT config-as-code,
+        # so it can be edited/restored (incl. a maintenance 'sleep infinity') with no
+        # Git change. railway.json must not pin it, and no acquisition flag may leak
+        # into config-as-code. A service with no Start Command falls back to the safe
+        # --preflight-only image CMD, never acquisition.
         rc = json.loads(Path("railway.json").read_text(encoding="utf-8"))
-        cmd = rc["deploy"]["startCommand"]
-        self.assertIn("--mode live_acquisition_and_enrichment", cmd)
-        self.assertIn("--airtable-write", cmd)
-        self.assertIn("--artifact-root /app/data/state/orchestrator_v2", cmd)
-        self.assertNotIn("--auto-approve", cmd)            # auto-approval disabled
-        self.assertNotIn("--instantly", cmd)               # Instantly disabled
+        self.assertNotIn("startCommand", rc.get("deploy", {}))
+        blob = json.dumps(rc)
+        self.assertNotIn("live_acquisition_and_enrichment", blob)
+        self.assertNotIn("--airtable-write", blob)
         self.assertEqual(rc["deploy"]["restartPolicyType"], "NEVER")
 
     # (15) Package integrity passes (manifest covers runlock + entrypoint).

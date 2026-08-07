@@ -112,6 +112,9 @@ class SchedulerConfig:
     max_retry_attempts: int = 2
     overdue_cap: Optional[int] = None
     state_path: str = ""
+    #: Overdue keys carried forward from a prior run (loaded from SchedulerState),
+    #: given priority next run. Empty while overdue_cap is disabled.
+    carried_overdue: Sequence[str] = ()
 
     @classmethod
     def from_config(cls, cfg: Any) -> "SchedulerConfig":
@@ -439,6 +442,8 @@ def select_boards(
     if config is not None:
         resolved_mode = config.mode
         position = config.position
+        if not carried_overdue and getattr(config, "carried_overdue", None):
+            carried_overdue = config.carried_overdue
         kwargs.setdefault("cycle_length", config.cycle_length)
         kwargs.setdefault("max_boards_per_run", config.board_cap)
         kwargs.setdefault("max_age_hours", config.max_age_hours)
