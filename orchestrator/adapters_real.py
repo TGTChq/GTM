@@ -274,53 +274,112 @@ class RealEnrichmentStage:
         rows = data.get("leads") or data.get("jobs") or []
         return [r for r in rows if isinstance(r, dict)]
 
-    def _to_report(self, qual, step3, lead_rows) -> EnrichmentReport:
-        fp = int(step3.final_pass_leads)
-        nc = int(step3.needs_check_leads)
-        uv = int(step3.unverified_leads)
-        rr = int(step3.reroute_leads)
-        rj = int(step3.rejected_leads)
+    #: Persisted _final_state -> orchestrator Disposition (vocabularies match).
+    _STATE_DISPOSITION = {
+        "FINAL_PASS": Disposition.FINAL_PASS,
+        "NEEDS_CHECK": Disposition.NEEDS_CHECK,
+        "UNVERIFIED": Disposition.UNVERIFIED,
+        "REROUTE": Disposition.REROUTE,
+        "REJECT": Disposition.REJECT,
+    }
+    #: Default reason per disposition when the persisted row carries none our enum
+    #: recognises (the real pipeline's reason vocabulary is broader).
+    _DEFAULT_REASON = {
+        Disposition.FINAL_PASS: ReasonCode.OK,
+        Disposition.NEEDS_CHECK: ReasonCode.HIRING_MANAGER_NOT_FOUND,
+        Disposition.UNVERIFIED: ReasonCode.EMAIL_UNVERIFIED,
+        Disposition.REROUTE: ReasonCode.COMPANY_UNRESOLVED,
+        Disposition.REJECT: ReasonCode.NOT_ICP,
+    }
+    #: Disposition -> stage outcome for the reconciled hiring_manager boundary.
+    _STAGE_OUTCOME = {
+        Disposition.FINAL_PASS: StageOutcome.PASSED,
+        Disposition.NEEDS_CHECK: StageOutcome.DEFERRED,
+        Disposition.UNVERIFIED: StageOutcome.DEFERRED,
+        Disposition.REROUTE: StageOutcome.REJECTED,
+        Disposition.REJECT: StageOutcome.REJECTED,
+    }
 
-        # Real FINAL_PASS Lead objects (real lead_key + hiring_manager_email) for
-        # delivery, taken from the persisted leads file.
-        fp_rows = [r for r in lead_rows if str(r.get("_final_state")) == "FINAL_PASS"]
-        leads: List[Lead] = []
-        for row in fp_rows[:fp]:
-            leads.append(Lead(
-                posting_id=str(row.get("job_id") or row.get("lead_key") or ""),
-                company={"name": row.get("employer_name", "")},
-                contact={"email": row.get("hiring_manager_email", "")},
-                disposition=Disposition.FINAL_PASS, primary_reason=ReasonCode.OK,
-                contact_key=str(row.get("lead_key") or row.get("job_id") or ""),
-            ))
-        # Pad FINAL_PASS to the authoritative Step3Result count if rows are sparse.
-        while len(leads) < fp:
-            i = len(leads)
-            leads.append(Lead(f"fp-{i}", {"name": ""}, {"email": f"fp{i}@x"},
-                              Disposition.FINAL_PASS, ReasonCode.OK, contact_key=f"fp-{i}"))
-        # Synthetic Leads carry the remaining dispositions so the census is exact.
-        for disp, count, reason in (
-            (Disposition.NEEDS_CHECK, nc, ReasonCode.HIRING_MANAGER_NOT_FOUND),
-            (Disposition.UNVERIFIED, uv, ReasonCode.EMAIL_UNVERIFIED),
-            (Disposition.REROUTE, rr, ReasonCode.COMPANY_UNRESOLVED),
-            (Disposition.REJECT, rj, ReasonCode.NOT_ICP),
-        ):
-            for i in range(count):
-                leads.append(Lead(f"{disp.value}-{i}", {"name": ""}, {},
-                                  disp, reason, contact_key=""))
+    @classmethod
+    def _reason_for(cls, row: Dict[str, Any], disp: Disposition) -> ReasonCode:
+        raw = str(row.get("_final_primary_reason") or row.get("_step3_reason") or "").strip()
+        try:
+            return ReasonCode(raw)
+        except Exception:  # noqa: BLE001 - broad real reason vocabulary -> our default
+            return cls._DEFAULT_REASON[disp]
 
-        dispo = (
-            [(StageOutcome.PASSED, ReasonCode.OK, None)] * fp
-            + [(StageOutcome.DEFERRED, ReasonCode.HIRING_MANAGER_NOT_FOUND, None)] * (nc + uv)
-            + [(StageOutcome.REJECTED, ReasonCode.NOT_ICP, None)] * (rr + rj)
+    @staticmethod
+    def _related_postings(row: Dict[str, Any], primary: str) -> List[str]:
+        out: List[str] = []
+        for pid in (row.get("related_job_ids") or []):
+            s = str(pid or "")
+            if s and s != primary:
+                out.append(s)
+        return out
+
+    def _real_lead(self, row: Dict[str, Any], disp: Disposition) -> Lead:
+        """Reconstruct a genuine Lead from a persisted row, preserving the ENTIRE
+        row under contact['_airtable_row'] so review-staging writes the real
+        NEEDS_CHECK/UNVERIFIED contact (Defect A), not an empty placeholder."""
+        pid = str(row.get("job_id") or row.get("canonical_job_id") or row.get("lead_key") or "")
+        company_name = (row.get("employer_name") or row.get("canonical_company_name")
+                        or row.get("canonical_employer_name") or "")
+        return Lead(
+            posting_id=pid,
+            company={"name": company_name},
+            contact={
+                "email": row.get("hiring_manager_email", "") or "",
+                "name": row.get("hiring_manager_name", "") or "",
+                "_airtable_row": row,   # full real row -> RealDelivery._rows forwards it
+            },
+            disposition=disp,
+            primary_reason=self._reason_for(row, disp),
+            email_status=str(row.get("apollo_email_status") or row.get("hunter_email_status") or ""),
+            contact_key=str(row.get("lead_key") or pid or ""),
+            related_posting_ids=self._related_postings(row, pid),
         )
+
+    def _to_report(self, qual, step3, lead_rows) -> EnrichmentReport:
+        # Authoritative per-state counts from Step3Result (the census must match).
+        authoritative = {
+            Disposition.FINAL_PASS: int(step3.final_pass_leads),
+            Disposition.NEEDS_CHECK: int(step3.needs_check_leads),
+            Disposition.UNVERIFIED: int(step3.unverified_leads),
+            Disposition.REROUTE: int(step3.reroute_leads),
+            Disposition.REJECT: int(step3.rejected_leads),
+        }
+        # Build REAL Leads from the persisted rows for EVERY state, preserving all
+        # data. Group by disposition so we can reconcile to the authoritative count.
+        by_disp: Dict[Disposition, List[Lead]] = {d: [] for d in authoritative}
+        for row in lead_rows:
+            disp = self._STATE_DISPOSITION.get(str(row.get("_final_state") or ""))
+            if disp is None:
+                continue
+            by_disp[disp].append(self._real_lead(row, disp))
+
+        leads: List[Lead] = []
+        for disp, target in authoritative.items():
+            real = by_disp[disp]
+            # Prefer real rows; trim if somehow over-count.
+            leads.extend(real[:target])
+            # Defensive pad ONLY if the persisted rows are sparser than the
+            # authoritative count, so the disposition census stays exact. Padding
+            # rows carry no contact so they can never be mistaken for deliverable.
+            for i in range(max(0, target - len(real))):
+                leads.append(Lead(f"{disp.value}-pad-{i}", {"name": ""}, {},
+                                  disp, self._DEFAULT_REASON[disp], contact_key=""))
+
+        dispo = [(self._STAGE_OUTCOME[l.disposition], l.primary_reason, None) for l in leads]
         stage = reconcile_stage("hiring_manager", "lead", dispo)
         return EnrichmentReport(
             leads=leads,
             stages=[stage],
             loss_census={
                 "hiring_manager_not_found": int(step3.hiring_manager_not_found),
-                "reroute": rr, "rejected": rj, "needs_check": nc, "unverified": uv,
+                "reroute": authoritative[Disposition.REROUTE],
+                "rejected": authoritative[Disposition.REJECT],
+                "needs_check": authoritative[Disposition.NEEDS_CHECK],
+                "unverified": authoritative[Disposition.UNVERIFIED],
             },
         )
 

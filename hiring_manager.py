@@ -201,8 +201,10 @@ def passes_company_criteria(
     if (
         config.ENFORCE_FOUNDED_BEFORE
         and org.founded_year is not None
-        and org.founded_year >= config.FOUNDED_BEFORE_YEAR
+        and org.founded_year > config.FOUNDED_BEFORE_YEAR
     ):
+        # Rule #6: reject only companies founded AFTER the cutoff; the cutoff year
+        # itself (<=) passes. UNKNOWN founded year is allowed below.
         return False, f"founded_too_recent:{org.founded_year}", False
 
     if config.ENFORCE_FOUNDED_BEFORE and org.founded_year is None:
