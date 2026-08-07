@@ -68,5 +68,20 @@ Sync prints `APPROVED_FOUND / REVALIDATED / SENT_TO_INSTANTLY / DUPLICATES_SKIPP
 
 ## Cutover and rollback
 
-See the final readiness report for the exact, ordered cutover steps and the
-rollback point (revert to commit `456a384`, restore prior service Start Commands).
+See the final readiness report for the exact, ordered cutover steps.
+
+**Rollback point.** If a rollback is required, revert **GTM/main** to commit
+`456a384` and restore **only GTM's** prior Start Command.
+
+**GTM Approved Sync must NOT be rolled back.** Its previous configuration was the
+confirmed production defect (it ran the acquisition orchestrator instead of the
+worker). Under **no** rollback scenario may it be restored to that command. It
+must remain, in every scenario:
+
+- Start Command: `python -u run_approved.py`
+- Cron: `*/5 * * * *`
+- Restart: NEVER
+
+`run_approved.py` exists and behaves correctly at `456a384` as well (it was
+merged in PR #34), so this configuration is valid both before and after a GTM
+code rollback.

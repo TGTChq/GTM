@@ -529,7 +529,12 @@ EXCLUDED_TITLE_KEYWORDS = [
     "director",
     "intern",
     "internship",
-    "head of",
+    # NOTE: "head of" is intentionally NOT a job-title exclusion. It is not one of
+    # the documented TGTC job exclusions (Intern/Director/VP/Senior/Event
+    # Marketing/Field Marketing/in-person/non-paying), and excluding it wrongly
+    # dropped high-recall individual-contributor postings whose title merely
+    # contains "Head". (Hiring-manager titles like "Head of Growth" are a separate
+    # concern handled in role_mapping, not here.)
     "event marketing",
     "field marketing",
 ]

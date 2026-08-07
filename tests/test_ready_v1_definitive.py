@@ -601,6 +601,11 @@ class ReadyV1BoundaryTests(unittest.TestCase):
         self.assertFalse(is_excluded_title("Sr. Backend Developer"))
         self.assertTrue(is_excluded_title("VP of Engineering"))
         self.assertTrue(is_excluded_title("Marketing Director"))
+        # "Head" is NOT a documented job-title exclusion: high-recall postings
+        # whose title contains "Head" must survive acquisition.
+        self.assertFalse(is_excluded_title("Head of Growth"))
+        self.assertFalse(is_excluded_title("Head of Engineering"))
+        self.assertFalse(is_excluded_title("Department Head"))
 
     def test_representative_query_classifies_against_full_catalog(self):
         class Registry:
