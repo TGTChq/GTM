@@ -47,6 +47,20 @@ Set on **GTM**:
   (persists overdue carry-forward so no board starves)
 - `ATS_REGISTRY_AUTO_SEED_HISTORY=1` (registry grows from job history)
 - `PIPELINE_ARTIFACT_ROOT=/app/data/state/orchestrator_v2` (all state on the volume)
+- `NUM_PAGES=1` — **required** with full target-title coverage. JSearch now queries
+  all 118 target titles (units = queries × pages). 118 × 1 = 118 units ≤ the 150
+  `JSEARCH_MAX_ESTIMATED_UNITS_PER_RUN` budget; at the old `NUM_PAGES=3` it would be
+  354 units and JSearch would refuse. First-pass depth is 1 page; adaptive
+  deepening re-adds pages to the roles that actually yield, within budget.
+
+**JSearch coverage / depth tradeoff (recommended vs alternative):**
+- *Recommended (budget-neutral, full breadth):* 118 queries × `NUM_PAGES=1` = 118
+  units ≤ 150. Every target title queried every run; ~32 units of headroom feed
+  adaptive deepening. No quota increase vs the prior 50 × 3 = 150.
+- *Alternative (full breadth + more first-pass depth):* raise
+  `JSEARCH_MAX_ESTIMATED_UNITS_PER_RUN` to 236 for `NUM_PAGES=2` (118 × 2), or 360
+  for `NUM_PAGES=3` (118 × 3). This is +86 / +204 units per run (~1.6× / ~2.4× the
+  prior JSearch quota burn) — choose only if the RapidAPI plan has monthly headroom.
 
 Founding year is intentionally **neutral** for qualification in the definitive
 ICP: it is enriched/persisted/shown when available but never rejects a company.

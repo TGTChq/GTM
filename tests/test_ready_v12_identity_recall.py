@@ -87,9 +87,9 @@ class EmployerIdentityV12Tests(unittest.TestCase):
 
 
 class AdaptiveAcquisitionV12Tests(unittest.TestCase):
-    def test_full_50_role_catalog_uses_bounded_page2_when_global_budget_is_zero(self):
+    def test_full_role_catalog_uses_bounded_page2_when_global_budget_is_zero(self):
         roles = list(config.ROLES)
-        self.assertEqual(len(roles), 50)
+        self.assertEqual(len(roles), 118)  # every target title queried directly
         productive = roles[0]
         calls = []
 
@@ -138,7 +138,7 @@ class AdaptiveAcquisitionV12Tests(unittest.TestCase):
                 )
 
         self.assertTrue(result.stats["adaptive_deepening_enabled"])
-        self.assertEqual(result.stats["base_estimated_request_units"], 50)
+        self.assertEqual(result.stats["base_estimated_request_units"], 118)
         self.assertEqual(result.stats["adaptive_effective_extra_unit_cap"], 48)
         self.assertEqual(result.stats["adaptive_extra_queries"], 1)
         self.assertIn((productive, 2), calls)

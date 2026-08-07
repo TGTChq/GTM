@@ -61,13 +61,20 @@ class AcquisitionCoverageTests(unittest.TestCase):
                       "Event Marketing Manager", "Field Marketing Specialist"):
             self.assertTrue(is_excluded_title(title))
 
+    def test_every_target_title_has_intentional_jsearch_query(self):
+        # Definitive high-volume config: every target title is a direct JSearch
+        # query, so TARGET_TITLES_WITHOUT_INTENTIONAL_JSEARCH_QUERY_COVERAGE = 0.
+        targets = set(ROLE_DEFINITIONS)
+        queried = set(DEFAULT_ACQUISITION_ROLES)
+        without_jsearch = targets - queried
+        self.assertEqual(without_jsearch, set())
+
     def test_coverage_counts(self):
         targets = set(ROLE_DEFINITIONS)
         queried = set(DEFAULT_ACQUISITION_ROLES)
         self.assertEqual(len(targets), 118)
-        self.assertEqual(len(queried), 50)
-        # 50 directly queried + 68 via broad-fetch lanes = 118, 0 uncovered.
-        self.assertEqual(len(targets - queried), 68)
+        self.assertEqual(len(queried), 118)          # all directly queried
+        self.assertEqual(len(targets - queried), 0)  # 0 depend on broad feeds only
         self.assertEqual(len(_titles_without_coverage()), 0)
 
 

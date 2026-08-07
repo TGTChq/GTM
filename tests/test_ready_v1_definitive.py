@@ -577,8 +577,12 @@ class ReadyV1BoundaryTests(unittest.TestCase):
         self.assertFalse(result.eligible)
         self.assertEqual(result.reason, "untrustworthy_employer_identity")
 
-    def test_acquisition_catalog_is_bounded_and_covers_distinct_supply_families(self):
-        self.assertEqual(len(DEFAULT_ACQUISITION_ROLES), 50)
+    def test_acquisition_catalog_covers_every_target_title(self):
+        # Definitive high-volume config: every target title is queried directly,
+        # so no role depends on incidental appearance in broad ATS/free feeds.
+        from role_catalog import ROLE_DEFINITIONS
+        self.assertEqual(len(DEFAULT_ACQUISITION_ROLES), 118)
+        self.assertEqual(set(DEFAULT_ACQUISITION_ROLES), set(ROLE_DEFINITIONS))
         for role in (
             "Customer Success Associate",
             "Technical Support Specialist",
