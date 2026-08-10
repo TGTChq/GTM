@@ -455,13 +455,13 @@ def _live_ats_runner(a: argparse.Namespace):
             )
             sched_cfg.carried_overdue = list(sched_state.carried_overdue)
         except Exception as exc:  # noqa: BLE001 - state is best-effort, never fatal
-            logger.warning("ATS scheduler state unreadable (%s); starting rotation at "
-                           "position 0", exc)
+            print(f"ATS scheduler state unreadable ({exc}); starting rotation at "
+                  "position 0")
             sched_cfg.position = 0
-    logger.info("ATS scheduler: mode=%s cycle_length=%d position=%d (covers slot %d; "
-                "full registry every %d runs)", sched_cfg.mode, sched_cfg.cycle_length,
-                sched_cfg.position, sched_cfg.position % max(1, sched_cfg.cycle_length),
-                sched_cfg.cycle_length)
+    print(f"ATS scheduler: mode={sched_cfg.mode} cycle_length={sched_cfg.cycle_length} "
+          f"position={sched_cfg.position} (covers slot "
+          f"{sched_cfg.position % max(1, sched_cfg.cycle_length)}; "
+          f"full registry every {sched_cfg.cycle_length} runs)")
 
     from ats_board_registry import AtsBoardRegistry
     registry = AtsBoardRegistry()
