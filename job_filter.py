@@ -1140,6 +1140,72 @@ def assess_pre_enrichment_viability(
     )
 
 
+def pre_enrichment_annotations(assessment: PreEnrichmentAssessment) -> Dict:
+    """The canonical "signed Step-2 decision" annotation set.
+
+    These nine fields are the evidence downstream stages read instead of
+    recomputing employment/geography/modality themselves -- notably
+    ``job_source_resolver._prefilter_full_time`` and
+    ``_prefilter_supported_us_work``, which gate the provider-structured review
+    fallback. Constructed in exactly one place so Step 2 and the orchestrator
+    path can never disagree about their shape or meaning.
+    """
+    return {
+        "_work_arrangement": assessment.work_arrangement.status,
+        "_work_arrangement_reason": assessment.work_arrangement.reason,
+        "_us_eligibility_reason": assessment.geography.reason,
+        "_remote_scope": assessment.geography.scope,
+        "_normalized_location": assessment.geography.display_location,
+        "_employment_quality": assessment.employment.classification,
+        "_employment_quality_reason": assessment.employment.reason,
+        "_employer_domain_input": assessment.employer_domain,
+        "_employer_domain_source": assessment.employer_domain_source,
+    }
+
+
+#: The subset that must all be present for a record to count as already carrying
+#: a signed Step-2 decision. Matches exactly what the two resolver prefilters read.
+_SIGNED_STEP2_FIELDS = (
+    "_work_arrangement", "_work_arrangement_reason",
+    "_remote_scope", "_us_eligibility_reason",
+    "_employment_quality", "_employment_quality_reason",
+)
+
+
+def has_pre_enrichment_annotations(job: Dict) -> bool:
+    return all(str(job.get(field) or "") for field in _SIGNED_STEP2_FIELDS)
+
+
+def annotate_pre_enrichment_assessment(
+    job: Dict,
+    *,
+    max_age_days: Optional[int] = None,
+    min_age_days: Optional[int] = None,
+) -> Dict:
+    """Attach the signed Step-2 decisions to ``job`` WITHOUT filtering it.
+
+    Step 2 (``run_filter``) both annotates and rejects. The orchestrator path
+    (``RealEnrichmentStage`` -> ``run_precontact_qualification`` -> JobGate)
+    never calls ``run_filter``, so these fields were absent on every record and
+    ``_provider_structured_review_fallback`` -- which exists precisely to admit
+    a fresh, full-time, US, substantial provider record to human review -- could
+    never fire, for ANY source.
+
+    This carries the same values forward and nothing else. It deliberately does
+    NOT act on ``assessment.eligible``: no record is accepted or rejected here,
+    so the accept/reject behaviour of every existing caller is unchanged. It is
+    idempotent -- a record that already carries a signed decision (because it
+    came through Step 2) is returned untouched rather than re-derived.
+    """
+    if has_pre_enrichment_annotations(job):
+        return job
+    assessment = assess_pre_enrichment_viability(
+        job, max_age_days=max_age_days, min_age_days=min_age_days
+    )
+    job.update(pre_enrichment_annotations(assessment))
+    return job
+
+
 def find_latest_raw_file() -> str:
     candidates = sorted(Path(config.OUTPUT_DIR).glob("jobs_*.json"), reverse=True)
     if not candidates:
@@ -1194,18 +1260,7 @@ def run_filter(
         assessment = assess_pre_enrichment_viability(
             job, max_age_days=max_age_days, min_age_days=min_age_days
         )
-        candidate = {
-            **job,
-            "_work_arrangement": assessment.work_arrangement.status,
-            "_work_arrangement_reason": assessment.work_arrangement.reason,
-            "_us_eligibility_reason": assessment.geography.reason,
-            "_remote_scope": assessment.geography.scope,
-            "_normalized_location": assessment.geography.display_location,
-            "_employment_quality": assessment.employment.classification,
-            "_employment_quality_reason": assessment.employment.reason,
-            "_employer_domain_input": assessment.employer_domain,
-            "_employer_domain_source": assessment.employer_domain_source,
-        }
+        candidate = {**job, **pre_enrichment_annotations(assessment)}
         if not assessment.eligible:
             stats[assessment.stat_name] += 1
             rejected.append({**candidate, "_filter_reason": assessment.reason})
