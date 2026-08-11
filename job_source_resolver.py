@@ -1571,7 +1571,19 @@ class JobSourceResolver:
                 attempts=attempts,
                 notes=["official_ats_inventory_does_not_contain_job"],
             )
-        corroborated = self._corroborate_independent_publishers(job, origin_urls, attempts)
+        # Independent-publisher corroboration is a NETWORK operation: it calls
+        # self._fetch on every aggregator/indeed/linkedin candidate URL. It was
+        # previously invoked unconditionally, so resolve(fetch=False) still
+        # issued live HTTP -- which also meant the orchestrator's own offline
+        # path (adapters_real.RealEnrichmentStage ->
+        # run_precontact_qualification(fetch_sources=False)) was not network-free.
+        # When the caller asked for no fetching, skip it entirely; live behaviour
+        # with fetch=True is unchanged.
+        corroborated = (
+            self._corroborate_independent_publishers(job, origin_urls, attempts)
+            if fetch
+            else None
+        )
         if corroborated is not None:
             return corroborated
         return ResolvedJobSource(

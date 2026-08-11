@@ -189,14 +189,42 @@ NON_ACTIVE = [
     r"\bnot (?:an|a) active (?:opening|role|position)\b",
 ]
 EMPLOYMENT_NEGATIVES: List[Tuple[str, List[str]]] = [
-    ("part_time", [r"\bpart[- ]time\b", r"\b(?:under|up to|approximately)\s*\d{1,2}\s*(?:hours|hrs)\s*(?:per|/)\s*week\b"]),
+    # Role-defining context is REQUIRED, matching the contract/fractional/unpaid
+    # rules below. A bare token match rejected full-time postings on benefits
+    # boilerplate ("Part-time employees and interns are not eligible to
+    # participate"), company hiring-classification prose ("we hire full-time,
+    # part-time, contractor..."), and ATS field LABELS whose value is Full-Time
+    # ("Full-Time/Part-Time  Full-Time") -- 3% precision over a 32-record audit.
+    ("part_time", [
+        r"\b(?:this|the) (?:is|role is|position is)\b[^.]{0,60}\bpart[- ]time\b",
+        r"\bpart[- ]time (?:role|position|job|opportunity|schedule|hours)\b",
+        r"\b(?:seeking|hiring|looking for) (?:a |an )?part[- ]time\b",
+        r"\b(?:under|up to|approximately)\s*\d{1,2}\s*(?:hours|hrs)\s*(?:per|/)\s*week\b",
+    ]),
     ("fixed_term", [r"\bfixed[- ]term\b", r"\b\d{1,2}[- ]month\s+(?:contract|term)\b"]),
     ("fractional", [r"\b(?:this|the) (?:is|role is|position is)\b[^.]{0,60}\bfractional\b", r"\bfractional (?:role|position|contractor|employee|engagement)\b"]),
     ("contract", [r"\b(?:this|the) (?:is|role is|position is)\b[^.]{0,80}\b(?:contract|contractor)\b", r"\bindependent contractor\b", r"\bcontract[- ]to[- ]hire\b"]),
     ("temporary", [r"\btemporary (?:role|position|job|assignment)\b", r"\btemp[- ]to[- ]hire\b"]),
     ("freelance", [r"\bfreelance(?:r)? (?:role|position|engagement)\b", r"\bseeking (?:a )?freelance"]),
     ("seasonal", [r"\bseasonal (?:role|position|job|employment)\b"]),
-    ("internship", [r"\bintern(?:ship)?\b", r"\bexternship\b", r"\bfellowship\b", r"\bapprenticeship\b", r"\breturnship\b"]),
+    # Same guard. A bare token rejected full-time postings on prior-experience
+    # requirements ("3+ years of professional experience (non-internship)",
+    # "at least one internship OR equivalent industry experience"), onboarding
+    # metaphors ("an apprenticeship model"), and aggregator sidebar text
+    # ("Human Resources Intern jobs") -- 8% precision over a 50-record audit.
+    #
+    # Bare ``fellowship`` is deliberately NOT listed: in the audit it fired only
+    # on clinical credentials ("advanced fellowship training in various
+    # subspecialties"). Genuine fellowship/apprenticeship/externship PROGRAMMES
+    # remain excluded by job_quality.assess_restricted_work (context-guarded,
+    # title + description head) and by config.EXCLUDED_TITLE_KEYWORDS at
+    # acquisition, so coverage is unchanged -- only the false positives go.
+    ("internship", [
+        r"\b(?:this|the) (?:is|role is|position is)\b[^.]{0,60}\b(?:intern(?:ship)?|externship|apprenticeship|returnship|fellowship)\b",
+        r"\b(?:intern(?:ship)?|externship|apprenticeship|returnship) (?:role|position|opportunity)\b",
+        r"\b(?:seeking|hiring|apply for|applying for) (?:an? )?(?:intern(?:ship)?|externship|apprentice(?:ship)?)\b",
+        r"\bas an intern\b",
+    ]),
     ("unpaid", [r"\b(?:this|the) (?:is|role is|position is)\b[^.]{0,70}\bunpaid\b", r"\bequity[- ]only\b", r"\bcommission[- ]only\b", r"\bno financial compensation\b"]),
 ]
 FULL_TIME = [r"\bfull[- ]time\b", r"\bregular employee\b", r"\bpermanent (?:role|position|employee)\b"]

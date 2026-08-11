@@ -15,6 +15,7 @@ from typing import Dict, List, Optional
 
 import config
 from decision_types import GateState
+from job_filter import annotate_pre_enrichment_assessment
 from job_gate import JobGate
 from role_gate import RoleGate
 
@@ -61,6 +62,16 @@ def run_precontact_qualification(
     stats: Counter = Counter()
 
     for job in jobs:
+        # Carry the signed Step-2 employment/geography/modality decisions onto
+        # the record before the Job Gate resolves its source. Step 2's
+        # run_filter is not on this path, so without this the values are absent
+        # and job_source_resolver's _prefilter_full_time /
+        # _prefilter_supported_us_work can never be satisfied -- which disables
+        # the provider-structured review fallback for every source. This only
+        # forwards values the existing assessment already computes; it accepts
+        # and rejects nothing, so gate outcomes for records that already resolve
+        # are unchanged.
+        annotate_pre_enrichment_assessment(job)
         annotated = jgate.annotate(job, fetch=fetch_sources)
         source = (
             ((annotated.get("_job_gate_decision") or {}).get("metadata") or {}).get("source")

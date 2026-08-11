@@ -34,7 +34,13 @@ from company_identity import (
     is_intermediary_domain,
     safe_company_domain,
 )
-from job_filter import extract_domain, get_safe_employer_domain, normalize_text
+from job_filter import (
+    extract_domain,
+    get_safe_employer_domain,
+    is_in_crm,
+    load_crm_companies,
+    normalize_text,
+)
 from job_signal import annotate_job
 from role_focus import extract_role_focus
 from role_mapping import (
@@ -99,6 +105,31 @@ def validate_preflight() -> None:
         raise ValueError("HUNTER_MAX_FALLBACK_ATTEMPTS_PER_BUCKET cannot be negative")
     if config.VERIFY_WITH_HUNTER and not config.HUNTER_API_KEY:
         logger.warning("HUNTER_API_KEY is missing; Hunter verification/fallback is disabled")
+
+
+_CRM_EXCLUSION_CACHE: Optional[Tuple[set, set]] = None
+
+
+def _crm_exclusion_sets() -> Tuple[set, set]:
+    """Load the company-level CRM / active-pipeline exclusion list once per run.
+
+    Delegates to the single canonical loader (``job_filter.load_crm_companies``)
+    so the orchestrator path applies exactly the same company normalization and
+    the same production safety policy as the Step 2 path: in PRODUCTION a
+    missing, unreadable, empty, or zero-company exclusion file raises instead of
+    silently disabling the exclusion. There is deliberately no second CRM
+    matching implementation.
+    """
+    global _CRM_EXCLUSION_CACHE
+    if _CRM_EXCLUSION_CACHE is None:
+        _CRM_EXCLUSION_CACHE = load_crm_companies(config.CRM_EXCLUSION_FILE)
+    return _CRM_EXCLUSION_CACHE
+
+
+def reset_crm_exclusion_cache() -> None:
+    """Drop the cached CRM sets so a changed file or config path is re-read."""
+    global _CRM_EXCLUSION_CACHE
+    _CRM_EXCLUSION_CACHE = None
 
 
 def _is_intermediary_domain(domain: str) -> bool:
@@ -1364,6 +1395,17 @@ def run_hiring_manager_identification(
     skipped_existing_company_keys: set[str] = set()
     skipped_existing_job_rows: List[Dict] = []
     skipped_existing_jobs = 0
+    # Company-level CRM / active-pipeline exclusion. It runs HERE -- during
+    # company grouping, before the first Apollo call and therefore before any
+    # Hunter call and any Airtable delivery -- because this is the only point in
+    # the orchestrator path (RealEnrichmentStage -> run_precontact_qualification
+    # -> here) where companies exist as companies. Step 2's run_filter applies
+    # the same exclusion, but the orchestrator path never calls run_filter, so
+    # without this the CRM list was inert for every orchestrator run.
+    crm_normalized, crm_compact = _crm_exclusion_sets()
+    crm_excluded_company_keys: set[str] = set()
+    crm_excluded_reasons: Dict[str, str] = {}
+    crm_excluded_jobs = 0
     for job in jobs:
         company_key = company_key_for_job(job)
         if company_key in excluded_company_keys:
@@ -1371,13 +1413,34 @@ def run_hiring_manager_identification(
             skipped_existing_job_rows.append(job)
             skipped_existing_jobs += 1
             continue
+        # The decision is ACCOUNT-WIDE, never function-specific: one CRM match
+        # removes every posting and therefore every function bucket of that
+        # company, including buckets already grouped from earlier postings.
+        if company_key in crm_excluded_company_keys:
+            crm_excluded_jobs += 1
+            continue
+        in_crm, crm_reason = is_in_crm(job, crm_normalized, crm_compact)
+        if in_crm:
+            already_grouped = jobs_by_company.pop(company_key, [])
+            crm_excluded_company_keys.add(company_key)
+            crm_excluded_reasons[company_key] = crm_reason
+            crm_excluded_jobs += len(already_grouped) + 1
+            continue
         jobs_by_company[company_key].append(job)
+    if crm_excluded_company_keys:
+        logger.info(
+            "CRM exclusion removed %d company(ies) / %d job(s) before enrichment: %s",
+            len(crm_excluded_company_keys), crm_excluded_jobs,
+            ", ".join(sorted(crm_excluded_company_keys)[:20]),
+        )
 
     all_leads: List[Dict] = []
     processed_jobs: List[Dict] = list(skipped_existing_job_rows)
     total_stats = defaultdict(int)
     total_stats["topup_skipped_previously_considered_companies"] = len(skipped_existing_company_keys)
     total_stats["topup_skipped_previously_considered_jobs"] = skipped_existing_jobs
+    total_stats["crm_excluded_companies"] = len(crm_excluded_company_keys)
+    total_stats["crm_excluded_jobs"] = crm_excluded_jobs
     companies_considered = 0
     eligible_companies = 0
     excluded_companies = 0
@@ -1564,6 +1627,11 @@ def run_hiring_manager_identification(
         "total_input_jobs": len(processed_jobs),
         "total_output_leads": len(all_leads),
         "companies_considered": companies_considered,
+        # Company-level CRM / active-pipeline exclusions applied before any
+        # Apollo/Hunter call. Surfaced per company so a run is auditable.
+        "crm_excluded_companies": len(crm_excluded_company_keys),
+        "crm_excluded_jobs": crm_excluded_jobs,
+        "crm_excluded_company_reasons": dict(sorted(crm_excluded_reasons.items())),
         "eligible_companies": eligible_companies,
         # "eligible_companies" means "not hard-rejected by firmographics/
         # industry/business-model" -- it does NOT mean the company could
