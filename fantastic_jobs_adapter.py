@@ -85,7 +85,7 @@ def _host(url: str) -> str:
         host = urlparse(str(url or "").strip()).hostname or ""
     except (ValueError, TypeError):
         return ""
-    return host.lower().lstrip("www.") if host.startswith("www.") else host.lower()
+    return host.lower().removeprefix("www.")
 
 
 def _intermediary_hosts() -> Tuple[str, ...]:

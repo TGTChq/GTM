@@ -55,7 +55,7 @@ def _url_host(value: str) -> str:
     if "://" not in raw:
         raw = f"https://{raw}"
     try:
-        host = (urlparse(raw).hostname or "").lower().lstrip("www.")
+        host = (urlparse(raw).hostname or "").lower().removeprefix("www.")
     except ValueError:
         return ""
     # A real hostname contains only letters, digits, hyphens and dots. urlparse
