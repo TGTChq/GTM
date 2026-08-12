@@ -452,7 +452,15 @@ class SchedulerBoundaryTests(unittest.TestCase):
         ):
             self.assertEqual(run_daily.main(), 0)
 
-    def test_approved_sync_never_enrolls_failed_revalidation(self):
+    def test_approved_sync_never_enrolls_failed_delivery_precheck(self):
+        """Approved Sync is delivery-only, but a row that cannot produce a valid
+        enrollment payload must still never reach Instantly.
+
+        (Was ``..._failed_revalidation``: the provider revalidation step it
+        patched was removed when Approved became the authorization boundary. The
+        invariant it guarded -- a failed pre-enrollment check is never enrolled --
+        is unchanged and is now asserted against the local delivery precheck.)
+        """
         import run_approved
         record = {"id": "rec1", "fields": {"Email": "alex@example.com"}}
         eligibility = {"approved_seen": 1, "approved_eligible": 1,
@@ -460,7 +468,8 @@ class SchedulerBoundaryTests(unittest.TestCase):
         with (
             patch.object(run_approved.airtable_client, "select_eligible_approved",
                          return_value=([record], eligibility)),
-            patch.object(run_approved, "revalidate_approved_record", return_value=(False, "stale job")),
+            patch.object(run_approved, "_delivery_precheck",
+                         return_value=(False, "Delivery precheck failed: missing Company")),
             patch.object(run_approved.airtable_client, "mark_error") as mark_error,
             patch.object(run_approved.instantly_client, "enroll_approved_leads") as enroll,
         ):
@@ -470,7 +479,8 @@ class SchedulerBoundaryTests(unittest.TestCase):
             }
             result = run_approved.run()
         enroll.assert_called_once_with([])
-        mark_error.assert_called_once_with(["rec1"], "stale job")
+        self.assertTrue(mark_error.called)
+        self.assertIn("rec1", mark_error.call_args[0][0])
         self.assertEqual(result["revalidation_failed"], 1)
         self.assertEqual(result["failed"], 1)
 

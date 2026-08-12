@@ -257,7 +257,7 @@ class EnrollmentSafetyTests(_Base):
 class ContainmentReconciliationTests(_Base):
     def test_missing_email_is_skipped_fail_closed(self):
         rec = _rec("noemail", Email="")
-        ok, reason = run_approved._local_revalidate(rec)
+        ok, reason = run_approved._delivery_precheck(rec)
         self.assertFalse(ok)
         # And the pure preflight classifier buckets it without a network call.
         self.assertEqual(run_approved._classify_for_preflight(rec), "blocked_missing_email")

@@ -1,18 +1,29 @@
-"""Approved-sync worker: enroll manually approved Airtable leads into Instantly.
+"""Approved-sync worker: DELIVERY-ONLY enrollment of approved Airtable leads.
 
 Definitive scheduled worker (Railway service "GTM Approved Sync",
-``python -u run_approved.py``, cron ``*/5 * * * *``, restart NEVER). One execution
-per cron tick; the process exits after each sync (no internal loop, no whole-job
-retry). It NEVER runs acquisition, ATS, JSearch or free-feed collection.
+``python -u run_approved.py``, restart NEVER). One execution per cron tick; the
+process exits after each sync. It NEVER runs acquisition, ATS, JSearch or
+free-feed collection.
 
-Selection is fail-closed and manual-only: only Airtable rows an operator set to
-``Status = Approved`` are considered. Before enrollment each record is
-revalidated -- with the live Apollo/Hunter re-check when
-``APPROVED_SYNC_REVALIDATE_PROVIDERS`` is true (default, production), otherwise
-with the zero-network validation-fingerprint + actionable-state + email/campaign/
-suppression checks. Instantly enrollment is idempotent; a record's Airtable
-status advances to Enrolled only after confirmed Instantly success, and a failed
-revalidation or enrollment leaves the record unchanged.
+**Approved is the authorization boundary.** A row an operator set to
+``Status = Approved`` has already passed the full qualification/enrichment
+pipeline upstream. This worker therefore DELIVERS it; it does not re-qualify it.
+
+Explicitly NOT done here (all of it happened upstream):
+  * no Apollo organization enrichment, no Apollo person match
+  * no Hunter verification
+  * no JobSourceResolver / job-URL probing / network corroboration
+  * no re-run of the qualification gates
+  * no validation-age ("staleness") rejection -- age is not a delivery failure
+
+Zero provider credits are spent by this worker.
+
+What DOES gate enrollment is local and derived only from stored Airtable
+evidence: the row must be Approved, carry a current correctly-signed actionable
+decision, and contain the fields needed to build a valid enrollment payload
+(email, company, role, role focus, resolvable campaign). Instantly enrollment is
+idempotent; a record advances to Enrolled only after confirmed Instantly success,
+and a delivery failure leaves the row retryable with an Error note.
 
 ``--preflight-only`` performs a zero-write backlog audit: it reads Airtable and
 classifies the approved backlog, calling neither Instantly nor any write.
@@ -29,8 +40,13 @@ from pathlib import Path
 import airtable_client
 import config
 import instantly_client
-from approved_revalidation import revalidate_approved_record
 from validation_integrity import fingerprint_matches
+
+#: Bounded failure reporting. The previous implementation dumped every failure
+#: object through ``json.dumps(..., indent=2)``; with 627 failures that emitted
+#: ~3,100 log lines in one burst, tripped Railway's 500 logs/sec replica limit
+#: and dropped 2,602 messages -- including the run summary.
+_MAX_LOGGED_FAILURE_EXAMPLES = 5
 
 Path(config.LOG_DIR).mkdir(parents=True, exist_ok=True)
 logging.basicConfig(
@@ -47,12 +63,22 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-def _local_revalidate(record: dict) -> tuple[bool, str]:
-    """Zero-network fail-closed revalidation used when provider re-check is off.
+def _delivery_precheck(record: dict) -> tuple[bool, str]:
+    """Local, zero-network delivery readiness check.
 
-    Enforces the validation-integrity fingerprint (critical fields unchanged) and
-    the same actionable-state / required-field / campaign / suppression rules the
-    Instantly builder applies -- all without any Apollo/Hunter call.
+    This is the ONLY pre-enrollment gate. It answers one question: "can a valid
+    Instantly payload be built from the evidence already stored on this row?" It
+    deliberately does NOT re-assess whether the lead is still a good lead --
+    that decision was made upstream and ratified by the operator's approval.
+
+    Checks retained, and why each is necessary:
+      * ``fingerprint_matches`` -- the row's critical fields must not have been
+        edited since validation signed them, or the payload would not match what
+        was approved. Pure local comparison.
+      * ``airtable_record_to_lead(probe=False)`` -- constructs the real payload,
+        so a row that cannot produce one is caught before Instantly rather than
+        failing mid-delivery. ``probe=False`` keeps it hermetic: no job-URL
+        probe, no network.
     """
     fields = record.get("fields") or {}
     if not fingerprint_matches(fields):
@@ -60,20 +86,45 @@ def _local_revalidate(record: dict) -> tuple[bool, str]:
     try:
         instantly_client.airtable_record_to_lead(record, probe=False)
     except Exception as exc:  # noqa: BLE001 - any builder rejection is fail-closed
-        return False, f"Local revalidation failed: {exc}"
-    return True, "approved_record_locally_revalidated"
+        return False, f"Delivery precheck failed: {exc}"
+    return True, "approved_record_ready_for_delivery"
 
 
-def _revalidate(record: dict, *, use_providers: bool) -> tuple[bool, str]:
-    if use_providers:
-        # Fail-closed live re-check (Apollo employment/email, gates). Production.
-        return revalidate_approved_record(record)
-    return _local_revalidate(record)
+def _log_enrollment_result(result: dict) -> None:
+    """Compact, bounded run summary.
+
+    Emits counts plus a per-reason histogram and at most
+    ``_MAX_LOGGED_FAILURE_EXAMPLES`` example record ids -- never the full failure
+    list, and never PII beyond the ids already present in Airtable.
+    """
+    failures = result.get("failures") or []
+    reasons: dict[str, int] = {}
+    for failure in failures:
+        key = str(failure.get("error") or "unknown").split(":", 1)[0][:80]
+        reasons[key] = reasons.get(key, 0) + 1
+    logger.info(
+        "Approved-sync result: approved=%d attempted=%d enrolled=%d duplicates=%d "
+        "failed=%d marked_enrolled=%d marked_error=%d",
+        int(result.get("approved", 0)), int(result.get("approved_attempted", 0)),
+        int(result.get("enrolled", 0)), int(result.get("duplicates", 0)),
+        int(result.get("failed", 0)), int(result.get("airtable_marked_enrolled", 0)),
+        int(result.get("airtable_mark_error", 0)))
+    if reasons:
+        logger.info("Approved-sync failure reasons: %s",
+                    dict(sorted(reasons.items(), key=lambda kv: -kv[1])))
+        examples = [f.get("record_id", "") for f in failures[:_MAX_LOGGED_FAILURE_EXAMPLES]]
+        logger.info("Approved-sync failure examples (%d of %d): %s",
+                    len(examples), len(failures), examples)
 
 
 def run(*, revalidate_providers: bool | None = None) -> dict:
-    if revalidate_providers is None:
-        revalidate_providers = config.APPROVED_SYNC_REVALIDATE_PROVIDERS
+    # ``revalidate_providers`` is accepted for backward compatibility only and is
+    # deliberately ignored: Approved Sync is delivery-only and never calls a
+    # provider. Passing True no longer re-enables Apollo/Hunter revalidation.
+    if revalidate_providers:
+        logger.warning(
+            "revalidate_providers=True is ignored: Approved Sync is delivery-only "
+            "and performs no provider revalidation.")
 
     # Eligibility partition first: legacy/invalid Approved rows (the ~42-row
     # legacy backlog without current validation metadata) are dropped here with NO
@@ -100,22 +151,29 @@ def run(*, revalidate_providers: bool | None = None) -> dict:
 
     safe_records = []
     revalidation_failures = []
+    precheck_failed_ids: list[str] = []
     for record in approved:
         try:
-            valid, reason = _revalidate(record, use_providers=revalidate_providers)
-        except Exception as exc:  # noqa: BLE001 - a revalidation crash is fail-closed
-            valid, reason = False, f"Approved revalidation error: {exc}"
+            valid, reason = _delivery_precheck(record)
+        except Exception as exc:  # noqa: BLE001 - a precheck crash is fail-closed
+            valid, reason = False, f"Delivery precheck error: {exc}"
         if valid:
             safe_records.append(record)
         else:
-            # Fail-closed: the record is NOT enrolled and its approval is not
-            # consumed. It is marked Error with the reason; nothing is enrolled.
+            # A genuine data-integrity/config failure: the payload cannot be
+            # built. Not enrolled, approval not consumed, marked Error so an
+            # operator can fix the row. Age alone can never land here.
             revalidation_failures.append({
                 "record_id": record.get("id", ""),
                 "email": (record.get("fields") or {}).get("Email", ""),
                 "error": reason,
             })
-            airtable_client.mark_error([record.get("id", "")], reason)
+            precheck_failed_ids.append(record.get("id", ""))
+    # One batched write instead of one PATCH per record (was 627 single-record
+    # PATCHes on the incident run). mark_error already chunks in tens.
+    if precheck_failed_ids:
+        airtable_client.mark_error(
+            precheck_failed_ids, "Delivery precheck failed; see Airtable row fields")
 
     # Instantly enrollment: per-record, idempotent (skip_if_in_workspace/campaign +
     # 409/422 duplicate handling). One record's failure never aborts the batch.
@@ -143,7 +201,7 @@ def run(*, revalidate_providers: bool | None = None) -> dict:
     # -- never for legacy/invalid rows, which were skipped before this point.
     result["airtable_mark_error"] = len(revalidation_failures) + len(instantly_failures)
     result["duplicates_suppressed"] = int(result.get("duplicates", 0))
-    logger.info("Enrollment result: %s", json.dumps(result, indent=2))
+    _log_enrollment_result(result)
     return result
 
 
@@ -191,7 +249,8 @@ def preflight() -> dict:
         "mode": "preflight_only",
         "writes": 0,
         "instantly_called": False,
-        "revalidate_providers_default": config.APPROVED_SYNC_REVALIDATE_PROVIDERS,
+        "delivery_only": True,
+        "provider_revalidation": "disabled (Approved is the authorization boundary)",
         "canonical_approved_status": config.AIRTABLE_STATUS_APPROVED,
         "counts": counts,
     }
