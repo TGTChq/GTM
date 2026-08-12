@@ -130,7 +130,11 @@ def enroll_record(record: Dict) -> EnrollmentResult:
     fields = record.get("fields") or {}
     email = fields.get("Email", "")
     try:
-        lead = airtable_record_to_lead(record)
+        # probe=False: Approved Sync is delivery-only. With probe=True a row whose
+        # ``Job URL Status`` is blank triggered select_job_url(probe=True) -- a live
+        # job-URL fetch during enrollment. Approval is the authorization boundary,
+        # so delivery performs no network corroboration.
+        lead = airtable_record_to_lead(record, probe=False)
     except Exception as exc:
         return EnrollmentResult(False, "failed", record_id, email, "", str(exc))
 
