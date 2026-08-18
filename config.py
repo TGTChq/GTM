@@ -204,6 +204,14 @@ ORGANIZATION_CACHE_DIR = str(Path(STATE_DIR) / "organization_cache")
 REROUTE_STATE_FILE = str(Path(STATE_DIR) / "reroute_state.json")
 RECOVERABLE_JOBS_FILE = str(Path(STATE_DIR) / "recoverable_jobs.json")
 FINAL_PASS_INVENTORY_FILE = str(Path(STATE_DIR) / "final_pass_inventory.json")
+OUTBOUND_COMPANY_CACHE_PATH = os.getenv(
+    "OUTBOUND_COMPANY_CACHE_PATH",
+    str(Path(STATE_DIR) / "company_display_cache.json"),
+)
+OUTBOUND_COMPANY_OVERRIDES_PATH = os.getenv(
+    "OUTBOUND_COMPANY_OVERRIDES_PATH",
+    str(BASE_DIR / "company_display_overrides.json"),
+)
 PIPELINE_CHECKPOINT_FILE = str(Path(STATE_DIR) / "pipeline_checkpoint.json")
 PIPELINE_LOCK_FILE = str(Path(STATE_DIR) / "pipeline.lock")
 SEEN_JOBS_FILE = str(Path(STATE_DIR) / "seen_jobs.json")
@@ -234,7 +242,7 @@ for directory in (
 
 # ---------- Final-pass architecture ----------
 FINAL_PASS_PIPELINE_ENABLED = _env_bool("FINAL_PASS_PIPELINE_ENABLED", True)
-VALIDATION_VERSION = "tgtc-ready-v1.4.5-actionable-review"
+VALIDATION_VERSION = "tgtc-ready-v1.4.7-role-display-2"
 VALIDATION_SIGNING_KEY = os.getenv("VALIDATION_SIGNING_KEY", "")
 # Source and company-site retrieval is bounded and cached.  Disabling fetches is
 # intended only for deterministic offline replay; it does not relax any gate.

@@ -226,6 +226,15 @@ def map_record(record: Dict[str, Any], source_label: str, seg: Optional[Dict[str
         "job_title": title,
         "employer_name": employer,
         "employer_website": domain,
+        # Preserve source identity/display candidates independently.  Downstream
+        # resolvers may use them as evidence, but must never rewrite the canonical
+        # employer identity above.
+        "organization": str(record.get("organization") or "").strip(),
+        "organization_url": str(record.get("organization_url") or "").strip(),
+        "org_linkedin_name": str(record.get("org_linkedin_name") or "").strip(),
+        "org_linkedin_slug": str(record.get("org_linkedin_slug") or "").strip(),
+        "org_linkedin_website": str(record.get("org_linkedin_website") or "").strip(),
+        "domain_derived": str(record.get("domain_derived") or "").strip(),
         "job_publisher": source_label,
         "job_description": description,
         "job_apply_link": url,

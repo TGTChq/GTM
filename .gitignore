@@ -38,3 +38,8 @@ Thumbs.db
 *.zip
 data/orchestrator/
 reports/jobs_enriched_*.json
+
+# local operator artifacts (not for production commits)
+/orchestrator.patch
+/ROLLBACK_MANIFEST.json
+data/logs/

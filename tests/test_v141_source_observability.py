@@ -3,9 +3,15 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
+
+
+def _recent_iso(days_ago: int = 2) -> str:
+    """Keep freshness-sensitive fixtures inside the production age window."""
+    return (datetime.now(timezone.utc) - timedelta(days=days_ago)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 import config
 import final_pass_topup
@@ -230,7 +236,7 @@ class HimalayasProfileV141Tests(unittest.TestCase):
             "job_country": "US",
             "job_is_remote": True,
             "job_employment_type": "Full Time",
-            "job_posted_at_datetime_utc": "2026-07-23T12:00:00Z",
+            "job_posted_at_datetime_utc": _recent_iso(),
             "_acquisition_source": "himalayas",
             "_provider_record_structured": True,
             "_source_company_slug": f"acme-{index}" if index else "acme",

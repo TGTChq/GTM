@@ -130,6 +130,51 @@ def real_free_feeds_runner(sources: Sequence[str], fetcher):
     return runner
 
 
+def real_fantastic_runner():
+    """Lane runner for the Fantastic.jobs Direct API acquisition source.
+
+    Fantastic owns its HTTP transport, pagination and provider quota (the
+    ``x-api-*-remaining`` headers plus the ``FANTASTIC_JOBS_*`` reserves), so it
+    does not draw on the RequestBudget seam that the ats/jsearch/free lanes use.
+    A source-level failure is contained: the lane returns ``failed``/``partial``
+    and never crashes the run or erases another lane. When
+    ``FANTASTIC_JOBS_ENABLED`` is falsey the adapter issues no request and the
+    lane completes with zero jobs.
+    """
+    from fantastic_jobs_adapter import run_fantastic_jobs_acquisition
+
+    def runner(manager: LaneManager) -> LaneResult:
+        errors: List[str] = []
+        jobs: List[Dict[str, Any]] = []
+        status = "complete"
+        metadata: Dict[str, Any] = {}
+        try:
+            result = run_fantastic_jobs_acquisition()
+            jobs = list(result.jobs)
+            errors = list(result.errors)
+            metadata = dict(result.metadata or {})
+            if not result.success:
+                status = "partial" if jobs else "failed"
+        except Exception as exc:  # noqa: BLE001 - a lane never erases another
+            status = "failed"
+            errors.append(f"{type(exc).__name__}: {exc}")
+        reqs = int(metadata.get("requests_attempted", 0) or 0)
+        return LaneResult(
+            lane="fantastic", status=status, jobs=jobs, errors=errors,
+            physical_requests=reqs,
+            attribution={
+                "source": "fantastic_jobs",
+                "records": len(jobs),
+                "requests": reqs,
+                "stop_reason": metadata.get("stop_reason", ""),
+                "jobs_quota_remaining": metadata.get("jobs_quota_remaining"),
+                "requests_quota_remaining": metadata.get("requests_quota_remaining"),
+            },
+        )
+
+    return runner
+
+
 def _live_jsearch_request(method: str, url: str, **kwargs: Any):
     """The real JSearch transport inner: routes to http_utils.request_with_retry,
     preserving its retry/quota behaviour. Imported lazily so offline never loads it."""
@@ -322,8 +367,12 @@ class RealEnrichmentStage:
         row under contact['_airtable_row'] so review-staging writes the real
         NEEDS_CHECK/UNVERIFIED contact (Defect A), not an empty placeholder."""
         pid = str(row.get("job_id") or row.get("canonical_job_id") or row.get("lead_key") or "")
-        company_name = (row.get("employer_name") or row.get("canonical_company_name")
-                        or row.get("canonical_employer_name") or "")
+        # The orchestration wrapper carries canonical identity only.  Outbound
+        # display fields remain inside the full row and are never overwritten by
+        # Apollo/raw-name reconstruction here.
+        company_name = (row.get("canonical_company_name")
+                        or row.get("canonical_employer_name")
+                        or row.get("employer_name") or "")
         return Lead(
             posting_id=pid,
             company={"name": company_name},

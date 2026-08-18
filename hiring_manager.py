@@ -34,6 +34,7 @@ from company_identity import (
     is_intermediary_domain,
     safe_company_domain,
 )
+from company_display_resolver import resolve_company_display
 from job_filter import (
     extract_domain,
     get_safe_employer_domain,
@@ -43,6 +44,7 @@ from job_filter import (
 )
 from job_signal import annotate_job
 from role_focus import extract_role_focus
+from role_display_resolver import resolve_role_display
 from role_mapping import (
     founder_allowed_for_employee_count,
     get_bucket_name_for_job,
@@ -682,6 +684,42 @@ def _strict_base_lead(
     account_decision: GateDecision,
 ) -> Dict:
     role_focus = extract_role_focus(primary, primary.get("_matched_role", ""))
+    role_display = resolve_role_display({**primary, "role_focus": role_focus.text})
+    related_role_results = [
+        resolve_role_display({
+            **job,
+            "role_focus": extract_role_focus(job, job.get("_matched_role", "")).text,
+        })
+        for job in bucket_jobs
+    ]
+    related_role_displays = {
+        result.name
+        for result in related_role_results
+        if result.name and not result.hold
+    }
+    related_role_holds = [
+        result.evidence.get("raw_title") or result.name
+        for result in related_role_results
+        if result.hold
+    ]
+    role_evidence = dict(role_display.evidence)
+    if related_role_holds:
+        role_evidence["related_ambiguous_roles"] = related_role_holds
+    canonical_company_name = account_decision.metadata.get("canonical_company_name")
+    canonical_domain = (
+        account_decision.metadata.get("canonical_domain")
+        or org.domain
+        or primary.get("employer_website")
+    )
+    company_display = resolve_company_display(
+        organization=primary.get("organization") or primary.get("employer_name"),
+        org_linkedin_name=primary.get("org_linkedin_name"),
+        canonical_company_name=canonical_company_name,
+        org_linkedin_slug=primary.get("org_linkedin_slug"),
+        org_linkedin_website=primary.get("org_linkedin_website"),
+        employer_domain=canonical_domain,
+        canonical_identity_verified=account_decision.state_value == GateState.PASS.value,
+    )
     lead = dict(primary)
     lead.update(
         {
@@ -707,6 +745,12 @@ def _strict_base_lead(
                 for j in bucket_jobs
                 if j.get("canonical_job_title") or j.get("job_title")
             }),
+            "related_outbound_roles": sorted(related_role_displays),
+            "outbound_role_name": role_display.name,
+            "outbound_role_confidence": role_display.confidence,
+            "_outbound_role_hold": bool(role_display.hold or related_role_holds),
+            "_outbound_role_evidence": role_evidence,
+            "_outbound_role_resolver_version": role_display.resolver_version,
             "related_job_ids": [j.get("job_id") for j in bucket_jobs if j.get("job_id")],
             "role_focus": role_focus.text,
             "role_focus_quality": role_focus.quality,
@@ -716,11 +760,60 @@ def _strict_base_lead(
             "company_founded_year": org.founded_year,
             "company_industry": org.industry,
             "company_business_model": account_decision.metadata.get("business_model"),
-            "canonical_company_name": account_decision.metadata.get("canonical_company_name"),
+            "canonical_company_name": canonical_company_name,
+            "outbound_company_name": company_display.name,
+            "outbound_company_confidence": company_display.confidence,
+            "outbound_company_identity_key": company_display.identity_key,
+            "_outbound_company_identity_safe": company_display.identity_safe,
+            "_outbound_company_hold": company_display.hold,
+            "_outbound_company_evidence": company_display.evidence,
+            "_outbound_display_resolver_version": company_display.resolver_version,
             "campaign_id": config.resolve_campaign_id(bucket, org.employee_count),
         }
     )
     return lead
+
+
+def _outbound_display_gate(lead: Dict) -> GateDecision:
+    if lead.get("_outbound_company_hold"):
+        return GateDecision(
+            "display",
+            GateState.NEEDS_CHECK,
+            ReasonCode.NEEDS_CHECK_OUTBOUND_COMPANY_IDENTITY,
+            retryable=False,
+            next_action="resolve_company_display_alias_before_approval",
+            metadata={
+                "confidence": lead.get("outbound_company_confidence") or "low",
+                "identity_key": lead.get("outbound_company_identity_key") or "",
+                "identity_safe": bool(lead.get("_outbound_company_identity_safe")),
+                "hold": True,
+            },
+        )
+    if lead.get("_outbound_role_hold"):
+        return GateDecision(
+            "display",
+            GateState.NEEDS_CHECK,
+            ReasonCode.NEEDS_CHECK_OUTBOUND_ROLE_AMBIGUOUS,
+            retryable=False,
+            next_action="resolve_outbound_role_before_approval",
+            metadata={
+                "confidence": lead.get("outbound_role_confidence") or "low",
+                "hold": True,
+                "role_evidence": lead.get("_outbound_role_evidence") or {},
+            },
+        )
+    return GateDecision(
+        "display",
+        GateState.PASS,
+        "OUTBOUND_DISPLAY_PASS",
+        metadata={
+            "confidence": lead.get("outbound_company_confidence") or "",
+            "identity_key": lead.get("outbound_company_identity_key") or "",
+            "identity_safe": bool(lead.get("_outbound_company_identity_safe")),
+            "role_confidence": lead.get("outbound_role_confidence") or "",
+            "hold": False,
+        },
+    )
 
 
 def _process_company_strict(company_jobs: List[Dict]) -> Tuple[List[Dict], Dict]:
@@ -762,6 +855,7 @@ def _process_company_strict(company_jobs: List[Dict]) -> Tuple[List[Dict], Dict]
         job_decision = _strict_gate_from_job(primary, "_job_gate_decision", "job")
         role_decision = _strict_gate_from_job(primary, "_role_gate_decision", "role")
         lead = _strict_base_lead(primary, bucket_jobs, bucket, org, account_decision)
+        display_decision = _outbound_display_gate(lead)
 
         search_domain = str(
             account_decision.metadata.get("canonical_domain")
@@ -784,7 +878,12 @@ def _process_company_strict(company_jobs: List[Dict]) -> Tuple[List[Dict], Dict]
         if account_decision.state_value == GateState.REJECT.value or not search_domain:
             final = annotate_final_decision(
                 lead,
-                {"job": job_decision, "role": role_decision, "account": account_decision},
+                {
+                    "job": job_decision,
+                    "role": role_decision,
+                    "account": account_decision,
+                    "display": display_decision,
+                },
             )
             final["_step3_status"] = (
                 "excluded" if final.get("_final_state") == "REJECT" else "unverified"
@@ -1062,6 +1161,7 @@ def _process_company_strict(company_jobs: List[Dict]) -> Tuple[List[Dict], Dict]
                                 job_decision,
                                 role_decision,
                                 account_decision,
+                                display_decision,
                                 selected_contact_decision,
                                 selected_email_decision,
                             )
@@ -1078,6 +1178,7 @@ def _process_company_strict(company_jobs: List[Dict]) -> Tuple[List[Dict], Dict]
                     "job": job_decision,
                     "role": role_decision,
                     "account": account_decision,
+                    "display": display_decision,
                     "contact": selected_contact_decision,
                     "email": selected_email_decision,
                 },
@@ -1090,6 +1191,7 @@ def _process_company_strict(company_jobs: List[Dict]) -> Tuple[List[Dict], Dict]
                     "job": job_decision,
                     "role": role_decision,
                     "account": account_decision,
+                    "display": display_decision,
                     "contact": contact_decision,
                 }
             elif last_contact_decision and last_contact_decision.state_value == GateState.PASS.value and last_email_decision:
@@ -1097,6 +1199,7 @@ def _process_company_strict(company_jobs: List[Dict]) -> Tuple[List[Dict], Dict]
                     "job": job_decision,
                     "role": role_decision,
                     "account": account_decision,
+                    "display": display_decision,
                     "contact": last_contact_decision,
                     "email": last_email_decision,
                 }
@@ -1110,6 +1213,7 @@ def _process_company_strict(company_jobs: List[Dict]) -> Tuple[List[Dict], Dict]
                     "job": job_decision,
                     "role": role_decision,
                     "account": account_decision,
+                    "display": display_decision,
                     "contact": contact_decision,
                 }
             final = annotate_final_decision(lead, gates)

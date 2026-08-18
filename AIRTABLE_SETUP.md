@@ -5,10 +5,19 @@ Create a table named `Leads` (or set `AIRTABLE_TABLE_NAME` to your table name) w
 | Field | Type | Notes |
 |---|---|---|
 | Lead Key | Single line text | Required; used for idempotency |
-| Company | Single line text | |
+| Company | Single line text | Canonical company identity; never use as outreach copy |
+| Outbound Company | Single line text | Identity-safe display name used by Instantly |
+| Outbound Company Confidence | Single select or text | `high`, `medium`, `low` |
+| Outbound Company Identity | Single line text | Stable `linkedin:` or `domain:` cache key |
+| Outbound Company Evidence | Long text | Resolver candidates, transformations, and identity evidence |
+| Outbound Hold | Checkbox | Checked for ambiguous/low-confidence company identity; cannot enroll |
 | Website | URL | |
-| Open Role | Single line text | Primary opening used in copy |
-| Open Roles | Long text | All related openings in the same functional bucket |
+| Open Role | Single line text | Canonical/raw primary opening retained for audit |
+| Open Roles | Long text | Canonical/raw related openings retained for audit |
+| Outbound Role | Single line text | Human-readable primary opening used by Instantly |
+| Outbound Roles | Long text | Human-readable related openings used by Instantly |
+| Outbound Role Confidence | Single select or text | `high`, `medium`, `low` |
+| Outbound Role Evidence | Long text | Resolver rules and role-head preservation evidence |
 | Role Focus | Single line text | Editable fragment inserted after “focused on”; required before approval |
 | Focus Quality | Single select | `specific`, `manual_required` |
 | Focus Evidence | Long text | Exact JD signals that produced the suggested focus |
@@ -62,7 +71,7 @@ Strict output boundary:
 - `FINAL_PASS` is written with `Relevance = accept`.
 - `NEEDS_CHECK` is written with `Relevance = review` and does not count toward the daily target.
 - `REJECT`, `UNVERIFIED`, and unresolved `REROUTE` never create Airtable rows.
-- `run_approved.py` enrolls only Approved rows whose `Final Decision = FINAL_PASS`, validation timestamp is fresh, and fingerprint still matches.
+- `run_approved.py` enrolls only current, correctly signed Approved rows with a send-safe outbound company, an outbound role, and no `Outbound Hold`.
 - Editing a signed field such as Email, Campaign ID, Role Focus, company, job URL, or contact identity invalidates the fingerprint and blocks enrollment until the lead is requalified.
 
 Recommended views:
@@ -72,6 +81,7 @@ Recommended views:
 3. **Approved / Waiting** — filter `Status = Approved`.
 4. **Enrolled** — filter `Status = Enrolled`.
 5. **Errors** — filter `Status = Error`.
+6. **Outbound Holds** — filter `Outbound Hold` is checked or `Outbound Company Confidence = low`.
 
 The code does not auto-create schema fields. Airtable's normal records API will reject unknown field names, so create the fields before the first production run.
 

@@ -66,9 +66,18 @@ def _sanitize_airtable_error(exc: Exception) -> Dict[str, object]:
 REQUIRED_FIELDS = [
     "Lead Key",
     "Company",
+    "Outbound Company",
+    "Outbound Company Confidence",
+    "Outbound Company Identity",
+    "Outbound Company Evidence",
+    "Outbound Hold",
     "Website",
     "Open Role",
     "Open Roles",
+    "Outbound Role",
+    "Outbound Roles",
+    "Outbound Role Confidence",
+    "Outbound Role Evidence",
     "Role Focus",
     "Focus Quality",
     "Focus Evidence",
@@ -247,12 +256,22 @@ def _evidence_bundle_text(job: Dict) -> str:
         "secondary_reasons": job.get("_final_secondary_reasons") or [],
         "gate_decisions": job.get("_gate_decisions") or {},
         "validation_version": job.get("_validation_version") or config.VALIDATION_VERSION,
+        "outbound_display": {
+            "company_confidence": job.get("outbound_company_confidence"),
+            "company_identity_key": job.get("outbound_company_identity_key"),
+            "company_hold": bool(job.get("_outbound_company_hold")),
+            "role_confidence": job.get("outbound_role_confidence"),
+            "role_hold": bool(job.get("_outbound_role_hold")),
+            "company_resolver_version": job.get("_outbound_display_resolver_version"),
+            "role_resolver_version": job.get("_outbound_role_resolver_version"),
+        },
     }
     return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))[:95000]
 
 
 def _job_to_fields(job: Dict) -> Dict:
     related_roles = job.get("related_open_roles") or []
+    related_outbound_roles = job.get("related_outbound_roles") or []
     relevance_reasons = job.get("_role_relevance_reasons") or []
     strict_state = str(job.get("_final_state") or "")
     relevance = job.get("_airtable_relevance") if strict_state else job.get("_role_relevance_status")
@@ -287,6 +306,17 @@ def _job_to_fields(job: Dict) -> Dict:
     fields = {
         "Lead Key": job.get("lead_key"),
         "Company": job.get("canonical_company_name") or job.get("canonical_employer_name") or job.get("employer_name"),
+        "Outbound Company": job.get("outbound_company_name"),
+        "Outbound Company Confidence": job.get("outbound_company_confidence"),
+        "Outbound Company Identity": job.get("outbound_company_identity_key"),
+        "Outbound Company Evidence": json.dumps(
+            job.get("_outbound_company_evidence") or {},
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )[:95000],
+        "Outbound Hold": bool(
+            job.get("_outbound_company_hold") or job.get("_outbound_role_hold")
+        ),
         "Website": (
             f"https://{job.get('company_domain')}"
             if job.get("company_domain")
@@ -294,6 +324,14 @@ def _job_to_fields(job: Dict) -> Dict:
         ),
         "Open Role": job.get("canonical_job_title") or job.get("job_title"),
         "Open Roles": " | ".join(related_roles),
+        "Outbound Role": job.get("outbound_role_name"),
+        "Outbound Roles": " | ".join(related_outbound_roles),
+        "Outbound Role Confidence": job.get("outbound_role_confidence"),
+        "Outbound Role Evidence": json.dumps(
+            job.get("_outbound_role_evidence") or {},
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )[:95000],
         "Role Focus": job.get("role_focus"),
         "Focus Quality": job.get("role_focus_quality"),
         "Focus Evidence": " | ".join(job.get("role_focus_evidence") or []),
@@ -923,6 +961,14 @@ def approved_row_eligibility(fields: Dict) -> tuple[str, str]:
         return "legacy", "missing_validation_fingerprint"
     if not fingerprint_matches(fields):
         return "legacy", "validation_fingerprint_mismatch"
+    if bool(fields.get("Outbound Hold")):
+        return "invalid", "outbound_company_held_for_review"
+    if str(fields.get("Outbound Company Confidence") or "").strip().lower() not in {"high", "medium"}:
+        return "invalid", "outbound_company_confidence_not_send_safe"
+    if not str(fields.get("Outbound Company") or "").strip():
+        return "invalid", "missing_outbound_company"
+    if not str(fields.get("Outbound Role") or "").strip():
+        return "invalid", "missing_outbound_role"
     if not str(fields.get("Email") or "").strip():
         return "invalid", "missing_email"
     campaign = str(fields.get("Campaign ID") or "").strip() or config.resolve_campaign_id(

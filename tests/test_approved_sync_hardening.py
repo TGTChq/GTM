@@ -28,6 +28,11 @@ def _fields(**overrides):
         "Validation Version": config.VALIDATION_VERSION,
         "Email": "jane@acme.com",
         "Company": "Acme",
+        "Outbound Company": "Acme",
+        "Outbound Company Confidence": "high",
+        "Outbound Company Identity": "domain:acme.com",
+        "Outbound Hold": False,
+        "Outbound Role": "Account Executive",
         "Role Bucket": "marketing",
         "Campaign ID": "camp-123",
         "Website": "https://acme.com",
@@ -46,6 +51,16 @@ class EligibilityPredicateTests(unittest.TestCase):
     def test_current_authorized_row_is_eligible(self):
         cat, _ = approved_row_eligibility(_fields())
         self.assertEqual(cat, "eligible")
+
+    def test_airtable_omitted_unchecked_hold_remains_eligible(self):
+        fields = _fields()
+        fields.pop("Outbound Hold")
+        cat, reason = approved_row_eligibility(fields)
+        self.assertEqual((cat, reason), ("eligible", "eligible"))
+
+    def test_explicit_hold_remains_blocked(self):
+        cat, reason = approved_row_eligibility(_fields(**{"Outbound Hold": True}))
+        self.assertEqual((cat, reason), ("invalid", "outbound_company_held_for_review"))
 
     # 1 — legacy: missing Final Decision.
     def test_missing_final_decision_is_legacy(self):

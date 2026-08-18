@@ -196,10 +196,17 @@ class InstantlyPayloadTests(unittest.TestCase):
                 "Email": "jane@example.com",
                 "Hiring Manager": "Jane Doe",
                 "Company": "Example Inc",
+                "Outbound Company": "Example",
+                "Outbound Company Confidence": "medium",
+                "Outbound Company Identity": "domain:example.com",
+                "Outbound Hold": False,
                 "HM Title": "Head of Marketing",
                 "Website": "https://example.com",
                 "Open Role": "Video Editor",
                 "Open Roles": "Video Editor | Graphic Designer",
+                "Outbound Role": "Video Editor",
+                "Outbound Roles": "Video Editor | Graphic Designer",
+                "Outbound Role Confidence": "medium",
                 "Role Focus": "short-form and social video, post-production, and motion graphics",
                 "Matched Role": "Video Editor",
                 "Role Bucket": "marketing",
@@ -213,7 +220,7 @@ class InstantlyPayloadTests(unittest.TestCase):
             },
         }
         payload = instantly_client.airtable_record_to_lead(record)
-        self.assertEqual(payload["company_name"], "Example Inc")
+        self.assertEqual(payload["company_name"], "Example")
         self.assertEqual(payload["job_title"], "Head of Marketing")
         self.assertEqual(payload["custom_variables"]["open_role"], "Video Editor")
         self.assertEqual(

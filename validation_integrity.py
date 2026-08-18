@@ -15,6 +15,9 @@ import config
 SIGNED_FIELDS = (
     # Identity and destination.
     "Company", "Website", "Open Role", "Open Roles", "Role Focus",
+    "Outbound Company", "Outbound Company Confidence", "Outbound Company Identity",
+    "Outbound Company Evidence", "Outbound Hold",
+    "Outbound Role", "Outbound Roles", "Outbound Role Confidence", "Outbound Role Evidence",
     "Matched Role", "Role Bucket", "Campaign ID", "Employees",
     # Job evidence used at approval and sent to Instantly.
     "Job URL", "Job URL Status", "Job URL Source", "Job ID",
@@ -27,12 +30,24 @@ SIGNED_FIELDS = (
 )
 
 
+def fingerprint_payload(fields: Dict) -> Dict:
+    """Return the canonical payload used by validation fingerprints.
+
+    Airtable omits unchecked checkbox fields from record responses.  Preserve
+    that provider-specific semantic only for Outbound Hold: missing/None/False
+    all mean an unchecked checkbox, while an explicit True remains held.
+    """
+    payload = {key: fields.get(key) for key in SIGNED_FIELDS}
+    payload["Outbound Hold"] = fields.get("Outbound Hold") is True
+    return payload
+
+
 def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
 def validation_fingerprint(fields: Dict) -> str:
-    payload = {key: fields.get(key) for key in SIGNED_FIELDS}
+    payload = fingerprint_payload(fields)
     serialized = json.dumps(payload, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
     key = str(config.VALIDATION_SIGNING_KEY or "")
     if not key:

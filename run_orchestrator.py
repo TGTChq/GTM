@@ -51,7 +51,7 @@ OFFLINE_MODES = {ExecutionMode.OFFLINE_REPLAY, ExecutionMode.FULL_DRY_RUN}
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="run_orchestrator")
     p.add_argument("--mode", choices=[m.value for m in ExecutionMode], default=DEFAULT_MODE.value)
-    p.add_argument("--lanes", default="", help="Comma: ats,jsearch,free_feeds. Empty = ats.")
+    p.add_argument("--lanes", default="", help="Comma: ats,jsearch,free_feeds,fantastic. Empty = ats.")
     p.add_argument("--boards", help="ATS board registry JSON (read-only).")
     p.add_argument("--corpus", action="append", default=[])
     p.add_argument("--artifact-root", default=str(Path(config.ARTIFACT_ROOT) / "orchestrator"))
@@ -154,7 +154,8 @@ def _preflight_checks(a):
         res["integrity_ok"] = False
         lines.append("package_integrity    manifest ABSENT (FAILED)")
     for k in ("RAPIDAPI_KEY", "APOLLO_API_KEY", "HUNTER_API_KEY",
-              "AIRTABLE_TOKEN", "AIRTABLE_BASE_ID", "AIRTABLE_TABLE_NAME"):
+              "AIRTABLE_TOKEN", "AIRTABLE_BASE_ID", "AIRTABLE_TABLE_NAME",
+              "FANTASTIC_JOBS_API_KEY"):
         res[k] = bool(getattr(config, k, None))
         lines.append(f"{k:20} {'PRESENT' if res[k] else 'ABSENT'}")
     # Definitive production path uses the FULL board registry (no --boards). A
@@ -299,7 +300,9 @@ def _strict_preflight(a, policy) -> int:
     problems: List[str] = []
     if not res.get("integrity_ok"):
         problems.append("package integrity")
-    if not res.get("boards_ok"):
+    # ATS boards are a dependency only when the ats lane is selected. A
+    # fantastic/jsearch/free-only run must not be blocked by an empty registry.
+    if "ats" in lanes and not res.get("boards_ok"):
         problems.append("BOARDS_FINAL.json")
     if not res.get("writable"):
         problems.append("artifact root not writable")
@@ -326,6 +329,8 @@ def _strict_preflight(a, policy) -> int:
         print("run_lock             stale -> acquisition will safely auto-recover it (audited)")
     if "jsearch" in lanes and not res.get("RAPIDAPI_KEY"):
         problems.append("RAPIDAPI_KEY (jsearch selected)")
+    if "fantastic" in lanes and not res.get("FANTASTIC_JOBS_API_KEY"):
+        problems.append("FANTASTIC_JOBS_API_KEY (fantastic selected)")
     if policy.allow_enrichment and not res.get("APOLLO_API_KEY"):
         problems.append("APOLLO_API_KEY (live enrichment)")
     if a.airtable_write and policy.allow_airtable_write and not (
@@ -552,6 +557,9 @@ def main(argv=None) -> int:
         lanes = requested or ["ats"]
         if "ats" in lanes:
             lane_runners["ats"] = _live_ats_runner(a)
+        if "fantastic" in lanes:
+            from orchestrator.adapters_real import real_fantastic_runner
+            lane_runners["fantastic"] = real_fantastic_runner()
         if "free_feeds" in lanes:
             from free_job_sources import default_fetcher
             lane_runners["free_feeds"] = real_free_feeds_runner(

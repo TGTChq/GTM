@@ -56,6 +56,11 @@ def airtable_record_to_lead(record: Dict, *, probe: bool = True) -> Dict:
         raise ValueError(f"Approved row is not actionable: {final_decision}")
     if final_decision and not validation_version:
         raise ValueError("Approved validated row is missing Validation Version")
+    if fields.get("Outbound Hold"):
+        raise ValueError("Outbound display is held for manual review")
+    company_confidence = str(fields.get("Outbound Company Confidence") or "").strip().lower()
+    if validation_version == str(config.VALIDATION_VERSION) and company_confidence not in {"high", "medium"}:
+        raise ValueError("Outbound company display confidence is not send-safe")
 
     # ``probe=False`` keeps this builder zero-network (job-URL status is not
     # fetched) so the approved-sync preflight and local revalidation stay hermetic.
@@ -65,8 +70,8 @@ def airtable_record_to_lead(record: Dict, *, probe: bool = True) -> Dict:
 
     required = {
         "Email": fields.get("Email"),
-        "Company": fields.get("Company"),
-        "Open Role": fields.get("Open Role"),
+        "Outbound Company": fields.get("Outbound Company"),
+        "Outbound Role": fields.get("Outbound Role"),
         "Role Focus": fields.get("Role Focus"),
     }
     missing = [name for name, value in required.items() if not str(value or "").strip()]
@@ -85,8 +90,8 @@ def airtable_record_to_lead(record: Dict, *, probe: bool = True) -> Dict:
         )
 
     custom_variables = {
-        "open_role": fields.get("Open Role"),
-        "open_roles": fields.get("Open Roles"),
+        "open_role": fields.get("Outbound Role"),
+        "open_roles": fields.get("Outbound Roles") or fields.get("Outbound Role"),
         "role_focus": fields.get("Role Focus"),
         "matched_role": fields.get("Matched Role"),
         "role_bucket": fields.get("Role Bucket"),
@@ -114,7 +119,7 @@ def airtable_record_to_lead(record: Dict, *, probe: bool = True) -> Dict:
             if " " in fields.get("Hiring Manager", "").strip()
             else ""
         ),
-        "company_name": fields.get("Company"),
+        "company_name": fields.get("Outbound Company"),
         "job_title": fields.get("HM Title"),
         "website": fields.get("Website"),
         "skip_if_in_workspace": True,

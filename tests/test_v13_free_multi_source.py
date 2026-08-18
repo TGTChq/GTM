@@ -3,9 +3,15 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
+
+
+def _recent_iso(days_ago: int = 2) -> str:
+    """Keep freshness-sensitive fixtures inside the production age window."""
+    return (datetime.now(timezone.utc) - timedelta(days=days_ago)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 import config
 import final_pass_topup
@@ -310,7 +316,7 @@ class MultiSourceAcquisitionTests(unittest.TestCase):
             "job_country": "US",
             "job_is_remote": True,
             "job_employment_type": "Full Time",
-            "job_posted_at_datetime_utc": "2026-07-23T10:00:00+00:00",
+            "job_posted_at_datetime_utc": _recent_iso(),
             "apply_options": [{"publisher": "Himalayas", "apply_link": "https://boards.greenhouse.io/acme/jobs/123"}],
             "_acquisition_source": "himalayas",
         }
@@ -372,7 +378,7 @@ class V131QualityHardeningTests(unittest.TestCase):
             "job_country": "US",
             "job_is_remote": True,
             "job_employment_type": "Full Time",
-            "job_posted_at_datetime_utc": "2026-07-23T10:00:00+00:00",
+            "job_posted_at_datetime_utc": _recent_iso(),
             "_matched_role": "Customer Success Manager",
             "_role_relevance_status": "accept",
             "_role_relevance_points": 6,

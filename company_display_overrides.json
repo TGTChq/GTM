@@ -1,0 +1,27 @@
+{
+  "schema": "company-display-overrides/1",
+  "resolver_version": "company-display/1",
+  "entries": {
+    "linkedin:socradar": {
+      "display_name": "SOCRadar",
+      "confidence": "high",
+      "identity_safe": true,
+      "identity_keys": [
+        "linkedin:socradar",
+        "domain:socradar.io"
+      ],
+      "evidence": {
+        "source": "reviewed_fantastic_audit_2026-08-17",
+        "organization": "SOCRadar",
+        "org_linkedin_name": "SOCRadar® Extended Threat Intelligence",
+        "org_linkedin_slug": "socradar",
+        "domain": "socradar.io"
+      },
+      "resolver_version": "company-display/1",
+      "manual_override": true
+    }
+  },
+  "aliases": {
+    "domain:socradar.io": "linkedin:socradar"
+  }
+}
