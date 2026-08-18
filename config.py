@@ -939,6 +939,13 @@ AIRTABLE_STATUS_APPROVED = os.getenv("AIRTABLE_STATUS_APPROVED", "Approved")
 AIRTABLE_STATUS_REJECTED = os.getenv("AIRTABLE_STATUS_REJECTED", "Rejected")
 AIRTABLE_STATUS_ENROLLED = os.getenv("AIRTABLE_STATUS_ENROLLED", "Enrolled")
 AIRTABLE_STATUS_ERROR = os.getenv("AIRTABLE_STATUS_ERROR", "Error")
+# Auto-approve genuine Fantastic Direct API leads that are SEND-SAFE by FACT
+# (airtable_client.send_safe_facts) straight to Status=Approved at creation, so a
+# normal send-safe Fantastic lead needs zero manual approval. The disposition
+# label (FINAL_PASS/NEEDS_CHECK/UNVERIFIED) is NOT the criterion; the underlying
+# send-safe facts are. Unsafe/ambiguous/held leads still land Pending. Approved
+# Sync independently re-checks send_safe_facts, so this never bypasses safety.
+FANTASTIC_AUTO_APPROVE_SEND_SAFE = _env_bool("FANTASTIC_AUTO_APPROVE_SEND_SAFE", True)
 APPROVED_REVALIDATION_MAX_AGE_HOURS = _env_int("APPROVED_REVALIDATION_MAX_AGE_HOURS", 24)
 APPROVED_REVALIDATE_JOB_SOURCE = _env_bool("APPROVED_REVALIDATE_JOB_SOURCE", True)
 # Approved-sync worker: keep the fail-closed Apollo/Hunter revalidation ON by

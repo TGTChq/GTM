@@ -85,6 +85,8 @@ class AirtableFinalBoundaryTests(unittest.TestCase):
             fields = {
                 "Status": "Approved", "Final Decision": decision,
                 "Validation Version": config.VALIDATION_VERSION, "Email": email,
+                "Apollo Email Status": "verified", "Email Validation": "PASS",
+                "Contact Alignment": "PASS",
                 "Company": "Example", "Role Bucket": "finance",
                 "Outbound Company": "Example",
                 "Outbound Company Confidence": "high",

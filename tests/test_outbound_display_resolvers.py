@@ -298,6 +298,10 @@ def test_approved_sync_eligibility_rejects_held_company():
         "Final Decision": "NEEDS_CHECK",
         "Validation Version": config.VALIDATION_VERSION,
         "Email": "hm@example.com",
+        # Otherwise send-safe so the HOLD is isolated as the sole blocker.
+        "Apollo Email Status": "verified",
+        "Email Validation": "PASS",
+        "Contact Alignment": "PASS",
         "Company": "Unishippers - Hudson Group",
         "Outbound Company": "Unishippers - Hudson Group",
         "Outbound Company Confidence": "low",

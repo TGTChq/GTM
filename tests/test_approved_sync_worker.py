@@ -90,6 +90,9 @@ def _rec(rid, *, status="Approved", final="FINAL_PASS", **overrides):
         # whose Validation Version matches the running pipeline exactly.
         "Validation Version": config.VALIDATION_VERSION,
         "Email": "jane@acme.com",
+        "Apollo Email Status": "verified",
+        "Email Validation": "PASS",
+        "Contact Alignment": "PASS",
         "Company": "Acme",
         "Outbound Company": "Acme",
         "Outbound Company Confidence": "high",

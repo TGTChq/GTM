@@ -391,7 +391,25 @@ def _job_to_fields(job: Dict) -> Dict:
     cleaned = _clean_fields(fields)
     if strict_state:
         cleaned["Validation Fingerprint"] = validation_fingerprint(cleaned)
+        # Auto-approval at creation: a genuine Fantastic Direct API lead whose
+        # stored FACTS are all send-safe is created Status=Approved (Status is
+        # excluded from the signed fingerprint, so this falsifies nothing -- the
+        # original Final Decision / reason / evidence are preserved). Everything
+        # else stays Pending for manual review. Approved Sync independently
+        # re-checks send_safe_facts, so this never bypasses a safety gate.
+        if (config.FANTASTIC_AUTO_APPROVE_SEND_SAFE and _is_fantastic_job(job)
+                and send_safe_facts(cleaned)[0]):
+            cleaned["Status"] = config.AIRTABLE_STATUS_APPROVED
     return cleaned
+
+
+def _is_fantastic_job(job: Dict) -> bool:
+    """True only for a genuine Fantastic Direct API record. The Fantastic adapter
+    is the only producer that stamps ``_fantastic_internal_id``; ``_acquisition_
+    source`` is a secondary signal. Never matches ATS/JSearch/free-feed/adzuna."""
+    if str(job.get("_fantastic_internal_id") or "").strip():
+        return True
+    return "fantastic" in str(job.get("_acquisition_source") or "").strip().lower()
 
 
 def _get_existing_leads() -> Dict[str, Dict]:
@@ -934,6 +952,65 @@ def fetch_status_records(status: str) -> List[Dict]:
 #: Final Decision values that can be enrolled (an actionable validated decision).
 _ACTIONABLE_FINAL_DECISIONS = {"FINAL_PASS", "NEEDS_CHECK", "UNVERIFIED"}
 
+#: send_safe_facts reasons that are signing/authorization gaps (map to "legacy" in
+#: approved_row_eligibility); all others are data/config gaps ("invalid").
+_SEND_SAFE_LEGACY_REASONS = frozenset({
+    "no_actionable_final_decision", "validation_version_mismatch",
+    "missing_validation_fingerprint", "validation_fingerprint_mismatch",
+})
+
+
+def send_safe_facts(fields: Dict) -> tuple[bool, str]:
+    """Authoritative, disposition-label-INDEPENDENT SEND-SAFE rule.
+
+    Returns ``(True, "send_safe")`` only when EVERY underlying send-safe fact
+    holds; otherwise ``(False, <first failing reason>)``. Fail-closed: any doubt
+    is not send-safe. This is the single source of truth for both auto-approval at
+    creation and Approved Sync's independent pre-enrollment guard, so a row can
+    NEVER be enrolled unless its current stored facts are all safe -- regardless of
+    its Airtable Status or its historical FINAL_PASS/NEEDS_CHECK/UNVERIFIED label."""
+    # 1) Actionable, current, correctly-signed decision (authorization boundary).
+    if str(fields.get("Final Decision") or "").strip() not in _ACTIONABLE_FINAL_DECISIONS:
+        return False, "no_actionable_final_decision"
+    if str(fields.get("Validation Version") or "").strip() != str(config.VALIDATION_VERSION):
+        return False, "validation_version_mismatch"
+    if not str(fields.get("Validation Fingerprint") or "").strip():
+        return False, "missing_validation_fingerprint"
+    if not fingerprint_matches(fields):
+        return False, "validation_fingerprint_mismatch"
+    # 2) Legitimate resolved, Apollo-VERIFIED, company-domain professional contact.
+    if not str(fields.get("Email") or "").strip():
+        return False, "missing_email"
+    if str(fields.get("Apollo Email Status") or "").strip().lower() != "verified":
+        return False, "apollo_email_not_verified"
+    if str(fields.get("Email Validation") or "").strip().upper() != "PASS":
+        return False, "email_gate_not_pass"
+    if str(fields.get("Contact Alignment") or "").strip().upper() != "PASS":
+        return False, "contact_not_aligned"
+    # 3) Outbound identity resolved, unheld (company OR role hold sets this), and
+    #    unambiguous. Never falsify: canonical fields are read, not rewritten.
+    if bool(fields.get("Outbound Hold")):
+        return False, "outbound_company_held_for_review"
+    if not str(fields.get("Outbound Company") or "").strip():
+        return False, "missing_outbound_company"
+    if str(fields.get("Outbound Company Confidence") or "").strip().lower() not in {"high", "medium"}:
+        return False, "outbound_company_confidence_not_send_safe"
+    if not str(fields.get("Outbound Role") or "").strip():
+        return False, "missing_outbound_role"
+    role_conf = str(fields.get("Outbound Role Confidence") or "").strip().lower()
+    if role_conf and role_conf not in {"high", "medium"}:
+        return False, "outbound_role_confidence_not_send_safe"
+    # 4) No material firmographic contradiction (a REJECT is written for no
+    #    reviewable row; NEEDS_CHECK/PASS are acceptable, an explicit REJECT is not).
+    if str(fields.get("Firmographics Status") or "").strip().upper() == "REJECT":
+        return False, "firmographic_contradiction"
+    # 5) A resolvable Instantly campaign must exist to build a valid payload.
+    campaign = str(fields.get("Campaign ID") or "").strip() or config.resolve_campaign_id(
+        str(fields.get("Role Bucket") or ""), fields.get("Employees"))
+    if not str(campaign or "").strip():
+        return False, "no_campaign_configured"
+    return True, "send_safe"
+
 
 def approved_row_eligibility(fields: Dict) -> tuple[str, str]:
     """Classify one Status=Approved row for Instantly enrollment. Returns
@@ -949,33 +1026,15 @@ def approved_row_eligibility(fields: Dict) -> tuple[str, str]:
 
     This is fail-closed: any doubt classifies away from ``"eligible"``. It is the
     single guard that stops the legacy Approved backlog (rows without the current
-    validation metadata) from ever reaching Instantly."""
-    fd = str(fields.get("Final Decision") or "").strip()
-    if fd not in _ACTIONABLE_FINAL_DECISIONS:
-        return "legacy", "no_actionable_final_decision"
-    # Exact version match -- a row signed under an OLD Validation Version (even with
-    # a self-consistent fingerprint) is legacy, not current authorization.
-    if str(fields.get("Validation Version") or "").strip() != str(config.VALIDATION_VERSION):
-        return "legacy", "validation_version_mismatch"
-    if not str(fields.get("Validation Fingerprint") or "").strip():
-        return "legacy", "missing_validation_fingerprint"
-    if not fingerprint_matches(fields):
-        return "legacy", "validation_fingerprint_mismatch"
-    if bool(fields.get("Outbound Hold")):
-        return "invalid", "outbound_company_held_for_review"
-    if str(fields.get("Outbound Company Confidence") or "").strip().lower() not in {"high", "medium"}:
-        return "invalid", "outbound_company_confidence_not_send_safe"
-    if not str(fields.get("Outbound Company") or "").strip():
-        return "invalid", "missing_outbound_company"
-    if not str(fields.get("Outbound Role") or "").strip():
-        return "invalid", "missing_outbound_role"
-    if not str(fields.get("Email") or "").strip():
-        return "invalid", "missing_email"
-    campaign = str(fields.get("Campaign ID") or "").strip() or config.resolve_campaign_id(
-        str(fields.get("Role Bucket") or ""), fields.get("Employees"))
-    if not str(campaign or "").strip():
-        return "invalid", "no_campaign_configured"
-    return "eligible", "eligible"
+    validation metadata) -- OR any accidentally-Approved row that is not send-safe
+    (e.g. an Apollo-unverified email) -- from ever reaching Instantly. Delegates to
+    the authoritative ``send_safe_facts`` so auto-approval and this guard can never
+    diverge."""
+    ok, reason = send_safe_facts(fields)
+    if ok:
+        return "eligible", "eligible"
+    category = "legacy" if reason in _SEND_SAFE_LEGACY_REASONS else "invalid"
+    return category, reason
 
 
 def select_eligible_approved() -> tuple[List[Dict], Dict[str, int]]:
