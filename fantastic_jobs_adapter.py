@@ -669,8 +669,20 @@ def run_fantastic_jobs_acquisition(http_get: HttpGet = _http_get) -> SourceResul
     # default (only AI-derived fields), which the mapper already handles by
     # leaving job_description empty rather than fabricating one.
     title_targeting = bool(getattr(config, "FANTASTIC_JOBS_TITLE_TARGETING_ENABLED", False))
+    title_advanced_enabled = bool(getattr(config, "FANTASTIC_JOBS_TITLE_ADVANCED_ENABLED", False))
+    title_advanced_expr = _title_advanced_expression() if title_advanced_enabled else ""
+    # title_advanced (one Boolean LinkedIn stream) TAKES PRECEDENCE over per-family
+    # title_targeting in acquisition. The continuation cursor must be persisted in
+    # the mode that ACTUALLY ran: if title_advanced runs while title_targeting is
+    # also enabled, saving in title_families mode would persist an EMPTY families
+    # state and silently drop the single-stream cursor -- so every next run would
+    # restart from the top of the window and re-bill the acquired prefix.
+    title_advanced_active = bool(
+        title_advanced_enabled and title_advanced_expr
+        and config.FANTASTIC_JOBS_LINKEDIN_LIMIT > 0)
+    used_title_families = bool(title_targeting and not title_advanced_active)
     new_family_states: Dict[str, Any] = dict((cont_state.get("families") or {})) if (
-        continuation_enabled and title_targeting) else {}
+        continuation_enabled and used_title_families) else {}
     try:
         # Segment priority: ATS first, then Wellfound, Y Combinator, LinkedIn.
         ats_params = {"time_frame": config.FANTASTIC_JOBS_TIME_FRAME,
@@ -679,9 +691,7 @@ def run_fantastic_jobs_acquisition(http_get: HttpGet = _http_get) -> SourceResul
             "/v1/active-ats", ats_params, ATS_SOURCE, config.FANTASTIC_JOBS_ATS_LIMIT,
             quota, http_get, seen_ids, metrics))
 
-        title_advanced_enabled = bool(getattr(config, "FANTASTIC_JOBS_TITLE_ADVANCED_ENABLED", False))
-        title_advanced_expr = _title_advanced_expression() if title_advanced_enabled else ""
-        if title_advanced_enabled and title_advanced_expr and config.FANTASTIC_JOBS_LINKEDIN_LIMIT > 0:
+        if title_advanced_active:
             # ONE Boolean OR-expression over the whole role catalog (benchmark
             # parity). The union is returned counting each job ONCE -> zero
             # cross-query billing overlap, 118/118 coverage, ~all target-role.
@@ -699,7 +709,7 @@ def run_fantastic_jobs_acquisition(http_get: HttpGet = _http_get) -> SourceResul
                 "/v1/active-jb", jb_params, "fantastic_jobs_linkedin",
                 min(config.FANTASTIC_JOBS_LINKEDIN_LIMIT, remaining),
                 quota, http_get, seen_ids, metrics, accept_source=("linkedin",)))
-        elif title_targeting and config.FANTASTIC_JOBS_LINKEDIN_LIMIT > 0:
+        elif used_title_families and config.FANTASTIC_JOBS_LINKEDIN_LIMIT > 0:
             # LinkedIn-only, but targeted per role FAMILY so ~all billed jobs are
             # on-portfolio (the broad feed is ~4% target-role). One global cap is
             # shared FAIRLY across families (deterministic order, per-family share)
@@ -807,13 +817,15 @@ def run_fantastic_jobs_acquisition(http_get: HttpGet = _http_get) -> SourceResul
     metrics["cross_query_duplicates"] = sum(
         int(s.get("duplicates", 0)) for s in metrics["segments"].values())
     metrics["title_targeting"] = title_targeting
+    metrics["used_title_families"] = used_title_families
 
     # Advance and persist the continuation cursor from the jobs actually acquired
     # (billed). The cursor moves strictly OLDER (min date_posted); high_water keeps
     # the newest ever seen so a future incremental run can pick up newer jobs via
-    # date_posted_gte. Title mode keeps an INDEPENDENT cursor per family so streams
-    # never leak; single-stream mode keeps one cursor.
-    if continuation_enabled and title_targeting:
+    # date_posted_gte. Per-family mode keeps an INDEPENDENT cursor per family so
+    # streams never leak; single-stream (title_advanced or seg-caps) keeps one
+    # cursor. The branch MUST match the acquisition path that actually ran.
+    if continuation_enabled and used_title_families:
         _save_continuation_state({
             "schema": _CONTINUATION_SCHEMA,
             "mode": "title_families",

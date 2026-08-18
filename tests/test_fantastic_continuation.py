@@ -224,5 +224,47 @@ class FantasticContinuationStaleAndQuotaTests(unittest.TestCase):
             self.assertTrue(any("date_posted_lt" in p for p in captured2))
 
 
+class FantasticContinuationModeMatchTests(unittest.TestCase):
+    """Regression: title_advanced (single stream) takes precedence over per-family
+    title_targeting in acquisition, so the continuation cursor must be SAVED in the
+    single-stream mode that actually ran. With both flags on, saving in
+    title_families mode would persist an empty state and drop the cursor -> every
+    run restarts from the top and re-bills. Production runs with BOTH flags on."""
+
+    def _run_both_flags(self, sp, cap=3):
+        base = dict(
+            FANTASTIC_JOBS_ENABLED=True, FANTASTIC_JOBS_API_KEY="k",
+            FANTASTIC_JOBS_BASE_URL="https://data.fantastic.jobs",
+            FANTASTIC_JOBS_ATS_LIMIT=0, FANTASTIC_JOBS_WELLFOUND_LIMIT=0, FANTASTIC_JOBS_YCOMBINATOR_LIMIT=0,
+            FANTASTIC_JOBS_LINKEDIN_LIMIT=cap, FANTASTIC_JOBS_MAX_JOBS_PER_RUN=cap,
+            FANTASTIC_JOBS_TIME_FRAME="24h", FANTASTIC_JOBS_MAX_PAGES_PER_SEGMENT=50,
+            FANTASTIC_JOBS_MIN_JOBS_QUOTA_REMAINING=90, FANTASTIC_JOBS_MIN_REQUESTS_QUOTA_REMAINING=20,
+            FANTASTIC_JOBS_MAX_RETRIES=0, FANTASTIC_JOBS_FAIL_OPEN=True,
+            FANTASTIC_JOBS_LOCATION="United States", FANTASTIC_JOBS_HEADCOUNT_MIN=25,
+            FANTASTIC_JOBS_AI_EMPLOYMENT_TYPE="FULL_TIME", FANTASTIC_JOBS_EXCLUDE_AGENCY=True,
+            FANTASTIC_JOBS_CONTINUATION_ENABLED=True, FANTASTIC_JOBS_CONTINUATION_STATE_PATH=sp,
+            FANTASTIC_JOBS_TITLE_ADVANCED_ENABLED=True,   # both on (production config)
+            FANTASTIC_JOBS_TITLE_TARGETING_ENABLED=True,
+        )
+        with mock.patch.multiple(config, **base):
+            return fja.run_fantastic_jobs_acquisition(http_get=_feed(FEED))
+
+    def test_title_advanced_precedence_persists_single_stream_cursor(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            sp = str(Path(tmp) / "cont.json")
+            r1 = self._run_both_flags(sp, cap=3)
+            state = json.loads(Path(sp).read_text(encoding="utf-8"))
+            # Saved as a single-stream cursor (NOT an empty title_families state).
+            self.assertNotEqual(state.get("mode"), "title_families")
+            self.assertEqual(state["cursor_date"], D[18])                    # oldest acquired
+            self.assertFalse(r1.metadata["used_title_families"])             # single-stream ran
+            # Resume actually advances (no re-bill of the acquired prefix).
+            r2 = self._run_both_flags(sp, cap=3)
+            self.assertTrue(any(int(i) < 1018 for i in
+                                {j["_fantastic_internal_id"] for j in r2.jobs}))
+            self.assertFalse({j["_fantastic_internal_id"] for j in r1.jobs}
+                             & {j["_fantastic_internal_id"] for j in r2.jobs})
+
+
 if __name__ == "__main__":
     unittest.main()
