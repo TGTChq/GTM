@@ -1560,7 +1560,28 @@ def run_hiring_manager_identification(
     # further Apollo calls are made and completed work is preserved.
     progress = _EnrichmentProgress.load(config.STEP3_OUTPUT_DIR)
 
+    # Optional soft wall-clock budget (0 = unlimited). A fail-safe for large daily
+    # runs: on expiry the loop stops taking NEW companies while every enriched
+    # company is already checkpointed, so a later run resumes without re-consuming
+    # Apollo or duplicating Airtable rows. Never truncates silently.
+    enrichment_budget_seconds = max(
+        0, int(getattr(config, "ORCHESTRATOR_ENRICHMENT_MAX_RUNTIME_SECONDS", 0) or 0)
+    )
+    enrichment_started = time.monotonic()
+
     for index, (company_key, company_jobs) in enumerate(company_items, 1):
+        if (
+            enrichment_budget_seconds
+            and time.monotonic() - enrichment_started >= enrichment_budget_seconds
+        ):
+            stop_reason = "enrichment_runtime_budget_reached"
+            total_stats["enrichment_runtime_budget_reached"] = 1
+            logger.warning(
+                "Enrichment runtime budget of %ds reached after %d/%d companies; "
+                "preserving checkpointed work and stopping (resumable).",
+                enrichment_budget_seconds, companies_considered, total_candidate_companies,
+            )
+            break
         cached = progress.get(company_key)
         if cached is not None:
             leads, stats = cached

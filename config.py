@@ -309,6 +309,14 @@ MULTI_SOURCE_FINAL_PASS_MAX_TOPUP_ITERATIONS = _env_int(
     "MULTI_SOURCE_FINAL_PASS_MAX_TOPUP_ITERATIONS", 0
 )
 FINAL_PASS_MAX_RUNTIME_SECONDS = _env_int("FINAL_PASS_MAX_RUNTIME_SECONDS", 1800)
+# Soft wall-clock budget for the run_orchestrator enrichment loop (0 = unlimited).
+# A fail-safe valve for large daily runs (e.g. the 3,500-job Fantastic target): on
+# expiry the loop stops taking NEW companies, every already-enriched company stays
+# checkpointed (no re-consumed Apollo, no duplicate Airtable rows via lead_key
+# idempotency), and the run ends INCOMPLETE with stop_reason
+# "enrichment_runtime_budget_reached" so a later run resumes. Never truncates
+# silently: default 0 processes every eligible company.
+ORCHESTRATOR_ENRICHMENT_MAX_RUNTIME_SECONDS = _env_int("ORCHESTRATOR_ENRICHMENT_MAX_RUNTIME_SECONDS", 0)
 FINAL_PASS_MAX_EMPTY_QUERY_CYCLES = _env_int(
     "FINAL_PASS_MAX_EMPTY_QUERY_CYCLES", 2
 )
@@ -610,6 +618,11 @@ FANTASTIC_JOBS_LOCATION = os.getenv("FANTASTIC_JOBS_LOCATION", "United States").
 FANTASTIC_JOBS_HEADCOUNT_MIN = _env_int("FANTASTIC_JOBS_HEADCOUNT_MIN", 25)
 FANTASTIC_JOBS_AI_EMPLOYMENT_TYPE = os.getenv("FANTASTIC_JOBS_AI_EMPLOYMENT_TYPE", "FULL_TIME").strip()
 FANTASTIC_JOBS_EXCLUDE_AGENCY = _env_bool("FANTASTIC_JOBS_EXCLUDE_AGENCY", True)
+# Per-segment pagination ceiling (pages of up to 100 jobs). Configurable so the
+# architecture is not permanently capped: at 100 jobs/page the default 50 pages =
+# 5,000 jobs/segment. The 3,500 jobs/day production target needs 35 pages, well
+# within the default; raise this only alongside a larger MAX_JOBS_PER_RUN and plan.
+FANTASTIC_JOBS_MAX_PAGES_PER_SEGMENT = _env_int("FANTASTIC_JOBS_MAX_PAGES_PER_SEGMENT", 50)
 
 
 def validate_fantastic_jobs_config() -> None:

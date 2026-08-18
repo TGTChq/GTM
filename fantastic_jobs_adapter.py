@@ -472,7 +472,7 @@ def _fetch_segment(endpoint: str, base_params: Dict[str, Any], source_label: str
             seg["stop_reason"] = seg["stop_reason"] or "no_new_ids"
             break
         page += 1
-        if page > 50:
+        if page > max(1, int(getattr(config, "FANTASTIC_JOBS_MAX_PAGES_PER_SEGMENT", 50))):
             seg["stop_reason"] = "page_cap"
             break
     return jobs
