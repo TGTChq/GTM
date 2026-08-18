@@ -74,6 +74,32 @@ def _advance_iso_second(value: str, seconds: int = 1) -> str:
         return str(value or "")
     return (dt + timedelta(seconds=seconds)).isoformat()
 
+
+def _family_id(term: str) -> str:
+    """Stable slug identifying a title-query family in continuation state."""
+    return "".join(c if c.isalnum() else "_" for c in str(term or "").lower()).strip("_")
+
+
+def _cursor_stats(jobs: List[Dict[str, Any]], prior_high: str = "") -> Optional[Dict[str, Any]]:
+    """Compute the continuation cursor (oldest date + boundary IDs) and high_water
+    from a set of acquired jobs. Returns None when no job carries a timestamp."""
+    posted = sorted(str(j.get("job_posted_at_datetime_utc") or "")
+                    for j in jobs if j.get("job_posted_at_datetime_utc"))
+    if not posted:
+        return None
+    oldest, newest = posted[0], posted[-1]
+    boundary_ids = [str(j.get("_fantastic_internal_id"))
+                    for j in jobs
+                    if str(j.get("job_posted_at_datetime_utc") or "") == oldest
+                    and j.get("_fantastic_internal_id")]
+    return {
+        "cursor_date": oldest,
+        "high_water": max(newest, str(prior_high or "")) if prior_high else newest,
+        "boundary_ids": boundary_ids,
+        "acquired_this_run": len(jobs),
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+
 # Contact PII that must never enter canonical records, logs, artifacts or Airtable.
 _PII_FIELDS = frozenset({
     "recruiter_name", "recruiter_title", "recruiter_url", "recruiter_email",
@@ -570,6 +596,9 @@ def run_fantastic_jobs_acquisition(http_get: HttpGet = _http_get) -> SourceResul
     # request; it is not sent. Full descriptions are absent from this API by
     # default (only AI-derived fields), which the mapper already handles by
     # leaving job_description empty rather than fabricating one.
+    title_targeting = bool(getattr(config, "FANTASTIC_JOBS_TITLE_TARGETING_ENABLED", False))
+    new_family_states: Dict[str, Any] = dict((cont_state.get("families") or {})) if (
+        continuation_enabled and title_targeting) else {}
     try:
         # Segment priority: ATS first, then Wellfound, Y Combinator, LinkedIn.
         ats_params = {"time_frame": config.FANTASTIC_JOBS_TIME_FRAME,
@@ -577,24 +606,68 @@ def run_fantastic_jobs_acquisition(http_get: HttpGet = _http_get) -> SourceResul
         result.jobs.extend(_fetch_segment(
             "/v1/active-ats", ats_params, ATS_SOURCE, config.FANTASTIC_JOBS_ATS_LIMIT,
             quota, http_get, seen_ids, metrics))
-        seg_caps = {
-            "wellfound": config.FANTASTIC_JOBS_WELLFOUND_LIMIT,
-            "ycombinator": config.FANTASTIC_JOBS_YCOMBINATOR_LIMIT,
-            "linkedin": config.FANTASTIC_JOBS_LINKEDIN_LIMIT,
-        }
-        for seg_key, cap in seg_caps.items():
-            if cap <= 0 or quota.stop_reason or len(result.jobs) >= config.FANTASTIC_JOBS_MAX_JOBS_PER_RUN:
-                continue
-            label, accept = JB_SEGMENTS[seg_key]
-            jb_params = {"time_frame": config.FANTASTIC_JOBS_TIME_FRAME,
-                         "exclude_ats_duplicate": "true", "source": seg_key}
-            jb_params.update(_jb_filter_params())
-            if cursor_date_lt:
-                jb_params["date_posted_lt"] = cursor_date_lt
-            remaining = config.FANTASTIC_JOBS_MAX_JOBS_PER_RUN - len(result.jobs)
-            result.jobs.extend(_fetch_segment(
-                "/v1/active-jb", jb_params, label, min(cap, remaining),
-                quota, http_get, seen_ids, metrics, accept_source=accept))
+
+        if title_targeting and config.FANTASTIC_JOBS_LINKEDIN_LIMIT > 0:
+            # LinkedIn-only, but targeted per role FAMILY so ~all billed jobs are
+            # on-portfolio (the broad feed is ~4% target-role). One global cap is
+            # shared FAIRLY across families (deterministic order, per-family share)
+            # so one high-volume family cannot exhaust the run. seen_ids is GLOBAL
+            # -> a job returned by two families is billed twice but processed once;
+            # its cross-family duplicate is counted for billing observability. Each
+            # family keeps its OWN date_posted cursor so streams never leak.
+            fam_states = (cont_state.get("families") or {}) if continuation_enabled else {}
+            families = [str(t).strip() for t in (config.FANTASTIC_JOBS_TITLE_FAMILIES or []) if str(t).strip()]
+            global_cap = int(config.FANTASTIC_JOBS_MAX_JOBS_PER_RUN)
+            per_family_cap = max(1, global_cap // max(1, len(families)))
+            metrics["title_families_planned"] = len(families)
+            for term in families:
+                if quota.stop_reason or len(result.jobs) >= global_cap:
+                    break
+                fid = _family_id(term)
+                cap = min(per_family_cap, global_cap - len(result.jobs))
+                if cap <= 0:
+                    break
+                fam = fam_states.get(fid) or {}
+                fam_lt = ""
+                if continuation_enabled and fam.get("cursor_date"):
+                    fam_lt = _advance_iso_second(fam["cursor_date"], 1)
+                    seen_ids |= {f"fantastic_{i}" for i in (fam.get("boundary_ids") or [])}
+                jb_params = {"time_frame": config.FANTASTIC_JOBS_TIME_FRAME,
+                             "exclude_ats_duplicate": "true", "source": "linkedin",
+                             "title": term}
+                jb_params.update(_jb_filter_params())
+                if fam_lt:
+                    jb_params["date_posted_lt"] = fam_lt
+                fam_jobs = _fetch_segment(
+                    "/v1/active-jb", jb_params, f"fantastic_jobs_linkedin::{fid}",
+                    cap, quota, http_get, seen_ids, metrics, accept_source=("linkedin",))
+                for job in fam_jobs:
+                    job["_fantastic_title_family"] = fid
+                    job["_fantastic_title_term"] = term
+                result.jobs.extend(fam_jobs)
+                if continuation_enabled:
+                    stats = _cursor_stats(fam_jobs, prior_high=str(fam.get("high_water") or ""))
+                    if stats:
+                        new_family_states[fid] = {"term": term, **stats}
+        else:
+            seg_caps = {
+                "wellfound": config.FANTASTIC_JOBS_WELLFOUND_LIMIT,
+                "ycombinator": config.FANTASTIC_JOBS_YCOMBINATOR_LIMIT,
+                "linkedin": config.FANTASTIC_JOBS_LINKEDIN_LIMIT,
+            }
+            for seg_key, cap in seg_caps.items():
+                if cap <= 0 or quota.stop_reason or len(result.jobs) >= config.FANTASTIC_JOBS_MAX_JOBS_PER_RUN:
+                    continue
+                label, accept = JB_SEGMENTS[seg_key]
+                jb_params = {"time_frame": config.FANTASTIC_JOBS_TIME_FRAME,
+                             "exclude_ats_duplicate": "true", "source": seg_key}
+                jb_params.update(_jb_filter_params())
+                if cursor_date_lt:
+                    jb_params["date_posted_lt"] = cursor_date_lt
+                remaining = config.FANTASTIC_JOBS_MAX_JOBS_PER_RUN - len(result.jobs)
+                result.jobs.extend(_fetch_segment(
+                    "/v1/active-jb", jb_params, label, min(cap, remaining),
+                    quota, http_get, seen_ids, metrics, accept_source=accept))
     except FantasticAuthError as exc:
         result.success = False
         result.errors.append(str(exc))
@@ -630,32 +703,32 @@ def run_fantastic_jobs_acquisition(http_get: HttpGet = _http_get) -> SourceResul
     result.raw_records = sum(s.get("returned", 0) for s in metrics["segments"].values())
     result.requests_attempted = metrics["requests_attempted"]  # actual dispatch attempts
     result.requests_succeeded = quota.requests_consumed        # successful (200) requests
+    # Billing-overlap observability: duplicates counted across the segments are
+    # jobs the provider returned (and billed) more than once -- within a family's
+    # repeated pages or, in title mode, across families sharing a job.
+    metrics["cross_query_duplicates"] = sum(
+        int(s.get("duplicates", 0)) for s in metrics["segments"].values())
+    metrics["title_targeting"] = title_targeting
+
     # Advance and persist the continuation cursor from the jobs actually acquired
     # (billed). The cursor moves strictly OLDER (min date_posted); high_water keeps
     # the newest ever seen so a future incremental run can pick up newer jobs via
-    # date_posted_gte. Only jobs that carry a real posted timestamp move the cursor.
-    if continuation_enabled:
-        posted = sorted(str(j.get("job_posted_at_datetime_utc") or "")
-                        for j in result.jobs if j.get("job_posted_at_datetime_utc"))
-        if posted:
-            oldest, newest = posted[0], posted[-1]
-            boundary_ids = [str(j.get("_fantastic_internal_id"))
-                            for j in result.jobs
-                            if str(j.get("job_posted_at_datetime_utc") or "") == oldest
-                            and j.get("_fantastic_internal_id")]
-            prior_high = str(cont_state.get("high_water") or "")
-            new_state = {
-                "schema": _CONTINUATION_SCHEMA,
-                "source": "linkedin",
-                "cursor_date": oldest,
-                "high_water": max(newest, prior_high) if prior_high else newest,
-                "boundary_ids": boundary_ids,
-                "acquired_this_run": len(result.jobs),
-                "updated_at": datetime.now(timezone.utc).isoformat(),
-            }
-            _save_continuation_state(new_state)
-            metrics["continuation"]["next_cursor_date"] = oldest
-            metrics["continuation"]["high_water"] = new_state["high_water"]
+    # date_posted_gte. Title mode keeps an INDEPENDENT cursor per family so streams
+    # never leak; single-stream mode keeps one cursor.
+    if continuation_enabled and title_targeting:
+        _save_continuation_state({
+            "schema": _CONTINUATION_SCHEMA,
+            "mode": "title_families",
+            "families": new_family_states,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        })
+        metrics["continuation"]["families_tracked"] = len(new_family_states)
+    elif continuation_enabled:
+        stats = _cursor_stats(result.jobs, prior_high=str(cont_state.get("high_water") or ""))
+        if stats:
+            _save_continuation_state({"schema": _CONTINUATION_SCHEMA, "source": "linkedin", **stats})
+            metrics["continuation"]["next_cursor_date"] = stats["cursor_date"]
+            metrics["continuation"]["high_water"] = stats["high_water"]
         else:
             metrics["continuation"]["next_cursor_date"] = cont_state.get("cursor_date", "")
 

@@ -632,6 +632,52 @@ FANTASTIC_JOBS_MAX_PAGES_PER_SEGMENT = _env_int("FANTASTIC_JOBS_MAX_PAGES_PER_SE
 # is skipped; new jobs entering the top are deferred to a future incremental
 # (date_posted_gte high_water) run, never lost. State persists on the volume so a
 # run is resumable and the resume point (cursor_date) is explicit.
+# Title-targeted acquisition. The broad LinkedIn feed is ~4% target-role, so a
+# live smoke proved broad retrieval wastes credits. Instead query the Direct API
+# `title` (substring) param per target-role FAMILY -- variants collapse into one
+# term ("Account Executive" also returns "Enterprise/Technical Account Executive")
+# to minimise cross-query overlap. Title targeting is recall-first; the downstream
+# classify-then-verify RoleGate remains the mandatory precision filter.
+FANTASTIC_JOBS_TITLE_TARGETING_ENABLED = _env_bool("FANTASTIC_JOBS_TITLE_TARGETING_ENABLED", False)
+DEFAULT_FANTASTIC_TITLE_FAMILIES = (
+    # GTM / Sales
+    "Account Executive", "Account Manager", "Business Development Representative",
+    "Sales Development Representative", "Inside Sales", "Sales Operations",
+    "Revenue Operations", "Sales Enablement", "Partnerships Manager", "Lead Generation",
+    # Customer Success / Support
+    "Customer Success", "Customer Support", "Customer Experience",
+    "Implementation Specialist", "Technical Support", "Community Manager",
+    # Engineering / Data
+    "Software Engineer", "Frontend Developer", "Backend Developer", "Full Stack Developer",
+    "Cloud Engineer", "DevOps Engineer", "QA Engineer", "Data Analyst", "Data Engineer",
+    "Data Scientist", "Business Intelligence", "Systems Administrator", "Database Administrator",
+    # Finance
+    "Accountant", "Bookkeeper", "Payroll Specialist", "Financial Analyst", "FP&A",
+    "Billing Specialist", "Collections Specialist", "Accounts Payable", "Accounts Receivable",
+    # Marketing / Creative
+    "Content Marketing", "Digital Marketing", "Email Marketing", "Performance Marketing",
+    "Growth Marketing", "Product Marketing", "Marketing Automation", "Brand Manager",
+    "Marketing Coordinator", "Marketing Analyst", "SEO Specialist", "Paid Media",
+    "Social Media Manager", "Copywriter", "Content Writer", "Graphic Designer",
+    "UX/UI Designer", "Web Designer", "Motion Designer", "Video Editor", "Video Producer",
+    # People / HR
+    "Recruiter", "Talent Acquisition", "People Operations", "HR Generalist", "HR Analyst",
+    "HR Administrator", "Benefits Administrator", "Compensation Analyst", "Learning & Development",
+    "Recruiting Coordinator",
+    # Operations
+    "Operations Analyst", "Business Operations", "Executive Assistant",
+    "Administrative Assistant", "Virtual Assistant", "Project Coordinator", "Data Entry",
+    # Product
+    "Product Manager", "Product Analyst", "Product Designer", "Technical Writer",
+    # AI
+    "AI Engineer", "Machine Learning Engineer", "Prompt Engineer", "AI Operations",
+    "Automation Specialist", "Conversational AI", "GTM Engineer", "Data Labeling", "Chatbot",
+    # Ecommerce
+    "E-commerce Manager", "Amazon Marketplace", "Shopify", "Catalog Specialist", "Listings Specialist",
+)
+FANTASTIC_JOBS_TITLE_FAMILIES = _env_json(
+    "FANTASTIC_JOBS_TITLE_FAMILIES_JSON", list(DEFAULT_FANTASTIC_TITLE_FAMILIES)
+)
 FANTASTIC_JOBS_CONTINUATION_ENABLED = _env_bool("FANTASTIC_JOBS_CONTINUATION_ENABLED", False)
 FANTASTIC_JOBS_CONTINUATION_STATE_PATH = os.getenv(
     "FANTASTIC_JOBS_CONTINUATION_STATE_PATH",
