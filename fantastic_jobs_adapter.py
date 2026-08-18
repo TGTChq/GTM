@@ -13,10 +13,13 @@ is issued and production behaviour is the unchanged baseline.
 """
 from __future__ import annotations
 
+import json
 import logging
+import os
 import random
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 
@@ -26,6 +29,50 @@ import config
 from free_job_sources import SourceResult
 
 logger = logging.getLogger(__name__)
+
+_CONTINUATION_SCHEMA = "fantastic-continuation/1"
+
+
+def _load_continuation_state() -> Dict[str, Any]:
+    """Cross-run continuation cursor state (best-effort; a missing/corrupt file
+    starts fresh so the first run acquires the newest window)."""
+    path = str(getattr(config, "FANTASTIC_JOBS_CONTINUATION_STATE_PATH", "") or "")
+    if not path:
+        return {}
+    try:
+        with open(path, encoding="utf-8") as handle:
+            data = json.load(handle)
+        if isinstance(data, dict) and data.get("schema") == _CONTINUATION_SCHEMA:
+            return data
+    except (OSError, ValueError):
+        pass
+    return {}
+
+
+def _save_continuation_state(state: Dict[str, Any]) -> None:
+    path = str(getattr(config, "FANTASTIC_JOBS_CONTINUATION_STATE_PATH", "") or "")
+    if not path:
+        return
+    try:
+        directory = os.path.dirname(path)
+        if directory:
+            os.makedirs(directory, exist_ok=True)
+        tmp = f"{path}.tmp"
+        with open(tmp, "w", encoding="utf-8") as handle:
+            json.dump(state, handle)
+        os.replace(tmp, path)  # atomic
+    except OSError as exc:  # never fail the run on a state-write error
+        logger.warning("Could not persist Fantastic continuation state: %s", type(exc).__name__)
+
+
+def _advance_iso_second(value: str, seconds: int = 1) -> str:
+    """Return ``value`` shifted later by ``seconds`` (used to re-include the
+    boundary second in the next ``date_posted_lt`` window)."""
+    try:
+        dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        return str(value or "")
+    return (dt + timedelta(seconds=seconds)).isoformat()
 
 # Contact PII that must never enter canonical records, logs, artifacts or Airtable.
 _PII_FIELDS = frozenset({
@@ -499,6 +546,24 @@ def run_fantastic_jobs_acquisition(http_get: HttpGet = _http_get) -> SourceResul
 
     quota = _QuotaState()
     seen_ids: set = set()
+
+    # Cross-run continuation cursor (default off). Resume strictly OLDER than the
+    # oldest job already acquired so deep batches never re-fetch/re-bill the
+    # prefix; the boundary second is re-included (date_posted_lt = cursor + 1s)
+    # and its already-acquired IDs are pre-seeded into seen_ids so no job is
+    # skipped and the overlap is deduped rather than re-counted.
+    continuation_enabled = bool(getattr(config, "FANTASTIC_JOBS_CONTINUATION_ENABLED", False))
+    cont_state = _load_continuation_state() if continuation_enabled else {}
+    cursor_date_lt = ""
+    if continuation_enabled and cont_state.get("cursor_date"):
+        cursor_date_lt = _advance_iso_second(cont_state["cursor_date"], 1)
+        seen_ids |= {f"fantastic_{i}" for i in (cont_state.get("boundary_ids") or [])}
+    metrics["continuation"] = {
+        "enabled": continuation_enabled,
+        "resumed_from_cursor_date": cont_state.get("cursor_date", ""),
+        "applied_date_posted_lt": cursor_date_lt,
+    }
+
     # NOTE: only parameters proven against the successful smoke test are sent.
     # `description_type` was a guessed parameter (the smoke test that returned
     # HTTP 200 never sent it) and was the divergence in the failed production
@@ -524,6 +589,8 @@ def run_fantastic_jobs_acquisition(http_get: HttpGet = _http_get) -> SourceResul
             jb_params = {"time_frame": config.FANTASTIC_JOBS_TIME_FRAME,
                          "exclude_ats_duplicate": "true", "source": seg_key}
             jb_params.update(_jb_filter_params())
+            if cursor_date_lt:
+                jb_params["date_posted_lt"] = cursor_date_lt
             remaining = config.FANTASTIC_JOBS_MAX_JOBS_PER_RUN - len(result.jobs)
             result.jobs.extend(_fetch_segment(
                 "/v1/active-jb", jb_params, label, min(cap, remaining),
@@ -563,6 +630,35 @@ def run_fantastic_jobs_acquisition(http_get: HttpGet = _http_get) -> SourceResul
     result.raw_records = sum(s.get("returned", 0) for s in metrics["segments"].values())
     result.requests_attempted = metrics["requests_attempted"]  # actual dispatch attempts
     result.requests_succeeded = quota.requests_consumed        # successful (200) requests
+    # Advance and persist the continuation cursor from the jobs actually acquired
+    # (billed). The cursor moves strictly OLDER (min date_posted); high_water keeps
+    # the newest ever seen so a future incremental run can pick up newer jobs via
+    # date_posted_gte. Only jobs that carry a real posted timestamp move the cursor.
+    if continuation_enabled:
+        posted = sorted(str(j.get("job_posted_at_datetime_utc") or "")
+                        for j in result.jobs if j.get("job_posted_at_datetime_utc"))
+        if posted:
+            oldest, newest = posted[0], posted[-1]
+            boundary_ids = [str(j.get("_fantastic_internal_id"))
+                            for j in result.jobs
+                            if str(j.get("job_posted_at_datetime_utc") or "") == oldest
+                            and j.get("_fantastic_internal_id")]
+            prior_high = str(cont_state.get("high_water") or "")
+            new_state = {
+                "schema": _CONTINUATION_SCHEMA,
+                "source": "linkedin",
+                "cursor_date": oldest,
+                "high_water": max(newest, prior_high) if prior_high else newest,
+                "boundary_ids": boundary_ids,
+                "acquired_this_run": len(result.jobs),
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            }
+            _save_continuation_state(new_state)
+            metrics["continuation"]["next_cursor_date"] = oldest
+            metrics["continuation"]["high_water"] = new_state["high_water"]
+        else:
+            metrics["continuation"]["next_cursor_date"] = cont_state.get("cursor_date", "")
+
     result.metadata = metrics
     for job in result.jobs:
         job.setdefault("_acquisition_source", "fantastic_jobs")

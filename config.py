@@ -623,6 +623,20 @@ FANTASTIC_JOBS_EXCLUDE_AGENCY = _env_bool("FANTASTIC_JOBS_EXCLUDE_AGENCY", True)
 # 5,000 jobs/segment. The 3,500 jobs/day production target needs 35 pages, well
 # within the default; raise this only alongside a larger MAX_JOBS_PER_RUN and plan.
 FANTASTIC_JOBS_MAX_PAGES_PER_SEGMENT = _env_int("FANTASTIC_JOBS_MAX_PAGES_PER_SEGMENT", 50)
+# Cross-run continuation cursor (default off preserves the exact baseline). The
+# Direct API feed is date_posted DESC with no stable `order`/id-keyset, but a
+# `date_posted_lt` upper bound IS supported and yields provably non-overlapping
+# windows. When enabled, each run resumes strictly OLDER than the oldest job
+# already acquired (cursor_date), so deep batches never re-fetch/re-bill the
+# prefix; the boundary second is re-included and deduped by stable IDs so no job
+# is skipped; new jobs entering the top are deferred to a future incremental
+# (date_posted_gte high_water) run, never lost. State persists on the volume so a
+# run is resumable and the resume point (cursor_date) is explicit.
+FANTASTIC_JOBS_CONTINUATION_ENABLED = _env_bool("FANTASTIC_JOBS_CONTINUATION_ENABLED", False)
+FANTASTIC_JOBS_CONTINUATION_STATE_PATH = os.getenv(
+    "FANTASTIC_JOBS_CONTINUATION_STATE_PATH",
+    str(Path(STATE_DIR) / "fantastic_continuation.json"),
+)
 
 
 def validate_fantastic_jobs_config() -> None:
