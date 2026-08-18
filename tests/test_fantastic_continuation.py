@@ -48,13 +48,13 @@ def _feed(records):
     return http_get
 
 
-def _run(http_get, state_path, cap=3, enabled=True):
+def _run(http_get, state_path, cap=3, enabled=True, time_frame="24h"):
     base = dict(
         FANTASTIC_JOBS_ENABLED=True, FANTASTIC_JOBS_API_KEY="k",
         FANTASTIC_JOBS_BASE_URL="https://data.fantastic.jobs",
         FANTASTIC_JOBS_ATS_LIMIT=0, FANTASTIC_JOBS_WELLFOUND_LIMIT=0, FANTASTIC_JOBS_YCOMBINATOR_LIMIT=0,
         FANTASTIC_JOBS_LINKEDIN_LIMIT=cap, FANTASTIC_JOBS_MAX_JOBS_PER_RUN=cap,
-        FANTASTIC_JOBS_TIME_FRAME="24h", FANTASTIC_JOBS_MAX_PAGES_PER_SEGMENT=50,
+        FANTASTIC_JOBS_TIME_FRAME=time_frame, FANTASTIC_JOBS_MAX_PAGES_PER_SEGMENT=50,
         FANTASTIC_JOBS_MIN_JOBS_QUOTA_REMAINING=90, FANTASTIC_JOBS_MIN_REQUESTS_QUOTA_REMAINING=20,
         FANTASTIC_JOBS_MAX_RETRIES=0, FANTASTIC_JOBS_FAIL_OPEN=True,
         FANTASTIC_JOBS_LOCATION="United States", FANTASTIC_JOBS_HEADCOUNT_MIN=25,
@@ -264,6 +264,79 @@ class FantasticContinuationModeMatchTests(unittest.TestCase):
                                 {j["_fantastic_internal_id"] for j in r2.jobs}))
             self.assertFalse({j["_fantastic_internal_id"] for j in r1.jobs}
                              & {j["_fantastic_internal_id"] for j in r2.jobs})
+
+
+class FantasticContinuation7dWindowTests(unittest.TestCase):
+    """A 7d acquisition window (production KPI config). Verifies the continuation
+    cursor correctly (a) DEPLETES a multi-day backlog older-first with no re-bill,
+    (b) DEFERS newly-arriving top-of-feed jobs (never lost), and (c) treats a
+    within-window cursor as FRESH but a rolled-over (>7d) cursor as STALE so a
+    reset re-acquires the fresh window (picking up the new arrivals)."""
+
+    def _feed_recent(self, n, span_days=6.5):
+        """n jobs newest-first spread across the last span_days (all inside 7d)."""
+        from datetime import datetime, timezone, timedelta
+        now = datetime.now(timezone.utc)
+        step = (span_days * 86400) / max(1, n)
+        return [_rec(6000 + (n - k),
+                     _iso(now - timedelta(seconds=(k + 1) * step)).replace("+00:00", "Z"))
+                for k in range(n)]
+
+    def test_backlog_depletion_older_first_no_rebill(self):
+        recs = self._feed_recent(30)  # ~6.5-day backlog inside the 7d window
+        with tempfile.TemporaryDirectory() as tmp:
+            sp = str(Path(tmp) / "c.json")
+            r1, _ = _run(_feed(recs), sp, cap=8, time_frame="7d")
+            r2, cap2 = _run(_feed(recs), sp, cap=8, time_frame="7d")
+            r3, _ = _run(_feed(recs), sp, cap=8, time_frame="7d")
+            i1 = {j["_fantastic_internal_id"] for j in r1.jobs}
+            i2 = {j["_fantastic_internal_id"] for j in r2.jobs}
+            i3 = {j["_fantastic_internal_id"] for j in r3.jobs}
+            self.assertEqual(r2.metadata["continuation"]["reset_reason"], "")   # within-window resume
+            self.assertTrue(any("date_posted_lt" in p for p in cap2))
+            self.assertFalse(i1 & i2)                                            # no re-bill
+            self.assertFalse(i1 & i3)
+            self.assertFalse(i2 & i3)                                            # strictly deeper each run
+            self.assertGreaterEqual(len(i1 | i2 | i3), 20)                       # backlog actually draining
+
+    def test_new_top_arrivals_deferred_not_lost(self):
+        recs = self._feed_recent(20)
+        with tempfile.TemporaryDirectory() as tmp:
+            sp = str(Path(tmp) / "c.json")
+            r1, _ = _run(_feed(recs), sp, cap=6, time_frame="7d")
+            hw1 = json.loads(Path(sp).read_text())["high_water"]
+            # brand-new jobs enter the TOP (newer than anything acquired)
+            from datetime import datetime, timezone, timedelta
+            now = datetime.now(timezone.utc)
+            newer = [_rec(9001, _iso(now).replace("+00:00", "Z")),
+                     _rec(9002, _iso(now - timedelta(seconds=1)).replace("+00:00", "Z"))]
+            r2, _ = _run(_feed(newer + recs), sp, cap=6, time_frame="7d")
+            i2 = {j["_fantastic_internal_id"] for j in r2.jobs}
+            self.assertNotIn("9001", i2)          # older-resume ignores new top jobs...
+            self.assertNotIn("9002", i2)
+            # ...and high_water still marks them for a later fresh-window pickup.
+            self.assertLess(hw1, _iso(now - timedelta(seconds=2)).replace("+00:00", "Z"))
+
+    def test_5day_cursor_fresh_but_8day_cursor_resets_under_7d_window(self):
+        from datetime import datetime, timezone, timedelta
+        recs = self._feed_recent(12)
+        for age_days, expect_reset in ((5, False), (8, True)):
+            with tempfile.TemporaryDirectory() as tmp:
+                sp = str(Path(tmp) / "c.json")
+                cur = _iso(datetime.now(timezone.utc) - timedelta(days=age_days))
+                Path(sp).write_text(json.dumps({
+                    "schema": fja._CONTINUATION_SCHEMA, "source": "linkedin",
+                    "cursor_date": cur, "high_water": cur, "boundary_ids": ["1"]}),
+                    encoding="utf-8")
+                res, cap = _run(_feed(recs), sp, cap=5, time_frame="7d")
+                cont = res.metadata["continuation"]
+                if expect_reset:
+                    self.assertEqual(cont["reset_reason"], "stale_window")   # rolled over -> fresh window
+                    self.assertTrue(all("date_posted_lt" not in p for p in cap))
+                    self.assertTrue(res.jobs)                                # new arrivals acquired
+                else:
+                    self.assertEqual(cont["reset_reason"], "")               # within 7d -> resume backlog
+                    self.assertTrue(any("date_posted_lt" in p for p in cap))
 
 
 if __name__ == "__main__":
