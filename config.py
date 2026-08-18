@@ -293,6 +293,21 @@ JOB_SOURCE_PROVIDER_STRUCTURED_MAX_AGE_DAYS = _env_int(
 JOB_SOURCE_PROVIDER_STRUCTURED_MIN_DESCRIPTION_CHARS = _env_int(
     "JOB_SOURCE_PROVIDER_STRUCTURED_MIN_DESCRIPTION_CHARS", 700
 )
+# Fantastic Direct API is a TRUSTED structured provider: it returns signed
+# employment/US/title/employer/posted-date fields, so provider trust -- not the
+# long-form-description length the aggregator path uses as a "substantial record"
+# proxy -- is the basis for ACTIVE_PROVIDER_STRUCTURED review eligibility. The
+# resolver relaxes ONLY the description-length bar, and ONLY for genuine Fantastic
+# Direct API records (the adapter stamps `_fantastic_internal_id`); every other
+# provider (JSearch, free feeds, adzuna, scraped LinkedIn, unknown) keeps the full
+# 700-char bar. This never grants OFFICIAL_SOURCE and stays fail-closed at
+# approved enrollment. Set the flag to 0 to fall back to the strict bar.
+JOB_SOURCE_FANTASTIC_PROVIDER_STRUCTURED_ENABLED = _env_bool(
+    "JOB_SOURCE_FANTASTIC_PROVIDER_STRUCTURED_ENABLED", True
+)
+JOB_SOURCE_FANTASTIC_PROVIDER_STRUCTURED_MIN_DESCRIPTION_CHARS = _env_int(
+    "JOB_SOURCE_FANTASTIC_PROVIDER_STRUCTURED_MIN_DESCRIPTION_CHARS", 120
+)
 JOB_SOURCE_CACHE_TTL_HOURS = _env_int("JOB_SOURCE_CACHE_TTL_HOURS", 24)
 JOB_SOURCE_MAX_ACTIVE_AGE_DAYS = _env_int("JOB_SOURCE_MAX_ACTIVE_AGE_DAYS", 45)
 COMPANY_SOURCE_FETCH_ENABLED = _env_bool("COMPANY_SOURCE_FETCH_ENABLED", True)

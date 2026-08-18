@@ -936,9 +936,27 @@ class JobSourceResolver:
         if age_days < -1 or age_days > max_age:
             return None
         description = str(job.get("job_description") or "").strip()
-        if len(description) < max(
-            500, int(config.JOB_SOURCE_PROVIDER_STRUCTURED_MIN_DESCRIPTION_CHARS)
-        ):
+        # A genuine Fantastic Direct API record (only that adapter stamps
+        # `_fantastic_internal_id`) is a TRUSTED structured provider: its
+        # employment/US/title/employer/posted-date fields are signed provider
+        # data, so the long-form-description length -- a proxy the aggregator path
+        # uses to judge "substantial" -- is not the trust basis for it. Relax ONLY
+        # that bar, ONLY for this provenance; every other provider (JSearch, free
+        # feeds, adzuna, scraped LinkedIn, unknown) keeps the full bar. All other
+        # safeguards below (freshness, signed full-time/US prefilters, disqualifying
+        # text, authoritative contradiction, real apply URL) still apply, and the
+        # result is ACTIVE_PROVIDER_STRUCTURED review -- never OFFICIAL_SOURCE.
+        is_fantastic_direct = bool(
+            job.get("_fantastic_internal_id")
+            and getattr(config, "JOB_SOURCE_FANTASTIC_PROVIDER_STRUCTURED_ENABLED", True)
+        )
+        min_description = (
+            max(1, int(getattr(
+                config, "JOB_SOURCE_FANTASTIC_PROVIDER_STRUCTURED_MIN_DESCRIPTION_CHARS", 120)))
+            if is_fantastic_direct
+            else max(500, int(config.JOB_SOURCE_PROVIDER_STRUCTURED_MIN_DESCRIPTION_CHARS))
+        )
+        if len(description) < min_description:
             return None
         if not _prefilter_full_time(job) or not _prefilter_supported_us_work(job):
             return None
@@ -1017,7 +1035,17 @@ class JobSourceResolver:
                 f"provider_source_type:{original_type}",
                 f"age_days:{age_days:.2f}",
                 "approved_revalidation_required",
-            ],
+            ] + ([
+                # Preserve Fantastic Direct API provenance separately -- the
+                # original source URL/attribution stays in source_url above; this
+                # never claims first-party OFFICIAL identity.
+                "fantastic_direct_api",
+                f"fantastic_job_id:{job.get('_fantastic_internal_id')}",
+                f"fantastic_source:{job.get('_fantastic_source') or 'unknown'}",
+                "fantastic_description_bar_relaxed"
+                if len(description) < max(500, int(config.JOB_SOURCE_PROVIDER_STRUCTURED_MIN_DESCRIPTION_CHARS))
+                else "fantastic_description_full",
+            ] if is_fantastic_direct else []),
         )
 
     def _discover_company_job_urls(
