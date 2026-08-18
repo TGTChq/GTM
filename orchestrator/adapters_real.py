@@ -148,6 +148,7 @@ def real_fantastic_runner():
         jobs: List[Dict[str, Any]] = []
         status = "complete"
         metadata: Dict[str, Any] = {}
+        classified = 0
         try:
             result = run_fantastic_jobs_acquisition()
             jobs = list(result.jobs)
@@ -155,6 +156,19 @@ def real_fantastic_runner():
             metadata = dict(result.metadata or {})
             if not result.success:
                 status = "partial" if jobs else "failed"
+            # Classify raw Fantastic postings into the target-role portfolio so the
+            # RoleGate (a match-VERIFIER that reads job["_matched_role"]) has a
+            # target to assess. Fantastic jobs arrive without a target role, so
+            # without this every posting is UNVERIFIED_ROLE_CLASSIFICATION and
+            # non-target titles (e.g. "Kitchen Manager") are never rejected. This
+            # mirrors the multi_source path's classify-then-verify step.
+            from multi_source_acquisition import _classify
+            for job in jobs:
+                try:
+                    _classify(job)
+                    classified += 1
+                except Exception:  # noqa: BLE001 - classification never aborts a lane
+                    continue
         except Exception as exc:  # noqa: BLE001 - a lane never erases another
             status = "failed"
             errors.append(f"{type(exc).__name__}: {exc}")
@@ -165,6 +179,7 @@ def real_fantastic_runner():
             attribution={
                 "source": "fantastic_jobs",
                 "records": len(jobs),
+                "role_classified": classified,
                 "requests": reqs,
                 "stop_reason": metadata.get("stop_reason", ""),
                 "jobs_quota_remaining": metadata.get("jobs_quota_remaining"),

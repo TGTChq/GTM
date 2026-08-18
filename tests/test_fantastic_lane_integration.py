@@ -61,6 +61,24 @@ class FantasticLaneRunnerTests(unittest.TestCase):
         self.assertTrue(any("RuntimeError" in e for e in res.errors))
         self.assertEqual(res.jobs, [])
 
+    def test_raw_jobs_are_role_classified_for_the_role_gate(self):
+        # Fantastic postings arrive without a target role; the lane must classify
+        # them so the RoleGate (a verifier) can accept target roles and reject
+        # non-target titles instead of blanket UNVERIFIED_ROLE_CLASSIFICATION.
+        sr = SourceResult(source="fantastic_jobs", success=True, metadata={"requests_attempted": 1}, jobs=[
+            {"job_id": "fantastic_1", "job_title": "Account Executive", "employer_name": "Acme",
+             "_acquisition_source": "fantastic_jobs_linkedin"},
+            {"job_id": "fantastic_2", "job_title": "Kitchen Manager", "employer_name": "Diner",
+             "_acquisition_source": "fantastic_jobs_linkedin"},
+        ])
+        res = self._run(sr)
+        self.assertEqual(res.attribution["role_classified"], 2)
+        by_title = {j["job_title"]: j for j in res.jobs}
+        self.assertTrue(by_title["Account Executive"].get("_matched_role"))
+        self.assertEqual(by_title["Account Executive"]["_role_relevance_status"], "accept")
+        self.assertTrue(by_title["Kitchen Manager"].get("_matched_role"))     # least-bad target
+        self.assertEqual(by_title["Kitchen Manager"]["_role_relevance_status"], "reject")
+
 
 class _Policy:
     allow_enrichment = False
