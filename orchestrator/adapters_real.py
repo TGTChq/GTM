@@ -460,6 +460,11 @@ class RealEnrichmentStage:
                 "unverified": authoritative[Disposition.UNVERIFIED],
             },
             funnel=funnel,
+            stop_reason=str(getattr(step3, "stop_reason", "") or ""),
+            enrichment_incomplete=(
+                str(getattr(step3, "stop_reason", "") or "") in _INCOMPLETE_ENRICHMENT_STOP_REASONS
+                or bool((getattr(step3, "stats", {}) or {}).get("apollo_circuit_open"))
+            ),
         )
 
 
@@ -472,6 +477,14 @@ class RealEnrichmentStage:
 #: AIRTABLE_REVIEW_STATES ({FINAL_PASS, UNVERIFIED, NEEDS_CHECK}); REJECT and
 #: REROUTE are terminal and never written.
 _REVIEWABLE = (Disposition.FINAL_PASS, Disposition.NEEDS_CHECK, Disposition.UNVERIFIED)
+
+#: Enrichment stop reasons that mean the loop stopped BEFORE every eligible
+#: company was processed -- a provider-capacity (Apollo) or runtime-budget stop.
+#: The run must then report INCOMPLETE (never a false success) while completed
+#: leads still deliver and the remaining companies stay resumable.
+_INCOMPLETE_ENRICHMENT_STOP_REASONS = frozenset({
+    "apollo_circuit_open", "enrichment_runtime_budget_reached",
+})
 
 
 @dataclass

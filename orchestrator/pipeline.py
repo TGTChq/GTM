@@ -230,6 +230,13 @@ class Orchestrator:
 
         status = RunStatus.COMPLETE if all_reconcile else RunStatus.INCOMPLETE
         stop = "" if all_reconcile else "a stage or delivery boundary failed to reconcile"
+        # A provider-capacity stop (Apollo circuit / enrichment runtime budget)
+        # leaves eligible companies un-enriched and resumable. The boundary
+        # accounting still reconciles (completed leads were delivered), so force an
+        # explicit INCOMPLETE with the capacity stop reason -- never a false success.
+        if enrichment is not None and getattr(enrichment, "enrichment_incomplete", False):
+            status = RunStatus.INCOMPLETE
+            stop = f"enrichment_incomplete:{enrichment.stop_reason or 'provider_capacity'}"
         resumed = self.ctx.resumed_from
         self.ctx.finish(status, stop)
         self.ctx.resumed_from = resumed  # finish() must not erase resume provenance
@@ -246,6 +253,8 @@ class Orchestrator:
             "run_lock": lock.to_dict() if lock is not None else None,
             "suppression": supp.to_dict(),
             "all_reconcile": all_reconcile,
+            "enrichment_incomplete": bool(getattr(enrichment, "enrichment_incomplete", False)) if enrichment else False,
+            "enrichment_stop_reason": getattr(enrichment, "stop_reason", "") if enrichment else "",
         }
         # Immutable run artifacts.
         self.state.write_artifact("run_status.json", {"run_id": self.ctx.run_id,

@@ -76,6 +76,13 @@ class EnrichmentReport:
     #: Optional cross-stage funnel counts (companies considered, ICP eligible/
     #: rejected, hiring managers found, ...) surfaced for operator observability.
     funnel: Dict[str, Any] = field(default_factory=dict)
+    #: The enrichment stage's stop reason (e.g. "apollo_circuit_open") and whether
+    #: it stopped BEFORE processing every eligible company (a provider-capacity or
+    #: runtime-budget stop). When incomplete the run must report INCOMPLETE with
+    #: this reason -- never a false success -- while the leads already completed are
+    #: still delivered and the remaining companies stay resumable.
+    stop_reason: str = ""
+    enrichment_incomplete: bool = False
 
     def dispositions(self) -> List[Disposition]:
         return [lead.disposition for lead in self.leads]
@@ -106,6 +113,8 @@ class EnrichmentReport:
             "funnel": dict(self.funnel),
             "stages": [s.to_dict() for s in self.stages],
             "sample": [l.to_dict() for l in self.leads[:10]],
+            "stop_reason": self.stop_reason,
+            "enrichment_incomplete": self.enrichment_incomplete,
         }
 
 
