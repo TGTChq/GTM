@@ -196,6 +196,18 @@ def _bool(value: Any) -> bool:
     return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _employment_type(value: Any) -> str:
+    """Normalize the provider ``employment_type`` to a clean scalar token.
+
+    The Fantastic API returns this field as an array (e.g. ``["FULL_TIME"]``);
+    naively stringifying it stored ``"['FULL_TIME']"`` in the canonical
+    Employment Type field. Take the first element and never serialize a list.
+    """
+    if isinstance(value, (list, tuple)):
+        value = value[0] if value else ""
+    return str(value or "").strip().upper() or "FULLTIME"
+
+
 def map_record(record: Dict[str, Any], source_label: str, seg: Optional[Dict[str, Any]] = None) -> Tuple[Optional[Dict[str, Any]], str]:
     """Map one Fantastic.jobs record into the canonical schema.
 
@@ -243,7 +255,7 @@ def map_record(record: Dict[str, Any], source_label: str, seg: Optional[Dict[str
         "job_location": _location_text(record),
         "job_country": (str((record.get("countries_derived") or [""])[0]) if isinstance(record.get("countries_derived"), list) else str(record.get("countries_derived") or "")).strip(),
         "job_is_remote": str(record.get("location_type") or "").strip().lower() == "remote",
-        "job_employment_type": str(record.get("employment_type") or "").strip().upper() or "FULLTIME",
+        "job_employment_type": _employment_type(record.get("employment_type")),
         "job_posted_at_datetime_utc": _safe_iso(record.get("date_posted") or record.get("date_created")),
         "job_offer_expiration_datetime_utc": _safe_iso(record.get("date_valid_through")),
         "job_min_salary": record.get("ai_salary_min_value") or record.get("salary_min"),
