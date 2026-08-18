@@ -17,6 +17,7 @@ import json
 import logging
 import os
 import random
+import re
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -73,6 +74,32 @@ def _advance_iso_second(value: str, seconds: int = 1) -> str:
     except (ValueError, TypeError):
         return str(value or "")
     return (dt + timedelta(seconds=seconds)).isoformat()
+
+
+def _parse_time_frame_hours(time_frame: str) -> float:
+    """Parse a Fantastic ``time_frame`` like ``24h`` / ``3d`` into hours."""
+    m = re.match(r"^\s*(\d+)\s*([hd])\s*$", str(time_frame or "").lower())
+    if not m:
+        return 24.0
+    n = int(m.group(1))
+    return n * 24.0 if m.group(2) == "d" else float(n)
+
+
+def _cursor_is_stale(cursor_date_iso: str, time_frame: str) -> bool:
+    """True when a persisted continuation cursor is older than the current
+    acquisition window. Resuming from such a cursor (date_posted_lt = cursor+1s)
+    would fall entirely below the feed's ``time_frame`` lower bound and silently
+    return zero jobs -- so the caller must RESET to a fresh window instead of
+    letting stale state suppress a new acquisition window. An unparseable cursor
+    is treated as NOT stale (best-effort: never force a reset on a parse glitch)."""
+    try:
+        dt = datetime.fromisoformat(str(cursor_date_iso).replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        return False
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    hours = _parse_time_frame_hours(time_frame)
+    return dt < datetime.now(timezone.utc) - timedelta(hours=hours)
 
 
 def _family_id(term: str) -> str:
@@ -613,6 +640,17 @@ def run_fantastic_jobs_acquisition(http_get: HttpGet = _http_get) -> SourceResul
     # skipped and the overlap is deduped rather than re-counted.
     continuation_enabled = bool(getattr(config, "FANTASTIC_JOBS_CONTINUATION_ENABLED", False))
     cont_state = _load_continuation_state() if continuation_enabled else {}
+    # Stale 24h-window guard (single-stream cursor): a cursor older than the
+    # current time_frame window would push date_posted_lt below the feed's lower
+    # bound and silently return zero jobs. Reset to a fresh window rather than let
+    # stale state suppress a new acquisition window.
+    continuation_reset_reason = ""
+    if (continuation_enabled and cont_state.get("cursor_date")
+            and _cursor_is_stale(cont_state["cursor_date"], config.FANTASTIC_JOBS_TIME_FRAME)):
+        continuation_reset_reason = "stale_window"
+        logger.info("Fantastic continuation cursor is older than the %s window; "
+                    "resetting to a fresh window.", config.FANTASTIC_JOBS_TIME_FRAME)
+        cont_state = {}
     cursor_date_lt = ""
     if continuation_enabled and cont_state.get("cursor_date"):
         cursor_date_lt = _advance_iso_second(cont_state["cursor_date"], 1)
@@ -621,6 +659,7 @@ def run_fantastic_jobs_acquisition(http_get: HttpGet = _http_get) -> SourceResul
         "enabled": continuation_enabled,
         "resumed_from_cursor_date": cont_state.get("cursor_date", ""),
         "applied_date_posted_lt": cursor_date_lt,
+        "reset_reason": continuation_reset_reason,
     }
 
     # NOTE: only parameters proven against the successful smoke test are sent.
@@ -683,8 +722,14 @@ def run_fantastic_jobs_acquisition(http_get: HttpGet = _http_get) -> SourceResul
                 fam = fam_states.get(fid) or {}
                 fam_lt = ""
                 if continuation_enabled and fam.get("cursor_date"):
-                    fam_lt = _advance_iso_second(fam["cursor_date"], 1)
-                    seen_ids |= {f"fantastic_{i}" for i in (fam.get("boundary_ids") or [])}
+                    if _cursor_is_stale(fam["cursor_date"], config.FANTASTIC_JOBS_TIME_FRAME):
+                        # Stale family cursor -> reset that family to a fresh window.
+                        new_family_states.pop(fid, None)
+                        fam = {}
+                        metrics["continuation"].setdefault("family_resets", []).append(fid)
+                    else:
+                        fam_lt = _advance_iso_second(fam["cursor_date"], 1)
+                        seen_ids |= {f"fantastic_{i}" for i in (fam.get("boundary_ids") or [])}
                 jb_params = {"time_frame": config.FANTASTIC_JOBS_TIME_FRAME,
                              "exclude_ats_duplicate": "true", "source": "linkedin",
                              "title": term}

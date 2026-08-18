@@ -131,5 +131,98 @@ class FantasticContinuationTests(unittest.TestCase):
             self.assertTrue(all(int(i) < 1018 for i in second_ids))            # resume continued older
 
 
+def _iso(dt):
+    return dt.isoformat()
+
+
+class FantasticContinuationStaleAndQuotaTests(unittest.TestCase):
+    """Scenario E (24h-window rollover / stale continuation resets safely) and
+    scenario F (quota exhaustion during continuation stays resumable without
+    re-billing the already-acquired prefix)."""
+
+    def _recent_feed_records(self):
+        from datetime import datetime, timezone, timedelta
+        now = datetime.now(timezone.utc)
+        # 12 fresh jobs within the last hour, newest first ids 3020..3009
+        recs = []
+        for k in range(12):
+            dt = now - timedelta(minutes=(k + 1))
+            recs.append(_rec(3020 - k, _iso(dt).replace("+00:00", "Z")))
+        return recs
+
+    def test_stale_cursor_resets_to_fresh_window_not_silent_suppression(self):
+        from datetime import datetime, timezone, timedelta
+        recs = self._recent_feed_records()
+        with tempfile.TemporaryDirectory() as tmp:
+            sp = str(Path(tmp) / "cont.json")
+            # Pre-seed a STALE cursor 48h old (older than the 24h window).
+            stale = _iso(datetime.now(timezone.utc) - timedelta(hours=48))
+            Path(sp).write_text(json.dumps({
+                "schema": fja._CONTINUATION_SCHEMA, "source": "linkedin",
+                "cursor_date": stale, "high_water": stale, "boundary_ids": ["999999"],
+            }), encoding="utf-8")
+            res, captured = _run(_feed(recs), sp, cap=3)
+            cont = res.metadata["continuation"]
+            self.assertEqual(cont["reset_reason"], "stale_window")
+            self.assertEqual(cont["resumed_from_cursor_date"], "")           # stale cursor dropped
+            self.assertTrue(all("date_posted_lt" not in p for p in captured))  # fresh window, no stale lt
+            self.assertEqual(len(res.jobs), 3)                                # acquired, NOT suppressed
+            # A fresh, recent cursor was persisted (not the stale one).
+            state = json.loads(Path(sp).read_text(encoding="utf-8"))
+            self.assertNotEqual(state["cursor_date"], stale)
+            self.assertGreater(state["cursor_date"], stale)
+
+    def test_fresh_cursor_within_window_is_not_reset(self):
+        from datetime import datetime, timezone, timedelta
+        recs = self._recent_feed_records()
+        with tempfile.TemporaryDirectory() as tmp:
+            sp = str(Path(tmp) / "cont.json")
+            r1, _ = _run(_feed(recs), sp, cap=3)                              # sets a recent cursor
+            r2, captured2 = _run(_feed(recs), sp, cap=3)                      # resume, cursor is fresh
+            self.assertEqual(r2.metadata["continuation"]["reset_reason"], "")  # NOT reset
+            self.assertTrue(any("date_posted_lt" in p for p in captured2))    # applied the fresh cursor
+            self.assertFalse({j["_fantastic_internal_id"] for j in r1.jobs}
+                             & {j["_fantastic_internal_id"] for j in r2.jobs})
+
+    def _many_recent(self, n):
+        from datetime import datetime, timezone, timedelta
+        now = datetime.now(timezone.utc)
+        # n fresh jobs, newest first, distinct seconds within the last ~3h.
+        return [_rec(5000 + (n - k),
+                     _iso(now - timedelta(seconds=(k + 1) * 30)).replace("+00:00", "Z"))
+                for k in range(n)]
+
+    def _low_remaining_feed(self, records, remaining):
+        def http_get(url, headers, params, timeout):
+            lt = params.get("date_posted_lt")
+            rows = [r for r in records if lt is None or r["date_posted"] < lt]
+            rows = sorted(rows, key=lambda r: (r["date_posted"], int(r["id"])), reverse=True)
+            offset = int(params.get("offset", 0)); limit = int(params.get("limit", 100))
+            resp = _Resp(rows[offset:offset + limit])
+            resp.headers = {"x-api-jobs-remaining": str(remaining),
+                            "x-api-requests-remaining": "1000000"}
+            return resp
+        return http_get
+
+    def test_quota_exhaustion_mid_continuation_is_partial_and_resumable(self):
+        recs = self._many_recent(150)  # enough for a FULL 100-job first page
+        with tempfile.TemporaryDirectory() as tmp:
+            sp = str(Path(tmp) / "cont.json")
+            # cap=200 wants a 2nd page; page 1 fills 100 and the provider reports
+            # jobs_remaining=90 (== MIN), so page 2's quota breach stops PARTIAL.
+            r1, _ = _run(self._low_remaining_feed(recs, remaining=90), sp, cap=200)
+            self.assertEqual(len(r1.jobs), 100)                              # partial (quota-bounded)
+            self.assertEqual(r1.metadata["stop_reason"], "jobs_quota_reserve")
+            state = json.loads(Path(sp).read_text(encoding="utf-8"))
+            acquired_dates = sorted(j["job_posted_at_datetime_utc"] for j in r1.jobs)
+            self.assertEqual(state["cursor_date"], acquired_dates[0])         # cursor = oldest ACQUIRED
+            # Resume (quota restored): continue STRICTLY OLDER, no re-bill of the prefix.
+            r2, captured2 = _run(self._low_remaining_feed(recs, remaining=1000000), sp, cap=200)
+            first = {j["_fantastic_internal_id"] for j in r1.jobs}
+            second = {j["_fantastic_internal_id"] for j in r2.jobs}
+            self.assertFalse(first & second)                                 # acquired prefix not re-billed
+            self.assertTrue(any("date_posted_lt" in p for p in captured2))
+
+
 if __name__ == "__main__":
     unittest.main()
