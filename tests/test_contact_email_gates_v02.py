@@ -70,14 +70,16 @@ class ContactEmailGateV02Tests(unittest.TestCase):
         )
         self.assertEqual(decision.state, GateState.PASS)
 
-    def test_hunter_valid_email_passes(self):
+    def test_hunter_valid_does_not_promote_unverified_apollo_email(self):
+        # Apollo is authoritative: a Hunter "valid" opinion can NEVER promote a
+        # non-Apollo-verified email to PASS. It is reviewable, not verified.
         hunter = HunterResult(found=True, email="a@example.com", status="valid")
         decision = EmailGate().evaluate(
             person=self.person(email_status="guessed"),
             hunter_result=hunter,
             company_domains={"example.com"},
         )
-        self.assertEqual(decision.state, GateState.PASS)
+        self.assertEqual(decision.state, GateState.NEEDS_CHECK)
 
     def test_accept_all_or_risky_routes_to_review(self):
         hunter = HunterResult(found=True, email="a@example.com", status="accept_all")

@@ -572,7 +572,8 @@ def _process_company_legacy(company_jobs: List[Dict]) -> Tuple[List[Dict], Dict]
                     hunter_result = hunter.verify_email(person.email)
                     time.sleep(config.HUNTER_RATE_LIMIT_DELAY)
             elif (
-                person.first_name
+                config.VERIFY_WITH_HUNTER
+                and person.first_name
                 and person.last_name
                 and config.HUNTER_API_KEY
                 and hunter_attempts < max_hunter_attempts
@@ -1084,7 +1085,8 @@ def _process_company_strict(company_jobs: List[Dict]) -> Tuple[List[Dict], Dict]
                     hunter_result = None
                 time.sleep(config.HUNTER_RATE_LIMIT_DELAY)
             elif (
-                not person.email
+                config.VERIFY_WITH_HUNTER
+                and not person.email
                 and person.first_name
                 and person.last_name
                 and config.HUNTER_API_KEY

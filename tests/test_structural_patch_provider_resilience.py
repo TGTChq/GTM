@@ -68,7 +68,11 @@ class HunterErrorTests(unittest.TestCase):
                 patch.object(config, "APOLLO_RATE_LIMIT_DELAY", 0),
                 patch.object(config, "HUNTER_RATE_LIMIT_DELAY", 0),
                 patch.object(config, "HUNTER_API_KEY", "test-key"),
-                patch.object(config, "VERIFY_WITH_HUNTER", False),
+                # Hunter is opt-in; enable it here to exercise the find_email
+                # fallback's resilience. When VERIFY_WITH_HUNTER is off the
+                # fallback is fully bypassed (see
+                # test_apollo_authoritative_email_verification).
+                patch.object(config, "VERIFY_WITH_HUNTER", True),
                 patch.object(config, "HUNTER_MAX_FALLBACK_ATTEMPTS_PER_BUCKET", 1),
                 patch.object(hiring_manager.apollo, "enrich_organization", return_value=org),
                 patch.object(hiring_manager.AccountGate, "evaluate", return_value=_account_pass()),
