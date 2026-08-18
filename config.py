@@ -638,6 +638,17 @@ FANTASTIC_JOBS_MAX_PAGES_PER_SEGMENT = _env_int("FANTASTIC_JOBS_MAX_PAGES_PER_SE
 # term ("Account Executive" also returns "Enterprise/Technical Account Executive")
 # to minimise cross-query overlap. Title targeting is recall-first; the downstream
 # classify-then-verify RoleGate remains the mandatory precision filter.
+# Upstream headcount MAX (organization_headcount_lt, confirmed supported live). The
+# closed benchmark's actor filtered headcount 25-999; the Direct API omitting it
+# let 41% of companies (>1000) reach and fail the ICP gate, halving retention and
+# wasting ~45% of credits. 0 disables. Downstream MAX_EMPLOYEES stays as defense.
+FANTASTIC_JOBS_HEADCOUNT_MAX = _env_int("FANTASTIC_JOBS_HEADCOUNT_MAX", 1000)
+# title_advanced: ONE Boolean OR-expression over the whole role catalog (the exact
+# benchmark approach). One query returns the union counting each job ONCE -> zero
+# cross-query billing overlap and 118/118 coverage, unlike per-family `title=`
+# queries. Preferred when enabled; blank expression is built from role_catalog.
+FANTASTIC_JOBS_TITLE_ADVANCED_ENABLED = _env_bool("FANTASTIC_JOBS_TITLE_ADVANCED_ENABLED", True)
+FANTASTIC_JOBS_TITLE_ADVANCED_EXPRESSION = os.getenv("FANTASTIC_JOBS_TITLE_ADVANCED_EXPRESSION", "").strip()
 FANTASTIC_JOBS_TITLE_TARGETING_ENABLED = _env_bool("FANTASTIC_JOBS_TITLE_TARGETING_ENABLED", False)
 DEFAULT_FANTASTIC_TITLE_FAMILIES = (
     # GTM / Sales
@@ -674,6 +685,11 @@ DEFAULT_FANTASTIC_TITLE_FAMILIES = (
     "Automation Specialist", "Conversational AI", "GTM Engineer", "Data Labeling", "Chatbot",
     # Ecommerce
     "E-commerce Manager", "Amazon Marketplace", "Shopify", "Catalog Specialist", "Listings Specialist",
+    # Coverage completion (the 18 roles the collapsed set missed -> 118/118)
+    "Customer Onboarding", "Customer Retention", "Customer Operations", "QA Analyst",
+    "AP Specialist", "AR Specialist", "PPC", "Lifecycle Marketing", "CRM Marketing",
+    "HR Operations", "Deal Desk", "CRM Administrator", "AI Automation", "AI Content",
+    "Data Annotator", "Podcast", "Product Support",
 )
 FANTASTIC_JOBS_TITLE_FAMILIES = _env_json(
     "FANTASTIC_JOBS_TITLE_FAMILIES_JSON", list(DEFAULT_FANTASTIC_TITLE_FAMILIES)

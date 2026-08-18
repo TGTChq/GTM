@@ -71,6 +71,19 @@ class FantasticRequestFilterTests(unittest.TestCase):
         # employment-type still pushed
         self.assertEqual(params.get("ai_employment_type"), "FULL_TIME")
 
+    def test_headcount_max_pushed_down_as_organization_headcount_lt(self):
+        # Acquisition-time upper bound (parity fix): <1000 filtered UPSTREAM so we
+        # stop paying for jobs the downstream MAX_EMPLOYEES gate would reject.
+        captured = _run_capture(FANTASTIC_JOBS_HEADCOUNT_MAX=1000)
+        _url, params = captured[0]
+        self.assertEqual(params.get("organization_headcount_lt"), 1000)
+        self.assertEqual(params.get("organization_headcount_gte"), 25)
+
+    def test_headcount_max_omitted_when_zero(self):
+        captured = _run_capture(FANTASTIC_JOBS_HEADCOUNT_MAX=0)
+        _url, params = captured[0]
+        self.assertNotIn("organization_headcount_lt", params)
+
 
 if __name__ == "__main__":
     unittest.main()

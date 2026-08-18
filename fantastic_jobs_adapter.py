@@ -372,12 +372,45 @@ def _jb_filter_params() -> Dict[str, Any]:
     headcount_min = int(getattr(config, "FANTASTIC_JOBS_HEADCOUNT_MIN", 0) or 0)
     if headcount_min > 0:
         params["organization_headcount_gte"] = headcount_min
+    headcount_max = int(getattr(config, "FANTASTIC_JOBS_HEADCOUNT_MAX", 0) or 0)
+    if headcount_max > 0:
+        params["organization_headcount_lt"] = headcount_max
     employment = str(getattr(config, "FANTASTIC_JOBS_AI_EMPLOYMENT_TYPE", "") or "").strip()
     if employment:
         params["ai_employment_type"] = employment
     if getattr(config, "FANTASTIC_JOBS_EXCLUDE_AGENCY", True):
         params["organization_agency"] = "exclude"
     return params
+
+
+def _title_advanced_term(role: str) -> str:
+    """Normalize a role into a title_advanced term (single-quote multi-word)."""
+    cleaned = " ".join(str(role or "").lower().replace("/", " ").replace("-", " ").split())
+    return f"'{cleaned}'" if " " in cleaned else cleaned
+
+
+def _title_advanced_expression() -> str:
+    """The Boolean OR-expression over the whole role catalog (benchmark parity).
+
+    A configured override wins; otherwise build deterministically from
+    role_catalog.DEFAULT_ACQUISITION_ROLES so one query returns the union of every
+    target role, counting each job once (no cross-query billing overlap).
+    """
+    override = str(getattr(config, "FANTASTIC_JOBS_TITLE_ADVANCED_EXPRESSION", "") or "").strip()
+    if override:
+        return override
+    try:
+        from role_catalog import DEFAULT_ACQUISITION_ROLES
+    except Exception:  # noqa: BLE001 - never let a missing catalog crash acquisition
+        return ""
+    terms: List[str] = []
+    seen: set = set()
+    for role in sorted({str(r).strip() for r in DEFAULT_ACQUISITION_ROLES if str(r).strip()}):
+        term = _title_advanced_term(role)
+        if term and term not in seen:
+            seen.add(term)
+            terms.append(term)
+    return " | ".join(terms)
 
 
 def _read_quota(headers: Any) -> Dict[str, Optional[int]]:
@@ -607,7 +640,27 @@ def run_fantastic_jobs_acquisition(http_get: HttpGet = _http_get) -> SourceResul
             "/v1/active-ats", ats_params, ATS_SOURCE, config.FANTASTIC_JOBS_ATS_LIMIT,
             quota, http_get, seen_ids, metrics))
 
-        if title_targeting and config.FANTASTIC_JOBS_LINKEDIN_LIMIT > 0:
+        title_advanced_enabled = bool(getattr(config, "FANTASTIC_JOBS_TITLE_ADVANCED_ENABLED", False))
+        title_advanced_expr = _title_advanced_expression() if title_advanced_enabled else ""
+        if title_advanced_enabled and title_advanced_expr and config.FANTASTIC_JOBS_LINKEDIN_LIMIT > 0:
+            # ONE Boolean OR-expression over the whole role catalog (benchmark
+            # parity). The union is returned counting each job ONCE -> zero
+            # cross-query billing overlap, 118/118 coverage, ~all target-role.
+            # It is a single LinkedIn stream, so it reuses the single-stream
+            # date_posted cursor (no per-family state).
+            metrics["title_advanced"] = {"expression_chars": len(title_advanced_expr)}
+            jb_params = {"time_frame": config.FANTASTIC_JOBS_TIME_FRAME,
+                         "exclude_ats_duplicate": "true", "source": "linkedin",
+                         "title_advanced": title_advanced_expr}
+            jb_params.update(_jb_filter_params())
+            if cursor_date_lt:
+                jb_params["date_posted_lt"] = cursor_date_lt
+            remaining = config.FANTASTIC_JOBS_MAX_JOBS_PER_RUN - len(result.jobs)
+            result.jobs.extend(_fetch_segment(
+                "/v1/active-jb", jb_params, "fantastic_jobs_linkedin",
+                min(config.FANTASTIC_JOBS_LINKEDIN_LIMIT, remaining),
+                quota, http_get, seen_ids, metrics, accept_source=("linkedin",)))
+        elif title_targeting and config.FANTASTIC_JOBS_LINKEDIN_LIMIT > 0:
             # LinkedIn-only, but targeted per role FAMILY so ~all billed jobs are
             # on-portfolio (the broad feed is ~4% target-role). One global cap is
             # shared FAIRLY across families (deterministic order, per-family share)
