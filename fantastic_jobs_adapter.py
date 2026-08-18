@@ -283,6 +283,30 @@ def map_record(record: Dict[str, Any], source_label: str, seg: Optional[Dict[str
     return job, ""
 
 
+def _jb_filter_params() -> Dict[str, Any]:
+    """ICP filters pushed into the /v1/active-jb request.
+
+    Only parameters confirmed supported by the live Direct API contract are sent
+    (``location``, ``organization_headcount_gte``, ``ai_employment_type``,
+    ``organization_agency=exclude``). The API exposes no headcount-maximum
+    parameter, so the upper bound is enforced downstream (config.MAX_EMPLOYEES).
+    Values are configuration, never guessed at call time.
+    """
+    params: Dict[str, Any] = {}
+    location = str(getattr(config, "FANTASTIC_JOBS_LOCATION", "") or "").strip()
+    if location:
+        params["location"] = location
+    headcount_min = int(getattr(config, "FANTASTIC_JOBS_HEADCOUNT_MIN", 0) or 0)
+    if headcount_min > 0:
+        params["organization_headcount_gte"] = headcount_min
+    employment = str(getattr(config, "FANTASTIC_JOBS_AI_EMPLOYMENT_TYPE", "") or "").strip()
+    if employment:
+        params["ai_employment_type"] = employment
+    if getattr(config, "FANTASTIC_JOBS_EXCLUDE_AGENCY", True):
+        params["organization_agency"] = "exclude"
+    return params
+
+
 def _read_quota(headers: Any) -> Dict[str, Optional[int]]:
     def geti(name: str) -> Optional[int]:
         try:
@@ -499,6 +523,7 @@ def run_fantastic_jobs_acquisition(http_get: HttpGet = _http_get) -> SourceResul
             label, accept = JB_SEGMENTS[seg_key]
             jb_params = {"time_frame": config.FANTASTIC_JOBS_TIME_FRAME,
                          "exclude_ats_duplicate": "true", "source": seg_key}
+            jb_params.update(_jb_filter_params())
             remaining = config.FANTASTIC_JOBS_MAX_JOBS_PER_RUN - len(result.jobs)
             result.jobs.extend(_fetch_segment(
                 "/v1/active-jb", jb_params, label, min(cap, remaining),

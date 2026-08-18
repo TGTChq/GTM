@@ -599,6 +599,17 @@ FANTASTIC_JOBS_MIN_JOBS_QUOTA_REMAINING = _env_int("FANTASTIC_JOBS_MIN_JOBS_QUOT
 FANTASTIC_JOBS_MIN_REQUESTS_QUOTA_REMAINING = _env_int("FANTASTIC_JOBS_MIN_REQUESTS_QUOTA_REMAINING", 20)
 FANTASTIC_JOBS_FAIL_OPEN = _env_bool("FANTASTIC_JOBS_FAIL_OPEN", True)
 FANTASTIC_JOBS_DESCRIPTION_FORMAT = os.getenv("FANTASTIC_JOBS_DESCRIPTION_FORMAT", "text").strip().lower()
+# LinkedIn-scope ICP filters pushed INTO the Direct API request so out-of-scope
+# inventory is never billed or paged. Only parameters confirmed against the live
+# /v1/active-jb contract are sent: location, organization_headcount_gte,
+# ai_employment_type, organization_agency. The API has no headcount-maximum
+# parameter, so the upper bound (config.MAX_EMPLOYEES) stays a downstream gate.
+# Downstream TGTC gates remain the authoritative US/headcount/employment/staffing
+# filter (defense-in-depth); these only reduce wasted credits/pages.
+FANTASTIC_JOBS_LOCATION = os.getenv("FANTASTIC_JOBS_LOCATION", "United States").strip()
+FANTASTIC_JOBS_HEADCOUNT_MIN = _env_int("FANTASTIC_JOBS_HEADCOUNT_MIN", 25)
+FANTASTIC_JOBS_AI_EMPLOYMENT_TYPE = os.getenv("FANTASTIC_JOBS_AI_EMPLOYMENT_TYPE", "FULL_TIME").strip()
+FANTASTIC_JOBS_EXCLUDE_AGENCY = _env_bool("FANTASTIC_JOBS_EXCLUDE_AGENCY", True)
 
 
 def validate_fantastic_jobs_config() -> None:
