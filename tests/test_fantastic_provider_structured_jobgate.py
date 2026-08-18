@@ -66,6 +66,29 @@ class FantasticProviderStructuredJobGateTests(unittest.TestCase):
         d = self._resolve(_fantastic_job(_LONG_DESC))
         self.assertEqual(d.state, GateState.PASS)
 
+    def test_empty_description_fantastic_record_passes(self):
+        # The real-world case: the Fantastic Direct API omits long-form
+        # descriptions, so genuine LinkedIn records arrive with an EMPTY
+        # description. Trust is the signed structured fields, so it still passes.
+        raw = {
+            "id": "555", "title": "Chief Information Officer",
+            "organization": "Contoso Health", "domain_derived": "contosohealth.com",
+            "org_linkedin_website": "contosohealth.com",
+            "url": "https://www.linkedin.com/jobs/view/555", "source": "linkedin",
+            "employment_type": ["FULL_TIME"], "date_posted": "2026-08-17T12:00:00Z",
+            "countries_derived": ["United States"], "locations_derived": ["Boston, MA, US"],
+            "location_type": "onsite", "org_linkedin_headcount": 300,
+            # no description_text / description
+        }
+        job, _ = map_record(raw, "fantastic_linkedin")
+        self.assertEqual(job["job_description"], "")
+        annotate_pre_enrichment_assessment(job)
+        d = self._resolve(job)
+        self.assertEqual(d.state, GateState.PASS)
+        src = (d.metadata or {}).get("source") or {}
+        self.assertEqual(src.get("state"), "ACTIVE_PROVIDER_STRUCTURED")
+        self.assertFalse(src.get("official"))
+
     def test_relaxation_disabled_reverts_to_strict_bar(self):
         with patch.object(config, "JOB_SOURCE_FANTASTIC_PROVIDER_STRUCTURED_ENABLED", False):
             d = self._resolve(_fantastic_job(_SHORT_DESC))

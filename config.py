@@ -305,8 +305,13 @@ JOB_SOURCE_PROVIDER_STRUCTURED_MIN_DESCRIPTION_CHARS = _env_int(
 JOB_SOURCE_FANTASTIC_PROVIDER_STRUCTURED_ENABLED = _env_bool(
     "JOB_SOURCE_FANTASTIC_PROVIDER_STRUCTURED_ENABLED", True
 )
+# Default 0: the Fantastic Direct API structurally OMITS long-form descriptions
+# (only AI-derived/structured fields are returned), so the record's trust basis is
+# its signed provider fields (title, employer, FULL_TIME, US, posted date, apply
+# URL) -- not description length. Requiring a description would re-block exactly
+# the records this fix targets. Set > 0 only if a floor is later desired.
 JOB_SOURCE_FANTASTIC_PROVIDER_STRUCTURED_MIN_DESCRIPTION_CHARS = _env_int(
-    "JOB_SOURCE_FANTASTIC_PROVIDER_STRUCTURED_MIN_DESCRIPTION_CHARS", 120
+    "JOB_SOURCE_FANTASTIC_PROVIDER_STRUCTURED_MIN_DESCRIPTION_CHARS", 0
 )
 JOB_SOURCE_CACHE_TTL_HOURS = _env_int("JOB_SOURCE_CACHE_TTL_HOURS", 24)
 JOB_SOURCE_MAX_ACTIVE_AGE_DAYS = _env_int("JOB_SOURCE_MAX_ACTIVE_AGE_DAYS", 45)

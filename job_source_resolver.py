@@ -951,8 +951,10 @@ class JobSourceResolver:
             and getattr(config, "JOB_SOURCE_FANTASTIC_PROVIDER_STRUCTURED_ENABLED", True)
         )
         min_description = (
-            max(1, int(getattr(
-                config, "JOB_SOURCE_FANTASTIC_PROVIDER_STRUCTURED_MIN_DESCRIPTION_CHARS", 120)))
+            # The Fantastic Direct API omits long-form descriptions, so a genuine
+            # record may legitimately carry an empty one; the floor defaults to 0.
+            max(0, int(getattr(
+                config, "JOB_SOURCE_FANTASTIC_PROVIDER_STRUCTURED_MIN_DESCRIPTION_CHARS", 0)))
             if is_fantastic_direct
             else max(500, int(config.JOB_SOURCE_PROVIDER_STRUCTURED_MIN_DESCRIPTION_CHARS))
         )
