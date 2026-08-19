@@ -682,6 +682,24 @@ def push_leads(jobs: List[Dict], batch_size: int = 10,
             continue
         to_create.append(job)
 
+    # Optional send-safe-only write policy (config.AIRTABLE_WRITE_SEND_SAFE_ONLY):
+    # create ONLY rows that are factually outbound-eligible -- send_safe_facts PASS,
+    # which is disposition-label-INDEPENDENT (never Final Decision alone). Non-send-
+    # safe candidates (held / no-contact / unusable email / unsafe identity /
+    # unresolved role / otherwise non-actionable) are NOT written; they remain
+    # preserved in the run's enrichment artifacts and are surfaced here as a metric.
+    # Approved Sync is untouched -- it independently re-runs send_safe_facts before
+    # any Instantly enrollment, so this policy never relaxes a downstream safety gate.
+    not_written_not_send_safe: List[str] = []
+    if config.AIRTABLE_WRITE_SEND_SAFE_ONLY and to_create:
+        gated: List[Dict] = []
+        for job in to_create:
+            if send_safe_facts(_job_to_fields(job))[0]:
+                gated.append(job)
+            else:
+                not_written_not_send_safe.append(job.get("lead_key"))
+        to_create = gated
+
     # Repair blank generated fields only. Never overwrite reviewer-edited values
     # or reset Status on an existing record.
     to_update: List[Dict] = []
@@ -820,6 +838,10 @@ def push_leads(jobs: List[Dict], batch_size: int = 10,
         # offending field on the next run instead of being an opaque status.
         "error_details": error_details,
         "skipped_no_contact": skipped_no_contact,
+        # Candidates withheld by AIRTABLE_WRITE_SEND_SAFE_ONLY (not send-safe); they
+        # are preserved in run artifacts/metrics, never written as Airtable leads.
+        "not_written_not_send_safe": len(not_written_not_send_safe),
+        "not_written_not_send_safe_lead_keys": not_written_not_send_safe,
         "reviewable": len(unique_by_key),
         "final_pass": sum(job.get("_final_state") == "FINAL_PASS" for job in unique_by_key.values()),
         "needs_check": sum(

@@ -945,6 +945,15 @@ AIRTABLE_SUPPRESS_ACCOUNT_LEVEL = _env_bool("AIRTABLE_SUPPRESS_ACCOUNT_LEVEL", F
 # level follows AIRTABLE_SUPPRESS_ACCOUNT_LEVEL. Default OFF -- ON for the
 # Fantastic production lane via env.
 PRE_APOLLO_EXISTING_DEDUPE = _env_bool("PRE_APOLLO_EXISTING_DEDUPE", False)
+# Send-safe-only Airtable write policy. When ON, push_leads creates a lead row
+# ONLY when send_safe_facts() passes (disposition-label-INDEPENDENT; never Final
+# Decision alone) -- so Airtable holds usable, outbound-eligible leads rather than
+# a review dump. Non-send-safe candidates (held / no-contact / unusable email /
+# unsafe identity / unresolved role / otherwise non-actionable) are withheld from
+# Airtable but preserved in run artifacts and surfaced as metrics. Approved Sync is
+# untouched: it independently re-runs send_safe_facts before Instantly enrollment.
+# Default OFF globally -- intended ON for the Fantastic production lane via env.
+AIRTABLE_WRITE_SEND_SAFE_ONLY = _env_bool("AIRTABLE_WRITE_SEND_SAFE_ONLY", False)
 AIRTABLE_STATUS_PENDING = os.getenv("AIRTABLE_STATUS_PENDING", "Pending")
 AIRTABLE_STATUS_APPROVED = os.getenv("AIRTABLE_STATUS_APPROVED", "Approved")
 AIRTABLE_STATUS_REJECTED = os.getenv("AIRTABLE_STATUS_REJECTED", "Rejected")
