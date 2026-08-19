@@ -281,6 +281,44 @@ def pick_best_candidate(people: List[Dict], target_titles: List[str]) -> Optiona
     return ranked[0] if ranked else None
 
 
+def _recover_org_via_domain_corroboration(org, input_domain, company_name, primary, stats):
+    """Mechanism B (config.HM_DOMAIN_CORROBORATION_RECOVERY). When org enrichment came
+    back untrusted because Apollo resolved a DIFFERENT organization domain, corroborate
+    that alternate against the source identity (name + LinkedIn) and, only when it
+    strongly proves the same employer/rebrand/first-party identity, re-enrich on the
+    recovered domain so the company can be searched instead of dropped. Returns the
+    (possibly recovered) org and the RecoveryDecision (or None when not attempted).
+    Canonical/source identity is preserved by the caller as separate provenance."""
+    import hm_domain_recovery
+    if org.found or not config.HM_DOMAIN_CORROBORATION_RECOVERY:
+        return org, None
+    raw = org.raw or {}
+    candidate_domain = raw.get("primary_domain") or raw.get("domain") or raw.get("website_url") or ""
+    candidate_name = raw.get("name") or ""
+    if not candidate_domain:
+        return org, None
+    stats["hm_domain_recovery_attempted"] += 1
+    decision = hm_domain_recovery.corroborate_recovery_domain(
+        source_domain=input_domain, source_name=company_name,
+        candidate_domain=candidate_domain, candidate_name=candidate_name,
+        source_linkedin=(primary.get("org_linkedin_slug")
+                         or primary.get("org_linkedin_website") or ""),
+        candidate_linkedin=raw.get("linkedin_url") or "")
+    if not decision.accepted:
+        stats["hm_domain_recovery_rejected"] += 1
+        stats[f"hm_domain_recovery_reject__{decision.reason}"] += 1
+        return org, decision
+    recovered = apollo.enrich_organization(
+        domain=decision.recovered_domain, name=company_name,
+        website=f"https://{decision.recovered_domain}")
+    if not recovered.found:
+        stats["hm_domain_recovery_reenrich_untrusted"] += 1
+        return org, decision
+    stats["hm_domain_recovery_accepted"] += 1
+    stats[f"hm_domain_recovery_accept__{decision.reason}"] += 1
+    return recovered, decision
+
+
 def _hm_second_pass(bucket_jobs, org, search_domain, target_titles,
                     ranked_candidates, people, stats):
     """Quality-preserving HM recovery (config.HM_SECOND_PASS_TITLE_BROADENING). When
@@ -859,6 +897,10 @@ def _process_company_strict(company_jobs: List[Dict]) -> Tuple[List[Dict], Dict]
         domain=input_domain, name=company_name, website=enrichment_website
     )
     time.sleep(config.APOLLO_RATE_LIMIT_DELAY)
+    # Mechanism B: corroborated employer-domain recovery. Only re-enriches on a
+    # strongly-corroborated same-employer alternate domain; otherwise org is unchanged.
+    org, _domain_recovery = _recover_org_via_domain_corroboration(
+        org, input_domain, company_name, first, stats)
     founder_allowed = founder_allowed_for_employee_count(org.employee_count)
 
     account_decision = AccountGate().evaluate(
@@ -1321,6 +1363,25 @@ def _process_company_strict(company_jobs: List[Dict]) -> Tuple[List[Dict], Dict]
         stats["row2_companies_with_untried_candidate"] += 1
     if company_had_person_match_attempt:
         stats["row2_companies_with_person_match_attempt"] += 1
+
+    # Mechanism B provenance + observability: when this company was searched via a
+    # corroborated recovery domain, keep source/recovered identity as SEPARATE fields
+    # (canonical identity is never overwritten) and count the recovery funnel.
+    if _domain_recovery is not None and _domain_recovery.accepted:
+        for lead in leads:
+            lead["_hm_domain_recovered"] = True
+            lead["_hm_recovery_reason"] = _domain_recovery.reason
+            lead["_hm_recovery_source_domain"] = str(_domain_recovery.evidence.get("source_domain") or "")
+            lead["_hm_recovery_domain"] = _domain_recovery.recovered_domain
+            state = str(lead.get("_step3_status") or "")
+            if state == "found":
+                stats["hm_domain_recovery_hm_found"] += 1
+                if str(lead.get("apollo_email_status") or "").lower() == "verified":
+                    stats["hm_domain_recovery_verified_contact"] += 1
+                if str(lead.get("_final_state") or "") == "FINAL_PASS":
+                    stats["hm_domain_recovery_send_safe"] += 1
+        if company_had_person_returned:
+            stats["hm_domain_recovery_people_found"] += 1
 
     return leads, dict(stats)
 

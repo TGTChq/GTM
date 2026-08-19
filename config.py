@@ -980,6 +980,17 @@ AIRTABLE_WRITE_SEND_SAFE_ONLY = _env_bool("AIRTABLE_WRITE_SEND_SAFE_ONLY", False
 # verified-email requirement -- the recovered person still passes every downstream
 # gate. Default OFF.
 HM_SECOND_PASS_TITLE_BROADENING = _env_bool("HM_SECOND_PASS_TITLE_BROADENING", False)
+# Employer-domain corroboration/recovery: when the normal search domain yields zero
+# Apollo people (or Apollo resolved a DIFFERENT organization domain), allow ONE
+# recovery HM search on that alternate domain -- but ONLY when strong structured
+# evidence (matching LinkedIn org identity, or exact company-name match with a
+# name-consistent first-party domain) proves it is the SAME employer / legitimate
+# rebrand / first-party identity. Fail-closed on any name conflict, staffing/client
+# ambiguity, or merely-speculative relationship. Canonical/source identity is
+# preserved separately; recovered contacts still pass every downstream gate
+# (bucket/title, Apollo-verified email, displays, holds, fingerprint, send_safe_facts,
+# Airtable idempotency, Approved-Sync fail-close). Default OFF.
+HM_DOMAIN_CORROBORATION_RECOVERY = _env_bool("HM_DOMAIN_CORROBORATION_RECOVERY", False)
 AIRTABLE_STATUS_PENDING = os.getenv("AIRTABLE_STATUS_PENDING", "Pending")
 AIRTABLE_STATUS_APPROVED = os.getenv("AIRTABLE_STATUS_APPROVED", "Approved")
 AIRTABLE_STATUS_REJECTED = os.getenv("AIRTABLE_STATUS_REJECTED", "Rejected")
