@@ -108,7 +108,7 @@ class ApolloExhaustionMidRunTests(unittest.TestCase):
                     Disposition.FINAL_PASS, ReasonCode.OK, contact_key="Acme|hm@acme.com|finance")
         captured = {}
 
-        def fake_push(rows, batch_size=10):
+        def fake_push(rows, batch_size=10, existing=None):
             captured["rows"] = rows
             keys = [r.get("lead_key") for r in rows]
             return {"created": len(rows), "failed": 0, "skipped_existing": 0,

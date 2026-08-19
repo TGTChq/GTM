@@ -1464,6 +1464,7 @@ def run_hiring_manager_identification(
     target_final_pass_leads: Optional[int] = None,
     max_eligible_companies: Optional[int] = None,
     exclude_company_keys: Optional[set[str]] = None,
+    exclude_company_function_keys: Optional[set[str]] = None,
     output_suffix: Optional[str] = None,
 ) -> Step3Result:
     """Enrich prequalified accounts under the applicable daily target.
@@ -1498,7 +1499,22 @@ def run_hiring_manager_identification(
 
     jobs_by_company: Dict[str, List[Dict]] = defaultdict(list)
     excluded_company_keys = {str(value) for value in (exclude_company_keys or set()) if value}
+    # FUNCTION-level pre-Apollo exclusion: prefixed ``domain:x|bucket:y`` /
+    # ``name:x|bucket:y`` keys of Airtable's already-active company+function leads.
+    # A match removes ONLY the same company+function candidate (its own bucket),
+    # never the whole company -- so a DIFFERENT function of the same company still
+    # proceeds. Keys are derived by airtable_client's own helper, so this skip and
+    # the delivery-side suppression share one derivation and cannot disagree.
+    excluded_company_function_keys = {
+        str(value) for value in (exclude_company_function_keys or set()) if value
+    }
+    _af_keys = None
+    if excluded_company_function_keys:
+        import airtable_client as _af
+        _af_keys = _af.company_function_keys_for_job
     skipped_existing_company_keys: set[str] = set()
+    skipped_existing_function_keys: set[str] = set()
+    skipped_existing_function_jobs = 0
     skipped_existing_job_rows: List[Dict] = []
     skipped_existing_jobs = 0
     # Company-level CRM / active-pipeline exclusion. It runs HERE -- during
@@ -1519,6 +1535,17 @@ def run_hiring_manager_identification(
             skipped_existing_job_rows.append(job)
             skipped_existing_jobs += 1
             continue
+        # Function-level pre-Apollo skip: only this company+function candidate is
+        # removed (multi-function preserved). Fail-open: a job with no resolvable
+        # function key (no bucket / no domain+name) yields an empty set and is
+        # never suppressed here -- the delivery backstop still applies.
+        if _af_keys is not None:
+            job_function_keys = _af_keys(job)
+            if job_function_keys and (job_function_keys & excluded_company_function_keys):
+                skipped_existing_function_keys |= job_function_keys
+                skipped_existing_job_rows.append(job)
+                skipped_existing_function_jobs += 1
+                continue
         # The decision is ACCOUNT-WIDE, never function-specific: one CRM match
         # removes every posting and therefore every function bucket of that
         # company, including buckets already grouped from earlier postings.
@@ -1545,8 +1572,16 @@ def run_hiring_manager_identification(
     total_stats = defaultdict(int)
     total_stats["topup_skipped_previously_considered_companies"] = len(skipped_existing_company_keys)
     total_stats["topup_skipped_previously_considered_jobs"] = skipped_existing_jobs
+    total_stats["preapollo_skipped_existing_function_keys"] = len(skipped_existing_function_keys)
+    total_stats["preapollo_skipped_existing_function_jobs"] = skipped_existing_function_jobs
     total_stats["crm_excluded_companies"] = len(crm_excluded_company_keys)
     total_stats["crm_excluded_jobs"] = crm_excluded_jobs
+    if skipped_existing_function_jobs:
+        logger.info(
+            "Pre-Apollo existing company+function skip removed %d job(s) across %d "
+            "function key(s) before any Apollo call",
+            skipped_existing_function_jobs, len(skipped_existing_function_keys),
+        )
     companies_considered = 0
     eligible_companies = 0
     excluded_companies = 0

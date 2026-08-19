@@ -295,7 +295,8 @@ class RealEnrichmentStage:
         self.workdir = Path(workdir or tempfile.mkdtemp())
 
     def run(self, opportunities: List[Dict[str, Any]],
-            *, exclude_company_keys=None) -> EnrichmentReport:
+            *, exclude_company_keys=None,
+            exclude_company_function_keys=None) -> EnrichmentReport:
         from qualification_pipeline import run_precontact_qualification
         import hiring_manager
 
@@ -319,7 +320,8 @@ class RealEnrichmentStage:
             #    already prevents re-processing the same opportunity.
             step3 = hiring_manager.run_hiring_manager_identification(
                 qual.output_path, target_final_pass_leads=self.target_final_pass,
-                exclude_company_keys=exclude_company_keys)
+                exclude_company_keys=exclude_company_keys,
+                exclude_company_function_keys=exclude_company_function_keys)
 
         leads = self._load_leads(step3.output_path)
         report = self._to_report(qual, step3, leads)
@@ -601,7 +603,7 @@ class RealDelivery:
         return rows
 
     def deliver(self, leads: List[Lead], *, run_id: str = "", source: str = "",
-                known_delivered=None) -> RealDeliveryReport:
+                known_delivered=None, existing=None) -> RealDeliveryReport:
         known_delivered = {str(k) for k in (known_delivered or set())}
         rep = RealDeliveryReport(entered=len(leads))
         by = {d: [l for l in leads if l.disposition is d] for d in Disposition}
@@ -627,7 +629,8 @@ class RealDelivery:
         rep.skipped_already_delivered = len(candidates) - len(submit)
 
         import airtable_client
-        result = airtable_client.push_leads(self._rows(submit, run_id=run_id, source=source))
+        result = airtable_client.push_leads(
+            self._rows(submit, run_id=run_id, source=source), existing=existing)
         rep.created = int(result.get("created", 0))
         rep.failed = int(result.get("failed", 0))
         rep.skipped_existing = int(result.get("skipped_existing", 0))

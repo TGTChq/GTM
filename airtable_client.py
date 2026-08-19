@@ -545,16 +545,11 @@ def _active_existing_company_keys(existing: Dict[str, Dict]) -> Set[str]:
     return keys
 
 
-def get_active_existing_company_keys_for_pipeline() -> Set[str]:
-    """Return company keys in the same format used by hiring_manager.
-
-    The daily target is a target of *new* Airtable accounts.  Suppressing a
-    company only after reaching 30 upstream can leave fewer than 30 created
-    rows, so active Airtable accounts are excluded before Apollo and before the
-    FINAL_PASS counter is evaluated.
-    """
-    validate_preflight()
-    existing = _get_existing_leads()
+def _active_existing_company_bare_keys(existing: Dict[str, Dict]) -> Set[str]:
+    """Active-company keys in the BARE (unprefixed) ``domain``/``name`` format that
+    hiring_manager's ``company_key_for_job`` / ``exclude_company_keys`` compares
+    against -- distinct from the prefixed ``domain:``/``name:`` account keys used by
+    delivery. Rejected/Error stay retryable, exactly as the other active-key paths."""
     result: Set[str] = set()
     retryable_statuses = {
         str(config.AIRTABLE_STATUS_ERROR).strip().lower(),
@@ -574,6 +569,50 @@ def get_active_existing_company_keys_for_pipeline() -> Set[str]:
     return result
 
 
+def get_active_existing_company_keys_for_pipeline() -> Set[str]:
+    """Return company keys in the same format used by hiring_manager.
+
+    The daily target is a target of *new* Airtable accounts.  Suppressing a
+    company only after reaching 30 upstream can leave fewer than 30 created
+    rows, so active Airtable accounts are excluded before Apollo and before the
+    FINAL_PASS counter is evaluated.
+    """
+    validate_preflight()
+    return _active_existing_company_bare_keys(_get_existing_leads())
+
+
+def snapshot_existing_identity() -> Dict[str, object]:
+    """Read Airtable existing-lead identity state ONCE (a pure GET) and derive
+    every suppression key set the run needs from that single snapshot:
+
+      * ``existing`` -- records-by-Lead-Key, handed straight to :func:`push_leads`
+        so delivery does NOT read Airtable a second time;
+      * ``company_function_keys`` -- prefixed ``domain:x|bucket:y`` / ``name:x|bucket:y``
+        keys for the FUNCTION-level pre-Apollo skip (multi-function preserving);
+      * ``company_account_keys`` -- prefixed ``domain:x`` / ``name:x`` keys (delivery's
+        account path);
+      * ``company_bare_keys`` -- unprefixed ``domain``/``name`` keys for hiring_manager's
+        account-level ``exclude_company_keys``.
+
+    All key sets are derived with the exact helpers delivery uses, so a pre-Apollo
+    decision made from this snapshot equals the delivery decision on the same row."""
+    validate_preflight()
+    existing = _get_existing_leads()
+    return {
+        "existing": existing,
+        "company_function_keys": _active_existing_company_function_keys(existing),
+        "company_account_keys": _active_existing_company_keys(existing),
+        "company_bare_keys": _active_existing_company_bare_keys(existing),
+    }
+
+
+def company_function_keys_for_job(job: Dict) -> Set[str]:
+    """Public wrapper: the prefixed ``domain:x|bucket:y`` / ``name:x|bucket:y`` keys for
+    one candidate, identical to what delivery computes -- so the pre-Apollo skip and
+    the delivery suppression share one key derivation and can never disagree."""
+    return _company_function_keys_from_job(job)
+
+
 def _ensure_job_signal(job: Dict) -> Dict:
     required = ("job_freshness", "job_url_status", "job_url_selected")
     if all(job.get(key) not in (None, "") for key in required):
@@ -581,7 +620,8 @@ def _ensure_job_signal(job: Dict) -> Dict:
     return annotate_job(job, probe_url=True)
 
 
-def push_leads(jobs: List[Dict], batch_size: int = 10) -> Dict:
+def push_leads(jobs: List[Dict], batch_size: int = 10,
+               existing: Optional[Dict[str, Dict]] = None) -> Dict:
     validate_preflight()
     strict_mode = any(job.get("_final_state") for job in jobs)
     if strict_mode:
@@ -601,7 +641,11 @@ def push_leads(jobs: List[Dict], batch_size: int = 10) -> Dict:
 
     # One contact/company/bucket record only, even if upstream data is duplicated.
     unique_by_key = {job["lead_key"]: job for job in reviewable}
-    existing = _get_existing_leads()
+    # Reuse a run-level snapshot when the orchestrator already read it (pre-Apollo
+    # dedupe path) so delivery never issues a second full-table read; otherwise
+    # read it here exactly as before.
+    if existing is None:
+        existing = _get_existing_leads()
 
     existing_keys = [key for key in unique_by_key if key in existing]
     # Two INDEPENDENT suppression tiers (see config.AIRTABLE_SUPPRESS_* docs):

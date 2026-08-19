@@ -151,7 +151,7 @@ class ReviewStagingDataPreservationTests(unittest.TestCase):
         report = self._report()
         captured = {}
 
-        def fake_push(rows):
+        def fake_push(rows, batch_size=10, existing=None):
             captured["rows"] = rows
             return {"created": len(rows), "failed": 0, "skipped_existing": 0,
                     "persisted_lead_keys": [r["lead_key"] for r in rows],

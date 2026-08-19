@@ -17,6 +17,8 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Sequence
 
+import config
+
 from retrieval_measurement.accounting import posting_identity
 
 from orchestrator.capacity import build_capacity_report
@@ -151,6 +153,22 @@ class Orchestrator:
             except Exception:  # noqa: BLE001
                 pass
 
+    def _existing_identity_snapshot(self) -> Optional[Dict[str, Any]]:
+        """Read Airtable existing-lead identity ONCE for pre-Apollo dedupe.
+
+        Returns ``None`` (feature off, or any read failure) so the caller proceeds
+        with no pre-suppression -- delivery's suppression is the authoritative
+        backstop, so a snapshot failure never blocks a run or drops a lead."""
+        if not config.PRE_APOLLO_EXISTING_DEDUPE:
+            return None
+        try:
+            import airtable_client
+            return airtable_client.snapshot_existing_identity()
+        except Exception as exc:  # noqa: BLE001 - fail-open on any snapshot error
+            print(f"[pre-apollo-dedupe] existing-identity snapshot unavailable; "
+                  f"proceeding without pre-suppression (delivery backstop intact): {exc}")
+            return None
+
     def _run_body(self, plan: OrchestratorPlan, *, resume: bool = False,
                   lock: Optional[RunLock] = None) -> Dict[str, Any]:
         started = time.perf_counter()
@@ -176,7 +194,25 @@ class Orchestrator:
         delivery = None
         capacity = None
         if self.ctx.policy.allow_enrichment:
-            enrichment = plan.enrichment_engine.run(opportunities)
+            # Pre-Apollo existing-lead dedupe (config.PRE_APOLLO_EXISTING_DEDUPE):
+            # snapshot Airtable identity ONCE, feed the function/account exclusion
+            # sets into enrichment BEFORE any Apollo spend, and hand the same
+            # snapshot to delivery so it never reads Airtable a second time. The
+            # feature is fully fail-open: any snapshot failure proceeds with no
+            # pre-suppression, and delivery's own suppression remains the backstop.
+            existing_snapshot = self._existing_identity_snapshot()
+            enr_kwargs: Dict[str, Any] = {}
+            deliver_kwargs: Dict[str, Any] = {}
+            if existing_snapshot is not None:
+                if config.AIRTABLE_SUPPRESS_EXISTING_COMPANY_FUNCTION:
+                    enr_kwargs["exclude_company_function_keys"] = (
+                        existing_snapshot["company_function_keys"])
+                if config.AIRTABLE_SUPPRESS_ACCOUNT_LEVEL:
+                    enr_kwargs["exclude_company_keys"] = (
+                        existing_snapshot["company_bare_keys"])
+                deliver_kwargs["existing"] = existing_snapshot["existing"]
+
+            enrichment = plan.enrichment_engine.run(opportunities, **enr_kwargs)
             for st in enrichment.stages:
                 report.add(st)
             report.census(enrichment.dispositions())
@@ -189,7 +225,7 @@ class Orchestrator:
 
             delivery = plan.delivery_manager.deliver(
                 enrichment.leads, run_id=self.ctx.run_id,
-                known_delivered=supp.delivered_leads())
+                known_delivered=supp.delivered_leads(), **deliver_kwargs)
             report.set_unit("delivered_rows", delivery.created)
             report.set_unit("enrolled_contacts", delivery.enrolled)
 

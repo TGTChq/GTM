@@ -934,6 +934,17 @@ AIRTABLE_SUPPRESS_EXISTING_COMPANY_FUNCTION = _env_bool(
 # flag and OFF by default so distinct functions are preserved unless an operator
 # deliberately opts into a one-account-at-a-time policy.
 AIRTABLE_SUPPRESS_ACCOUNT_LEVEL = _env_bool("AIRTABLE_SUPPRESS_ACCOUNT_LEVEL", False)
+# Pre-Apollo existing-lead dedupe. When ON, the orchestrator snapshots Airtable
+# existing-lead identity ONCE at run start and suppresses candidates whose
+# canonical company x role-bucket (function) already has an active lead BEFORE
+# any Apollo org-enrich / people-search spend -- reusing the exact identity
+# semantics and the same snapshot that delivery uses (no second Airtable read).
+# Delivery-side idempotency/suppression remains the authoritative final backstop.
+# Governed alongside the two AIRTABLE_SUPPRESS_* flags above: function-level
+# pre-suppression follows AIRTABLE_SUPPRESS_EXISTING_COMPANY_FUNCTION, account-
+# level follows AIRTABLE_SUPPRESS_ACCOUNT_LEVEL. Default OFF -- ON for the
+# Fantastic production lane via env.
+PRE_APOLLO_EXISTING_DEDUPE = _env_bool("PRE_APOLLO_EXISTING_DEDUPE", False)
 AIRTABLE_STATUS_PENDING = os.getenv("AIRTABLE_STATUS_PENDING", "Pending")
 AIRTABLE_STATUS_APPROVED = os.getenv("AIRTABLE_STATUS_APPROVED", "Approved")
 AIRTABLE_STATUS_REJECTED = os.getenv("AIRTABLE_STATUS_REJECTED", "Rejected")
