@@ -12,6 +12,20 @@ from unittest import mock
 
 import config
 import fantastic_jobs_adapter as fja
+
+from datetime import datetime as _dtclass, timezone as _tz
+
+
+class _FrozenDT(_dtclass):
+    """Fixed .now() so the stale-window check uses a deterministic clock; the
+    date-anchored fixtures below stay inside the window regardless of the real
+    date. fromisoformat and everything else are inherited; production is untouched."""
+    _fixed = _dtclass(2026, 8, 18, 6, 0, 0, tzinfo=_tz.utc)
+
+    @classmethod
+    def now(cls, tz=None):
+        return cls._fixed if tz is None else cls._fixed.astimezone(tz)
+
 from role_catalog import DEFAULT_ACQUISITION_ROLES
 
 
@@ -53,7 +67,7 @@ def _run(http_get, *, cap=50, advanced=True, targeting=False, expression="",
         FANTASTIC_JOBS_CONTINUATION_ENABLED=continuation,
         FANTASTIC_JOBS_CONTINUATION_STATE_PATH=state_path or "",
     )
-    with mock.patch.multiple(config, **base):
+    with mock.patch.multiple(config, **base), mock.patch.object(fja, "datetime", _FrozenDT):
         return fja.run_fantastic_jobs_acquisition(http_get=http_get)
 
 

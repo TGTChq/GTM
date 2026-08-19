@@ -17,8 +17,33 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+import contextlib
+from datetime import datetime as _dtclass, timezone as _tz
+
 import config
 import fantastic_jobs_adapter as fja
+
+
+class _FrozenDT(_dtclass):
+    """datetime whose .now() is fixed, so the stale-window check is evaluated
+    against a deterministic clock instead of the wall clock (fromisoformat and all
+    other behavior inherited unchanged). Keeps date-anchored fixtures stable
+    regardless of the real date; production logic is untouched."""
+    _fixed = _dtclass(2026, 8, 18, 4, 0, 0, tzinfo=_tz.utc)
+
+    @classmethod
+    def now(cls, tz=None):
+        return cls._fixed if tz is None else cls._fixed.astimezone(tz)
+
+
+@contextlib.contextmanager
+def _frozen_clock(now=None):
+    if now is None:
+        yield
+        return
+    _FrozenDT._fixed = now
+    with mock.patch.object(fja, "datetime", _FrozenDT):
+        yield
 
 
 class _Resp:
@@ -48,7 +73,7 @@ def _feed(records):
     return http_get
 
 
-def _run(http_get, state_path, cap=3, enabled=True, time_frame="24h"):
+def _run(http_get, state_path, cap=3, enabled=True, time_frame="24h", now=None):
     base = dict(
         FANTASTIC_JOBS_ENABLED=True, FANTASTIC_JOBS_API_KEY="k",
         FANTASTIC_JOBS_BASE_URL="https://data.fantastic.jobs",
@@ -68,12 +93,14 @@ def _run(http_get, state_path, cap=3, enabled=True, time_frame="24h"):
     def wrapped(url, headers, params, timeout):
         captured.append(dict(params))
         return orig(url, headers, params, timeout)
-    with mock.patch.multiple(config, **base):
+    with mock.patch.multiple(config, **base), _frozen_clock(now):
         res = fja.run_fantastic_jobs_acquisition(http_get=wrapped)
     return res, captured
 
 
-# distinct-second feed, newest first
+# distinct-second feed, newest first. Anchored to a fixed date, so date-anchored
+# tests freeze the clock (_FIXED_NOW) to keep these fixtures inside the window.
+_FIXED_NOW = _dtclass(2026, 8, 18, 4, 0, 0, tzinfo=_tz.utc)
 D = {n: f"2026-08-18T03:00:{n:02d}" for n in range(1, 21)}
 FEED = [_rec(1000 + n, D[n]) for n in range(20, 0, -1)]  # id 1020@:20 (newest) .. 1001@:01
 
@@ -101,9 +128,9 @@ class FantasticContinuationTests(unittest.TestCase):
     def test_resume_sends_cursor_dedupes_boundary_and_never_overlaps(self):
         with tempfile.TemporaryDirectory() as tmp:
             sp = str(Path(tmp) / "cont.json")
-            r1, _ = _run(_feed(FEED), sp, cap=3)
+            r1, _ = _run(_feed(FEED), sp, cap=3, now=_FIXED_NOW)
             first_ids = {j["_fantastic_internal_id"] for j in r1.jobs}          # {1020,1019,1018}
-            r2, captured2 = _run(_feed(FEED), sp, cap=3)
+            r2, captured2 = _run(_feed(FEED), sp, cap=3, now=_FIXED_NOW)
             # resumed with date_posted_lt = cursor(:18) + 1s = :19
             self.assertTrue(any(p.get("date_posted_lt") == D[19] for p in captured2))
             second_ids = {j["_fantastic_internal_id"] for j in r2.jobs}
@@ -117,10 +144,10 @@ class FantasticContinuationTests(unittest.TestCase):
     def test_new_jobs_at_top_between_runs_are_not_skipped_and_deferred(self):
         with tempfile.TemporaryDirectory() as tmp:
             sp = str(Path(tmp) / "cont.json")
-            r1, _ = _run(_feed(FEED), sp, cap=3)                                # acquires :20,:19,:18
+            r1, _ = _run(_feed(FEED), sp, cap=3, now=_FIXED_NOW)                # acquires :20,:19,:18
             # New jobs enter the TOP (newer than any prior) between runs.
             newer = [_rec(2001, "2026-08-18T03:05:00"), _rec(2002, "2026-08-18T03:06:00")]
-            r2, _ = _run(_feed(newer + FEED), sp, cap=3)
+            r2, _ = _run(_feed(newer + FEED), sp, cap=3, now=_FIXED_NOW)
             second_ids = {j["_fantastic_internal_id"] for j in r2.jobs}
             # The older-window resume must NOT grab the new top jobs...
             self.assertNotIn("2001", second_ids)
@@ -246,7 +273,7 @@ class FantasticContinuationModeMatchTests(unittest.TestCase):
             FANTASTIC_JOBS_TITLE_ADVANCED_ENABLED=True,   # both on (production config)
             FANTASTIC_JOBS_TITLE_TARGETING_ENABLED=True,
         )
-        with mock.patch.multiple(config, **base):
+        with mock.patch.multiple(config, **base), _frozen_clock(_FIXED_NOW):
             return fja.run_fantastic_jobs_acquisition(http_get=_feed(FEED))
 
     def test_title_advanced_precedence_persists_single_stream_cursor(self):
