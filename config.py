@@ -626,6 +626,23 @@ FANTASTIC_JOBS_LINKEDIN_LIMIT = _env_int("FANTASTIC_JOBS_LINKEDIN_LIMIT", 10)
 FANTASTIC_JOBS_MIN_JOBS_QUOTA_REMAINING = _env_int("FANTASTIC_JOBS_MIN_JOBS_QUOTA_REMAINING", 90)
 FANTASTIC_JOBS_MIN_REQUESTS_QUOTA_REMAINING = _env_int("FANTASTIC_JOBS_MIN_REQUESTS_QUOTA_REMAINING", 20)
 FANTASTIC_JOBS_FAIL_OPEN = _env_bool("FANTASTIC_JOBS_FAIL_OPEN", True)
+# --- Adaptive net-new top-up (COMMIT 3) -----------------------------------
+# Three DISTINCT concepts (see orchestrator/topup.py); do NOT conflate with the
+# --target CLI arg, which stays the FINAL_PASS reporting/SLA semantic.
+#   B) Production yield target: desired NET-NEW + send_safe_facts-PASS + actually-
+#      created-in-Airtable leads. 0 (default) = OFF => the pipeline runs its normal
+#      single pass. When > 0, the orchestrator keeps acquiring fresh continuation
+#      slices to REPLACE duplicates / existing rows / cheap rejects / non-send-safe
+#      results until the target is met or a hard boundary is reached.
+NET_NEW_SEND_SAFE_TARGET = _env_int("NET_NEW_SEND_SAFE_TARGET", 0)
+#   A) Acquisition safety cap = FANTASTIC_JOBS_MAX_JOBS_PER_RUN (above): the hard
+#      ceiling on Fantastic jobs BILLED across all top-up slices in one run.
+#   Per-iteration slice size (each slice bills at most this many jobs; cumulative
+#   billing is still clamped to the safety cap).
+FANTASTIC_TOPUP_SLICE_JOBS = _env_int("FANTASTIC_TOPUP_SLICE_JOBS", 500)
+#   C) Runtime-budget and iteration-guard boundaries (never-infinite-loop).
+TOPUP_RUNTIME_BUDGET_SECONDS = _env_int("TOPUP_RUNTIME_BUDGET_SECONDS", 0)  # 0 = no runtime cap
+TOPUP_MAX_ITERATIONS = _env_int("TOPUP_MAX_ITERATIONS", 40)
 FANTASTIC_JOBS_DESCRIPTION_FORMAT = os.getenv("FANTASTIC_JOBS_DESCRIPTION_FORMAT", "text").strip().lower()
 # LinkedIn-scope ICP filters pushed INTO the Direct API request so out-of-scope
 # inventory is never billed or paged. Only parameters confirmed against the live
