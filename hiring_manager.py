@@ -48,6 +48,7 @@ from role_display_resolver import resolve_role_display
 from role_mapping import (
     founder_allowed_for_employee_count,
     get_bucket_name_for_job,
+    get_broadened_target_titles_for_jobs,
     get_hiring_manager_bucket_for_job,
     get_target_titles_for_jobs,
     is_founder_tier_title,
@@ -280,6 +281,33 @@ def pick_best_candidate(people: List[Dict], target_titles: List[str]) -> Optiona
     return ranked[0] if ranked else None
 
 
+def _hm_second_pass(bucket_jobs, org, search_domain, target_titles,
+                    ranked_candidates, people, stats):
+    """Quality-preserving HM recovery (config.HM_SECOND_PASS_TITLE_BROADENING). When
+    the first people search yields no title-matched candidate, run at most ONE more
+    search broadened WITHIN THE SAME function to adjacent senior decision-makers
+    (SVP/EVP/generalist leaders). Returns possibly-updated (titles, ranked, people).
+    The recovered candidates still flow through the identical downstream gates."""
+    if ranked_candidates or not config.HM_SECOND_PASS_TITLE_BROADENING:
+        return target_titles, ranked_candidates, people
+    broadened = get_broadened_target_titles_for_jobs(bucket_jobs, org.employee_count)
+    if not broadened or broadened == target_titles:
+        return target_titles, ranked_candidates, people
+    stats["hm_second_pass_attempts"] += 1
+    try:
+        people2 = apollo.search_people_at_company(search_domain, broadened)
+    except apollo.GLOBAL_FATAL_ERRORS:
+        raise
+    except Exception:  # noqa: BLE001 - a second-pass failure never worsens the miss
+        return target_titles, ranked_candidates, people
+    time.sleep(config.APOLLO_RATE_LIMIT_DELAY)
+    ranked2 = rank_candidates(people2, broadened)
+    if ranked2:
+        stats["hm_second_pass_recovered"] += 1
+        return broadened, ranked2, people2
+    return target_titles, ranked_candidates, people
+
+
 def _organization_domains(org: apollo.OrgEnrichment) -> set[str]:
     values = [org.domain]
     raw = org.raw or {}
@@ -504,6 +532,9 @@ def _process_company_legacy(company_jobs: List[Dict]) -> Tuple[List[Dict], Dict]
         people = apollo.search_people_at_company(search_domain, target_titles)
         time.sleep(config.APOLLO_RATE_LIMIT_DELAY)
         ranked_candidates = rank_candidates(people, target_titles)
+
+        target_titles, ranked_candidates, people = _hm_second_pass(
+            bucket_jobs, org, search_domain, target_titles, ranked_candidates, people, stats)
 
         if not ranked_candidates:
             leads.append(
@@ -960,6 +991,30 @@ def _process_company_strict(company_jobs: List[Dict]) -> Tuple[List[Dict], Dict]
                 stats["row2_buckets_with_apollo_person"] += 1
                 company_had_person_returned = True
             title_ranked_candidates = rank_candidates(people, target_titles)
+            # Quality-preserving second pass: broaden WITHIN the same function to
+            # adjacent senior decision-makers when the first title-filtered search
+            # matched nobody. Apollo filters person_titles server-side
+            # (include_similar_titles=false), so a broadened set can also recover a
+            # subset of zero-people buckets. Recovered candidates pass every
+            # downstream gate unchanged.
+            if not title_ranked_candidates and config.HM_SECOND_PASS_TITLE_BROADENING:
+                broadened = get_broadened_target_titles_for_jobs(bucket_jobs, org.employee_count)
+                if broadened and broadened != target_titles:
+                    stats["hm_second_pass_attempts"] += 1
+                    try:
+                        people2 = apollo.search_people_at_company(search_domain, broadened)
+                    except apollo.GLOBAL_FATAL_ERRORS:
+                        raise
+                    except Exception:  # noqa: BLE001 - never worsens the miss
+                        people2 = None
+                    if people2:
+                        time.sleep(config.APOLLO_RATE_LIMIT_DELAY)
+                        t2 = rank_candidates(people2, broadened)
+                        if t2:
+                            stats["hm_second_pass_recovered"] += 1
+                            target_titles = broadened
+                            people = people2
+                            title_ranked_candidates = t2
             stats["row2_title_matched_candidates_total"] += len(title_ranked_candidates)
             if title_ranked_candidates:
                 stats["row2_buckets_with_title_match"] += 1

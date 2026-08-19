@@ -971,6 +971,15 @@ PRE_APOLLO_EXISTING_DEDUPE = _env_bool("PRE_APOLLO_EXISTING_DEDUPE", False)
 # untouched: it independently re-runs send_safe_facts before Instantly enrollment.
 # Default OFF globally -- intended ON for the Fantastic production lane via env.
 AIRTABLE_WRITE_SEND_SAFE_ONLY = _env_bool("AIRTABLE_WRITE_SEND_SAFE_ONLY", False)
+# Quality-preserving hiring-manager recovery: when a company x role-bucket's normal
+# people search returns no acceptable HM, perform at most ONE bounded second-pass
+# search broadened WITHIN THE SAME function to adjacent legitimate decision-maker
+# seniorities (Director / Senior Director level -- which _selection_tier already
+# treats as a valid "direct_functional_leader"). It never crosses functions, never
+# accepts junior/IC titles, and never weakens the HM-title matcher or the Apollo-
+# verified-email requirement -- the recovered person still passes every downstream
+# gate. Default OFF.
+HM_SECOND_PASS_TITLE_BROADENING = _env_bool("HM_SECOND_PASS_TITLE_BROADENING", False)
 AIRTABLE_STATUS_PENDING = os.getenv("AIRTABLE_STATUS_PENDING", "Pending")
 AIRTABLE_STATUS_APPROVED = os.getenv("AIRTABLE_STATUS_APPROVED", "Approved")
 AIRTABLE_STATUS_REJECTED = os.getenv("AIRTABLE_STATUS_REJECTED", "Rejected")

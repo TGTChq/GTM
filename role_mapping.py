@@ -562,6 +562,55 @@ def get_target_titles_for_job(
     return _founders_last(combined, founder_allowed=founder_allowed)
 
 
+#: Second-pass broadening (config.HM_SECOND_PASS_TITLE_BROADENING). The base map
+#: already spans C-suite -> VP -> Head -> Director -> Manager per function, so this
+#: adds only ADJACENT senior decision-maker variants the base omits (SVP/EVP and a
+#: couple of same-function senior generalist leaders). It NEVER crosses functions and
+#: NEVER adds junior/IC titles; recovered candidates still pass rank_candidates,
+#: _selection_tier, the HM-title matcher and Apollo-verified-email gates unchanged.
+BUCKET_BROADENED_TITLES: Dict[str, List[str]] = {
+    "gtm_revenue": ["SVP Sales", "SVP Revenue", "EVP Sales", "Senior Vice President of Sales",
+                    "Head of Sales", "General Manager"],
+    "engineering": ["SVP Engineering", "EVP Engineering", "Senior Vice President of Engineering",
+                    "Head of Software Engineering", "Head of Technology"],
+    "data": ["SVP Data", "Head of Data Science", "Head of Business Intelligence",
+             "VP Data Science", "VP of Data Science"],
+    "it": ["SVP Information Technology", "Head of Information Systems", "VP Technology",
+           "VP of Technology", "Head of Technology"],
+    "marketing": ["SVP Marketing", "EVP Marketing", "Senior Vice President of Marketing",
+                  "Head of Demand Generation", "Head of Brand"],
+    "customer_success": ["SVP Customer Success", "Head of Client Success",
+                         "VP Client Success", "VP of Client Success"],
+    "customer_support": ["SVP Customer Support", "Head of Technical Support",
+                         "VP Support Operations", "VP of Support Operations"],
+    "finance": ["SVP Finance", "EVP Finance", "Head of Accounting", "VP Accounting",
+                "VP of Accounting", "VP Financial Operations"],
+    "operations": ["SVP Operations", "EVP Operations", "General Manager",
+                   "Managing Director", "Head of Business Operations"],
+    "people_hr": ["SVP People", "SVP Human Resources", "Head of HR",
+                  "VP Talent", "VP of Talent", "Head of People Operations"],
+    "product": ["SVP Product", "EVP Product", "Head of Product Management",
+                "VP Product Management", "VP of Product Management"],
+    "ecommerce": ["SVP Ecommerce", "Head of Online", "VP Digital Commerce",
+                  "VP of Digital Commerce", "Head of Digital"],
+    "partnerships": ["SVP Partnerships", "Head of Alliances", "VP Alliances",
+                     "VP of Alliances", "Head of Channel"],
+}
+
+
+def get_broadened_target_titles_for_jobs(
+    jobs: Iterable[Dict], employee_count: int | None = None
+) -> List[str]:
+    """Base titles PLUS the same-function second-pass broadening set (SVP/EVP and
+    adjacent senior leaders), deduped, founders last. Same-function only."""
+    jobs = list(jobs)
+    combined: List[str] = list(get_target_titles_for_jobs(jobs, employee_count))
+    for job in jobs:
+        bucket = get_hiring_manager_bucket_for_job(job)
+        combined.extend(BUCKET_BROADENED_TITLES.get(bucket, []))
+    return _founders_last(combined, founder_allowed=founder_allowed_for_employee_count(employee_count))
+
+
 def get_target_titles_for_jobs(
     jobs: Iterable[Dict], employee_count: int | None = None
 ) -> List[str]:
