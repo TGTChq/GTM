@@ -107,22 +107,43 @@ def _family_id(term: str) -> str:
     return "".join(c if c.isalnum() else "_" for c in str(term or "").lower()).strip("_")
 
 
-def _cursor_stats(jobs: List[Dict[str, Any]], prior_high: str = "") -> Optional[Dict[str, Any]]:
-    """Compute the continuation cursor (oldest date + boundary IDs) and high_water
-    from a set of acquired jobs. Returns None when no job carries a timestamp."""
+def _ids_at(jobs: List[Dict[str, Any]], when: str) -> List[str]:
+    """Stable IDs of the jobs whose date_posted equals ``when`` (a timestamp
+    boundary set, used to dedupe the boundary second on the next run)."""
+    return [str(j.get("_fantastic_internal_id"))
+            for j in jobs
+            if str(j.get("job_posted_at_datetime_utc") or "") == when
+            and j.get("_fantastic_internal_id")]
+
+
+def _cursor_stats(jobs: List[Dict[str, Any]], prior_high: str = "",
+                  prior_high_ids: Optional[List[str]] = None) -> Optional[Dict[str, Any]]:
+    """Compute the continuation cursor from a set of acquired jobs. Tracks BOTH
+    edges of the single stream: ``cursor_date`` (oldest acquired -> the DEEP/backward
+    resume point) with its boundary IDs, and ``high_water`` (newest ever seen -> the
+    FRESH-EDGE stop point) with the boundary IDs at that newest second. The oldest
+    always advances older; the newest is monotonic non-decreasing (a run that only
+    went deeper preserves the prior high_water AND its IDs). Returns None when no job
+    carries a timestamp (an empty run never rewrites either edge)."""
     posted = sorted(str(j.get("job_posted_at_datetime_utc") or "")
                     for j in jobs if j.get("job_posted_at_datetime_utc"))
     if not posted:
         return None
     oldest, newest = posted[0], posted[-1]
-    boundary_ids = [str(j.get("_fantastic_internal_id"))
-                    for j in jobs
-                    if str(j.get("job_posted_at_datetime_utc") or "") == oldest
-                    and j.get("_fantastic_internal_id")]
+    if prior_high and str(prior_high) >= newest:
+        # This run acquired nothing newer than the prior fresh edge: keep it (and
+        # its boundary IDs) so the next fresh-edge pass still stops at the right
+        # second rather than regressing to this run's (older) newest.
+        high_water = str(prior_high)
+        high_water_ids = list(prior_high_ids or [])
+    else:
+        high_water = newest
+        high_water_ids = _ids_at(jobs, newest)
     return {
         "cursor_date": oldest,
-        "high_water": max(newest, str(prior_high or "")) if prior_high else newest,
-        "boundary_ids": boundary_ids,
+        "high_water": high_water,
+        "high_water_ids": high_water_ids,
+        "boundary_ids": _ids_at(jobs, oldest),
         "acquired_this_run": len(jobs),
         "updated_at": datetime.now(timezone.utc).isoformat(),
     }
@@ -529,8 +550,16 @@ def _quota_would_breach(quota: _QuotaState, want: int) -> str:
 
 def _fetch_segment(endpoint: str, base_params: Dict[str, Any], source_label: str, cap: int,
                    quota: _QuotaState, http_get: HttpGet, seen_ids: set,
-                   metrics: Dict[str, Any], accept_source: Optional[Tuple[str, ...]] = None) -> List[Dict[str, Any]]:
+                   metrics: Dict[str, Any], accept_source: Optional[Tuple[str, ...]] = None,
+                   stop_before_date: Optional[str] = None) -> List[Dict[str, Any]]:
+    """When ``stop_before_date`` is set (fresh-edge/head pass), the DESC feed is
+    paged from the top and paging STOPS as soon as a job older than that timestamp
+    is seen -- so only jobs newer than the prior high_water are collected. Jobs AT
+    the boundary second flow through the normal ``seen_ids`` dedupe (the caller seeds
+    it with the persisted high_water boundary IDs), so already-acquired boundary jobs
+    are skipped while genuinely new same-second siblings are still kept."""
     jobs: List[Dict[str, Any]] = []
+    boundary_hit = False
     seg = metrics["segments"].setdefault(source_label, {
         "attempted": 0, "requests_succeeded": 0, "returned": 0, "schema_valid": 0,
         "schema_rejected": 0, "pii_dropped": 0, "non_us": 0, "source_filtered_out": 0,
@@ -587,6 +616,14 @@ def _fetch_segment(endpoint: str, base_params: Dict[str, Any], source_label: str
                 if not any(tok in src for tok in accept_source):
                     seg["source_filtered_out"] += 1
                     continue
+            if stop_before_date:
+                posted_at = str(job.get("job_posted_at_datetime_utc") or "")
+                if posted_at and posted_at < stop_before_date:
+                    # Crossed below the prior fresh edge -> everything further down
+                    # this DESC feed is already covered; stop the fresh-edge pass.
+                    seg["stop_reason"] = seg["stop_reason"] or "head_boundary"
+                    boundary_hit = True
+                    break
             if job["job_id"] in seen_ids:
                 seg["duplicates"] += 1
                 continue
@@ -598,6 +635,8 @@ def _fetch_segment(endpoint: str, base_params: Dict[str, Any], source_label: str
             jobs.append(job)
             if len(jobs) >= cap:
                 break
+        if boundary_hit:
+            break
         if len(rows) < want:
             seg["stop_reason"] = seg["stop_reason"] or "short_page"
             break
@@ -662,6 +701,32 @@ def run_fantastic_jobs_acquisition(http_get: HttpGet = _http_get) -> SourceResul
         "reset_reason": continuation_reset_reason,
     }
 
+    # Two-phase acquisition (single stream). The DESC feed has no lower-bound date
+    # parameter, so the FRESH EDGE is reached by paging from the TOP and stopping
+    # client-side at the prior high_water (head pass); the DEEP/backfill edge resumes
+    # strictly OLDER than cursor_date (date_posted_lt). "head_then_deep" (default)
+    # does both; "head" only discovers new jobs; "deep" only backfills (top-up slices
+    # >=2 use this so the head query is billed at most once per run). The head pass is
+    # INDEPENDENT of the deep cursor, so an exhausted historical crawl can never again
+    # starve daily discovery of newly-posted jobs.
+    acquire_mode = str(getattr(config, "FANTASTIC_JOBS_ACQUIRE_MODE",
+                               "head_then_deep") or "head_then_deep").strip().lower()
+    do_head = continuation_enabled and acquire_mode in ("head", "head_then_deep")
+    do_deep = ((not continuation_enabled)
+               or (acquire_mode in ("deep", "head_then_deep") and bool(cursor_date_lt)))
+    if continuation_enabled and not do_head and not do_deep:
+        do_deep = True  # degenerate config -> plain current-window fetch (never zero)
+    # Fresh-edge anchor: the prior high_water (empty on the first run / after a stale
+    # reset -> the head pass then fetches the full window from the top, exactly the
+    # legacy first-run behavior, and establishes high_water). Seed seen_ids with the
+    # persisted boundary IDs at that second so already-acquired boundary jobs dedupe
+    # while genuinely new same-second siblings are still collected.
+    head_high_water = str(cont_state.get("high_water") or "") if do_head else ""
+    if head_high_water:
+        seen_ids |= {f"fantastic_{i}" for i in (cont_state.get("high_water_ids") or [])}
+    metrics["continuation"]["acquire_mode"] = acquire_mode
+    metrics["continuation"]["head_from_high_water"] = head_high_water
+
     # NOTE: only parameters proven against the successful smoke test are sent.
     # `description_type` was a guessed parameter (the smoke test that returned
     # HTTP 200 never sent it) and was the divergence in the failed production
@@ -683,6 +748,43 @@ def run_fantastic_jobs_acquisition(http_get: HttpGet = _http_get) -> SourceResul
     used_title_families = bool(title_targeting and not title_advanced_active)
     new_family_states: Dict[str, Any] = dict((cont_state.get("families") or {})) if (
         continuation_enabled and used_title_families) else {}
+    # The two edges advance INDEPENDENTLY: head jobs (fresh top) may only raise
+    # high_water; deep jobs (backfill) may only lower cursor_date. Kept in separate
+    # buckets so a head pass can never regress the deep floor (which would re-bill).
+    stream_head_jobs: List[Dict[str, Any]] = []
+    stream_deep_jobs: List[Dict[str, Any]] = []
+
+    def _run_single_stream(endpoint: str, base_jb: Dict[str, Any], label: str,
+                           cap_limit: int, accept: Optional[Tuple[str, ...]]) -> None:
+        """Head (fresh-edge: page from the top, stop at the prior high_water) then
+        Deep (strictly older than the deep cursor). Both passes share the base label
+        (so a job's ``_acquisition_source`` is never mutated) and the global
+        ``seen_ids`` (so the two passes never double-count). Either pass may be
+        disabled by the acquire mode."""
+        if do_head:
+            room = min(cap_limit, config.FANTASTIC_JOBS_MAX_JOBS_PER_RUN - len(result.jobs))
+            if room > 0:
+                got = _fetch_segment(  # NO date_posted_lt: page from the top
+                    endpoint, dict(base_jb), label, room, quota, http_get, seen_ids,
+                    metrics, accept_source=accept, stop_before_date=(head_high_water or None))
+                stream_head_jobs.extend(got)
+                result.jobs.extend(got)
+                metrics["continuation"]["head_acquired"] = (
+                    metrics["continuation"].get("head_acquired", 0) + len(got))
+        if do_deep:
+            room = min(cap_limit, config.FANTASTIC_JOBS_MAX_JOBS_PER_RUN - len(result.jobs))
+            if room > 0:
+                deep_jb = dict(base_jb)
+                if cursor_date_lt:
+                    deep_jb["date_posted_lt"] = cursor_date_lt
+                got = _fetch_segment(
+                    endpoint, deep_jb, label, room, quota, http_get, seen_ids,
+                    metrics, accept_source=accept)
+                stream_deep_jobs.extend(got)
+                result.jobs.extend(got)
+                metrics["continuation"]["deep_acquired"] = (
+                    metrics["continuation"].get("deep_acquired", 0) + len(got))
+
     try:
         # Segment priority: ATS first, then Wellfound, Y Combinator, LinkedIn.
         ats_params = {"time_frame": config.FANTASTIC_JOBS_TIME_FRAME,
@@ -696,19 +798,14 @@ def run_fantastic_jobs_acquisition(http_get: HttpGet = _http_get) -> SourceResul
             # parity). The union is returned counting each job ONCE -> zero
             # cross-query billing overlap, 118/118 coverage, ~all target-role.
             # It is a single LinkedIn stream, so it reuses the single-stream
-            # date_posted cursor (no per-family state).
+            # date_posted cursor (head fresh-edge + deep backfill).
             metrics["title_advanced"] = {"expression_chars": len(title_advanced_expr)}
             jb_params = {"time_frame": config.FANTASTIC_JOBS_TIME_FRAME,
                          "exclude_ats_duplicate": "true", "source": "linkedin",
                          "title_advanced": title_advanced_expr}
             jb_params.update(_jb_filter_params())
-            if cursor_date_lt:
-                jb_params["date_posted_lt"] = cursor_date_lt
-            remaining = config.FANTASTIC_JOBS_MAX_JOBS_PER_RUN - len(result.jobs)
-            result.jobs.extend(_fetch_segment(
-                "/v1/active-jb", jb_params, "fantastic_jobs_linkedin",
-                min(config.FANTASTIC_JOBS_LINKEDIN_LIMIT, remaining),
-                quota, http_get, seen_ids, metrics, accept_source=("linkedin",)))
+            _run_single_stream("/v1/active-jb", jb_params, "fantastic_jobs_linkedin",
+                               config.FANTASTIC_JOBS_LINKEDIN_LIMIT, ("linkedin",))
         elif used_title_families and config.FANTASTIC_JOBS_LINKEDIN_LIMIT > 0:
             # LinkedIn-only, but targeted per role FAMILY so ~all billed jobs are
             # on-portfolio (the broad feed is ~4% target-role). One global cap is
@@ -770,12 +867,7 @@ def run_fantastic_jobs_acquisition(http_get: HttpGet = _http_get) -> SourceResul
                 jb_params = {"time_frame": config.FANTASTIC_JOBS_TIME_FRAME,
                              "exclude_ats_duplicate": "true", "source": seg_key}
                 jb_params.update(_jb_filter_params())
-                if cursor_date_lt:
-                    jb_params["date_posted_lt"] = cursor_date_lt
-                remaining = config.FANTASTIC_JOBS_MAX_JOBS_PER_RUN - len(result.jobs)
-                result.jobs.extend(_fetch_segment(
-                    "/v1/active-jb", jb_params, label, min(cap, remaining),
-                    quota, http_get, seen_ids, metrics, accept_source=accept))
+                _run_single_stream("/v1/active-jb", jb_params, label, cap, accept)
     except FantasticAuthError as exc:
         result.success = False
         result.errors.append(str(exc))
@@ -820,11 +912,13 @@ def run_fantastic_jobs_acquisition(http_get: HttpGet = _http_get) -> SourceResul
     metrics["used_title_families"] = used_title_families
 
     # Advance and persist the continuation cursor from the jobs actually acquired
-    # (billed). The cursor moves strictly OLDER (min date_posted); high_water keeps
-    # the newest ever seen so a future incremental run can pick up newer jobs via
-    # date_posted_gte. Per-family mode keeps an INDEPENDENT cursor per family so
-    # streams never leak; single-stream (title_advanced or seg-caps) keeps one
-    # cursor. The branch MUST match the acquisition path that actually ran.
+    # (billed). ``_cursor_stats`` spans BOTH edges of the merged head+deep set in one
+    # save: cursor_date -> min (advances OLDER, deep resume), high_water -> newest ever
+    # seen (advances NEWER on a head pass, PRESERVED with its boundary IDs when a run
+    # only went deeper). An empty run returns None and rewrites NEITHER edge (the file
+    # is left intact), so a zero-result deep query can never regress the fresh edge.
+    # Per-family mode keeps an INDEPENDENT cursor per family; single-stream
+    # (title_advanced or seg-caps) keeps one cursor.
     if continuation_enabled and used_title_families:
         _save_continuation_state({
             "schema": _CONTINUATION_SCHEMA,
@@ -834,13 +928,39 @@ def run_fantastic_jobs_acquisition(http_get: HttpGet = _http_get) -> SourceResul
         })
         metrics["continuation"]["families_tracked"] = len(new_family_states)
     elif continuation_enabled:
-        stats = _cursor_stats(result.jobs, prior_high=str(cont_state.get("high_water") or ""))
-        if stats:
-            _save_continuation_state({"schema": _CONTINUATION_SCHEMA, "source": "linkedin", **stats})
-            metrics["continuation"]["next_cursor_date"] = stats["cursor_date"]
-            metrics["continuation"]["high_water"] = stats["high_water"]
+        prior_cursor = str(cont_state.get("cursor_date") or "")
+        prior_high = str(cont_state.get("high_water") or "")
+        prior_boundary = list(cont_state.get("boundary_ids") or [])
+        prior_high_ids = list(cont_state.get("high_water_ids") or [])
+        # DEEP edge (backfill floor) advances strictly OLDER, from the deep pass. On
+        # the FIRST run (no prior floor) the full-window head pass establishes it.
+        deep_source = stream_deep_jobs if prior_cursor else (stream_deep_jobs + stream_head_jobs)
+        deep_stats = _cursor_stats(deep_source)
+        if deep_stats and (not prior_cursor or deep_stats["cursor_date"] < prior_cursor):
+            new_cursor = deep_stats["cursor_date"]
+            new_boundary = deep_stats["boundary_ids"]
         else:
-            metrics["continuation"]["next_cursor_date"] = cont_state.get("cursor_date", "")
+            new_cursor, new_boundary = prior_cursor, prior_boundary  # deep didn't advance
+        # FRESH edge (high_water) advances strictly NEWER, from the head pass. On the
+        # FIRST run the full-window head set is the whole acquisition.
+        head_source = stream_head_jobs if prior_high else (stream_head_jobs + stream_deep_jobs)
+        head_stats = _cursor_stats(head_source)
+        if head_stats and (not prior_high or head_stats["high_water"] > prior_high):
+            new_high = head_stats["high_water"]
+            new_high_ids = _ids_at(head_source, new_high)
+        else:
+            new_high, new_high_ids = prior_high, prior_high_ids  # no fresher jobs
+        if stream_head_jobs or stream_deep_jobs:
+            _save_continuation_state({
+                "schema": _CONTINUATION_SCHEMA, "source": "linkedin",
+                "cursor_date": new_cursor, "high_water": new_high,
+                "high_water_ids": new_high_ids, "boundary_ids": new_boundary,
+                "acquired_this_run": len(stream_head_jobs) + len(stream_deep_jobs),
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            })
+        # else: nothing acquired -> leave the persisted state file untouched.
+        metrics["continuation"]["next_cursor_date"] = new_cursor
+        metrics["continuation"]["high_water"] = new_high
 
     result.metadata = metrics
     for job in result.jobs:

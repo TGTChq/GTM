@@ -661,14 +661,22 @@ FANTASTIC_JOBS_EXCLUDE_AGENCY = _env_bool("FANTASTIC_JOBS_EXCLUDE_AGENCY", True)
 # within the default; raise this only alongside a larger MAX_JOBS_PER_RUN and plan.
 FANTASTIC_JOBS_MAX_PAGES_PER_SEGMENT = _env_int("FANTASTIC_JOBS_MAX_PAGES_PER_SEGMENT", 50)
 # Cross-run continuation cursor (default off preserves the exact baseline). The
-# Direct API feed is date_posted DESC with no stable `order`/id-keyset, but a
-# `date_posted_lt` upper bound IS supported and yields provably non-overlapping
-# windows. When enabled, each run resumes strictly OLDER than the oldest job
-# already acquired (cursor_date), so deep batches never re-fetch/re-bill the
-# prefix; the boundary second is re-included and deduped by stable IDs so no job
-# is skipped; new jobs entering the top are deferred to a future incremental
-# (date_posted_gte high_water) run, never lost. State persists on the volume so a
-# run is resumable and the resume point (cursor_date) is explicit.
+# Direct API feed is date_posted DESC with no stable `order`/id-keyset, and the
+# ONLY proven date filter is the `date_posted_lt` upper bound (there is NO
+# lower-bound/`date_posted_gte` parameter). Continuation therefore tracks TWO edges
+# of the single stream:
+#   * DEEP/backfill edge (cursor_date): each run resumes strictly OLDER than the
+#     oldest job already acquired (date_posted_lt = cursor_date + 1s), so deep
+#     batches never re-fetch/re-bill the prefix; the boundary second is re-included
+#     and deduped by stable IDs so no job is skipped.
+#   * FRESH edge (high_water): newly-posted jobs sit at the TOP of the DESC feed, so
+#     each run FIRST pages from the top and stops client-side once it crosses below
+#     the prior high_water (see FANTASTIC_JOBS_ACQUIRE_MODE). This needs no new API
+#     parameter and, being independent of the deep cursor, a completed historical
+#     crawl can never starve daily discovery of new arrivals.
+# State persists on the volume so a run is resumable and both resume points are
+# explicit. The head pass advances high_water (+ its boundary IDs); the deep pass
+# advances cursor_date (+ its boundary IDs); an empty run rewrites neither.
 # Title-targeted acquisition. The broad LinkedIn feed is ~4% target-role, so a
 # live smoke proved broad retrieval wastes credits. Instead query the Direct API
 # `title` (substring) param per target-role FAMILY -- variants collapse into one
@@ -736,6 +744,15 @@ FANTASTIC_JOBS_CONTINUATION_STATE_PATH = os.getenv(
     "FANTASTIC_JOBS_CONTINUATION_STATE_PATH",
     str(Path(STATE_DIR) / "fantastic_continuation.json"),
 )
+# Acquisition phase for the single-stream continuation cursor:
+#   "head_then_deep" (default) -- discover jobs newer than the prior high_water
+#      (fresh edge, top of the DESC feed, client-side stop; no new API param), then
+#      continue the backward date_posted_lt crawl to fill the remaining cap.
+#   "head" -- fresh edge only.  "deep" -- backward backfill only.
+# The pipeline sets this per phase so the top-up loop bills the head query at most
+# once per run (slice 1 = head_then_deep, later slices = deep). Ignored when
+# continuation is disabled (a single plain current-window fetch).
+FANTASTIC_JOBS_ACQUIRE_MODE = os.getenv("FANTASTIC_JOBS_ACQUIRE_MODE", "head_then_deep").strip().lower()
 
 
 def validate_fantastic_jobs_config() -> None:

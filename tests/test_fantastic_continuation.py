@@ -1,13 +1,18 @@
 """Cross-run Fantastic continuation cursor (date_posted keyset).
 
-The Direct API feed is date_posted DESC with no stable `order`/id-keyset, but
-`date_posted_lt` (proven live) yields non-overlapping windows. These tests pin:
+The Direct API feed is date_posted DESC with no stable `order`/id-keyset, and the
+ONLY proven date filter is the `date_posted_lt` upper bound (there is NO
+lower-bound param). Continuation tracks two edges of the single stream. These tests
+pin:
   * disabled by default -> no cursor param, no state written (baseline unchanged);
   * first run sets cursor_date=oldest, high_water=newest, boundary ids;
-  * a resumed run sends date_posted_lt = cursor + 1s, re-includes and DEDUPES the
-    boundary second (no re-count, no skip), and never re-acquires the deep prefix;
-  * new jobs entering the top between runs are NOT skipped/lost -- the older-window
-    resume ignores them and high_water preserves them for an incremental run.
+  * a resumed run sends date_posted_lt = cursor + 1s for the DEEP backfill,
+    re-includes and DEDUPES the boundary second (no re-count, no skip), and never
+    re-acquires the deep prefix;
+  * new jobs entering the top between runs are DISCOVERED by the fresh-edge HEAD
+    pass (page from the top, stop client-side at the prior high_water) -- the fix
+    for the production zero-acquisition bug where an exhausted deep crawl starved
+    daily discovery.
 """
 from __future__ import annotations
 
@@ -141,7 +146,12 @@ class FantasticContinuationTests(unittest.TestCase):
             self.assertLess(state2["cursor_date"], D[18])                       # cursor advanced older
             self.assertEqual(state2["high_water"], D[20])                       # high_water preserved
 
-    def test_new_jobs_at_top_between_runs_are_not_skipped_and_deferred(self):
+    def test_new_jobs_at_top_between_runs_are_discovered_by_head_pass(self):
+        """FIX (formerly ..._are_not_skipped_and_deferred): the fresh-edge HEAD pass
+        pages from the top of the DESC feed and DISCOVERS jobs posted since the prior
+        high_water. The old design deferred them forever -- the exact production
+        zero-acquisition bug. New arrivals are now acquired AND the deep tail still
+        advances, and high_water moves up to the newest arrival."""
         with tempfile.TemporaryDirectory() as tmp:
             sp = str(Path(tmp) / "cont.json")
             r1, _ = _run(_feed(FEED), sp, cap=3, now=_FIXED_NOW)                # acquires :20,:19,:18
@@ -149,13 +159,16 @@ class FantasticContinuationTests(unittest.TestCase):
             newer = [_rec(2001, "2026-08-18T03:05:00"), _rec(2002, "2026-08-18T03:06:00")]
             r2, _ = _run(_feed(newer + FEED), sp, cap=3, now=_FIXED_NOW)
             second_ids = {j["_fantastic_internal_id"] for j in r2.jobs}
-            # The older-window resume must NOT grab the new top jobs...
-            self.assertNotIn("2001", second_ids)
-            self.assertNotIn("2002", second_ids)
-            # ...and they are preserved for a future incremental (high_water < their date).
+            # The head pass grabs the brand-new top arrivals...
+            self.assertIn("2001", second_ids)
+            self.assertIn("2002", second_ids)
+            # ...and high_water advanced to the newest arrival (with its boundary id).
             state2 = json.loads(Path(sp).read_text(encoding="utf-8"))
-            self.assertLess(state2["high_water"], "2026-08-18T03:05:00")
-            self.assertTrue(all(int(i) < 1018 for i in second_ids))            # resume continued older
+            self.assertEqual(state2["high_water"], "2026-08-18T03:06:00")
+            self.assertIn("2002", state2["high_water_ids"])
+            # The deep cursor must NOT regress newer (that would re-bill the prefix):
+            # here the head pass filled the cap, so the deep floor is preserved.
+            self.assertLessEqual(state2["cursor_date"], D[18])
 
 
 def _iso(dt):
@@ -326,7 +339,10 @@ class FantasticContinuation7dWindowTests(unittest.TestCase):
             self.assertFalse(i2 & i3)                                            # strictly deeper each run
             self.assertGreaterEqual(len(i1 | i2 | i3), 20)                       # backlog actually draining
 
-    def test_new_top_arrivals_deferred_not_lost(self):
+    def test_new_top_arrivals_discovered_by_head_pass(self):
+        """FIX (formerly ..._deferred_not_lost): brand-new top-of-feed arrivals are
+        DISCOVERED by the fresh-edge head pass on the very next run (they used to be
+        deferred indefinitely), and high_water advances to the newest arrival."""
         recs = self._feed_recent(20)
         with tempfile.TemporaryDirectory() as tmp:
             sp = str(Path(tmp) / "c.json")
@@ -339,10 +355,12 @@ class FantasticContinuation7dWindowTests(unittest.TestCase):
                      _rec(9002, _iso(now - timedelta(seconds=1)).replace("+00:00", "Z"))]
             r2, _ = _run(_feed(newer + recs), sp, cap=6, time_frame="7d")
             i2 = {j["_fantastic_internal_id"] for j in r2.jobs}
-            self.assertNotIn("9001", i2)          # older-resume ignores new top jobs...
-            self.assertNotIn("9002", i2)
-            # ...and high_water still marks them for a later fresh-window pickup.
-            self.assertLess(hw1, _iso(now - timedelta(seconds=2)).replace("+00:00", "Z"))
+            self.assertIn("9001", i2)             # head pass discovers the new arrivals
+            self.assertIn("9002", i2)
+            # high_water advanced past the prior mark up to the newest arrival.
+            hw2 = json.loads(Path(sp).read_text())["high_water"]
+            self.assertGreater(hw2, hw1)
+            self.assertGreaterEqual(hw2, _iso(now - timedelta(seconds=1)).replace("+00:00", "Z"))
 
     def test_5day_cursor_fresh_but_8day_cursor_resets_under_7d_window(self):
         from datetime import datetime, timezone, timedelta
@@ -362,8 +380,175 @@ class FantasticContinuation7dWindowTests(unittest.TestCase):
                     self.assertTrue(all("date_posted_lt" not in p for p in cap))
                     self.assertTrue(res.jobs)                                # new arrivals acquired
                 else:
-                    self.assertEqual(cont["reset_reason"], "")               # within 7d -> resume backlog
-                    self.assertTrue(any("date_posted_lt" in p for p in cap))
+                    # Within 7d -> the cursor is HONORED (not reset): the head pass
+                    # uses it as the fresh-edge stop, and jobs are still acquired.
+                    self.assertEqual(cont["reset_reason"], "")
+                    self.assertEqual(cont["head_from_high_water"], cur)
+                    self.assertTrue(res.jobs)
+
+
+class FantasticFreshEdgeDailyTests(unittest.TestCase):
+    """Reproduces the production zero-acquisition incident (Aug 20/21: 0 raw_postings
+    every day after the Aug 18 crawl) and pins the durable fix: the daily cron must
+    discover jobs posted since the last run even after the historical DEEP crawl is
+    exhausted, without re-billing the historical prefix."""
+
+    from datetime import datetime as _dt, timedelta as _td
+    _tzc = _tz.utc
+
+    def _at(self, i, dt):
+        return _rec(i, dt.isoformat().replace("+00:00", "Z"))
+
+    def _day(self, sp, records, now, cap=6, mode="head_then_deep"):
+        with mock.patch.object(config, "FANTASTIC_JOBS_ACQUIRE_MODE", mode):
+            return _run(_feed(records), sp, cap=cap, time_frame="7d", now=now)
+
+    def test_incident_repro_daily_fresh_edge_after_deep_exhausted(self):
+        base = self._dt(2026, 8, 18, 13, 0, 0, tzinfo=self._tzc)
+        d1 = [self._at(1000 + k, base - self._td(hours=6 * k)) for k in range(10)]  # ~2.5d backlog
+        with tempfile.TemporaryDirectory() as tmp:
+            sp = str(Path(tmp) / "c.json")
+            # DAY 1 (Aug 18): acquire the newest slice of the backlog.
+            r1, _ = self._day(sp, d1, base, cap=6)
+            self.assertTrue(r1.jobs)
+            hw1 = json.loads(Path(sp).read_text())["high_water"]
+            # DAY 2 (Aug 19): 3 jobs posted since hw1 -> MUST be discovered (not 0).
+            new2 = [self._at(2000 + k, base + self._td(days=1, minutes=-k)) for k in range(3)]
+            r2, _ = self._day(sp, new2 + d1, base + self._td(days=1), cap=6)
+            i2 = {j["_fantastic_internal_id"] for j in r2.jobs}
+            for k in range(3):
+                self.assertIn(str(2000 + k), i2)                    # fresh edge discovered
+            hw2 = json.loads(Path(sp).read_text())["high_water"]
+            self.assertGreater(hw2, hw1)                            # high_water advanced
+            # DAY 3 (Aug 20): 2 more new jobs -> discovered, no re-bill of day-2 jobs.
+            new3 = [self._at(3000 + k, base + self._td(days=2, minutes=-k)) for k in range(2)]
+            r3, _ = self._day(sp, new3 + new2 + d1, base + self._td(days=2), cap=6)
+            i3 = {j["_fantastic_internal_id"] for j in r3.jobs}
+            for k in range(2):
+                self.assertIn(str(3000 + k), i3)
+            self.assertFalse(i2 & i3)                               # no re-bill across days
+            self.assertGreater(json.loads(Path(sp).read_text())["high_water"], hw2)
+
+    def test_valid_zero_day_then_discovery_next_day(self):
+        base = self._dt(2026, 8, 18, 13, 0, 0, tzinfo=self._tzc)
+        d1 = [self._at(1000 + k, base - self._td(hours=3 * k)) for k in range(4)]
+        with tempfile.TemporaryDirectory() as tmp:
+            sp = str(Path(tmp) / "c.json")
+            r1, _ = self._day(sp, d1, base, cap=10)                 # drains the small backlog
+            st1 = json.loads(Path(sp).read_text())
+            # A quiet day: no new jobs, deep exhausted -> a VALID zero run...
+            r2, _ = self._day(sp, d1, base + self._td(days=1), cap=10)
+            self.assertEqual(len(r2.jobs), 0)
+            st2 = json.loads(Path(sp).read_text())
+            self.assertEqual(st2["high_water"], st1["high_water"])  # state preserved, not regressed
+            self.assertEqual(st2["cursor_date"], st1["cursor_date"])
+            # ...and the very next day a new job appears and IS discovered (not stuck).
+            new = [self._at(9000, base + self._td(days=2))]
+            r3, _ = self._day(sp, new + d1, base + self._td(days=2), cap=10)
+            self.assertIn("9000", {j["_fantastic_internal_id"] for j in r3.jobs})
+
+    def test_identical_boundary_timestamps_new_sibling_discovered_old_deduped(self):
+        base = self._dt(2026, 8, 18, 13, 0, 0, tzinfo=self._tzc)
+        ts = base
+        # Two jobs share the exact high_water second on day 1.
+        d1 = [self._at(1001, ts), self._at(1002, ts), self._at(1003, ts - self._td(hours=1))]
+        with tempfile.TemporaryDirectory() as tmp:
+            sp = str(Path(tmp) / "c.json")
+            r1, _ = self._day(sp, d1, base, cap=10)
+            st1 = json.loads(Path(sp).read_text())
+            self.assertEqual(st1["high_water"], ts.isoformat())   # normalized to +00:00
+            self.assertEqual(set(st1["high_water_ids"]), {"1001", "1002"})
+            # A THIRD sibling appears at the SAME second next run -> discovered; the two
+            # already-acquired siblings at that second are deduped (not re-acquired).
+            sib = [self._at(1004, ts)]
+            r2, _ = self._day(sp, sib + d1, base + self._td(hours=2), cap=10)
+            i2 = {j["_fantastic_internal_id"] for j in r2.jobs}
+            self.assertIn("1004", i2)
+            self.assertNotIn("1001", i2)
+            self.assertNotIn("1002", i2)
+
+    def test_prefix_schema_without_high_water_ids_upgrades_in_place(self):
+        # The CURRENTLY DEPLOYED (pre-fix) state file has cursor_date + high_water but
+        # NO high_water_ids. First fixed run must load it, discover new jobs, and add
+        # high_water_ids -- no crash, no wipe.
+        base = self._dt(2026, 8, 18, 13, 0, 0, tzinfo=self._tzc)
+        with tempfile.TemporaryDirectory() as tmp:
+            sp = str(Path(tmp) / "c.json")
+            Path(sp).write_text(json.dumps({
+                "schema": fja._CONTINUATION_SCHEMA, "source": "linkedin",
+                "cursor_date": (base - self._td(days=2)).isoformat().replace("+00:00", "Z"),
+                "high_water": (base - self._td(hours=1)).isoformat().replace("+00:00", "Z"),
+                "boundary_ids": ["777"],
+            }), encoding="utf-8")  # note: NO high_water_ids key
+            new = [self._at(4001, base), self._at(4002, base - self._td(minutes=1))]
+            older = [self._at(500 + k, base - self._td(days=1, hours=k)) for k in range(3)]
+            r, _ = self._day(sp, new + older, base, cap=10)
+            i = {j["_fantastic_internal_id"] for j in r.jobs}
+            self.assertIn("4001", i)                                # fresh edge discovered
+            self.assertIn("4002", i)
+            st = json.loads(Path(sp).read_text())
+            self.assertIn("high_water_ids", st)                     # schema upgraded in place
+            self.assertIn("4001", st["high_water_ids"])
+
+    def test_high_water_monotonic_and_cursor_monotonic_backward(self):
+        base = self._dt(2026, 8, 18, 13, 0, 0, tzinfo=self._tzc)
+        d1 = [self._at(1000 + k, base - self._td(hours=4 * k)) for k in range(12)]
+        with tempfile.TemporaryDirectory() as tmp:
+            sp = str(Path(tmp) / "c.json")
+            hw_prev, cur_prev = "", "9"
+            feed = list(d1)
+            for day in range(3):
+                if day > 0:  # inject a new top job each subsequent day
+                    feed = [self._at(8000 + day, base + self._td(days=day))] + feed
+                _r, _ = self._day(sp, feed, base + self._td(days=day), cap=5)
+                st = json.loads(Path(sp).read_text())
+                if hw_prev:
+                    self.assertGreaterEqual(st["high_water"], hw_prev)   # never decreases
+                    self.assertLessEqual(st["cursor_date"], cur_prev)    # never increases
+                hw_prev, cur_prev = st["high_water"], st["cursor_date"]
+
+    def test_no_duplicate_opportunities_across_head_deep_overlap(self):
+        # Head and deep share seen_ids: a job on the head/deep boundary is emitted once.
+        base = self._dt(2026, 8, 18, 13, 0, 0, tzinfo=self._tzc)
+        d1 = [self._at(1000 + k, base - self._td(hours=2 * k)) for k in range(8)]
+        with tempfile.TemporaryDirectory() as tmp:
+            sp = str(Path(tmp) / "c.json")
+            self._day(sp, d1, base, cap=4)
+            new = [self._at(7001, base + self._td(days=1))]
+            r2, _ = self._day(sp, new + d1, base + self._td(days=1), cap=8)
+            ids = [j["_fantastic_internal_id"] for j in r2.jobs]
+            self.assertEqual(len(ids), len(set(ids)))              # no duplicates emitted
+
+
+class FantasticAcquireModeGatingTests(unittest.TestCase):
+    """The acquire mode gates the two passes so the top-up loop can bill the head
+    (top-of-feed) query at most once per run: slice 1 = head_then_deep, later = deep."""
+
+    def _seed(self, sp):
+        Path(sp).write_text(json.dumps({
+            "schema": fja._CONTINUATION_SCHEMA, "source": "linkedin",
+            "cursor_date": "2026-08-18T03:00:10", "high_water": "2026-08-18T03:00:18",
+            "high_water_ids": ["1018"], "boundary_ids": ["1010"],
+        }), encoding="utf-8")
+
+    def test_deep_mode_never_issues_a_top_of_feed_query(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            sp = str(Path(tmp) / "c.json")
+            self._seed(sp)
+            with mock.patch.object(config, "FANTASTIC_JOBS_ACQUIRE_MODE", "deep"):
+                _r, captured = _run(_feed(FEED), sp, cap=3, now=_FIXED_NOW)
+            # Every request is deep (carries date_posted_lt) -> no fresh-edge head query.
+            self.assertTrue(captured)
+            self.assertTrue(all("date_posted_lt" in p for p in captured))
+
+    def test_head_mode_only_issues_top_of_feed_query(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            sp = str(Path(tmp) / "c.json")
+            self._seed(sp)
+            with mock.patch.object(config, "FANTASTIC_JOBS_ACQUIRE_MODE", "head"):
+                _r, captured = _run(_feed(FEED), sp, cap=3, now=_FIXED_NOW)
+            self.assertTrue(captured)
+            self.assertTrue(all("date_posted_lt" not in p for p in captured))
 
 
 if __name__ == "__main__":

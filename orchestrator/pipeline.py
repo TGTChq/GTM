@@ -330,6 +330,22 @@ class Orchestrator:
             config.FANTASTIC_JOBS_MAX_JOBS_PER_RUN = self._orig
             return False
 
+    class _FantasticAcquireMode:
+        """Select the Fantastic acquisition phase for one slice. The FIRST slice runs
+        the fresh-edge head pass (then deep to fill); later slices run DEEP only, so
+        the top-of-feed head query is billed at most ONCE per run. Restores on exit."""
+        def __init__(self, mode: str) -> None:
+            self.mode = str(mode)
+
+        def __enter__(self):
+            self._orig = getattr(config, "FANTASTIC_JOBS_ACQUIRE_MODE", "head_then_deep")
+            config.FANTASTIC_JOBS_ACQUIRE_MODE = self.mode
+            return self
+
+        def __exit__(self, *exc):
+            config.FANTASTIC_JOBS_ACQUIRE_MODE = self._orig
+            return False
+
     @staticmethod
     def _count_net_new_send_safe(leads, delivery) -> int:
         """The top-up target unit: leads CREATED this slice whose stored facts pass
@@ -394,7 +410,12 @@ class Orchestrator:
                 stop_reason = decision.stop_reason
                 break
 
-            with self._FantasticSliceCap(decision.next_slice):
+            # Slice 1 discovers the fresh edge (head) then backfills (deep); every
+            # later slice is DEEP only, so the top-of-feed head query is billed at
+            # most once per run and top-up never re-runs the fresh-edge query.
+            slice_mode = "head_then_deep" if controller.iterations == 0 else "deep"
+            with self._FantasticSliceCap(decision.next_slice), \
+                    self._FantasticAcquireMode(slice_mode):
                 iter_lanes = self._acquire(plan, resume=(resume and controller.iterations == 0))
             lane_results = iter_lanes  # last slice's lanes surface in the result
             iter_postings = [j for r in iter_lanes.values() for j in r.jobs]
