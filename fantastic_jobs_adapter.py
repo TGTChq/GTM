@@ -400,6 +400,12 @@ def map_record(record: Dict[str, Any], source_label: str, seg: Optional[Dict[str
         "_staffing_agency_flag": _bool(record.get("org_linkedin_recruitment_agency_derived")),
         "_ats_duplicate": _bool(record.get("ats_duplicate")),
         "_domain_candidates": domain_candidates,
+        # Provider index time (assign-once; the date_created watermark key) kept
+        # separately from date_posted so the two clocks are never conflated.
+        "_fantastic_date_created": _safe_iso(record.get("date_created")),
+        "_fantastic_date_posted": _safe_iso(record.get("date_posted")),
+        # Canonical provider provenance: which Fantastic dataset this row came from.
+        "_provider_dataset": "ats" if source_label == ATS_SOURCE else "jb",
     }
     return job, ""
 
@@ -432,33 +438,172 @@ def _jb_filter_params() -> Dict[str, Any]:
 
 
 def _title_advanced_term(role: str) -> str:
-    """Normalize a role into a title_advanced term (single-quote multi-word)."""
+    """Normalize a role into a title_advanced term (single-quote multi-word).
+
+    NOTE: a quoted multi-word term is a tsquery PHRASE (all tokens, adjacent). A
+    catalog title containing "/" (e.g. "UX/UI Designer") therefore collapses into
+    an unintended 3-token AND phrase that real titles never satisfy; such roles get
+    explicit aliases via ``config.FANTASTIC_TITLE_ALIASES`` (see ``_role_terms``).
+    """
     cleaned = " ".join(str(role or "").lower().replace("/", " ").replace("-", " ").split())
     return f"'{cleaned}'" if " " in cleaned else cleaned
 
 
-def _title_advanced_expression() -> str:
-    """The Boolean OR-expression over the whole role catalog (benchmark parity).
+def _negation_term(token: str) -> str:
+    """A tsquery negation for one contaminant: ``!'multi word'`` or ``!word``.
+    PROVEN live (2026-08-22 count probe): only ``& !term`` is honored; ``-term`` and
+    ``NOT term`` are rejected (HTTP 400) and are never emitted."""
+    t = " ".join(str(token or "").lower().replace("/", " ").replace("-", " ").split())
+    if not t:
+        return ""
+    return f"!'{t}'" if " " in t else f"!{t}"
 
-    A configured override wins; otherwise build deterministically from
-    role_catalog.DEFAULT_ACQUISITION_ROLES so one query returns the union of every
-    target role, counting each job once (no cross-query billing overlap).
+
+def _role_terms(role: str) -> List[str]:
+    """All inclusion terms for one catalog role: the normalized role plus any
+    configured recall aliases (deduplicated, order-stable)."""
+    # Aliases are FLAG-GATED (config.FANTASTIC_TITLE_ALIASES_ENABLED, default OFF):
+    # even a pure-recall change alters the live billing query, so with the flag off
+    # the expression is byte-identical to the proven production 118-term form (Gate-E D1).
+    aliases = (getattr(config, "FANTASTIC_TITLE_ALIASES", {}) or {}) if bool(
+        getattr(config, "FANTASTIC_TITLE_ALIASES_ENABLED", False)) else {}
+    raw = [role] + [a for a in (aliases.get(role) or []) if str(a or "").strip()]
+    out: List[str] = []
+    seen: set = set()
+    for r in raw:
+        t = _title_advanced_term(r)
+        if t and t not in seen:
+            seen.add(t)
+            out.append(t)
+    return out
+
+
+def _role_family_id(role: str) -> str:
+    return _family_id(role)
+
+
+def build_title_query_plan() -> Dict[str, Any]:
+    """Build the production ``title_advanced`` expression AND its attribution map.
+
+    Returns ``{"expression": str, "clauses": [{"family": id, "role": str,
+    "include": [terms], "exclude": [negations], "clause": str}], "global_exclusions":
+    [...], "fingerprint": sha}``. Each role becomes ONE clause:
+
+        ( 'term a' | 'term b' [ & !contaminant ... ] )
+
+    joined by ``|``. Scoped negation (``config.FANTASTIC_TITLE_SCOPED_EXCLUSIONS``)
+    is applied ONLY inside the clause of the role it was proven safe for, never
+    globally; ``config.FANTASTIC_TITLE_GLOBAL_EXCLUSIONS`` wraps the whole union as
+    ``( union ) & !term`` and is reserved for tokens proven collision-free across
+    every FINAL_PASS title. A configured override expression wins verbatim (no
+    attribution possible for an opaque override).
     """
     override = str(getattr(config, "FANTASTIC_JOBS_TITLE_ADVANCED_EXPRESSION", "") or "").strip()
     if override:
-        return override
+        return {"expression": override, "clauses": [], "global_exclusions": [],
+                "fingerprint": _fingerprint(override), "override": True}
     try:
         from role_catalog import DEFAULT_ACQUISITION_ROLES
     except Exception:  # noqa: BLE001 - never let a missing catalog crash acquisition
-        return ""
-    terms: List[str] = []
-    seen: set = set()
+        return {"expression": "", "clauses": [], "global_exclusions": [], "fingerprint": ""}
+    scoped_on = bool(getattr(config, "FANTASTIC_TITLE_SCOPED_EXCLUSIONS_ENABLED", False))
+    scoped = (getattr(config, "FANTASTIC_TITLE_SCOPED_EXCLUSIONS", {}) or {}) if scoped_on else {}
+    global_on = bool(getattr(config, "FANTASTIC_TITLE_GLOBAL_EXCLUSIONS_ENABLED", False))
+    global_neg = [n for n in ((getattr(config, "FANTASTIC_TITLE_GLOBAL_EXCLUSIONS", []) or [])
+                              if global_on else []) if str(n or "").strip()]
+
+    clauses: List[Dict[str, Any]] = []
+    seen_terms: set = set()
     for role in sorted({str(r).strip() for r in DEFAULT_ACQUISITION_ROLES if str(r).strip()}):
-        term = _title_advanced_term(role)
-        if term and term not in seen:
-            seen.add(term)
-            terms.append(term)
-    return " | ".join(terms)
+        include = [t for t in _role_terms(role) if t not in seen_terms]
+        if not include:
+            continue
+        seen_terms.update(include)
+        exclude = [n for n in (_negation_term(x) for x in (scoped.get(role) or [])) if n]
+        inner = " | ".join(include)
+        if exclude:
+            # Scoped: negate INSIDE this role's clause only.
+            clause = f"({inner}) & " + " & ".join(exclude) if len(include) > 1 else f"{inner} & " + " & ".join(exclude)
+            clause = f"({clause})"
+        else:
+            clause = inner if len(include) == 1 else f"({inner})"
+        clauses.append({"family": _role_family_id(role), "role": role, "include": include,
+                        "exclude": exclude, "clause": clause})
+    union = " | ".join(c["clause"] for c in clauses)
+    gneg = [n for n in (_negation_term(x) for x in global_neg) if n]
+    expression = f"({union}) & " + " & ".join(gneg) if (union and gneg) else union
+    return {"expression": expression, "clauses": clauses, "global_exclusions": gneg,
+            "fingerprint": _fingerprint(expression), "override": False}
+
+
+def _fingerprint(text: str) -> str:
+    import hashlib
+    return hashlib.sha256(str(text or "").encode("utf-8")).hexdigest()[:16]
+
+
+def _title_advanced_expression() -> str:
+    """The Boolean OR-expression over the whole role catalog (benchmark parity)."""
+    return build_title_query_plan()["expression"]
+
+
+def attribute_title_family(job_title: str, plan: Dict[str, Any]) -> str:
+    """Best-effort attribution of an acquired job title to the query family whose
+    inclusion term(s) it matches (token-subset match mirroring tsquery phrase
+    semantics). Returns the family id or "" when no clause matches (e.g. an
+    opaque override expression)."""
+    import re as _re
+    title_tokens = _re.findall(r"[a-z0-9&]+", str(job_title or "").lower())
+    title_str = " " + " ".join(title_tokens) + " "
+    best = ""
+    best_len = 0
+    for c in plan.get("clauses") or []:
+        for term in c.get("include") or []:
+            phrase = term.strip("'")
+            if f" {phrase} " in title_str and len(phrase) > best_len:
+                best, best_len = c["family"], len(phrase)
+    return best
+
+
+def _server_industry_exclusions() -> List[str]:
+    """Exact Fantastic taxonomy labels to send as ``exclude_organization_industry``
+    (PROVEN param, live count probe 2026-08-22). Labels are NEVER derived from
+    Apollo keyword lists; only configured exact strings are sent."""
+    if not bool(getattr(config, "FANTASTIC_SERVER_INDUSTRY_EXCLUSION_ENABLED", False)):
+        return []
+    raw = getattr(config, "FANTASTIC_EXCLUDED_ORG_INDUSTRIES", []) or []
+    out: List[str] = []
+    seen: set = set()
+    for label in raw:
+        s = str(label or "").strip()
+        if s and s not in seen:
+            seen.add(s)
+            out.append(s)
+    return out
+
+
+def _apply_server_industry_exclusions(params: Dict[str, Any]) -> Dict[str, Any]:
+    """Attach ``exclude_organization_industry`` (multi-value as repeated params, the
+    OpenAPI array encoding) and record attribution in the params' sidecar."""
+    labels = _server_industry_exclusions()
+    if labels:
+        params["exclude_organization_industry"] = labels if len(labels) > 1 else labels[0]
+    return params
+
+
+def provider_filter_attribution() -> Dict[str, Any]:
+    """Metadata describing the upstream (pre-billing) exclusions in force, so a
+    later analysis can attribute "jobs not purchased" WITHOUT pretending those rows
+    were returned. Stored in run metadata + the yield ledger header."""
+    plan = build_title_query_plan()
+    labels = _server_industry_exclusions()
+    return {
+        "provider_filter_industry": bool(labels),
+        "industry_labels": list(labels),
+        "industry_config_fingerprint": _fingerprint("|".join(labels)),
+        "title_query_fingerprint": plan.get("fingerprint", ""),
+        "title_global_exclusions": list(plan.get("global_exclusions") or []),
+        "title_scoped_exclusion_families": [c["family"] for c in (plan.get("clauses") or []) if c.get("exclude")],
+    }
 
 
 def _read_quota(headers: Any) -> Dict[str, Optional[int]]:
@@ -468,12 +613,20 @@ def _read_quota(headers: Any) -> Dict[str, Optional[int]]:
             return int(raw) if raw not in (None, "") else None
         except (TypeError, ValueError):
             return None
-    return {
+    out: Dict[str, Any] = {
         "jobs_limit": geti("x-api-jobs-limit"),
         "jobs_remaining": geti("x-api-jobs-remaining"),
         "requests_limit": geti("x-api-requests-limit"),
         "requests_remaining": geti("x-api-requests-remaining"),
     }
+    # Billing reset date (string header; used by the monthly governor). Absent on
+    # some responses -> None; never treated as an error.
+    try:
+        nbd = headers.get("x-api-next-billing-date")
+        out["next_billing_date"] = str(nbd).strip() if nbd not in (None, "") else None
+    except (TypeError, AttributeError):
+        out["next_billing_date"] = None
+    return out
 
 
 class FantasticAuthError(Exception):
@@ -580,8 +733,14 @@ def _fetch_segment(endpoint: str, base_params: Dict[str, Any], source_label: str
     })
     page = 1
     fingerprints: set = set()
-    while len(jobs) < cap:
-        want = min(cap - len(jobs), 100)
+    # BILLING-ACCURATE CAP (Gate-A BUG 6 / Gate-D): the provider bills every RETURNED
+    # row, including rows we then schema-reject, source-filter or dedupe. The cap
+    # therefore bounds rows RETURNED this call (``returned``), not rows KEPT -- so a
+    # governor/top-up budget of N can never be exceeded by a dup-heavy page run.
+    # Kept jobs are always <= returned, so ``len(jobs) < cap`` remains implied.
+    returned = 0
+    while returned < cap:
+        want = min(cap - returned, 100)
         breach = _quota_would_breach(quota, want)
         if breach:
             seg["stop_reason"] = breach
@@ -607,6 +766,8 @@ def _fetch_segment(endpoint: str, base_params: Dict[str, Any], source_label: str
             quota.jobs_remaining = q["jobs_remaining"]
         if q.get("requests_remaining") is not None:
             quota.requests_remaining = q["requests_remaining"]
+        if q.get("next_billing_date"):
+            metrics["next_billing_date"] = q["next_billing_date"]
         if not rows:
             seg["stop_reason"] = seg["stop_reason"] or "empty_page"
             break
@@ -619,6 +780,7 @@ def _fetch_segment(endpoint: str, base_params: Dict[str, Any], source_label: str
         for record in rows:
             seg["returned"] += 1
             quota.jobs_consumed += 1
+            returned += 1
             job, reason = map_record(record, source_label, seg)
             if job is None:
                 seg["schema_rejected"] += 1
@@ -649,6 +811,13 @@ def _fetch_segment(endpoint: str, base_params: Dict[str, Any], source_label: str
                 break
         if boundary_hit:
             break
+        if returned >= cap:
+            # Cap reached with a FULL page: the feed may hold more rows. Record it
+            # explicitly so a date_created watermark never treats a cap-truncated
+            # window as drained (Gate-B 5A). A short page below means exhaustion.
+            if len(rows) >= want:
+                seg["stop_reason"] = seg["stop_reason"] or "cap_reached"
+            break
         if len(rows) < want:
             seg["stop_reason"] = seg["stop_reason"] or "short_page"
             break
@@ -660,6 +829,282 @@ def _fetch_segment(endpoint: str, base_params: Dict[str, Any], source_label: str
             seg["stop_reason"] = "page_cap"
             break
     return jobs
+
+
+def build_ats_params(title_advanced_expr: str) -> Dict[str, Any]:
+    """``/v1/active-ats`` request with filter PARITY to the LinkedIn stream: the same
+    role universe (title_advanced; PROVEN accepted by active-ats-count), the same
+    US/headcount/full-time/agency ICP filters (all PROVEN accepted, 0 dropped) and
+    the same server-side industry exclusions. Flags allow either parity layer to be
+    switched off for a controlled A/B."""
+    params: Dict[str, Any] = {"time_frame": config.FANTASTIC_JOBS_TIME_FRAME,
+                              "include_basic_organization_details": "true"}
+    if bool(getattr(config, "FANTASTIC_ATS_APPLY_TITLE_ADVANCED", True)) and title_advanced_expr:
+        params["title_advanced"] = title_advanced_expr
+    if bool(getattr(config, "FANTASTIC_ATS_APPLY_ICP_FILTERS", True)):
+        params.update(_jb_filter_params())
+    _apply_server_industry_exclusions(params)
+    return params
+
+
+# NOTE (Gates B+E): a local "employer|title" cross-source posting identity was
+# considered and REJECTED -- it would collapse two legitimately distinct openings
+# (e.g. "Account Executive" NYC vs SF) and is redundant with the provider-side
+# exclude_ats_duplicate=true de-twinning. ATS x JB twins are prevented at the
+# provider; downstream company x function grouping handles enrichment dedupe.
+
+
+def _save_quota_snapshot(quota: "_QuotaState", metrics: Dict[str, Any]) -> None:
+    """Persist the last-known provider quota headers so the NEXT run's governor can
+    read remaining credits / reset date without a row-producing call. Best-effort."""
+    path = str(getattr(config, "FANTASTIC_QUOTA_SNAPSHOT_PATH", "") or "")
+    if not path or quota.jobs_remaining is None:
+        return
+    snap = {"schema": "fantastic-quota-snapshot/1",
+            "jobs_remaining": quota.jobs_remaining,
+            "requests_remaining": quota.requests_remaining,
+            "next_billing_date": metrics.get("next_billing_date", ""),
+            "captured_at": datetime.now(timezone.utc).isoformat()}
+    try:
+        d = os.path.dirname(path)
+        if d:
+            os.makedirs(d, exist_ok=True)
+        tmp = f"{path}.tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(snap, fh)
+        os.replace(tmp, path)
+    except OSError as exc:
+        logger.warning("quota snapshot not persisted: %s", type(exc).__name__)
+
+
+def load_quota_snapshot() -> Dict[str, Any]:
+    path = str(getattr(config, "FANTASTIC_QUOTA_SNAPSHOT_PATH", "") or "")
+    if not path:
+        return {}
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+_WATERMARK_SCHEMA = "fantastic-watermark/1"
+
+
+class DateCreatedWatermarkEngine:
+    """Acquisition engine keyed on the provider's index clock (``date_created``).
+
+    PROVEN (2026-08-22 live probe): ``date_created_gte``/``date_created_lt`` are both
+    honored by ``/v1/active-jb``. Category 2: DEFAULT OFF.
+
+    Safe algorithm (never the naive "advance to max seen"):
+        upper = now_utc - LAG            (deterministic, frozen at run start)
+        lower = prev_watermark - OVERLAP (re-query a small band behind the mark)
+        request date_created_gte=lower & date_created_lt=upper
+        advance watermark -> upper ONLY after the interval is fully processed
+        and persisted; a crash before commit leaves the prior watermark, so the
+        next run replays the bounded [lower, upper) interval (dedup by stable IDs).
+
+    State file (separate from the date_posted continuation file; additive; never
+    wipes; deploying the code needs no migration because the engine is OFF)::
+
+        {"schema": "fantastic-watermark/1", "last_successful_watermark": iso,
+         "window_start": iso, "window_end": iso, "overlap_start": iso,
+         "in_flight_window_end": iso|"", "boundary_ids": [...], "run_epoch": int,
+         "updated_at": iso}
+
+    An EMPTY interval is a valid, successful interval (proof of absence) and still
+    advances the watermark -- structurally immune to the zero-acquisition-stuck
+    class that afflicts a date_posted cursor.
+    """
+
+    def __init__(self, *, result, quota, http_get, seen_ids, metrics, run_cap: int,
+                 now: Optional[datetime] = None) -> None:
+        self.result, self.quota, self.http_get = result, quota, http_get
+        self.seen_ids, self.metrics, self.run_cap = seen_ids, metrics, run_cap
+        self.now = (now or datetime.now(timezone.utc)).replace(microsecond=0)
+        self.state: Dict[str, Any] = self._load()
+        self.lower = ""
+        self.upper = ""
+        self.acquired: List[Dict[str, Any]] = []
+        self.opened = False
+
+    # -- state -----------------------------------------------------------------
+    def _path(self) -> str:
+        return str(getattr(config, "FANTASTIC_WATERMARK_STATE_PATH", "") or "")
+
+    def _load(self) -> Dict[str, Any]:
+        p = self._path()
+        if not p:
+            return {}
+        try:
+            with open(p, encoding="utf-8") as fh:
+                data = json.load(fh)
+            if isinstance(data, dict) and data.get("schema") == _WATERMARK_SCHEMA:
+                return data
+        except (OSError, ValueError):
+            pass
+        return {}
+
+    def _save(self) -> None:
+        p = self._path()
+        if not p:
+            return
+        try:
+            d = os.path.dirname(p)
+            if d:
+                os.makedirs(d, exist_ok=True)
+            tmp = f"{p}.tmp"
+            self.state["schema"] = _WATERMARK_SCHEMA
+            self.state["updated_at"] = datetime.now(timezone.utc).isoformat()
+            with open(tmp, "w", encoding="utf-8") as fh:
+                json.dump(self.state, fh)
+            os.replace(tmp, p)
+        except OSError as exc:
+            logger.warning("watermark state not persisted: %s", type(exc).__name__)
+
+    @staticmethod
+    def _iso(dt: datetime) -> str:
+        return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    # -- window ------------------------------------------------------------------
+    def open(self) -> None:
+        """Compute the deterministic window for this run and persist the in-flight
+        marker BEFORE any acquisition (so a crash is detectable on restart)."""
+        # WINDOW REUSE (Gate-E D3): the top-up loop may call the adapter more than
+        # once. If an in-flight window is already open (same run, or an earlier
+        # crashed run) it is REUSED verbatim -- never re-derived from ``now`` -- so
+        # later calls page the SAME [lower, upper) and can never re-bill it. Every ID
+        # already acquired in that window (``window_acquired_ids``) plus the whole
+        # previous overlap band (``overlap_band_ids``) is re-seeded into ``seen_ids``,
+        # so replay/overlap dedupes the entire band, not only the boundary second (D6).
+        lag = int(getattr(config, "FANTASTIC_DATE_CREATED_LAG_MINUTES", 180) or 0)
+        overlap = int(getattr(config, "FANTASTIC_DATE_CREATED_OVERLAP_MINUTES", 60) or 0)
+        prev = self.state.get("last_successful_watermark") or ""
+        in_flight = self.state.get("in_flight_window_end") or ""
+        reused = False
+        # Guard a corrupt in-flight record (marker without a parsable window start):
+        # treat it as "no open window" rather than crashing acquisition uncaught.
+        try:
+            datetime.fromisoformat(str(self.state.get("window_start") or "").replace("Z", "+00:00"))
+            start_ok = bool(self.state.get("window_start"))
+        except (ValueError, TypeError):
+            start_ok = False
+        if in_flight and start_ok:
+            self.lower, self.upper = str(self.state.get("window_start")), str(in_flight)
+            reused = True
+        else:
+            upper_dt = self.now - timedelta(minutes=max(0, lag))
+            if prev:
+                prev_dt = datetime.fromisoformat(str(prev).replace("Z", "+00:00"))
+                if prev_dt.tzinfo is None:
+                    prev_dt = prev_dt.replace(tzinfo=timezone.utc)
+                lower_dt = prev_dt - timedelta(minutes=max(0, overlap))
+            else:
+                # Bootstrap: cover the current time_frame window exactly once.
+                hours = _parse_time_frame_hours(config.FANTASTIC_JOBS_TIME_FRAME)
+                lower_dt = upper_dt - timedelta(hours=hours)
+            if lower_dt >= upper_dt:
+                lower_dt = upper_dt  # run started inside the lag buffer: empty interval
+            self.lower, self.upper = self._iso(lower_dt), self._iso(upper_dt)
+            self.state["window_acquired_ids"] = []
+        for key in ("boundary_ids", "overlap_band_ids", "window_acquired_ids"):
+            self.seen_ids |= {f"fantastic_{i}" for i in (self.state.get(key) or [])}
+        self.state.update({"window_start": self.lower, "window_end": self.upper,
+                           "overlap_start": self.lower, "in_flight_window_end": self.upper,
+                           "last_successful_watermark": prev})
+        self._save()
+        self.opened = True
+        self.metrics["watermark"] = {
+            "enabled": True, "lower": self.lower, "upper": self.upper,
+            "previous_watermark": prev, "window_reused": reused,
+            "lag_minutes": lag, "overlap_minutes": overlap, "empty_interval": (self.lower == self.upper)}
+
+    def run_stream(self, endpoint: str, base_params: Dict[str, Any], label: str,
+                   cap_limit: int, accept: Optional[Tuple[str, ...]]) -> None:
+        """One pass over [lower, upper) for a source; shares billing/dedupe with the
+        head/deep engine via ``_fetch_segment``."""
+        if not self.opened or self.lower == self.upper:
+            return
+        room = min(cap_limit, self.run_cap - len(self.result.jobs))
+        if room <= 0:
+            return
+        params = dict(base_params)
+        params["date_created_gte"] = self.lower
+        params["date_created_lt"] = self.upper
+        got = _fetch_segment(endpoint, params, label, room, self.quota, self.http_get,
+                             self.seen_ids, self.metrics, accept_source=accept)
+        self.acquired.extend(got)
+        self.result.jobs.extend(got)
+        self.metrics["watermark"]["acquired"] = self.metrics["watermark"].get("acquired", 0) + len(got)
+
+    # Segment stop reasons that mean the window was NATURALLY exhausted. Anything
+    # else (cap hit, quota reserve, page_cap, request error, rate limit) means the
+    # window was TRUNCATED and the watermark must NOT advance (Gate-B 5A: a partial
+    # window that commits loses every un-fetched in-window job permanently).
+    _DRAINED_STOPS = frozenset({"", "empty_page", "short_page", "no_new_ids"})
+
+    def window_drained(self) -> bool:
+        segs = self.metrics.get("segments") or {}
+        if not segs:
+            return self.lower == self.upper  # empty interval = trivially drained
+        for s in segs.values():
+            if s.get("error_code") or str(s.get("stop_reason") or "") not in self._DRAINED_STOPS:
+                return False
+        return True
+
+    def checkpoint(self) -> None:
+        """After this adapter call: persist the IDs acquired so far in the OPEN window
+        (still in-flight; the watermark does NOT advance) and whether the window was
+        fully DRAINED. A later slice or a crash replay dedupes against the IDs and
+        never re-bills. Committing is the PIPELINE's job (``commit_watermark``),
+        after processing + persistence (Gate-E D4)."""
+        if not self.opened:
+            return
+        ids = set(str(i) for i in (self.state.get("window_acquired_ids") or []))
+        ids |= {str(j.get("_fantastic_internal_id")) for j in self.acquired if j.get("_fantastic_internal_id")}
+        self.state["window_acquired_ids"] = sorted(ids)
+        self.state["window_drained"] = bool(self.window_drained())
+        self._save()
+        self.metrics["watermark"]["committed"] = False
+        self.metrics["watermark"]["drained"] = self.state["window_drained"]
+
+
+def commit_watermark(*, success: bool) -> Dict[str, Any]:
+    """Advance the date_created watermark to the open window's ``upper`` bound.
+
+    Called by the PIPELINE after the acquired postings were processed AND persisted
+    (after SuppressionStore.commit_postings) -- never by the adapter (Gate-E D4). A
+    crash between acquisition and persistence leaves the in-flight marker, so the
+    next run REPLAYS the same bounded window and dedupes against the checkpointed
+    IDs. An EMPTY window is a valid success (proof of absence) and still advances.
+    The window's acquired IDs become the next run's ``overlap_band_ids`` so the
+    overlap band is re-queried but never re-billed (Gate-E D6).
+    """
+    engine = DateCreatedWatermarkEngine(result=None, quota=None, http_get=None,
+                                        seen_ids=set(), metrics={}, run_cap=0)
+    st = engine.state
+    upper = str(st.get("in_flight_window_end") or "")
+    if not upper:
+        return {"committed": False, "reason": "no_open_window"}
+    if not success:
+        engine._save()
+        return {"committed": False, "reason": "run_not_successful", "upper": upper}
+    if not bool(st.get("window_drained", False)):
+        # Gate-B 5A: the window was TRUNCATED (cap / quota reserve / page_cap / error).
+        # Leave the watermark where it is so the next run replays the SAME window
+        # (deduping what was already acquired) instead of losing the remainder.
+        engine._save()
+        return {"committed": False, "reason": "window_truncated_replay_next_run", "upper": upper,
+                "acquired_so_far": len(st.get("window_acquired_ids") or [])}
+    acquired_ids = list(st.get("window_acquired_ids") or [])
+    st.update({"last_successful_watermark": upper, "in_flight_window_end": "",
+               "overlap_band_ids": acquired_ids, "boundary_ids": [],
+               "run_epoch": int(st.get("run_epoch", 0) or 0) + 1,
+               "acquired_last_window": len(acquired_ids), "window_acquired_ids": []})
+    engine._save()
+    return {"committed": True, "next_watermark": upper, "band_ids": len(acquired_ids)}
 
 
 def run_fantastic_jobs_acquisition(http_get: HttpGet = _http_get) -> SourceResult:
@@ -751,7 +1196,21 @@ def run_fantastic_jobs_acquisition(http_get: HttpGet = _http_get) -> SourceResul
     # leaving job_description empty rather than fabricating one.
     title_targeting = bool(getattr(config, "FANTASTIC_JOBS_TITLE_TARGETING_ENABLED", False))
     title_advanced_enabled = bool(getattr(config, "FANTASTIC_JOBS_TITLE_ADVANCED_ENABLED", False))
-    title_advanced_expr = _title_advanced_expression() if title_advanced_enabled else ""
+    title_plan = build_title_query_plan() if title_advanced_enabled else {"expression": "", "clauses": []}
+    title_advanced_expr = title_plan.get("expression", "") if title_advanced_enabled else ""
+    metrics["provider_filters"] = provider_filter_attribution()
+
+    # Acquisition ENGINE selection (common interface, see AcquisitionEngine below):
+    #   * default  -> head/deep two-cursor (the production-safe path, unchanged)
+    #   * flag ON  -> date_created watermark (Category 2; DEFAULT OFF)
+    # Both engines share _fetch_segment/billing/quota/seen_ids; only the window
+    # bounds and the persisted cursor differ, so no pipeline logic is duplicated.
+    watermark_engine = None
+    if bool(getattr(config, "FANTASTIC_DATE_CREATED_WATERMARK_ENABLED", False)):
+        watermark_engine = DateCreatedWatermarkEngine(
+            result=result, quota=quota, http_get=http_get, seen_ids=seen_ids,
+            metrics=metrics, run_cap=run_cap)
+        watermark_engine.open()
     # title_advanced (one Boolean LinkedIn stream) TAKES PRECEDENCE over per-family
     # title_targeting in acquisition. The continuation cursor must be persisted in
     # the mode that ACTUALLY ran: if title_advanced runs while title_targeting is
@@ -803,11 +1262,28 @@ def run_fantastic_jobs_acquisition(http_get: HttpGet = _http_get) -> SourceResul
 
     try:
         # Segment priority: ATS first, then Wellfound, Y Combinator, LinkedIn.
-        ats_params = {"time_frame": config.FANTASTIC_JOBS_TIME_FRAME,
-                      "include_basic_organization_details": "true"}
-        result.jobs.extend(_fetch_segment(
-            "/v1/active-ats", ats_params, ATS_SOURCE, config.FANTASTIC_JOBS_ATS_LIMIT,
-            quota, http_get, seen_ids, metrics))
+        # active-ats is the complementary, NON-overlapping first-party dataset
+        # (active-jb is queried with exclude_ats_duplicate=true, so ATS x JB twins
+        # cannot be billed twice by construction). It is gated by BOTH the explicit
+        # source flag (Category 2, default OFF) and a non-zero ATS limit, so a code
+        # deploy can never activate it; production keeps FANTASTIC_JOBS_ATS_LIMIT=0.
+        ats_enabled = (bool(getattr(config, "FANTASTIC_ATS_SOURCE_ENABLED", False))
+                       and int(config.FANTASTIC_JOBS_ATS_LIMIT or 0) > 0)
+        metrics["ats_source"] = {"enabled": ats_enabled, "limit": int(config.FANTASTIC_JOBS_ATS_LIMIT or 0)}
+        if ats_enabled:
+            ats_params = build_ats_params(title_advanced_expr)
+            metrics["ats_source"]["params"] = sorted(k for k in ats_params if k != "title_advanced")
+            ats_room = min(int(config.FANTASTIC_JOBS_ATS_LIMIT), run_cap - len(result.jobs))
+            if ats_room > 0:
+                if watermark_engine is not None:
+                    watermark_engine.run_stream("/v1/active-ats", ats_params, ATS_SOURCE, ats_room, None)
+                else:
+                    got = _fetch_segment("/v1/active-ats", ats_params, ATS_SOURCE, ats_room,
+                                         quota, http_get, seen_ids, metrics)
+                    # ATS rows must NOT feed the LinkedIn date_posted cursor (Gate-B):
+                    # an ATS row with a newer date_posted would inflate high_water and
+                    # make the next LinkedIn head pass skip genuinely new jobs.
+                    result.jobs.extend(got)
 
         if title_advanced_active:
             # ONE Boolean OR-expression over the whole role catalog (benchmark
@@ -815,13 +1291,20 @@ def run_fantastic_jobs_acquisition(http_get: HttpGet = _http_get) -> SourceResul
             # cross-query billing overlap, 118/118 coverage, ~all target-role.
             # It is a single LinkedIn stream, so it reuses the single-stream
             # date_posted cursor (head fresh-edge + deep backfill).
-            metrics["title_advanced"] = {"expression_chars": len(title_advanced_expr)}
+            metrics["title_advanced"] = {"expression_chars": len(title_advanced_expr),
+                                         "fingerprint": title_plan.get("fingerprint", ""),
+                                         "clauses": len(title_plan.get("clauses") or [])}
             jb_params = {"time_frame": config.FANTASTIC_JOBS_TIME_FRAME,
                          "exclude_ats_duplicate": "true", "source": "linkedin",
                          "title_advanced": title_advanced_expr}
             jb_params.update(_jb_filter_params())
-            _run_single_stream("/v1/active-jb", jb_params, "fantastic_jobs_linkedin",
-                               config.FANTASTIC_JOBS_LINKEDIN_LIMIT, ("linkedin",))
+            _apply_server_industry_exclusions(jb_params)
+            if watermark_engine is not None:
+                watermark_engine.run_stream("/v1/active-jb", jb_params, "fantastic_jobs_linkedin",
+                                            config.FANTASTIC_JOBS_LINKEDIN_LIMIT, ("linkedin",))
+            else:
+                _run_single_stream("/v1/active-jb", jb_params, "fantastic_jobs_linkedin",
+                                   config.FANTASTIC_JOBS_LINKEDIN_LIMIT, ("linkedin",))
         elif used_title_families and config.FANTASTIC_JOBS_LINKEDIN_LIMIT > 0:
             # LinkedIn-only, but targeted per role FAMILY so ~all billed jobs are
             # on-portfolio (the broad feed is ~4% target-role). One global cap is
@@ -926,6 +1409,26 @@ def run_fantastic_jobs_acquisition(http_get: HttpGet = _http_get) -> SourceResul
         int(s.get("duplicates", 0)) for s in metrics["segments"].values())
     metrics["title_targeting"] = title_targeting
     metrics["used_title_families"] = used_title_families
+    # Per-source billing observability (jobs kept + rows returned/billed per dataset).
+    metrics["per_source"] = {
+        label: {"jobs": sum(1 for j in result.jobs if j.get("_acquisition_source") == label),
+                "returned_billed": int(s.get("returned", 0)),
+                "requests": int(s.get("requests_succeeded", 0))}
+        for label, s in metrics["segments"].items()}
+    # Query-family attribution for every acquired job (which title clause matched),
+    # used by the yield ledger to compute net-new send-safe per title family.
+    if title_plan.get("clauses"):
+        for job in result.jobs:
+            job["_title_family"] = attribute_title_family(job.get("job_title", ""), title_plan)
+    # Last-known provider quota snapshot (0-credit input for the next run's
+    # governor). Gated so an all-flags-OFF deploy writes NO new state (Gate-E D7).
+    if bool(getattr(config, "FANTASTIC_MONTHLY_GOVERNOR_ENABLED", False)):
+        _save_quota_snapshot(quota, metrics)
+
+    # The watermark engine only CHECKPOINTS here (IDs acquired in the open window);
+    # the watermark advances in the PIPELINE after processing + persistence (D4).
+    if watermark_engine is not None:
+        watermark_engine.checkpoint()
 
     # Advance and persist the continuation cursor from the jobs actually acquired
     # (billed). ``_cursor_stats`` spans BOTH edges of the merged head+deep set in one
@@ -935,7 +1438,9 @@ def run_fantastic_jobs_acquisition(http_get: HttpGet = _http_get) -> SourceResul
     # is left intact), so a zero-result deep query can never regress the fresh edge.
     # Per-family mode keeps an INDEPENDENT cursor per family; single-stream
     # (title_advanced or seg-caps) keeps one cursor.
-    if continuation_enabled and used_title_families:
+    if watermark_engine is not None:
+        pass  # watermark engine owns the window; the date_posted cursor file is left intact
+    elif continuation_enabled and used_title_families:
         _save_continuation_state({
             "schema": _CONTINUATION_SCHEMA,
             "mode": "title_families",

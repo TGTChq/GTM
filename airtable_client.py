@@ -824,6 +824,10 @@ def push_leads(jobs: List[Dict], batch_size: int = 10,
         "created": created,
         "created_lead_keys": created_lead_keys,
         "persisted_lead_keys": persisted_lead_keys,
+        # Rows actually PATCHED in place this run (a row count, unlike the
+        # per-field updated_missing_* counters). Delivery derives
+        # ``updated_existing`` from this -- never from len(persisted_lead_keys).
+        "updated": len(to_update),
         "updated_missing_role_focus": updated_missing_role_focus,
         "updated_missing_job_signals": updated_missing_job_signals,
         "skipped_existing": skipped_existing,

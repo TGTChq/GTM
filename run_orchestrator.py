@@ -625,11 +625,19 @@ def _print_run_summary(ctx, mode, result, state) -> None:
     fp = wf.get("final_pass_count", census.get("FINAL_PASS", 0))
     nc = census.get("NEEDS_CHECK", 0)
     uv = census.get("UNVERIFIED", 0)
-    usable_emails = int(fp or 0) + int(uv or 0)  # verified + pending-verification
+    # Email counters are EMAIL-PRESENCE / VERIFICATION based (Gate D), never a sum of
+    # disposition labels: ``contacts`` == leads carrying a resolved email; verified ==
+    # those whose Apollo status is "verified". (The old "usable_emails = FINAL_PASS +
+    # UNVERIFIED" was a census sum unrelated to email presence and could exceed contacts.)
+    emails = result.get("emails") or {}
+    verified_emails = emails.get("verified")
+    unverified_emails = emails.get("unverified")
     at_created = deliv.get("created")
     at_existing = deliv.get("skipped_existing")
     at_failed = deliv.get("failed")
     at_submitted = deliv.get("reviewable_submitted")
+    skips = deliv.get("skip_breakdown") or {}
+    acq = result.get("acquisition") or {}
 
     # Top rejection reasons across the boundaries the orchestrator can see:
     # cross-run dedup, pre-contact qualification, and enrichment loss.
@@ -670,6 +678,25 @@ def _print_run_summary(ctx, mode, result, state) -> None:
         line("stop_reason", run_stop)
     if failed_lanes:
         line("ACQUISITION", f"FAILED ({', '.join(failed_lanes)}) -- see errors above")
+    # CUMULATIVE top-up acquisition (all slices), never only the last slice.
+    if acq:
+        cum = acq.get("cumulative") or {}
+        print("---- Acquisition (cumulative, all top-up slices) ----")
+        line("topup_iterations", acq.get("iterations"))
+        line("run_cap", f"{acq.get('run_cap')} (source={acq.get('budget_source')})")
+        line("jobs_unique_kept", cum.get("jobs_unique_kept"))
+        line("jobs_returned_billed", cum.get("jobs_returned_billed"))
+        line("jobs_quota_consumed", cum.get("jobs_quota_consumed"))
+        line("physical_requests", cum.get("physical_requests"))
+        line("cross_query_duplicates", cum.get("cross_query_duplicates"))
+        line("jobs_quota_remaining", cum.get("last_jobs_quota_remaining"))
+        for src, s in sorted((cum.get("per_source") or {}).items()):
+            line(f"  {src}", f"jobs={s.get('jobs')} billed={s.get('returned_billed')} requests={s.get('requests')}")
+        line("final_stop_reason", acq.get("final_stop_reason"))
+        govd = (result.get("governor") or {}).get("decision") or {}
+        if govd:
+            line("governor_budget", f"{govd.get('run_budget')} reason={govd.get('reason')} "
+                                    f"remaining={govd.get('remaining_credits')} reserve={govd.get('reserve_credits')}")
     print("---- Brett's daily metrics ----")
     line("JOBS_ANALYZED", raw)
     line("QUALIFIED", funnel.get("target_role_eligible", funnel.get("icp_eligible_companies")))
@@ -684,7 +711,8 @@ def _print_run_summary(ctx, mode, result, state) -> None:
     line("icp_rejected_companies", funnel.get("icp_rejected_companies"))
     line("hiring_managers_found", funnel.get("hiring_managers_found"))
     line("contacts_with_email", contacts)
-    line("usable_emails", usable_emails)
+    line("verified_emails", verified_emails)
+    line("unverified_emails", unverified_emails)
     line("FINAL_PASS", fp)
     line("NEEDS_CHECK", nc)
     line("UNVERIFIED", uv)
@@ -693,6 +721,11 @@ def _print_run_summary(ctx, mode, result, state) -> None:
     line("airtable_created", at_created)
     line("airtable_existing", at_existing)
     line("airtable_failed", at_failed)
+    if skips:
+        # Mutually exclusive: submitted - created - failed == sum of these.
+        for k in ("updated_existing", "company_function_suppressed", "account_suppressed",
+                  "no_contact", "person_employer_duplicate", "other"):
+            line(f"  skip.{k}", skips.get(k))
     ats = (result.get("lanes") or {}).get("ats") or {}
     if ats:
         attr = ats.get("attribution") or {}

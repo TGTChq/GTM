@@ -762,6 +762,132 @@ FANTASTIC_JOBS_CONTINUATION_STATE_PATH = os.getenv(
 # continuation is disabled (a single plain current-window fetch).
 FANTASTIC_JOBS_ACQUIRE_MODE = os.getenv("FANTASTIC_JOBS_ACQUIRE_MODE", "head_then_deep").strip().lower()
 
+# ---------- Yield-optimization architecture (2026-08) ----------
+# Category 1 (SAFE TO ENABLE at the next cutover) vs Category 2 (IMPLEMENTED, TESTED,
+# DEFAULT OFF until post-reset validation). A code deploy must NEVER activate a
+# Category-2 behavior: every one defaults OFF below.
+#
+# --- Monthly Fantastic credit governor (P0; Category 1) ----------------------
+# The 20,000 Jobs/month plan is a HARD binding constraint. The governor is the
+# spending AUTHORITY for a run; NET_NEW_SEND_SAFE_TARGET is only an aspiration that
+# may stop a run early, never raise its budget. See orchestrator/fantastic_governor.py.
+FANTASTIC_MONTHLY_GOVERNOR_ENABLED = _env_bool("FANTASTIC_MONTHLY_GOVERNOR_ENABLED", False)
+FANTASTIC_MONTHLY_JOBS_LIMIT = _env_int("FANTASTIC_MONTHLY_JOBS_LIMIT", 20000)
+FANTASTIC_MONTHLY_RESERVE_PCT = float(os.getenv("FANTASTIC_MONTHLY_RESERVE_PCT", "0.10") or 0.10)
+FANTASTIC_DAILY_MIN_JOBS = _env_int("FANTASTIC_DAILY_MIN_JOBS", 100)      # conservative floor
+FANTASTIC_DAILY_MAX_JOBS = _env_int("FANTASTIC_DAILY_MAX_JOBS", 0)        # 0 = no daily ceiling
+FANTASTIC_GOVERNOR_USE_PROVIDER_HEADERS = _env_bool("FANTASTIC_GOVERNOR_USE_PROVIDER_HEADERS", True)
+FANTASTIC_GOVERNOR_USE_COUNT_HINT = _env_bool("FANTASTIC_GOVERNOR_USE_COUNT_HINT", False)
+FANTASTIC_GOVERNOR_CARRY_CAP_DAYS = float(os.getenv("FANTASTIC_GOVERNOR_CARRY_CAP_DAYS", "3") or 3.0)
+# Explicit reset date fallback (ISO) when the provider doesn't expose one; the
+# provider header x-api-next-billing-date wins when present.
+FANTASTIC_BILLING_RESET_AT = os.getenv("FANTASTIC_BILLING_RESET_AT", "").strip()
+FANTASTIC_GOVERNOR_LEDGER_PATH = os.getenv(
+    "FANTASTIC_GOVERNOR_LEDGER_PATH", str(Path(STATE_DIR) / "fantastic_governor_ledger.json"))
+# Last-known provider quota snapshot (written by every acquisition; read by the
+# governor at the start of the next run so it never needs a row-producing call).
+FANTASTIC_QUOTA_SNAPSHOT_PATH = os.getenv(
+    "FANTASTIC_QUOTA_SNAPSHOT_PATH", str(Path(STATE_DIR) / "fantastic_quota_snapshot.json"))
+
+# --- Server-side industry exclusion (PROVEN param: exclude_organization_industry) -
+# JSON list of EXACT Fantastic/LinkedIn taxonomy labels. Never translated from Apollo
+# keywords. Only "Hospitals and Health Care" is proven (live count probe: honored;
+# historical: 82 billed jobs -> 0 FINAL_PASS). Additional labels stay unconfigured
+# until proven. The downstream ICP gate remains intact (defense-in-depth).
+FANTASTIC_EXCLUDED_ORG_INDUSTRIES = _env_json(
+    "FANTASTIC_EXCLUDED_ORG_INDUSTRIES_JSON", ["Hospitals and Health Care"])
+FANTASTIC_SERVER_INDUSTRY_EXCLUSION_ENABLED = _env_bool(
+    "FANTASTIC_SERVER_INDUSTRY_EXCLUSION_ENABLED", False)
+
+# --- Title query: scoped tsquery negation (PROVEN operator: "& !term") -----------
+# Scoped per role family so a contaminant is excluded only where it is junk:
+#   {"Community Manager": ["apartment","leasing","property management","hoa"], ...}
+# Only contexts with PROVEN zero FINAL_PASS collision are configured by default.
+FANTASTIC_TITLE_SCOPED_EXCLUSIONS_ENABLED = _env_bool(
+    "FANTASTIC_TITLE_SCOPED_EXCLUSIONS_ENABLED", False)
+FANTASTIC_TITLE_SCOPED_EXCLUSIONS = _env_json(
+    "FANTASTIC_TITLE_SCOPED_EXCLUSIONS_JSON",
+    {"Community Manager": ["apartment", "leasing", "property management", "hoa", "homeowners"],
+     "Automation Specialist": ["building automation", "hvac"],
+     "Systems Administrator": ["clearance", "polygraph"],
+     "Technical Writer": ["clearance"],
+     "Data Scientist": ["clearance"]})
+# Global negations apply to EVERY clause; only tokens proven collision-free across all
+# FINAL_PASS titles belong here ("clearance" = 55 billed rows, 0 FINAL_PASS).
+FANTASTIC_TITLE_GLOBAL_EXCLUSIONS = _env_json(
+    "FANTASTIC_TITLE_GLOBAL_EXCLUSIONS_JSON", ["clearance"])
+FANTASTIC_TITLE_GLOBAL_EXCLUSIONS_ENABLED = _env_bool(
+    "FANTASTIC_TITLE_GLOBAL_EXCLUSIONS_ENABLED", False)
+# Alias/recall fixes for titles whose "/" or compound form collapses into an
+# unintended token-AND phrase. Always applied (pure recall, zero-cost).
+FANTASTIC_TITLE_ALIASES_ENABLED = _env_bool("FANTASTIC_TITLE_ALIASES_ENABLED", False)  # Gate-E D1
+FANTASTIC_TITLE_ALIASES = _env_json("FANTASTIC_TITLE_ALIASES_JSON", {
+    "UX/UI Designer": ["ux designer", "ui designer", "ux ui designer", "ui ux designer"],
+    "Frontend Developer": ["frontend developer", "front end developer", "front-end developer"],
+})
+
+# --- date_created watermark acquisition (Category 2; DEFAULT OFF) ----------------
+# PROVEN on the production API (2026-08-22 probe): date_created_gte/lt both honored.
+# Safe form ONLY: upper = now - lag; lower = prev_watermark - overlap; advance the
+# watermark to `upper` only after the interval is fully processed+persisted.
+# Lag/overlap are conservative placeholders pending commit-lag validation.
+FANTASTIC_DATE_CREATED_WATERMARK_ENABLED = _env_bool("FANTASTIC_DATE_CREATED_WATERMARK_ENABLED", False)
+FANTASTIC_DATE_CREATED_LAG_MINUTES = _env_int("FANTASTIC_DATE_CREATED_LAG_MINUTES", 180)
+FANTASTIC_DATE_CREATED_OVERLAP_MINUTES = _env_int("FANTASTIC_DATE_CREATED_OVERLAP_MINUTES", 60)
+FANTASTIC_WATERMARK_STATE_PATH = os.getenv(
+    "FANTASTIC_WATERMARK_STATE_PATH", str(Path(STATE_DIR) / "fantastic_watermark.json"))
+
+# --- active-ats source (Category 2; DEFAULT OFF; FANTASTIC_JOBS_ATS_LIMIT stays 0 in prod)
+# Complementary, non-overlapping with active-jb(exclude_ats_duplicate=true).
+FANTASTIC_ATS_SOURCE_ENABLED = _env_bool("FANTASTIC_ATS_SOURCE_ENABLED", False)
+FANTASTIC_ATS_APPLY_TITLE_ADVANCED = _env_bool("FANTASTIC_ATS_APPLY_TITLE_ADVANCED", True)
+FANTASTIC_ATS_APPLY_ICP_FILTERS = _env_bool("FANTASTIC_ATS_APPLY_ICP_FILTERS", True)
+
+# --- JB-vs-ATS source experiment (Category 2; explicit opt-in only) --------------
+SOURCE_EXPERIMENT_ENABLED = _env_bool("SOURCE_EXPERIMENT_ENABLED", False)
+SOURCE_EXPERIMENT_MIN_PER_ARM = _env_int("SOURCE_EXPERIMENT_MIN_PER_ARM", 100)
+SOURCE_EXPERIMENT_MAX_BUDGET = _env_int("SOURCE_EXPERIMENT_MAX_BUDGET", 600)
+SOURCE_EXPERIMENT_CONFIDENCE = float(os.getenv("SOURCE_EXPERIMENT_CONFIDENCE", "0.90") or 0.90)
+SOURCE_EXPERIMENT_ARTIFACT_DIR = os.getenv(
+    "SOURCE_EXPERIMENT_ARTIFACT_DIR", str(Path(STATE_DIR) / "source_experiment"))
+
+# --- Provider-firmographic REJECT-only pre-gate (Apollo stays authoritative for PASS)
+# Historical equivalence: reject-side 90/96 matched Apollo with 6 false-rejects (0.6%).
+# ONLY the deterministic exact-label industry rules + an extreme headcount rule are
+# implemented; default OFF until the label set is re-validated against a live cycle.
+PROVIDER_FIRMOGRAPHIC_PRE_REJECT = _env_bool("PROVIDER_FIRMOGRAPHIC_PRE_REJECT", False)
+PROVIDER_PRE_REJECT_INDUSTRIES = _env_json(
+    "PROVIDER_PRE_REJECT_INDUSTRIES_JSON", ["Hospitals and Health Care"])
+# (No headcount rule: provider `_org_headcount` is CAPPED (~999) and is not an
+#  employee count, so a size pre-reject can never fire -- Gate C. Industry-only.)
+
+# --- Apollo cross-run caches (Category 1 if tests prove correctness) ------------
+APOLLO_CACHE_ENABLED = _env_bool("APOLLO_CACHE_ENABLED", False)
+APOLLO_CACHE_PATH = os.getenv("APOLLO_CACHE_PATH", str(Path(STATE_DIR) / "apollo_cache.json"))
+APOLLO_CACHE_ORG_TTL_DAYS = _env_int("APOLLO_CACHE_ORG_TTL_DAYS", 60)
+APOLLO_CACHE_PEOPLE_POSITIVE_TTL_DAYS = _env_int("APOLLO_CACHE_PEOPLE_POSITIVE_TTL_DAYS", 45)
+APOLLO_CACHE_ZERO_PEOPLE_TTL_DAYS = _env_int("APOLLO_CACHE_ZERO_PEOPLE_TTL_DAYS", 21)
+APOLLO_CACHE_ZERO_TITLE_TTL_DAYS = _env_int("APOLLO_CACHE_ZERO_TITLE_TTL_DAYS", 14)
+APOLLO_CACHE_PERSON_MATCH_TTL_DAYS = _env_int("APOLLO_CACHE_PERSON_MATCH_TTL_DAYS", 45)
+
+# --- Hunter on the Fantastic/LinkedIn acquisition path ------------------------
+# Historical: 0 incremental send-safe leads from Hunter on this path. Integration
+# code is retained; this gate disables it ONLY for the Fantastic acquisition path.
+HUNTER_ENABLED_FOR_FANTASTIC_PATH = _env_bool("HUNTER_ENABLED_FOR_FANTASTIC_PATH", True)
+
+# --- Enrollment anti-spam identity (Category 1) --------------------------------
+# normalized employer domain + normalized resolved email => one enrollment.
+ENROLLMENT_PERSON_EMPLOYER_UNIQUENESS = _env_bool("ENROLLMENT_PERSON_EMPLOYER_UNIQUENESS", False)
+
+# --- North-star yield ledger (analytics only; never blocks the pipeline) --------
+YIELD_LEDGER_ENABLED = _env_bool("YIELD_LEDGER_ENABLED", False)  # Gate-E D13: no new file on deploy
+YIELD_LEDGER_PATH = os.getenv("YIELD_LEDGER_PATH", str(Path(STATE_DIR) / "yield_ledger.jsonl"))
+
+# --- Segment allocation foundations (Category 2; DEFAULT OFF) -----------------
+SEGMENT_ALLOCATOR_ENABLED = _env_bool("SEGMENT_ALLOCATOR_ENABLED", False)
+SEGMENT_YIELD_TABLE_PATH = os.getenv("SEGMENT_YIELD_TABLE_PATH", str(Path(STATE_DIR) / "segment_yield.json"))
+SEGMENT_PRIORITY = _env_json("SEGMENT_PRIORITY_JSON", [])
+
 
 def validate_fantastic_jobs_config() -> None:
     """Fail closed on misconfiguration BEFORE any network request.
@@ -803,6 +929,21 @@ def validate_fantastic_jobs_config() -> None:
         )
     if FANTASTIC_JOBS_DESCRIPTION_FORMAT not in {"text", "html"}:
         raise ValueError("FANTASTIC_JOBS_DESCRIPTION_FORMAT must be 'text' or 'html'")
+    # Gate-E D5: the active-ats segment now needs BOTH the explicit source flag AND a
+    # non-zero limit. Surface the contract change loudly instead of silently acquiring
+    # nothing when an operator sets ATS_LIMIT>0 alone.
+    if FANTASTIC_JOBS_ATS_LIMIT > 0 and not FANTASTIC_ATS_SOURCE_ENABLED:
+        import warnings
+        warnings.warn(
+            "FANTASTIC_JOBS_ATS_LIMIT>0 but FANTASTIC_ATS_SOURCE_ENABLED=0: the active-ats "
+            "segment is DISABLED (set FANTASTIC_ATS_SOURCE_ENABLED=1 to acquire from it).",
+            RuntimeWarning, stacklevel=2)
+    # Watermark lag/overlap must be sane before the engine may ever run.
+    if FANTASTIC_DATE_CREATED_WATERMARK_ENABLED:
+        if FANTASTIC_DATE_CREATED_LAG_MINUTES < 60:
+            raise ValueError("FANTASTIC_DATE_CREATED_LAG_MINUTES must be >= 60 (provider commit lag ~1h)")
+        if FANTASTIC_DATE_CREATED_OVERLAP_MINUTES < 0:
+            raise ValueError("FANTASTIC_DATE_CREATED_OVERLAP_MINUTES must be >= 0")
 
 
 # ---------- Railway startup guard (a deploy must not auto-run the pipeline) ----------

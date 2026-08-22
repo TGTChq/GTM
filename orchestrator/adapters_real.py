@@ -27,6 +27,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence
 
+import config
 from orchestrator.enrichment import EnrichmentReport, Lead
 from orchestrator.lanes import LaneManager, LaneResult
 from orchestrator.reasons import Disposition, ReasonCode, StageOutcome
@@ -149,11 +150,13 @@ def real_fantastic_runner():
         status = "complete"
         metadata: Dict[str, Any] = {}
         classified = 0
+        raw_records = 0
         try:
             result = run_fantastic_jobs_acquisition()
             jobs = list(result.jobs)
             errors = list(result.errors)
             metadata = dict(result.metadata or {})
+            raw_records = int(getattr(result, "raw_records", 0) or 0)
             if not result.success:
                 status = "partial" if jobs else "failed"
             # Classify raw Fantastic postings into the target-role portfolio so the
@@ -184,6 +187,16 @@ def real_fantastic_runner():
                 "stop_reason": metadata.get("stop_reason", ""),
                 "jobs_quota_remaining": metadata.get("jobs_quota_remaining"),
                 "requests_quota_remaining": metadata.get("requests_quota_remaining"),
+                # BILLING-ACCURATE counters (Gate A/D): the provider bills every RETURNED
+                # row, not the unique-kept ``records``. The top-up controller, the
+                # monthly governor ledger and the yield ledger must consume these.
+                "jobs_quota_consumed": int(metadata.get("jobs_quota_consumed", 0) or 0),
+                "raw_records": raw_records or int(metadata.get("raw_records", 0) or 0),
+                "cross_query_duplicates": int(metadata.get("cross_query_duplicates", 0) or 0),
+                "per_source": dict(metadata.get("per_source") or {}),
+                "provider_filters": dict(metadata.get("provider_filters") or {}),
+                "next_billing_date": metadata.get("next_billing_date"),
+                "watermark": dict(metadata.get("watermark") or {}),
             },
         )
 
@@ -513,6 +526,16 @@ class RealDeliveryReport:
     skipped: int = 0
     skipped_existing: int = 0        # idempotency duplicates (Airtable server-side)
     skipped_already_delivered: int = 0  # local cross-run lead_key idempotency
+    # MUTUALLY EXCLUSIVE breakdown of every submitted-but-not-created row (Gate D):
+    #   reviewable_submitted - created - failed
+    #     == skipped_existing + updated_existing + company_function_suppressed
+    #        + account_suppressed + no_contact + person_employer_duplicate + other
+    updated_existing: int = 0
+    company_function_suppressed: int = 0
+    account_suppressed: int = 0
+    no_contact: int = 0
+    person_employer_duplicate: int = 0
+    other_unreconciled: int = 0
     failed: int = 0
     enrolled: int = 0
     instantly_contacts: int = 0      # MUST be 0 in review-staging
@@ -524,15 +547,33 @@ class RealDeliveryReport:
     detail: Dict[str, Any] = field(default_factory=dict)
 
     def reconciles(self) -> bool:
-        return self.entered == self.created + self.skipped + self.failed
+        # NOT tautological (Gate D): ``skipped`` is derived, so check the entered set
+        # against INDEPENDENT counters: everything entered is either submitted, or
+        # withheld before submission (already delivered / non-reviewable disposition).
+        withheld = int(self.detail.get("withheld_before_submit", self.entered - self.reviewable_submitted))
+        return self.entered == self.reviewable_submitted + withheld
+
+    def skip_breakdown(self) -> Dict[str, int]:
+        """Mutually exclusive partition of submitted-but-not-created rows.
+        ``person_employer_duplicate`` is reported alongside but is NOT part of the
+        submitted identity: collapse losers are withheld BEFORE submission (like
+        already-delivered rows), so they are reconciled against ``entered``."""
+        return {
+            "skipped_existing": self.skipped_existing,
+            "updated_existing": self.updated_existing,
+            "company_function_suppressed": self.company_function_suppressed,
+            "account_suppressed": self.account_suppressed,
+            "no_contact": self.no_contact,
+            "other": self.other_unreconciled,
+        }
 
     def reviewable_reconciles(self) -> bool:
-        # Mandated: reviewable_records = created + skipped_existing + failed
-        # (idempotency dupes + created + failed). Any non-reviewable/suppressed
-        # rows are counted separately in ``detail.other_skips``.
-        other = int(self.detail.get("other_skips", 0))
-        return self.reviewable_submitted == (
-            self.created + self.skipped_existing + self.failed + other)
+        """EXACT identity over mutually-exclusive counters (no double/triple count):
+        submitted - created - failed == sum(skip_breakdown)."""
+        if self.mode == "dry_no_write":
+            return True
+        return (self.reviewable_submitted - self.created - self.failed
+                == sum(self.skip_breakdown().values()))
 
     def instantly_untouched(self) -> bool:
         return self.enrolled == 0 and self.instantly_contacts == 0
@@ -549,6 +590,8 @@ class RealDeliveryReport:
             "created": self.created, "skipped": self.skipped,
             "skipped_existing": self.skipped_existing,
             "skipped_already_delivered": self.skipped_already_delivered,
+            "person_employer_duplicate": self.person_employer_duplicate,
+            "skip_breakdown": self.skip_breakdown(),
             "delivered_lead_keys": len(self.delivered_lead_keys),
             "failed": self.failed,
             "final_pass": self.final_pass, "needs_check": self.needs_check,
@@ -560,6 +603,105 @@ class RealDeliveryReport:
             "failed_rows": len(self.failed_rows),
             "detail": dict(self.detail or {}),
         }
+
+
+# Deterministic bucket priority for the person-employer collapse winner (highest
+# first). A person resolved for several functions is enrolled under the single
+# highest-priority one; the rest are dropped (provenance kept in delivery detail).
+_BUCKET_PRIORITY = ("gtm_revenue", "finance", "operations", "product", "engineering",
+                    "marketing", "people_hr", "customer_success", "customer_support")
+
+
+def _norm_email(value: str) -> str:
+    return str(value or "").strip().lower()
+
+
+def _norm_domain(value: str) -> str:
+    s = str(value or "").strip().lower()
+    s = s.split("://", 1)[-1].split("/", 1)[0]
+    return s[4:] if s.startswith("www.") else s
+
+
+def _person_employer_key(lead) -> str:
+    """(normalized employer domain, normalized resolved email) -- bucket-agnostic."""
+    email = _norm_email(lead.contact.get("email"))
+    row = lead.contact.get("_airtable_row") or {}
+    domain = _norm_domain(row.get("employer_website") or row.get("company_domain")
+                          or lead.company.get("website") or "")
+    if not domain:
+        # lead_key is "domain|email|bucket" -- reuse its domain segment as a fallback.
+        domain = _norm_domain(str(lead.contact_key or "").split("|", 1)[0])
+    return f"{domain}|{email}" if (domain and email) else ""
+
+
+def _bucket_rank(lead) -> int:
+    row = lead.contact.get("_airtable_row") or {}
+    b = str(row.get("_role_bucket") or lead.contact.get("_role_bucket") or "").strip().lower()
+    try:
+        return _BUCKET_PRIORITY.index(b)
+    except ValueError:
+        return len(_BUCKET_PRIORITY)
+
+
+def _existing_person_keys(existing) -> set:
+    """Person-email index over existing Airtable rows (bucket-agnostic), derived
+    from whatever the snapshot exposes. Tolerant of every snapshot shape; an
+    unreadable snapshot yields an empty index (collapse still applies within-run)."""
+    keys: set = set()
+    if not existing:
+        return keys
+    rows = existing.values() if isinstance(existing, dict) else existing
+    for rec in rows:
+        f = rec.get("fields", rec) if isinstance(rec, dict) else {}
+        if not isinstance(f, dict):
+            continue
+        email = _norm_email(f.get("Email") or f.get("hiring_manager_email") or f.get("email"))
+        domain = _norm_domain(f.get("Website") or f.get("employer_website") or f.get("company_domain") or "")
+        if not domain:
+            lk = str(f.get("lead_key") or f.get("Lead Key") or "")
+            domain = _norm_domain(lk.split("|", 1)[0]) if "|" in lk else ""
+        if email and domain:
+            keys.add(f"{domain}|{email}")
+    return keys
+
+
+def _collapse_person_employer(leads, *, existing=None):
+    """Enforce ONE enrollment per (employer domain, resolved email).
+
+    Returns (kept_leads, losers) where losers is a list of (winner_key, dropped_bucket).
+    Distinct emails at the same employer (distinct buyers) are all kept; the same
+    person at two employers (different domain) is kept in both. Flag-gated.
+    """
+    if not bool(getattr(config, "ENROLLMENT_PERSON_EMPLOYER_UNIQUENESS", False)):
+        return list(leads), []
+    existing_people = _existing_person_keys(existing)
+    best: Dict[str, Any] = {}
+    losers: List[Any] = []
+    order: List[str] = []
+    for lead in leads:
+        pk = _person_employer_key(lead)
+        if not pk:
+            best[f"__nokey__{id(lead)}"] = lead
+            order.append(f"__nokey__{id(lead)}")
+            continue
+        if pk in existing_people:
+            # This person is ALREADY an active Airtable row (any bucket): never
+            # re-enroll them under a new function key.
+            row = lead.contact.get("_airtable_row") or {}
+            losers.append((pk, str(row.get("_role_bucket") or "")))
+            continue
+        cur = best.get(pk)
+        if cur is None:
+            best[pk] = lead
+            order.append(pk)
+        elif _bucket_rank(lead) < _bucket_rank(cur):
+            lrow = cur.contact.get("_airtable_row") or {}
+            losers.append((pk, str(lrow.get("_role_bucket") or "")))
+            best[pk] = lead
+        else:
+            row = lead.contact.get("_airtable_row") or {}
+            losers.append((pk, str(row.get("_role_bucket") or "")))
+    return [best[k] for k in order], losers
 
 
 class RealDelivery:
@@ -624,9 +766,15 @@ class RealDelivery:
         # in addition to Airtable's own server-side lead_key dedup).
         candidates = by[Disposition.FINAL_PASS] if self.auto_approve else reviewable
         submit = [l for l in candidates if l.contact_key not in known_delivered]
+        rep.skipped_already_delivered = len(candidates) - len(submit)
+        # ENROLLMENT ANTI-SPAM IDENTITY (flag-gated): one person at one employer is
+        # enrolled ONCE even when several functions/jobs resolved to them. Losers are
+        # DROPPED from the submit set (never routed through suppressed keys, which
+        # would mark them "delivered" and permanently suppress them) -- Gate C.
+        submit, dup_losers = _collapse_person_employer(submit, existing=existing)
+        rep.person_employer_duplicate = len(dup_losers)
         rep.mode = "auto_approve" if self.auto_approve else "review_staging"
         rep.reviewable_submitted = len(submit)
-        rep.skipped_already_delivered = len(candidates) - len(submit)
 
         import airtable_client
         result = airtable_client.push_leads(
@@ -634,22 +782,36 @@ class RealDelivery:
         rep.created = int(result.get("created", 0))
         rep.failed = int(result.get("failed", 0))
         rep.skipped_existing = int(result.get("skipped_existing", 0))
-        # Existing rows the adapter repaired in place (persisted beyond created).
-        updated = max(0, len(result.get("persisted_lead_keys", []) or []) - rep.created)
-        other_skips = (updated
-                       + int(result.get("skipped_existing_company", 0))
-                       + int(result.get("skipped_existing_account", 0))
-                       + int(result.get("skipped_no_contact", 0))
-                       + len(result.get("suppressed_company_lead_keys", []) or [])
-                       + len(result.get("suppressed_account_lead_keys", []) or []))
+        # MUTUALLY EXCLUSIVE skip counters, each from its own push_leads field -- the
+        # old derivation (len(persisted)-created + the same suppressed lists again)
+        # double-counted existing rows and triple-counted function suppressions.
+        rep.updated_existing = int(result.get("updated", 0) or 0)
+        rep.company_function_suppressed = int(result.get("skipped_existing_company", 0) or 0)
+        rep.account_suppressed = int(result.get("skipped_existing_account", 0) or 0)
+        rep.no_contact = int(result.get("skipped_no_contact", 0) or 0)
+        # Rows withheld by AIRTABLE_WRITE_SEND_SAFE_ONLY are neither created nor a
+        # skip category above; book them explicitly so the identity stays exact.
+        not_send_safe = int(result.get("not_written_not_send_safe", 0) or 0)
+        accounted = (rep.created + rep.failed + rep.skipped_existing + rep.updated_existing
+                     + rep.company_function_suppressed + rep.account_suppressed + rep.no_contact)
+        # ``other`` = send-safe-withheld rows + any residual the adapter did not name.
+        rep.other_unreconciled = max(0, rep.reviewable_submitted - accounted)
+        # person_employer_duplicate rows were removed BEFORE submission, so they are
+        # withheld (like already-delivered), not part of the submitted identity.
         rep.skipped = rep.entered - rep.created - rep.failed      # entered reconciles
         rep.failed_rows = [{"lead_key": k} for k in (result.get("failed_lead_keys", []) or [])]
         # Delivered = created + repaired-existing this run, PLUS the ones we
-        # skipped because they were already delivered. NEVER a failed row.
+        # skipped because they were already delivered. NEVER a failed row, NEVER a
+        # person-employer collapse loser.
         rep.delivered_lead_keys = sorted(
             set(result.get("persisted_lead_keys", []) or [])
             | {l.contact_key for l in candidates if l.contact_key in known_delivered})
-        rep.detail = {"airtable": result, "other_skips": other_skips}
+        rep.detail = {"airtable": result,
+                      "other_skips": sum(rep.skip_breakdown().values()) - rep.skipped_existing,
+                      "withheld_before_submit": rep.skipped_already_delivered + len(dup_losers)
+                      + (rep.entered - len(candidates)),
+                      "person_employer_collapsed": [
+                          {"winner": w, "dropped_bucket": b} for (w, b) in dup_losers]}
 
         # Instantly: ONLY in auto-approve mode and only when explicitly enabled.
         # Review-staging never enrolls anyone.

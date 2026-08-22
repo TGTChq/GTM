@@ -379,14 +379,43 @@ class Orchestrator:
         started = time.perf_counter()
         report = WaterfallReport()
         supp = SuppressionStore(self.state)
+
+        # MONTHLY CREDIT GOVERNOR (P0): the spending AUTHORITY for this run. The
+        # controller's cumulative billing cap becomes
+        #     min(FANTASTIC_JOBS_MAX_JOBS_PER_RUN, governor.run_budget)
+        # (the provider quota floor is enforced by both the controller and the
+        # adapter). NET_NEW_SEND_SAFE_TARGET may stop the loop EARLY but can never
+        # raise this cap. Inputs are the LAST KNOWN provider headers (0-credit quota
+        # snapshot) -- never a row-producing call. Flag OFF => cap unchanged (6000).
+        gov = self._build_governor()
+        run_cap = int(config.FANTASTIC_JOBS_MAX_JOBS_PER_RUN)
+        budget_source = "per_run_ceiling"
+        if gov.run_budget is not None and gov.run_budget < run_cap:
+            run_cap, budget_source = int(gov.run_budget), "governor"
+        # date_created WATERMARK (Category 2, default OFF) is a SINGLE-WINDOW run:
+        # the window is pinned once and the adapter pages within it, so the top-up
+        # loop must run exactly ONE slice sized to the whole run cap (Gate-E D3).
+        # Multi-slice would re-open the same window and re-bill it.
+        watermark_on = bool(getattr(config, "FANTASTIC_DATE_CREATED_WATERMARK_ENABLED", False))
+        slice_jobs = run_cap if watermark_on else config.FANTASTIC_TOPUP_SLICE_JOBS
         controller = TopUpController(
             target_net_new=config.NET_NEW_SEND_SAFE_TARGET,
-            safety_cap_jobs=config.FANTASTIC_JOBS_MAX_JOBS_PER_RUN,
-            slice_jobs=config.FANTASTIC_TOPUP_SLICE_JOBS,
+            safety_cap_jobs=run_cap,
+            slice_jobs=max(1, int(slice_jobs)),
             min_quota_remaining=config.FANTASTIC_JOBS_MIN_JOBS_QUOTA_REMAINING,
             runtime_budget_seconds=(config.TOPUP_RUNTIME_BUDGET_SECONDS or None),
-            max_iterations=config.TOPUP_MAX_ITERATIONS,
+            max_iterations=(1 if watermark_on else config.TOPUP_MAX_ITERATIONS),
+            budget_source=budget_source,
         )
+        ledger = self._build_yield_ledger()
+        # Cumulative acquisition accounting across ALL top-up slices (Gate D): the
+        # summary must never report only the last slice. Three distinct series:
+        # unique-kept jobs, returned/billed rows, and provider quota consumed.
+        acq_cum: Dict[str, Any] = {
+            "jobs_unique_kept": 0, "jobs_returned_billed": 0, "jobs_quota_consumed": 0,
+            "physical_requests": 0, "cross_query_duplicates": 0, "per_source": {},
+            "last_jobs_quota_remaining": None}
+        acq_iters: List[Dict[str, Any]] = []
 
         # Pre-Apollo dedupe: snapshot ONCE, then keep a live function-key set so a
         # company+function we CREATE in an earlier slice is not re-enriched in a
@@ -407,7 +436,12 @@ class Orchestrator:
         stop_reason = ""
         acquisition_error = ""  # set on a FAILED acquisition lane (not "no inventory")
 
-        while True:
+        # A zero governor grant is a CLEAN, distinct stop before any acquisition
+        # (Gate-E D8) -- never a failed run, never an acquisition attempt.
+        if gov.run_budget is not None and gov.run_budget <= 0:
+            stop_reason = "governor_zero_budget"
+
+        while not stop_reason:
             decision = controller.decide(
                 quota_remaining=last_quota, apollo_circuit_open=last_circuit,
                 inventory_exhausted=last_inventory)
@@ -436,17 +470,42 @@ class Orchestrator:
                 break
 
             iter_postings = [j for r in iter_lanes.values() for j in r.jobs]
-            billed = len(iter_postings)
-            postings_total += billed
+            kept = len(iter_postings)
+            postings_total += kept
 
             fl = iter_lanes.get("fantastic")
+            # BILLED = rows the provider RETURNED (it bills every returned row,
+            # including ones we dedupe/reject), NOT the unique-kept count. Falls back
+            # to kept when the lane exposes no billing counter (non-Fantastic lanes).
+            billed = kept
             if fl is not None:
                 q = fl.attribution.get("jobs_quota_remaining")
                 last_quota = int(q) if q is not None else last_quota
-            last_inventory = (billed == 0)
+                rb = int(fl.attribution.get("raw_records") or 0)
+                billed = rb if rb > 0 else kept
+                acq_cum["jobs_quota_consumed"] += int(fl.attribution.get("jobs_quota_consumed") or 0)
+                acq_cum["cross_query_duplicates"] += int(fl.attribution.get("cross_query_duplicates") or 0)
+                for src, s in (fl.attribution.get("per_source") or {}).items():
+                    agg_src = acq_cum["per_source"].setdefault(src, {"jobs": 0, "returned_billed": 0, "requests": 0})
+                    for k in agg_src:
+                        agg_src[k] += int(s.get(k, 0) or 0)
+                acq_cum["last_jobs_quota_remaining"] = last_quota
+            acq_cum["jobs_unique_kept"] += kept
+            acq_cum["jobs_returned_billed"] += billed
+            acq_cum["physical_requests"] += sum(int(r.physical_requests or 0) for r in iter_lanes.values())
+            last_inventory = (kept == 0)
+            for j in iter_postings:
+                j.setdefault("_acquisition_mode", slice_mode)
+            ledger.record_acquired(iter_postings, mode=slice_mode)
 
             opportunities, dedup_stage = self._dedup(iter_postings, supp.seen_postings())
             report.add(dedup_stage)
+            # Ledger: postings that exit at dedupe never become leads.
+            passed_ids = {str(o.get("posting_id") or o.get("job_id")) for o in opportunities}
+            for j in iter_postings:
+                jid = str(j.get("posting_id") or j.get("job_id") or "")
+                if jid and jid not in passed_ids:
+                    ledger.mark(jid, exit_stage="dedup_previously_seen", previously_seen=True)
 
             enr_kwargs: Dict[str, Any] = {}
             deliver_kwargs: Dict[str, Any] = {}
@@ -469,9 +528,26 @@ class Orchestrator:
             net_new = self._count_net_new_send_safe(enrichment.leads, delivery)
             last_circuit = bool(getattr(enrichment, "enrichment_incomplete", False)
                                 and "apollo" in str(getattr(enrichment, "stop_reason", "")))
+            self._ledger_mark_outcomes(ledger, enrichment.leads, delivery)
 
             supp.commit_postings(enrichment.terminal_posting_ids())
             supp.commit_delivered(getattr(delivery, "delivered_lead_keys", []) or [])
+            # Gate-E D12: postings that terminally collapsed into another lead (N->1)
+            # must also be committed, else they are re-billed + re-enriched every run.
+            collapsed_ids = [rid for lead in enrichment.leads
+                             for rid in (getattr(lead, "related_posting_ids", []) or [])
+                             if rid and rid != getattr(lead, "posting_id", None)]
+            if collapsed_ids:
+                supp.commit_postings(collapsed_ids)
+            # date_created WATERMARK commit: ONLY now -- after this window's postings
+            # were processed AND persisted to the suppression store (Gate-E D4).
+            if watermark_on:
+                try:
+                    import fantastic_jobs_adapter as _fja
+                    wm = _fja.commit_watermark(success=True)
+                    acq_cum["watermark_commit"] = wm
+                except Exception as exc:  # noqa: BLE001 - leaves the window in-flight (replayed next run)
+                    acq_cum["watermark_commit"] = {"committed": False, "error": type(exc).__name__}
             # Feed created company+function keys forward so later slices skip them.
             for lead in enrichment.leads:
                 import airtable_client
@@ -493,6 +569,15 @@ class Orchestrator:
             agg.delivered_lead_keys.extend(getattr(delivery, "delivered_lead_keys", []) or [])
 
             controller.record(billed=billed, net_new_send_safe=net_new)
+            acq_iters.append({"slice_index": controller.iterations, "slice_mode": slice_mode,
+                              "jobs_unique_kept": kept, "jobs_returned_billed": billed,
+                              "physical_requests": sum(int(r.physical_requests or 0) for r in iter_lanes.values()),
+                              "net_new_send_safe": net_new, "quota_remaining": last_quota})
+
+        # Record this run's ACTUAL billed credits against the monthly ledger
+        # (idempotent per run_id; no-op when the governor is disabled).
+        self._commit_governor(gov, billed=controller.billed)
+        ledger.flush()
 
         # -- build the run report from the accumulation -------------------
         report.set_unit("postings", postings_total)
@@ -505,6 +590,16 @@ class Orchestrator:
                         len([l for l in all_leads if l.disposition is Disposition.FINAL_PASS]))
         report.set_unit("delivered_rows", agg.created)
         report.set_unit("net_new_send_safe", controller.net_new)
+        # Email-presence / verification counters (Gate D): derived from the leads'
+        # actual resolved email + Apollo status, never from disposition labels.
+        with_email = [l for l in all_leads if l.contact.get("email")]
+        def _verified(l) -> bool:
+            row = l.contact.get("_airtable_row") or {}
+            st = str(row.get("apollo_email_status") or getattr(l, "email_status", "") or "").lower()
+            return st == "verified"
+        n_verified = sum(1 for l in with_email if _verified(l))
+        emails_block = {"with_email": len(with_email), "verified": n_verified,
+                        "unverified": len(with_email) - n_verified}
 
         enrichment = EnrichmentReport(leads=all_leads, stages=[])
         capacity = build_capacity_report(
@@ -532,9 +627,24 @@ class Orchestrator:
         topup_dict = controller.to_dict()
         topup_dict["final_stop_reason"] = stop_reason
         topup_dict["acquisition_error"] = acquisition_error
+        # CUMULATIVE acquisition block (additive; result["lanes"] stays the last
+        # slice so the f27ccf1 failure observability is byte-for-byte preserved).
+        acquisition_block = {
+            "iterations": controller.iterations,
+            "final_stop_reason": stop_reason,
+            "acquisition_error": acquisition_error,
+            "budget_source": controller.budget_source,
+            "run_cap": controller.safety_cap_jobs,
+            "cumulative": dict(acq_cum),
+            "per_iteration": acq_iters,
+        }
         result = {
             "run": self.ctx.to_dict(),
             "lanes": {lane: r.to_dict() for lane, r in lane_results.items()},
+            "acquisition": acquisition_block,
+            "governor": gov.to_dict(),
+            "yield_ledger": ledger.summary(),
+            "emails": emails_block,
             "waterfall": report.to_dict(),
             "enrichment": enrichment.to_dict(),
             "delivery": agg.to_dict(),
@@ -554,5 +664,76 @@ class Orchestrator:
         self.state.write_artifact("delivery.json", agg.to_dict())
         self.state.write_artifact("capacity_report.json", capacity.to_dict())
         self.state.write_artifact("topup.json", topup_dict)
+        self.state.write_artifact("acquisition.json", acquisition_block)
         self.state.write_artifact("orchestrator_result.json", result)
         return result
+
+    # -- governor / ledger helpers (all fail-open; never affect run outcome) -----
+    def _build_governor(self):
+        from orchestrator import fantastic_governor as G
+        try:
+            if not bool(getattr(config, "FANTASTIC_MONTHLY_GOVERNOR_ENABLED", False)):
+                return G.GovernorContext(enabled=False, decision=None, ledger=None)
+            import fantastic_jobs_adapter as _fja
+            snap = _fja.load_quota_snapshot()
+            reset_at = G._parse_iso(snap.get("next_billing_date") or "")
+            jr = snap.get("jobs_remaining")
+            return G.build_context(config, run_id=self.ctx.run_id,
+                                   provider_jobs_remaining=(int(jr) if jr is not None else None),
+                                   provider_reset_at=reset_at)
+        except Exception as exc:  # noqa: BLE001 - a governor failure must fail CONSERVATIVELY
+            print(f"[governor] unavailable ({type(exc).__name__}); granting the daily minimum only")
+            from orchestrator.fantastic_governor import GovernorDecision
+            dmin = int(getattr(config, "FANTASTIC_DAILY_MIN_JOBS", 100) or 0)
+            return G.GovernorContext(enabled=True, ledger=None, decision=GovernorDecision(
+                run_budget=dmin, reason="governor_error_conservative", remaining_credits=0,
+                spendable_credits=0, reserve_credits=0, base_daily_allowance=0,
+                carry_forward_applied=0, days_remaining=0.0, inventory_capped=False,
+                provider_authoritative=False))
+
+    def _commit_governor(self, gov, *, billed: int) -> None:
+        try:
+            from orchestrator import fantastic_governor as G
+            G.commit_run(gov, run_id=self.ctx.run_id, billed=int(billed))
+        except Exception as exc:  # noqa: BLE001
+            print(f"[governor] ledger commit skipped: {type(exc).__name__}")
+
+    def _build_yield_ledger(self):
+        from orchestrator.yield_ledger import YieldLedger
+        try:
+            return YieldLedger(str(getattr(config, "YIELD_LEDGER_PATH", "") or ""), self.ctx.run_id,
+                               enabled=bool(getattr(config, "YIELD_LEDGER_ENABLED", False)))
+        except Exception:  # noqa: BLE001
+            return YieldLedger("", self.ctx.run_id, enabled=False)
+
+    @staticmethod
+    def _ledger_mark_outcomes(ledger, leads, delivery) -> None:
+        """Attribute enrichment + delivery outcomes to each lead's PRIMARY posting
+        and mark its related postings as collapsed (credit counted once)."""
+        try:
+            import airtable_client
+            created = set((getattr(delivery, "detail", {}) or {}).get("airtable", {}).get("created_lead_keys", []) or [])
+            for lead in leads:
+                pid = str(getattr(lead, "posting_id", "") or "")
+                if not pid:
+                    continue
+                row = lead.contact.get("_airtable_row") or {}
+                email = bool(lead.contact.get("email"))
+                status = str(row.get("apollo_email_status") or getattr(lead, "email_status", "") or "").lower()
+                dispo = str(getattr(lead.disposition, "value", lead.disposition) or "")
+                is_created = lead.contact_key in created
+                try:
+                    safe = bool(airtable_client.send_safe_facts(airtable_client._job_to_fields(row))[0]) if row else False
+                except Exception:  # noqa: BLE001
+                    safe = False
+                ledger.mark(pid, exit_stage="enriched",
+                            icp_outcome=("reject" if dispo == "REJECT" else "pass"),
+                            hm_outcome=("found" if email else "not_found"),
+                            zero_apollo_people=(str(getattr(lead.primary_reason, "value", "")) == "hiring_manager_not_found"),
+                            email_outcome=("verified" if (email and status == "verified") else ("unverified" if email else "none")),
+                            send_safe=safe, airtable_created=is_created,
+                            net_new_send_safe=(safe and is_created),
+                            role_bucket=str(row.get("_role_bucket") or lead.contact.get("_role_bucket") or ""))
+                ledger.mark_collapsed(pid, list(getattr(lead, "related_posting_ids", []) or []))
+        except Exception:  # noqa: BLE001 - analytics never affects the run
+            pass

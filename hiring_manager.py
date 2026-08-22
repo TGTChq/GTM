@@ -886,6 +886,106 @@ def _outbound_display_gate(lead: Dict) -> GateDecision:
     )
 
 
+_APOLLO_CACHE = None
+
+
+def _apollo_cache():
+    """Process-wide Apollo cache (flag-gated, default OFF => an inert instance).
+    Built lazily with an ICP-rule fingerprint so a rule change invalidates
+    firmographic entries. Never raises."""
+    global _APOLLO_CACHE
+    if _APOLLO_CACHE is None:
+        try:
+            import hashlib
+            from orchestrator.apollo_cache import build_cache
+            rules = "|".join(str(getattr(config, k, "")) for k in (
+                "MIN_EMPLOYEES", "MAX_EMPLOYEES", "APOLLO_EXCLUDED_INDUSTRY_KEYWORDS", "VALIDATION_VERSION"))
+            fp = hashlib.sha256(rules.encode("utf-8")).hexdigest()[:16]
+            _APOLLO_CACHE = build_cache(config, rules_fingerprint=fp)
+        except Exception:  # noqa: BLE001
+            from orchestrator.apollo_cache import ApolloCache
+            _APOLLO_CACHE = ApolloCache("", enabled=False, ttl_days={})
+    return _APOLLO_CACHE
+
+
+def reset_apollo_cache() -> None:
+    global _APOLLO_CACHE
+    _APOLLO_CACHE = None
+
+
+def _titles_fingerprint(titles) -> str:
+    import hashlib
+    return hashlib.sha256("|".join(sorted(str(t).lower() for t in (titles or []))).encode("utf-8")).hexdigest()[:12]
+
+
+def _cached_enrich_organization(input_domain: str, company_name: str, website: str):
+    """Org enrichment with a POSITIVE-ONLY cross-run cache (Gate C): a miss always
+    re-enriches (so org.raw exists for domain-corroboration recovery); only a
+    trusted ``found`` org that passed Apollo's domain-consistency guard is cached.
+    Cached entries hold RAW firmographics only -- the ICP gate is always re-run."""
+    from orchestrator.apollo_cache import normalize_domain
+    cache = _apollo_cache()
+    key = normalize_domain(input_domain)
+    if cache.enabled and key:
+        hit = cache.get("org", key, fingerprint_sensitive=True)
+        if hit:
+            try:
+                return apollo.OrgEnrichment(**{k: v for k, v in hit.items() if k in apollo.OrgEnrichment.__dataclass_fields__})
+            except Exception:  # noqa: BLE001 - a malformed entry is just a miss
+                pass
+    org = apollo.enrich_organization(domain=input_domain, name=company_name, website=website)
+    time.sleep(config.APOLLO_RATE_LIMIT_DELAY)
+    if cache.enabled and key and getattr(org, "found", False):
+        try:
+            payload = {k: getattr(org, k) for k in apollo.OrgEnrichment.__dataclass_fields__ if k != "raw"}
+            payload["found"] = True
+            # Trusted only when Apollo resolved the SAME domain we asked for.
+            trusted = normalize_domain(str(getattr(org, "domain", "") or "")) in ("", key)
+            cache.put("org", key, payload, trusted=trusted)
+            cache.save()
+        except Exception:  # noqa: BLE001
+            pass
+    return org
+
+
+def provider_pre_reject_reason(job: Dict) -> str:
+    """REJECT-only provider-firmographic pre-gate (config.PROVIDER_FIRMOGRAPHIC_PRE_REJECT).
+
+    Returns a reason string when the provider's exact industry label is on the
+    curated list, else "". Matching is ``normalize_text`` EQUALITY against a
+    PROVIDER-vocabulary list -- never substring, never derived from the Apollo
+    keyword list (label vocabularies differ: provider "Hospitals and Health Care"
+    vs Apollo "hospital & health care"). Industry-only by design: the provider
+    headcount field is capped (~999) and cannot express a size rule.
+    """
+    if not bool(getattr(config, "PROVIDER_FIRMOGRAPHIC_PRE_REJECT", False)):
+        return ""
+    from job_filter import normalize_text
+    label = normalize_text(str(job.get("_org_industry") or ""))
+    if not label:
+        return ""
+    allowed = {normalize_text(str(x)) for x in (getattr(config, "PROVIDER_PRE_REJECT_INDUSTRIES", []) or [])}
+    allowed.discard("")
+    if label in allowed:
+        return f"provider_industry:{job.get('_org_industry')}"
+    return ""
+
+
+def hunter_allowed_for_job(job: Dict) -> bool:
+    """Hunter gate evaluated PER JOB (never module-global) so only the Fantastic
+    acquisition path can be toggled; Approved Sync / run_daily / reviewable_topup
+    paths are unaffected. Default ON (the '0 incremental' claim is unmeasured)."""
+    if not bool(getattr(config, "VERIFY_WITH_HUNTER", False)):
+        return False
+    if bool(getattr(config, "HUNTER_ENABLED_FOR_FANTASTIC_PATH", True)):
+        return True
+    try:
+        from airtable_client import _is_fantastic_job
+        return not _is_fantastic_job(job)
+    except Exception:  # noqa: BLE001 - never let the gate itself break enrichment
+        return True
+
+
 def _process_company_strict(company_jobs: List[Dict]) -> Tuple[List[Dict], Dict]:
     """Run Account, Contact, Email and final gates for prequalified jobs."""
     stats = defaultdict(int)
@@ -893,10 +993,21 @@ def _process_company_strict(company_jobs: List[Dict]) -> Tuple[List[Dict], Dict]
     input_domain = _best_input_domain(first)
     company_name = str(first.get("canonical_employer_name") or first.get("employer_name") or "")
     enrichment_website = f"https://{input_domain}" if input_domain else ""
-    org = apollo.enrich_organization(
-        domain=input_domain, name=company_name, website=enrichment_website
-    )
-    time.sleep(config.APOLLO_RATE_LIMIT_DELAY)
+    # Provider-firmographic REJECT-only pre-gate (flag-gated, default OFF). When the
+    # provider's exact industry label is on the curated pre-reject list the company
+    # can never PASS ICP, so the Apollo org-enrich call is skipped and the company
+    # flows through the SAME AccountGate REJECT path (full provenance preserved).
+    # It NEVER authorizes a PASS: Apollo remains the only PASS authority.
+    pre_reject_reason = provider_pre_reject_reason(first)
+    if pre_reject_reason:
+        org = apollo.OrgEnrichment(found=False)
+        stats["provider_pre_reject"] += 1
+        stats["apollo_org_skipped"] += 1
+        for job in company_jobs:
+            job["_provider_pre_reject_reason"] = pre_reject_reason
+            job["_apollo_org_skipped"] = True
+    else:
+        org = _cached_enrich_organization(input_domain, company_name, enrichment_website)
     # Mechanism B: corroborated employer-domain recovery. Only re-enriches on a
     # strongly-corroborated same-employer alternate domain; otherwise org is unchanged.
     org, _domain_recovery = _recover_org_via_domain_corroboration(
@@ -1005,21 +1116,41 @@ def _process_company_strict(company_jobs: List[Dict]) -> Tuple[List[Dict], Dict]
         attempted_before = reroute_registry.attempted_ids(account_bucket_key)
 
         company_had_people_search_call = True
-        stats["row2_people_search_calls_total"] += 1
         apollo_error = False
-        try:
-            people = apollo.search_people_at_company(search_domain, target_titles)
-        except apollo.GLOBAL_FATAL_ERRORS:
-            # A whole-account Apollo outage must propagate to open the run-level
-            # circuit, not be masked as an empty-people result for this one bucket.
-            raise
-        except Exception as exc:
-            apollo_error = True
+        # NEGATIVE people-search cache, VARIANT-SCOPED (Gate C): keyed by domain +
+        # bucket + the exact title-set fingerprint, so the broadened second pass (a
+        # different title set) is a cache MISS by construction and is never blocked.
+        # Only a confirmed empty result is cached (never an error). Free search is
+        # skipped on a hit; the zero-people outcome is replayed.
+        _cache = _apollo_cache()
+        _neg_key = f"{safe_search_domain}|{bucket}|{_titles_fingerprint(target_titles)}" if safe_search_domain else ""
+        if _cache.enabled and _neg_key and _cache.get("zero_title", _neg_key) is not None:
             people = []
-            logger.warning(
-                "Apollo people search error for %s|%s: %s", search_domain, bucket, exc
-            )
-        time.sleep(config.APOLLO_RATE_LIMIT_DELAY)
+            stats["people_search_negative_cache_hit"] += 1
+        else:
+            stats["row2_people_search_calls_total"] += 1
+            try:
+                people = apollo.search_people_at_company(search_domain, target_titles)
+            except apollo.GLOBAL_FATAL_ERRORS:
+                # A whole-account Apollo outage must propagate to open the run-level
+                # circuit, not be masked as an empty-people result for this one bucket.
+                raise
+            except Exception as exc:
+                apollo_error = True
+                people = []
+                logger.warning(
+                    "Apollo people search error for %s|%s: %s", search_domain, bucket, exc
+                )
+            time.sleep(config.APOLLO_RATE_LIMIT_DELAY)
+            if _cache.enabled and _neg_key and not apollo_error:
+                try:
+                    if people:
+                        _cache.put("people_pos", _neg_key, {"count": len(people)})
+                    else:
+                        _cache.put("zero_title", _neg_key, {"reason": "empty_people_search"})
+                    _cache.save()
+                except Exception:  # noqa: BLE001
+                    pass
 
         if apollo_error:
             # An exception/failed response is not the same as a confirmed empty
@@ -1173,7 +1304,9 @@ def _process_company_strict(company_jobs: List[Dict]) -> Tuple[List[Dict], Dict]
             if person.organization_domain:
                 allowed_domains.add(person.organization_domain)
             hunter_result: Optional[hunter.HunterResult] = None
-            if person.email and config.VERIFY_WITH_HUNTER and config.HUNTER_API_KEY:
+            # Per-job Hunter gate (Fantastic path only; default ON -- see config).
+            _hunter_ok = hunter_allowed_for_job(primary)
+            if person.email and _hunter_ok and config.HUNTER_API_KEY:
                 try:
                     hunter_result = hunter.verify_email(person.email)
                 except Exception as exc:
@@ -1182,7 +1315,7 @@ def _process_company_strict(company_jobs: List[Dict]) -> Tuple[List[Dict], Dict]
                     hunter_result = None
                 time.sleep(config.HUNTER_RATE_LIMIT_DELAY)
             elif (
-                config.VERIFY_WITH_HUNTER
+                _hunter_ok
                 and not person.email
                 and person.first_name
                 and person.last_name

@@ -199,6 +199,9 @@ class FetchBehaviorTests(unittest.TestCase):
             FANTASTIC_JOBS_YCOMBINATOR_LIMIT="0", FANTASTIC_JOBS_LINKEDIN_LIMIT="2",
             FANTASTIC_JOBS_MIN_JOBS_QUOTA_REMAINING="0",
             FANTASTIC_JOBS_MIN_REQUESTS_QUOTA_REMAINING="0",
+            # The active-ats segment now requires the explicit source flag in
+            # addition to a non-zero limit (Category-2, default OFF in production).
+            FANTASTIC_ATS_SOURCE_ENABLED="1",
         )
         env.update(over)
         return _reload_config(**env)
@@ -327,7 +330,8 @@ class RequestDiagnosticsRepairTests(unittest.TestCase):
                    FANTASTIC_JOBS_ATS_LIMIT="5", FANTASTIC_JOBS_WELLFOUND_LIMIT="0",
                    FANTASTIC_JOBS_YCOMBINATOR_LIMIT="0", FANTASTIC_JOBS_LINKEDIN_LIMIT="0",
                    FANTASTIC_JOBS_MIN_JOBS_QUOTA_REMAINING="0",
-                   FANTASTIC_JOBS_MIN_REQUESTS_QUOTA_REMAINING="0", FANTASTIC_JOBS_MAX_RETRIES="0")
+                   FANTASTIC_JOBS_MIN_REQUESTS_QUOTA_REMAINING="0", FANTASTIC_JOBS_MAX_RETRIES="0",
+                   FANTASTIC_ATS_SOURCE_ENABLED="1")
         env.update(over)
         return _reload_config(**env)
 

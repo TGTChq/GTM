@@ -50,9 +50,15 @@ class TopUpController:
         runtime_budget_seconds: Optional[float] = None,
         max_iterations: int = 50,
         clock: Callable[[], float] = time.monotonic,
+        budget_source: str = "per_run_ceiling",
     ) -> None:
         self.target_net_new = int(target_net_new)
         self.safety_cap_jobs = max(0, int(safety_cap_jobs))
+        # Which authority produced ``safety_cap_jobs``: "per_run_ceiling"
+        # (FANTASTIC_JOBS_MAX_JOBS_PER_RUN, the unchanged default) or "governor"
+        # (the monthly credit governor's run budget). Determines the stop label so
+        # a governor stop is never reported as the generic safety cap.
+        self.budget_source = str(budget_source or "per_run_ceiling")
         self.slice_jobs = max(1, int(slice_jobs))
         self.min_quota_remaining = max(0, int(min_quota_remaining))
         self.runtime_budget_seconds = runtime_budget_seconds
@@ -89,7 +95,7 @@ class TopUpController:
         if self.iterations >= self.max_iterations:
             return self._stop("max_iterations_guard")
         if self.billed >= self.safety_cap_jobs:
-            return self._stop("acquisition_safety_cap")
+            return self._stop(self._cap_reason())
         if quota_remaining is not None and quota_remaining <= self.min_quota_remaining:
             return self._stop("fantastic_quota_floor")
         if apollo_circuit_open:
@@ -102,8 +108,12 @@ class TopUpController:
         remaining_cap = self.safety_cap_jobs - self.billed
         nxt = min(self.slice_jobs, remaining_cap)
         if nxt <= 0:
-            return self._stop("acquisition_safety_cap")
+            return self._stop(self._cap_reason())
         return TopUpDecision(True, "", nxt)
+
+    def _cap_reason(self) -> str:
+        """Distinct stop label per budget authority (never overloaded)."""
+        return "governor_run_budget" if self.budget_source == "governor" else "acquisition_safety_cap"
 
     def record(self, *, billed: int, net_new_send_safe: int) -> None:
         """Record the outcome of one processed slice."""
@@ -120,6 +130,7 @@ class TopUpController:
             "enabled": self.enabled,
             "target_net_new": self.target_net_new,
             "safety_cap_jobs": self.safety_cap_jobs,
+            "budget_source": self.budget_source,
             "slice_jobs": self.slice_jobs,
             "net_new_send_safe": self.net_new,
             "jobs_billed": self.billed,
