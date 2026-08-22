@@ -315,19 +315,23 @@ class Orchestrator:
 
     # -- adaptive net-new top-up ------------------------------------------
     class _FantasticSliceCap:
-        """Temporarily cap the Fantastic per-call max so one iteration bills at most
-        `n` jobs; the controller separately clamps cumulative billing to the safety
-        cap. Restores the original on exit."""
+        """Set a per-iteration RUNTIME slice budget so one iteration bills at most `n`
+        jobs. It sets ``FANTASTIC_JOBS_RUN_SLICE_CAP`` -- NOT the config-validated
+        global ``FANTASTIC_JOBS_MAX_JOBS_PER_RUN`` -- so a slice smaller than a segment
+        limit (e.g. 500 vs LINKEDIN_LIMIT=6000) stays valid: the adapter clamps this
+        iteration's acquisition to the slice while config validation still sees the real
+        ceiling. The controller separately clamps CUMULATIVE billing to the safety cap.
+        Restores on exit."""
         def __init__(self, n: int) -> None:
             self.n = int(n)
 
         def __enter__(self):
-            self._orig = config.FANTASTIC_JOBS_MAX_JOBS_PER_RUN
-            config.FANTASTIC_JOBS_MAX_JOBS_PER_RUN = self.n
+            self._orig = getattr(config, "FANTASTIC_JOBS_RUN_SLICE_CAP", 0)
+            config.FANTASTIC_JOBS_RUN_SLICE_CAP = self.n
             return self
 
         def __exit__(self, *exc):
-            config.FANTASTIC_JOBS_MAX_JOBS_PER_RUN = self._orig
+            config.FANTASTIC_JOBS_RUN_SLICE_CAP = self._orig
             return False
 
     class _FantasticAcquireMode:
@@ -401,6 +405,7 @@ class Orchestrator:
         last_circuit = False
         last_inventory = False
         stop_reason = ""
+        acquisition_error = ""  # set on a FAILED acquisition lane (not "no inventory")
 
         while True:
             decision = controller.decide(
@@ -418,6 +423,18 @@ class Orchestrator:
                     self._FantasticAcquireMode(slice_mode):
                 iter_lanes = self._acquire(plan, resume=(resume and controller.iterations == 0))
             lane_results = iter_lanes  # last slice's lanes surface in the result
+
+            # A FAILED acquisition lane is an operational error (config/provider/parse
+            # crash), NOT "inventory exhausted". Stop immediately and mark the run
+            # failed so a silent zero-acquisition run can never be reported complete.
+            failed_lanes = [(name, r) for name, r in iter_lanes.items() if r.status == "failed"]
+            if failed_lanes:
+                acquisition_error = "; ".join(
+                    f"{name}: {'; '.join(r.errors) if r.errors else 'lane failed'}"
+                    for name, r in failed_lanes)
+                stop_reason = "acquisition_failed"
+                break
+
             iter_postings = [j for r in iter_lanes.values() for j in r.jobs]
             billed = len(iter_postings)
             postings_total += billed
@@ -502,12 +519,19 @@ class Orchestrator:
         all_reconcile = (report.all_reconcile() and agg.reconciles()
                          and agg.enrollment_reconciles())
         target_reached = controller.net_new >= controller.target_net_new
-        status = RunStatus.COMPLETE if all_reconcile else RunStatus.INCOMPLETE
-        stop = "" if all_reconcile else "a stage or delivery boundary failed to reconcile"
-        self.ctx.finish(status, stop or f"topup:{stop_reason}")
+        if acquisition_error:
+            # A failed acquisition lane overrides everything: the run is FAILED, never
+            # a silent "complete" with raw_postings=0.
+            status = RunStatus.FAILED
+            self.ctx.finish(status, f"acquisition_failed: {acquisition_error}")
+        else:
+            status = RunStatus.COMPLETE if all_reconcile else RunStatus.INCOMPLETE
+            stop = "" if all_reconcile else "a stage or delivery boundary failed to reconcile"
+            self.ctx.finish(status, stop or f"topup:{stop_reason}")
 
         topup_dict = controller.to_dict()
         topup_dict["final_stop_reason"] = stop_reason
+        topup_dict["acquisition_error"] = acquisition_error
         result = {
             "run": self.ctx.to_dict(),
             "lanes": {lane: r.to_dict() for lane, r in lane_results.items()},

@@ -540,6 +540,18 @@ def _request(endpoint: str, params: Dict[str, Any], http_get: HttpGet, seg: Dict
     raise FantasticRequestError("dispatch", f"network_error:{last_err}", None, attempts - 1)
 
 
+def _effective_run_cap() -> int:
+    """The maximum jobs this acquisition CALL may bill: the global validated ceiling
+    (FANTASTIC_JOBS_MAX_JOBS_PER_RUN), further clamped to the per-iteration runtime
+    slice budget (FANTASTIC_JOBS_RUN_SLICE_CAP) when the top-up loop has set one.
+    Decoupled from the global so a slice smaller than a segment limit is valid: the
+    config validator still checks segment_total <= the GLOBAL ceiling, while the fetch
+    loop clamps this iteration's billing to the slice."""
+    ceiling = int(getattr(config, "FANTASTIC_JOBS_MAX_JOBS_PER_RUN", 0) or 0)
+    slice_cap = int(getattr(config, "FANTASTIC_JOBS_RUN_SLICE_CAP", 0) or 0)
+    return min(ceiling, slice_cap) if slice_cap > 0 else ceiling
+
+
 def _quota_would_breach(quota: _QuotaState, want: int) -> str:
     if quota.requests_remaining is not None and (quota.requests_remaining - 1) < config.FANTASTIC_JOBS_MIN_REQUESTS_QUOTA_REMAINING:
         return "requests_quota_reserve"
@@ -671,6 +683,10 @@ def run_fantastic_jobs_acquisition(http_get: HttpGet = _http_get) -> SourceResul
 
     quota = _QuotaState()
     seen_ids: set = set()
+    # Max jobs this CALL may bill: the validated global ceiling, clamped to the
+    # per-iteration top-up slice budget when set. Validation above used the ceiling;
+    # the fetch loop below uses run_cap so a slice < a segment limit is billed safely.
+    run_cap = _effective_run_cap()
 
     # Cross-run continuation cursor (default off). Resume strictly OLDER than the
     # oldest job already acquired so deep batches never re-fetch/re-bill the
@@ -762,7 +778,7 @@ def run_fantastic_jobs_acquisition(http_get: HttpGet = _http_get) -> SourceResul
         ``seen_ids`` (so the two passes never double-count). Either pass may be
         disabled by the acquire mode."""
         if do_head:
-            room = min(cap_limit, config.FANTASTIC_JOBS_MAX_JOBS_PER_RUN - len(result.jobs))
+            room = min(cap_limit, run_cap - len(result.jobs))
             if room > 0:
                 got = _fetch_segment(  # NO date_posted_lt: page from the top
                     endpoint, dict(base_jb), label, room, quota, http_get, seen_ids,
@@ -772,7 +788,7 @@ def run_fantastic_jobs_acquisition(http_get: HttpGet = _http_get) -> SourceResul
                 metrics["continuation"]["head_acquired"] = (
                     metrics["continuation"].get("head_acquired", 0) + len(got))
         if do_deep:
-            room = min(cap_limit, config.FANTASTIC_JOBS_MAX_JOBS_PER_RUN - len(result.jobs))
+            room = min(cap_limit, run_cap - len(result.jobs))
             if room > 0:
                 deep_jb = dict(base_jb)
                 if cursor_date_lt:
@@ -816,7 +832,7 @@ def run_fantastic_jobs_acquisition(http_get: HttpGet = _http_get) -> SourceResul
             # family keeps its OWN date_posted cursor so streams never leak.
             fam_states = (cont_state.get("families") or {}) if continuation_enabled else {}
             families = [str(t).strip() for t in (config.FANTASTIC_JOBS_TITLE_FAMILIES or []) if str(t).strip()]
-            global_cap = int(config.FANTASTIC_JOBS_MAX_JOBS_PER_RUN)
+            global_cap = int(run_cap)
             per_family_cap = max(1, global_cap // max(1, len(families)))
             metrics["title_families_planned"] = len(families)
             for term in families:
@@ -861,7 +877,7 @@ def run_fantastic_jobs_acquisition(http_get: HttpGet = _http_get) -> SourceResul
                 "linkedin": config.FANTASTIC_JOBS_LINKEDIN_LIMIT,
             }
             for seg_key, cap in seg_caps.items():
-                if cap <= 0 or quota.stop_reason or len(result.jobs) >= config.FANTASTIC_JOBS_MAX_JOBS_PER_RUN:
+                if cap <= 0 or quota.stop_reason or len(result.jobs) >= run_cap:
                     continue
                 label, accept = JB_SEGMENTS[seg_key]
                 jb_params = {"time_frame": config.FANTASTIC_JOBS_TIME_FRAME,

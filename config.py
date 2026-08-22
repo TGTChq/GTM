@@ -640,6 +640,14 @@ NET_NEW_SEND_SAFE_TARGET = _env_int("NET_NEW_SEND_SAFE_TARGET", 0)
 #   Per-iteration slice size (each slice bills at most this many jobs; cumulative
 #   billing is still clamped to the safety cap).
 FANTASTIC_TOPUP_SLICE_JOBS = _env_int("FANTASTIC_TOPUP_SLICE_JOBS", 500)
+#   Per-iteration RUNTIME slice budget (0 = no slice cap). The top-up loop sets this
+#   for one acquisition iteration so the adapter bills at most this many jobs THAT
+#   iteration. It is deliberately DECOUPLED from FANTASTIC_JOBS_MAX_JOBS_PER_RUN (the
+#   global, config-validated safety ceiling): a slice of 500 with LINKEDIN_LIMIT=6000
+#   is valid because validation checks the ceiling (6000<=6000) while the adapter
+#   clamps this iteration's acquisition to the slice. Cumulative billing across slices
+#   stays bounded by the ceiling via the TopUpController. Never persisted; runtime-only.
+FANTASTIC_JOBS_RUN_SLICE_CAP = _env_int("FANTASTIC_JOBS_RUN_SLICE_CAP", 0)
 #   C) Runtime-budget and iteration-guard boundaries (never-infinite-loop).
 TOPUP_RUNTIME_BUDGET_SECONDS = _env_int("TOPUP_RUNTIME_BUDGET_SECONDS", 0)  # 0 = no runtime cap
 TOPUP_MAX_ITERATIONS = _env_int("TOPUP_MAX_ITERATIONS", 40)

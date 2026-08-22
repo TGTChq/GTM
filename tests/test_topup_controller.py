@@ -148,9 +148,12 @@ def _fantastic_runner(supply_per_slice, quota=999999):
     state = {"i": 0, "uid": 0}
 
     def runner(manager):
+        import fantastic_jobs_adapter as _fja
         n = supply_per_slice[state["i"]] if state["i"] < len(supply_per_slice) else 0
         state["i"] += 1
-        n = min(n, config.FANTASTIC_JOBS_MAX_JOBS_PER_RUN)   # cap the loop set
+        # Mirror the real adapter: clamp this iteration's billing to the RUNTIME slice
+        # budget (decoupled from the config-validated FANTASTIC_JOBS_MAX_JOBS_PER_RUN).
+        n = min(n, _fja._effective_run_cap())
         jobs = []
         for _ in range(n):
             state["uid"] += 1

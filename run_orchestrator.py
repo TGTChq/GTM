@@ -650,6 +650,26 @@ def _print_run_summary(ctx, mode, result, state) -> None:
     line("run_id", ctx.run_id)
     line("mode", mode.value)
     line("status", result["run"]["status"])
+    # Acquisition lanes -- surface a FAILED lane and its error (config/provider/parse
+    # crash) directly in Railway logs, so a zero-acquisition failure is never hidden
+    # behind status=complete/raw_postings=0 and never requires mounting the volume.
+    lanes = result.get("lanes") or {}
+    run_stop = (result.get("run") or {}).get("stop_reason") or ""
+    failed_lanes = {ln: ld for ln, ld in lanes.items()
+                    if (ld or {}).get("status") == "failed" or (ld or {}).get("errors")}
+    if lanes:
+        print("---- Acquisition lanes ----")
+        for ln, ld in lanes.items():
+            ld = ld or {}
+            flag = "   <== FAILED" if ln in failed_lanes else ""
+            line(f"  {ln}", f"status={ld.get('status')} jobs={ld.get('jobs')} "
+                            f"requests={ld.get('physical_requests')}{flag}")
+            for e in (ld.get("errors") or [])[:3]:
+                line("    error", str(e)[:300])
+    if run_stop:
+        line("stop_reason", run_stop)
+    if failed_lanes:
+        line("ACQUISITION", f"FAILED ({', '.join(failed_lanes)}) -- see errors above")
     print("---- Brett's daily metrics ----")
     line("JOBS_ANALYZED", raw)
     line("QUALIFIED", funnel.get("target_role_eligible", funnel.get("icp_eligible_companies")))
