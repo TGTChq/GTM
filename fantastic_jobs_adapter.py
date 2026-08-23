@@ -519,14 +519,49 @@ def build_title_query_plan() -> Dict[str, Any]:
     global_neg = [n for n in ((getattr(config, "FANTASTIC_TITLE_GLOBAL_EXCLUSIONS", []) or [])
                               if global_on else []) if str(n or "").strip()]
 
+    # FUNCTIONAL ROLE EXPANSION (flag-gated): adjacent titles that describe the SAME
+    # underlying work as a measured high-yield activity cluster but are absent from
+    # the 118-term catalog. Each expansion belongs to exactly ONE acquisition family
+    # and inherits that family's contamination exclusions, so a broad activity word
+    # (e.g. "automation") can never be bought naked. With the flag OFF the catalog
+    # and therefore the expression are byte-identical to production.
+    expansion_terms: Dict[str, str] = {}          # role -> family
+    family_exclusions: Dict[str, Tuple[str, ...]] = {}
+    if bool(getattr(config, "FANTASTIC_FUNCTIONAL_ROLE_EXPANSION_ENABLED", False)):
+        try:
+            from orchestrator.function_acquisition import (
+                ADJACENT_TITLE_CANDIDATES, FAMILY_SCOPED_EXCLUSIONS, family_for_role)
+            family_exclusions = dict(FAMILY_SCOPED_EXCLUSIONS)
+            for fam, titles in ADJACENT_TITLE_CANDIDATES.items():
+                for t in titles:
+                    expansion_terms[str(t)] = fam
+        except Exception:  # noqa: BLE001 - expansion never breaks acquisition
+            expansion_terms, family_exclusions = {}, {}
+
+    catalog = {str(r).strip() for r in DEFAULT_ACQUISITION_ROLES if str(r).strip()}
+    # An "expansion" must be a title the catalog does NOT already cover. Without this
+    # guard a duplicate would shadow the base clause (alphabetical ordering decides
+    # which wins), silently reclassifying a base role as expanded and corrupting the
+    # base-vs-expanded yield attribution the ledger depends on.
+    _catalog_terms = {t for r in catalog for t in _role_terms(r)}
+    expansion_terms = {r: f for r, f in expansion_terms.items()
+                       if not (set(_role_terms(r)) & _catalog_terms)}
+    all_roles = sorted(catalog | set(expansion_terms))
+
     clauses: List[Dict[str, Any]] = []
     seen_terms: set = set()
-    for role in sorted({str(r).strip() for r in DEFAULT_ACQUISITION_ROLES if str(r).strip()}):
+    for role in all_roles:
         include = [t for t in _role_terms(role) if t not in seen_terms]
         if not include:
             continue
         seen_terms.update(include)
         exclude = [n for n in (_negation_term(x) for x in (scoped.get(role) or [])) if n]
+        # An expanded title inherits its family's contamination defence.
+        if role in expansion_terms and family_exclusions:
+            fam_ex = family_exclusions.get(expansion_terms[role]) or ()
+            for n in (_negation_term(x) for x in fam_ex):
+                if n and n not in exclude:
+                    exclude.append(n)
         inner = " | ".join(include)
         if exclude:
             # Scoped: negate INSIDE this role's clause only.
@@ -535,12 +570,16 @@ def build_title_query_plan() -> Dict[str, Any]:
         else:
             clause = inner if len(include) == 1 else f"({inner})"
         clauses.append({"family": _role_family_id(role), "role": role, "include": include,
-                        "exclude": exclude, "clause": clause})
+                        "exclude": exclude, "clause": clause,
+                        "expanded": role in expansion_terms,
+                        "function_family": expansion_terms.get(role, "")})
     union = " | ".join(c["clause"] for c in clauses)
     gneg = [n for n in (_negation_term(x) for x in global_neg) if n]
     expression = f"({union}) & " + " & ".join(gneg) if (union and gneg) else union
     return {"expression": expression, "clauses": clauses, "global_exclusions": gneg,
-            "fingerprint": _fingerprint(expression), "override": False}
+            "fingerprint": _fingerprint(expression), "override": False,
+            "expanded_clauses": sum(1 for c in clauses if c.get("expanded")),
+            "base_clauses": sum(1 for c in clauses if not c.get("expanded"))}
 
 
 def _fingerprint(text: str) -> str:
@@ -1220,12 +1259,25 @@ def run_fantastic_jobs_acquisition(http_get: HttpGet = _http_get) -> SourceResul
     #   * flag ON  -> date_created watermark (Category 2; DEFAULT OFF)
     # Both engines share _fetch_segment/billing/quota/seen_ids; only the window
     # bounds and the persisted cursor differ, so no pipeline logic is duplicated.
+    # WATERMARK CIRCUIT BREAKER: any state/contract anomaly falls back to the tested
+    # head/deep engine for THIS RUN. Run-local only -- never mutates configuration.
     watermark_engine = None
     if bool(getattr(config, "FANTASTIC_DATE_CREATED_WATERMARK_ENABLED", False)):
-        watermark_engine = DateCreatedWatermarkEngine(
-            result=result, quota=quota, http_get=http_get, seen_ids=seen_ids,
-            metrics=metrics, run_cap=run_cap)
-        watermark_engine.open()
+        try:
+            eng = DateCreatedWatermarkEngine(
+                result=result, quota=quota, http_get=http_get, seen_ids=seen_ids,
+                metrics=metrics, run_cap=run_cap)
+            eng.open()
+            if not eng.opened or not eng.upper:
+                raise ValueError("watermark window did not open")
+            watermark_engine = eng
+        except Exception as exc:  # noqa: BLE001
+            metrics["watermark"] = {"enabled": True, "circuit_open": True,
+                                    "fallback": "head_deep",
+                                    "reason": f"{type(exc).__name__}"}
+            logger.warning("watermark unhealthy (%s); falling back to head/deep for this run",
+                           type(exc).__name__)
+            watermark_engine = None
     # title_advanced (one Boolean LinkedIn stream) TAKES PRECEDENCE over per-family
     # title_targeting in acquisition. The continuation cursor must be persisted in
     # the mode that ACTUALLY ran: if title_advanced runs while title_targeting is
@@ -1288,8 +1340,12 @@ def run_fantastic_jobs_acquisition(http_get: HttpGet = _http_get) -> SourceResul
         if ats_enabled:
             ats_params = build_ats_params(title_advanced_expr)
             metrics["ats_source"]["params"] = sorted(k for k in ats_params if k != "title_advanced")
+            # ATS budget shares the SINGLE combined run cap with JB: the governor
+            # controls ATS+JB together and ATS can never claim an independent
+            # allowance (run_cap - already-acquired).
             ats_room = min(int(config.FANTASTIC_JOBS_ATS_LIMIT), run_cap - len(result.jobs))
             if ats_room > 0:
+                before = len(result.jobs)
                 if watermark_engine is not None:
                     watermark_engine.run_stream("/v1/active-ats", ats_params, ATS_SOURCE, ats_room, None)
                 else:
@@ -1299,6 +1355,23 @@ def run_fantastic_jobs_acquisition(http_get: HttpGet = _http_get) -> SourceResul
                     # an ATS row with a newer date_posted would inflate high_water and
                     # make the next LinkedIn head pass skip genuinely new jobs.
                     result.jobs.extend(got)
+                # ATS CIRCUIT BREAKER (run-local): if the ATS segment errored or its
+                # rows were overwhelmingly unparseable, record it and continue with
+                # JB. One malformed source can never take down the baseline path.
+                seg = (metrics["segments"].get(ATS_SOURCE) or {})
+                returned = int(seg.get("returned", 0) or 0)
+                rejected = int(seg.get("schema_rejected", 0) or 0)
+                bad_rate = (rejected / returned) if returned else 0.0
+                thresh = float(getattr(config, "FANTASTIC_ATS_MAX_SCHEMA_REJECT_RATE", 0.5) or 0.5)
+                tripped = bool(seg.get("error_code")) or (returned >= 20 and bad_rate > thresh)
+                metrics["ats_source"].update({
+                    "acquired": len(result.jobs) - before, "returned": returned,
+                    "schema_rejected": rejected, "schema_reject_rate": round(bad_rate, 4),
+                    "circuit_open": tripped})
+                if tripped:
+                    logger.warning("ATS circuit breaker tripped (err=%s reject_rate=%.2f); "
+                                   "continuing with active-jb only",
+                                   seg.get("error_code") or "-", bad_rate)
 
         if title_advanced_active:
             # ONE Boolean OR-expression over the whole role catalog (benchmark

@@ -855,6 +855,11 @@ FANTASTIC_WATERMARK_STATE_PATH = os.getenv(
 # --- active-ats source (Category 2; DEFAULT OFF; FANTASTIC_JOBS_ATS_LIMIT stays 0 in prod)
 # Complementary, non-overlapping with active-jb(exclude_ats_duplicate=true).
 FANTASTIC_ATS_SOURCE_ENABLED = _env_bool("FANTASTIC_ATS_SOURCE_ENABLED", False)
+# Run-local ATS circuit breaker: if the ATS segment errors, or >this fraction of a
+# meaningful sample fails schema mapping, ATS is abandoned FOR THAT RUN and active-jb
+# continues. Never mutates configuration.
+FANTASTIC_ATS_MAX_SCHEMA_REJECT_RATE = float(
+    os.getenv("FANTASTIC_ATS_MAX_SCHEMA_REJECT_RATE", "0.5") or 0.5)
 FANTASTIC_ATS_APPLY_TITLE_ADVANCED = _env_bool("FANTASTIC_ATS_APPLY_TITLE_ADVANCED", True)
 FANTASTIC_ATS_APPLY_ICP_FILTERS = _env_bool("FANTASTIC_ATS_APPLY_ICP_FILTERS", True)
 
