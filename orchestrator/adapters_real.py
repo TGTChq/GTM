@@ -131,6 +131,52 @@ def real_free_feeds_runner(sources: Sequence[str], fetcher):
     return runner
 
 
+def real_external_batch_runner(csv_path: str):
+    """Lane runner for an already-acquired external Fantastic batch (Apify CSV).
+
+    The rows were bought outside this pipeline, so the lane issues ZERO provider
+    requests and consumes ZERO Fantastic job credits. Normalization goes through
+    ``fantastic_jobs_adapter.map_record`` and the same
+    ``multi_source_acquisition._classify`` step the paid Fantastic lane uses, so
+    every downstream gate sees an identical canonical record.
+    """
+    from external_batch_adapter import normalize_batch
+
+    def runner(manager: LaneManager) -> LaneResult:
+        errors: List[str] = []
+        jobs: List[Dict[str, Any]] = []
+        stats: Dict[str, Any] = {}
+        status = "complete"
+        try:
+            jobs, stats = normalize_batch(csv_path)
+            if not jobs:
+                status = "failed"
+                errors.append(f"external batch produced no canonical jobs: {csv_path}")
+        except Exception as exc:  # noqa: BLE001 - a lane never erases another
+            status = "failed"
+            errors.append(f"{type(exc).__name__}: {exc}")
+        return LaneResult(
+            lane="external_batch", status=status, jobs=jobs, errors=errors,
+            # No HTTP was performed: the batch is a local file.
+            physical_requests=0,
+            attribution={
+                "source": "external_apify_fantastic",
+                "batch_file": Path(csv_path).name,
+                "records": len(jobs),
+                "raw_rows": int(stats.get("raw_rows", 0) or 0),
+                "role_classified": int(stats.get("classified", 0) or 0),
+                "row_errors": int(stats.get("row_errors", 0) or 0),
+                "rejected_by_reason": dict(stats.get("rejected_by_reason") or {}),
+                # Explicit, auditable proof that this lane bought nothing.
+                "requests": 0,
+                "jobs_quota_consumed": 0,
+                "raw_records": int(stats.get("raw_rows", 0) or 0),
+            },
+        )
+
+    return runner
+
+
 def real_fantastic_runner():
     """Lane runner for the Fantastic.jobs Direct API acquisition source.
 
@@ -306,6 +352,8 @@ class RealEnrichmentStage:
     def __init__(self, *, target_final_pass: Optional[int] = None, workdir: Optional[str] = None):
         self.target_final_pass = target_final_pass
         self.workdir = Path(workdir or tempfile.mkdtemp())
+        #: CollapseResult from the last run when company collapse is enabled.
+        self.collapse = None
 
     def run(self, opportunities: List[Dict[str, Any]],
             *, exclude_company_keys=None,
@@ -328,17 +376,68 @@ class RealEnrichmentStage:
             # 1) Real JobGate + RoleGate (offline: no source fetch).
             qual = run_precontact_qualification(str(raw), output_dir=str(qual_dir),
                                                 fetch_sources=False)
+            qual_path = qual.output_path
+            # 1b) Optional company-level opportunity collapse. Runs BETWEEN the
+            #     gates and the first Apollo call, so only postings that already
+            #     qualified compete to represent their employer, and an employer
+            #     can consume at most one person enrichment. Default OFF.
+            self.collapse = None
+            if config.COMPANY_OPPORTUNITY_COLLAPSE_ENABLED:
+                qual_path = self._collapse_qualified(
+                    qual_path, qual_dir,
+                    suppressed_function_keys=exclude_company_function_keys)
             # 2) Real company identity + Apollo + Hunter + contact gates + FINAL_PASS.
             #    No company-wide exclusion is invented; posting-level dedup upstream
             #    already prevents re-processing the same opportunity.
             step3 = hiring_manager.run_hiring_manager_identification(
-                qual.output_path, target_final_pass_leads=self.target_final_pass,
+                qual_path, target_final_pass_leads=self.target_final_pass,
                 exclude_company_keys=exclude_company_keys,
                 exclude_company_function_keys=exclude_company_function_keys)
 
         leads = self._load_leads(step3.output_path)
         report = self._to_report(qual, step3, leads)
+        if self.collapse is not None:
+            report.funnel["company_collapse"] = dict(self.collapse.metrics)
         return report
+
+    def _collapse_qualified(self, qual_path: str, qual_dir: Path,
+                            *, suppressed_function_keys=None) -> str:
+        """Rewrite the qualified-jobs file down to one opportunity per employer.
+
+        Writes a sibling file so the pre-collapse qualification output stays on
+        disk as evidence. Any failure returns the ORIGINAL path unchanged: a
+        collapse defect must never silently drop qualified inventory.
+        """
+        from company_opportunity_collapse import collapse_company_opportunities
+        try:
+            from airtable_client import company_function_keys_for_job
+            payload = json.loads(Path(qual_path).read_text(encoding="utf-8"))
+            jobs = [j for j in (payload.get("jobs") or []) if isinstance(j, dict)]
+            result = collapse_company_opportunities(
+                jobs,
+                suppressed_function_keys=suppressed_function_keys,
+                function_keys_for_job=company_function_keys_for_job)
+        except Exception as exc:  # noqa: BLE001 - never drop inventory on a defect
+            print(f"[company-collapse] skipped ({type(exc).__name__}: {exc}); "
+                  f"proceeding with all {qual_path} opportunities")
+            return qual_path
+        self.collapse = result
+        collapsed_path = qual_dir / "jobs_company_collapsed.json"
+        collapsed_path.write_text(json.dumps(
+            {**{k: v for k, v in payload.items() if k != "jobs"},
+             "jobs": result.representatives,
+             "company_collapse": result.metrics}, indent=2), encoding="utf-8")
+        (qual_dir / "jobs_company_collapse_withheld.json").write_text(json.dumps({
+            "company_collapse": result.metrics,
+            "withheld": [{"job_id": j.get("job_id"), "employer_name": j.get("employer_name"),
+                          "job_title": j.get("job_title"), "reason": reason}
+                         for j, reason in result.withheld],
+        }, indent=2), encoding="utf-8")
+        print(f"[company-collapse] {result.metrics['input_postings']} qualified postings -> "
+              f"{result.metrics['company_opportunities_after_collapse']} company opportunities "
+              f"({result.metrics['jobs_suppressed_by_company_collapse']} siblings suppressed, "
+              f"{result.metrics['identity_unresolved_withheld']} withheld unresolved)")
+        return str(collapsed_path)
 
     @staticmethod
     def _load_leads(path: str) -> List[Dict[str, Any]]:

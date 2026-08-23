@@ -1163,6 +1163,16 @@ ALTERNATE_CONTACT_MAX_ENRICHMENTS_PER_RUN = _env_int(
 APOLLO_MAX_PERSON_MATCH_ATTEMPTS_PER_BUCKET = _env_int(
     "APOLLO_MAX_PERSON_MATCH_ATTEMPTS_PER_BUCKET", 3
 )
+
+# Company-level opportunity collapse (company_opportunity_collapse.py): elect ONE
+# posting per trusted employer identity BEFORE paid person enrichment, so an
+# employer advertising eight roles cannot become eight Apollo credits and eight
+# outbound leads. Applied AFTER the JobGate/RoleGate so only qualified postings
+# compete for the slot. Default OFF: the live lanes already bound spend upstream
+# via the function-aware provider dedupe, and turning this on changes which
+# opening represents an employer.
+COMPANY_OPPORTUNITY_COLLAPSE_ENABLED = _env_bool(
+    "COMPANY_OPPORTUNITY_COLLAPSE_ENABLED", False)
 # People search itself is free (only match_person/enrichment consumes
 # credits) -- apollo_client.search_people_at_company previously fetched only
 # page 1 (25 results) with no pagination at all, silently missing any
