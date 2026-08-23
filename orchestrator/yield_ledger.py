@@ -65,7 +65,11 @@ class LedgerRow:
     source: str = ""                 # _acquisition_source label
     provider_dataset: str = ""       # jb | ats
     acquisition_mode: str = ""       # head | deep | watermark | ats | plain
-    title_family: str = ""
+    title_family: str = ""           # query clause family (attribute_title_family)
+    acquisition_function_family: str = ""   # role family the paid query belonged to
+    functional_activity_cluster: str = ""   # ontology cluster id, when derivable
+    matching_title_clause: str = ""  # the specific clause that matched
+    organization_slug: str = ""      # provider exclusion key (slug crosswalk bridge)
     role_bucket: str = ""
     company_domain: str = ""         # normalized employer domain (not PII)
     industry: str = ""
@@ -79,8 +83,11 @@ class LedgerRow:
     previously_seen: bool = False
     collapsed_into: str = ""         # primary posting id when this posting folded into a lead
     icp_outcome: str = ""            # pass|reject|unresolved|""
+    company_function_existing: bool = False   # already covered at run start
     hm_outcome: str = ""             # found|not_found|""
     zero_apollo_people: bool = False
+    org_id_fallback_attempted: bool = False
+    org_id_fallback_recovered: bool = False
     email_outcome: str = ""          # verified|unverified|none|""
     send_safe: bool = False
     airtable_created: bool = False
@@ -129,6 +136,10 @@ class YieldLedger:
                     provider_dataset=str(j.get("_provider_dataset") or ""),
                     acquisition_mode=str(j.get("_acquisition_mode") or mode or ""),
                     title_family=str(j.get("_title_family") or ""),
+                    acquisition_function_family=str(j.get("_acquisition_function_family") or ""),
+                    functional_activity_cluster=str(j.get("_activity_cluster") or ""),
+                    matching_title_clause=str(j.get("_matched_role") or ""),
+                    organization_slug=str(j.get("org_linkedin_slug") or ""),
                     role_bucket=str(j.get("_role_bucket") or ""),
                     company_domain=str(j.get("employer_website") or "").lower(),
                     industry=str(j.get("_org_industry") or ""),

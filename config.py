@@ -890,6 +890,18 @@ APOLLO_CACHE_PERSON_MATCH_TTL_DAYS = _env_int("APOLLO_CACHE_PERSON_MATCH_TTL_DAY
 # code is retained; this gate disables it ONLY for the Fantastic acquisition path.
 HUNTER_ENABLED_FOR_FANTASTIC_PATH = _env_bool("HUNTER_ENABLED_FOR_FANTASTIC_PATH", True)
 
+# --- Apollo zero-people org-id recovery (Category 1 once probed; DEFAULT OFF) ----
+# ~61% of HM misses are zero_apollo_people, and 184/205 of those buckets held a
+# TRUSTED Apollo organization (measured) whose organization_id we never tried --
+# the people search selects the company only by q_organization_domains_list[].
+# The fallback re-runs the SAME titles against organization_ids[] when the domain
+# search confirms zero people. People Search is a 0-credit endpoint and the org id
+# was already paid for by this company's enrich_organization call, so the fallback
+# adds NO Apollo credit. Titles are never broadened; every downstream gate is
+# unchanged; a domain-mismatched org is never used.
+APOLLO_ORG_ID_ZERO_PEOPLE_FALLBACK_ENABLED = _env_bool(
+    "APOLLO_ORG_ID_ZERO_PEOPLE_FALLBACK_ENABLED", False)
+
 # --- Enrollment anti-spam identity (Category 1) --------------------------------
 # normalized employer domain + normalized resolved email => one enrollment.
 ENROLLMENT_PERSON_EMPLOYER_UNIQUENESS = _env_bool("ENROLLMENT_PERSON_EMPLOYER_UNIQUENESS", False)
@@ -897,6 +909,30 @@ ENROLLMENT_PERSON_EMPLOYER_UNIQUENESS = _env_bool("ENROLLMENT_PERSON_EMPLOYER_UN
 # --- North-star yield ledger (analytics only; never blocks the pipeline) --------
 YIELD_LEDGER_ENABLED = _env_bool("YIELD_LEDGER_ENABLED", False)  # Gate-E D13: no new file on deploy
 YIELD_LEDGER_PATH = os.getenv("YIELD_LEDGER_PATH", str(Path(STATE_DIR) / "yield_ledger.jsonl"))
+
+# --- Function-aware UPSTREAM (pre-billing) company x function dedupe -----------
+# PRE_APOLLO_EXISTING_DEDUPE saves Apollo but Fantastic has ALREADY billed the row.
+# This partitions acquisition into role families and sends, per family, the LinkedIn
+# slugs already actively covered FOR THAT FUNCTION as exclude_organization_slug
+# (PROVEN honored: 500 slugs removed 950 rows at a 13.6KB URL). A company covered
+# for GTM is excluded from the GTM query only -- its Engineering demand stays
+# eligible. DEFAULT OFF: partitioning the single 118-term query into N paid family
+# queries changes billing shape and must be proven by replay first.
+FANTASTIC_FUNCTION_AWARE_UPSTREAM_DEDUPE_ENABLED = _env_bool(
+    "FANTASTIC_FUNCTION_AWARE_UPSTREAM_DEDUPE_ENABLED", False)
+FANTASTIC_SLUG_CROSSWALK_PATH = os.getenv(
+    "FANTASTIC_SLUG_CROSSWALK_PATH", str(Path(STATE_DIR) / "fantastic_slug_crosswalk.json"))
+FANTASTIC_SLUG_CROSSWALK_TTL_DAYS = _env_int("FANTASTIC_SLUG_CROSSWALK_TTL_DAYS", 120)
+# 250 = safe operational chunk (a live probe honored 500 at 13.6KB, close to common
+# ~16KB URL ceilings); never blindly emit larger URLs.
+FANTASTIC_SLUG_EXCLUSION_CHUNK = _env_int("FANTASTIC_SLUG_EXCLUSION_CHUNK", 250)
+
+# --- Functional / activity role expansion (Category 2; DEFAULT OFF) -----------
+# Adjacent titles that perform the SAME work as proven high-yield activity clusters
+# but are missing from the 118-term catalog. With the flag OFF the production
+# expression stays byte-identical (118 terms / 2966 chars).
+FANTASTIC_FUNCTIONAL_ROLE_EXPANSION_ENABLED = _env_bool(
+    "FANTASTIC_FUNCTIONAL_ROLE_EXPANSION_ENABLED", False)
 
 # --- Segment allocation foundations (Category 2; DEFAULT OFF) -----------------
 SEGMENT_ALLOCATOR_ENABLED = _env_bool("SEGMENT_ALLOCATOR_ENABLED", False)

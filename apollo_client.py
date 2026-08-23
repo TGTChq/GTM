@@ -449,6 +449,83 @@ def search_people_at_company(domain: str, titles: List[str]) -> List[Dict[str, A
     return validated
 
 
+def search_people_by_org_id(organization_id: str, titles: List[str],
+                            expected_domain: str = "") -> List[Dict[str, Any]]:
+    """ZERO-PEOPLE FALLBACK: the same People Search, selecting the company by Apollo's
+    own ``organization_ids[]`` instead of ``q_organization_domains_list[]``.
+
+    Motivation (measured): 184/205 historical ``zero_apollo_people`` buckets held a
+    trusted, ICP-validated Apollo organization (an ``employee_count`` only exists when
+    ``org.found``), and 80% of them are 51-1000-employee companies where Apollo almost
+    certainly HAS contacts -- so a 0-person result implicates the DOMAIN selector, not
+    Apollo's coverage. The org id was already paid for by ``enrich_organization`` earlier
+    in the same company pass, so this fallback costs NO additional Apollo credit
+    (People Search is a 0-credit endpoint; only enrichment/reveal bills).
+
+    Quality is preserved by construction: the SAME ``person_titles`` and
+    ``include_similar_titles=false`` are used -- titles are never broadened and
+    seniority is never lowered. When ``expected_domain`` is supplied, the same
+    defensive wrong-company guard used by the domain search is applied, so a
+    recovered person from a different organization is discarded.
+    """
+    organization_id = str(organization_id or "").strip()
+    if not organization_id or not titles:
+        return []
+
+    per_page = 25
+    max_pages = max(1, int(getattr(config, "APOLLO_PEOPLE_SEARCH_MAX_PAGES", 1)))
+    all_people: List[Dict[str, Any]] = []
+    for page in range(1, max_pages + 1):
+        params: List[tuple[str, str]] = [
+            ("organization_ids[]", organization_id),
+            ("include_similar_titles", "false"),
+            ("page", str(page)),
+            ("per_page", str(per_page)),
+        ]
+        params.extend(("person_titles[]", title) for title in titles)
+        try:
+            response = request_with_retry(
+                "POST",
+                f"{APOLLO_BASE_URL}/mixed_people/api_search",
+                headers=_headers(),
+                params=params,
+            )
+            data = safe_json(response)
+            debug_dump("apollo_people_search_org_id", data)
+        except Exception as exc:
+            logger.error("Apollo org-id people search failed for org %s (page %d): %s",
+                         organization_id, page, exc)
+            if page == 1:
+                # A failed fallback must never worsen the primary outcome.
+                return []
+            break
+
+        page_people = data.get("people") or []
+        if not isinstance(page_people, list):
+            logger.warning("Apollo returned a non-list people payload for org %s", organization_id)
+            break
+        all_people.extend(page_people)
+        pagination = data.get("pagination") if isinstance(data.get("pagination"), dict) else {}
+        total_pages = pagination.get("total_pages")
+        if len(page_people) < per_page:
+            break
+        if isinstance(total_pages, int) and page >= total_pages:
+            break
+
+    expected = _domain(expected_domain) if expected_domain else ""
+    if not expected:
+        return all_people
+    validated: List[Dict[str, Any]] = []
+    for person in all_people:
+        person_domain = _person_org_domain(person)
+        if person_domain and person_domain != expected and not person_domain.endswith("." + expected):
+            logger.warning("Discarding org-id-recovered Apollo person %s (domain %s != %s)",
+                           person.get("id") or person.get("person_id"), person_domain, expected)
+            continue
+        validated.append(person)
+    return validated
+
+
 def match_person(person: Dict[str, Any]) -> PersonMatch:
     """Enrich a person while preserving search-result identity for Hunter fallback."""
     person_id = person.get("id") or person.get("person_id")

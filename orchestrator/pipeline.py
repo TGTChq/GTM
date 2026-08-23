@@ -727,6 +727,9 @@ class Orchestrator:
                 except Exception:  # noqa: BLE001
                     safe = False
                 ledger.mark(pid, exit_stage="enriched",
+                            org_id_fallback_attempted=bool(row.get("_apollo_org_id_recovered")
+                                                           or lead.contact.get("_apollo_org_id_recovered")),
+                            org_id_fallback_recovered=bool(row.get("_apollo_org_id_recovered")),
                             icp_outcome=("reject" if dispo == "REJECT" else "pass"),
                             hm_outcome=("found" if email else "not_found"),
                             zero_apollo_people=(str(getattr(lead.primary_reason, "value", "")) == "hiring_manager_not_found"),

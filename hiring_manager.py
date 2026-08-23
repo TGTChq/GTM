@@ -948,6 +948,19 @@ def _cached_enrich_organization(input_domain: str, company_name: str, website: s
     return org
 
 
+def _org_is_trusted_for_domain(org, expected_domain: str) -> bool:
+    """The org-id fallback may only use an organization Apollo resolved to the SAME
+    domain we asked about (or one that reports no domain at all). A domain mismatch
+    means Apollo matched a DIFFERENT company -- using its id would import
+    wrong-company contacts, which is worse than a miss."""
+    from orchestrator.apollo_cache import normalize_domain
+    want = normalize_domain(expected_domain)
+    got = normalize_domain(str(getattr(org, "domain", "") or ""))
+    if not want:
+        return False
+    return got in ("", want) or got.endswith("." + want)
+
+
 def provider_pre_reject_reason(job: Dict) -> str:
     """REJECT-only provider-firmographic pre-gate (config.PROVIDER_FIRMOGRAPHIC_PRE_REJECT).
 
@@ -1142,11 +1155,45 @@ def _process_company_strict(company_jobs: List[Dict]) -> Tuple[List[Dict], Dict]
                     "Apollo people search error for %s|%s: %s", search_domain, bucket, exc
                 )
             time.sleep(config.APOLLO_RATE_LIMIT_DELAY)
+            stats["apollo_people_domain_searches"] += 1
+            if not apollo_error and not people:
+                stats["apollo_people_domain_zero"] += 1
+            # ---- ZERO-PEOPLE ORG-ID FALLBACK (flag-gated, default OFF) ----------
+            # Fires ONLY when the domain-selected search confirmed ZERO people (never
+            # on an error) and Apollo already resolved a TRUSTED organization for this
+            # company. Re-runs the SAME titles with the SAME include_similar_titles
+            # against organization_ids[]; titles are never broadened and seniority is
+            # never lowered. Costs no Apollo credit (search is 0-credit and the org id
+            # was already paid for by this company's enrich_organization call).
+            if (not apollo_error and not people
+                    and bool(getattr(config, "APOLLO_ORG_ID_ZERO_PEOPLE_FALLBACK_ENABLED", False))
+                    and getattr(org, "found", False) and getattr(org, "organization_id", None)
+                    and _org_is_trusted_for_domain(org, safe_search_domain)):
+                stats["apollo_people_org_id_fallback_attempted"] += 1
+                try:
+                    recovered = apollo.search_people_by_org_id(
+                        org.organization_id, target_titles, expected_domain=search_domain)
+                except apollo.GLOBAL_FATAL_ERRORS:
+                    raise
+                except Exception as exc:  # noqa: BLE001 - never worsens the miss
+                    recovered = []
+                    logger.warning("Apollo org-id fallback failed for %s|%s: %s",
+                                   search_domain, bucket, exc)
+                time.sleep(config.APOLLO_RATE_LIMIT_DELAY)
+                if recovered:
+                    stats["apollo_people_org_id_people_found"] += 1
+                    stats["apollo_people_org_id_people_total"] += len(recovered)
+                    people = recovered
+                    for _j in bucket_jobs:
+                        _j["_apollo_org_id_recovered"] = True
             if _cache.enabled and _neg_key and not apollo_error:
                 try:
                     if people:
                         _cache.put("people_pos", _neg_key, {"count": len(people)})
                     else:
+                        # Only a TERMINAL zero (fallback also empty or disabled) is
+                        # cached negative, so enabling the fallback later is not
+                        # blocked by an earlier domain-only miss.
                         _cache.put("zero_title", _neg_key, {"reason": "empty_people_search"})
                     _cache.save()
                 except Exception:  # noqa: BLE001
@@ -1515,6 +1562,20 @@ def _process_company_strict(company_jobs: List[Dict]) -> Tuple[List[Dict], Dict]
                     stats["hm_domain_recovery_send_safe"] += 1
         if company_had_person_returned:
             stats["hm_domain_recovery_people_found"] += 1
+
+    # Org-id zero-people recovery funnel: attribute the DOWNSTREAM outcome of every
+    # lead whose candidate pool came from the organization_ids[] fallback, so the
+    # recovery rate is measured end-to-end (people -> HM -> verified -> send-safe)
+    # rather than only at the search boundary.
+    for lead in leads:
+        if not lead.get("_apollo_org_id_recovered"):
+            continue
+        if str(lead.get("_step3_status") or "") == "found":
+            stats["apollo_people_org_id_hm_found"] += 1
+            if str(lead.get("apollo_email_status") or "").lower() == "verified":
+                stats["apollo_people_org_id_verified"] += 1
+            if str(lead.get("_final_state") or "") == "FINAL_PASS":
+                stats["apollo_people_org_id_send_safe"] += 1
 
     return leads, dict(stats)
 
