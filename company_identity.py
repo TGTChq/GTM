@@ -63,6 +63,49 @@ _PLACEHOLDER_COMPANY_NAMES = {
 }
 
 
+#: EXACT URL-shortener hosts. A shortener is a redirector, never an employer identity.
+#:
+#: Observed in production: a posting stored ``Website=https://bit.ly`` with
+#: ``Company="Ágora Investimentos"`` while its Job URL pointed at a Barrett-Jackson
+#: Auction Company listing. Because the shortener became the company domain,
+#: ``email_matches_company`` accepted an ``@bit.ly`` address and the row recorded
+#: Contact Alignment PASS -- i.e. a real Bitly employee would have been contacted about
+#: another company's job.
+#:
+#: This list is deliberately EXACT-MATCH only. Short domains are not shorteners
+#: (``hex.tech``, ``m8th.com``, ``az.gov`` are all legitimate employers), so no
+#: length or shape heuristic may ever be used here.
+URL_SHORTENER_DOMAINS = frozenset({
+    "bit.ly", "bitly.com", "t.co", "tinyurl.com", "goo.gl", "ow.ly", "buff.ly",
+    "lnkd.in", "rebrand.ly", "cutt.ly", "is.gd", "shorturl.at", "trib.al",
+    "dlvr.it", "ift.tt", "hubs.ly", "okt.to", "rb.gy", "linktr.ee",
+})
+
+#: Provenance for rejected identities; read via :func:`shortener_rejection_metrics`.
+_SHORTENER_REJECTIONS: dict[str, int] = {}
+
+
+def is_url_shortener_domain(domain_or_url: str | None) -> bool:
+    """True when the host is a known URL shortener (exact match only)."""
+    return normalize_company_domain(domain_or_url) in URL_SHORTENER_DOMAINS
+
+
+def shortener_rejection_metrics() -> dict[str, int]:
+    return dict(_SHORTENER_REJECTIONS)
+
+
+def reset_shortener_rejection_metrics() -> None:
+    _SHORTENER_REJECTIONS.clear()
+
+
+def _record_shortener_rejection(domain: str) -> None:
+    key = "employer_domain_rejected_shortener"
+    _SHORTENER_REJECTIONS[key] = _SHORTENER_REJECTIONS.get(key, 0) + 1
+    _SHORTENER_REJECTIONS[f"{key}:{domain}"] = (
+        _SHORTENER_REJECTIONS.get(f"{key}:{domain}", 0) + 1
+    )
+
+
 def is_intermediary_domain(domain_or_url: str | None, blocked_domains: Iterable[str]) -> bool:
     domain = normalize_company_domain(domain_or_url)
     if not domain:
@@ -81,6 +124,11 @@ def safe_company_domain(
 ) -> str:
     domain = normalize_company_domain(domain_or_url)
     if not domain or is_intermediary_domain(domain, blocked_domains):
+        return ""
+    # A shortener is rejected regardless of the caller's blocked list -- contact_gate
+    # passes an EMPTY list, so this must be structural rather than configured.
+    if domain in URL_SHORTENER_DOMAINS:
+        _record_shortener_rejection(domain)
         return ""
     return domain
 
@@ -388,9 +436,14 @@ def email_matches_company(email: str | None, allowed_domains: Iterable[str | Non
     candidate = email_domain(email)
     if not candidate or candidate in _FREE_EMAIL_DOMAINS:
         return False
+    # Independently fail closed: even if a shortener reached the allowed set through
+    # some other path, an @shortener address is never a company email.
+    if candidate in URL_SHORTENER_DOMAINS:
+        return False
     allowed = {
         normalized
         for value in allowed_domains
         if (normalized := normalize_company_domain(value))
+        and normalized not in URL_SHORTENER_DOMAINS
     }
     return candidate in allowed
