@@ -282,3 +282,92 @@ class PostRecoveryStateTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AttemptProvenanceTests(unittest.TestCase):
+    """EVERY attempt must be persisted -- not just the ones that succeed.
+
+    The first 42-attempt sweep persisted only successes, so its 28 failures could not
+    later be segmented by failure class, and that information was unrecoverable without
+    paying Apollo a second time.
+    """
+
+    def setUp(self):
+        p = mock.patch.object(config, "VALIDATION_SIGNING_KEY", "unit-test-key")
+        p.start()
+        self.addCleanup(p.stop)
+
+    def _attempt(self, person, **kw):
+        out = ACR.build_recovery(_row(), person, target_titles=TITLES)
+        return ACR.attempt_record(record_id="rec1", outcome=out,
+                                  candidate_person_id="p-new", candidate_pool_depth=4,
+                                  original_block_reason="apollo_email_not_verified",
+                                  employer_domain="acme.com", **kw)
+
+    def test_failure_records_its_reason_and_class(self):
+        a = self._attempt(_person(email="", status="unavailable"))
+        self.assertEqual(a["alternate_contact_result"], ACR.NO_EMAIL)
+        self.assertEqual(a["email_outcome"], "no_email")
+        self.assertTrue(a["alternate_contact_failure_reason"])
+        self.assertFalse(a["recovered"])
+
+    def test_extrapolated_failure_is_distinguishable_from_no_email(self):
+        a = self._attempt(_person(status="extrapolated"))
+        self.assertEqual(a["email_outcome"], "extrapolated")
+
+    def test_domain_ambiguous_failure_is_distinguishable(self):
+        a = self._attempt(_person(email="hm@holdingco.com", org_domain="holdingco.com",
+                                  org_name="Holding Co International"))
+        self.assertEqual(a["email_outcome"], "verified")
+        self.assertEqual(a["alignment_class"], ACR.PARENT_DOMAIN_AMBIGUOUS)
+
+    def test_success_is_recorded_too(self):
+        a = self._attempt(_person())
+        self.assertTrue(a["recovered"])
+        self.assertEqual(a["alternate_contact_failure_reason"], "")
+
+    def test_provenance_carries_no_raw_pii(self):
+        blob = str(self._attempt(_person()))
+        self.assertNotIn("hm@acme.com", blob)
+        self.assertNotIn("Dana Reed", blob)
+        self.assertIn("acme.com", blob)          # domain only
+
+    def test_second_alternate_is_worthwhile_only_for_person_level_failures(self):
+        cases = {
+            ACR.NO_EMAIL: True, ACR.EXTRAPOLATED: True,
+            ACR.VERIFIED_DOMAIN_AMBIGUOUS: False, ACR.VERIFIED_DOMAIN_MISMATCH: False,
+            ACR.GATE_REJECTED: False, ACR.PERSON_EMPLOYER_DUPLICATE: False,
+        }
+        for result, expected in cases.items():
+            with self.subTest(result=result):
+                attempt = {"recovered": False, "alternate_contact_result": result,
+                           "candidate_pool_depth": 5}
+                self.assertEqual(ACR.second_alternate_eligible(attempt), expected)
+
+    def test_no_second_candidate_means_not_eligible(self):
+        attempt = {"recovered": False, "alternate_contact_result": ACR.NO_EMAIL,
+                   "candidate_pool_depth": 1}
+        self.assertFalse(ACR.second_alternate_eligible(attempt))
+
+    def test_recovered_row_never_needs_a_second_alternate(self):
+        attempt = {"recovered": True, "alternate_contact_result": ACR.VERIFIED_EXACT_DOMAIN,
+                   "candidate_pool_depth": 9}
+        self.assertFalse(ACR.second_alternate_eligible(attempt))
+
+    def test_attempts_are_written_as_jsonl(self):
+        import json as _json
+        import tempfile, os
+        path = os.path.join(tempfile.mkdtemp(), "sub", "attempts.jsonl")
+        rows = [self._attempt(_person()), self._attempt(_person(status="extrapolated"))]
+        self.assertEqual(ACR.write_attempts(path, rows), 2)
+        with open(path, encoding="utf-8") as fh:
+            parsed = [_json.loads(line) for line in fh if line.strip()]
+        self.assertEqual(len(parsed), 2)
+        self.assertEqual(parsed[0]["schema"], ACR.ATTEMPT_SCHEMA)
+
+    def test_write_failure_never_raises_into_the_caller(self):
+        self.assertEqual(ACR.write_attempts("/nonexistent\x00/bad.jsonl",
+                                            [{"a": 1}]), 0)
+
+    def test_empty_write_is_a_noop(self):
+        self.assertEqual(ACR.write_attempts("unused.jsonl", []), 0)
