@@ -372,3 +372,100 @@ def recovered_status(fields: Dict[str, Any]) -> str:
         return config.AIRTABLE_STATUS_PENDING
     return (config.AIRTABLE_STATUS_APPROVED if send_safe_facts(fields)[0]
             else config.AIRTABLE_STATUS_PENDING)
+
+
+#: Artifact schema for one recovery attempt. Deliberately non-PII: it records WHY an
+#: attempt failed so a follow-up decision (e.g. "first alternate had no email -> try a
+#: second") can be made WITHOUT re-enriching the first person, which would re-bill.
+ATTEMPT_SCHEMA = "alternate-contact-attempt/1"
+
+
+def attempt_record(
+    *,
+    record_id: str,
+    outcome: RecoveryOutcome,
+    rank: int = 1,
+    candidate_person_id: str = "",
+    candidate_pool_depth: int = 0,
+    original_block_reason: str = "",
+    employer_domain: str = "",
+) -> Dict[str, Any]:
+    """Build the persisted, non-PII provenance for ONE alternate-contact attempt.
+
+    The first sweep persisted only successes, so the 28 failures could not later be
+    segmented by failure class and the information was unrecoverable without paying
+    Apollo again. Every attempt -- recovered or not -- must now be written.
+
+    Raw e-mail addresses and person names are never included; only the domain, the
+    Apollo person id and the classification are.
+    """
+    prov = dict(outcome.provenance or {})
+    alignment = outcome.alignment
+    return {
+        "schema": ATTEMPT_SCHEMA,
+        "record_id": str(record_id or ""),
+        "alternate_contact_recovery_attempted": True,
+        "alternate_contact_rank": int(rank),
+        "alternate_contact_result": outcome.outcome,
+        "alternate_contact_failure_reason": (
+            "" if outcome.recovered else (outcome.reason or "")),
+        "alternate_contact_previous_person_id": prov.get(
+            "alternate_contact_previous_person_id", ""),
+        "candidate_apollo_person_id": str(candidate_person_id or ""),
+        "candidate_pool_depth": int(candidate_pool_depth or 0),
+        "alignment_class": (alignment.alignment if alignment else ""),
+        "alignment_reason": (alignment.reason if alignment else ""),
+        "email_outcome": _email_outcome(outcome),
+        "contact_email_domain": prov.get("contact_email_domain", "")
+        or ((alignment.evidence or {}).get("contact_email_domain", "") if alignment else ""),
+        "employer_domain": str(employer_domain or ""),
+        "original_block_reason": str(original_block_reason or ""),
+        "recovered": outcome.recovered,
+        "recovery_version": RECOVERY_VERSION,
+    }
+
+
+def _email_outcome(outcome: RecoveryOutcome) -> str:
+    """Coarse e-mail disposition, independent of domain alignment."""
+    if outcome.outcome == NO_EMAIL:
+        return "no_email"
+    if outcome.outcome == EXTRAPOLATED:
+        return "extrapolated"
+    if outcome.outcome in (VERIFIED_EXACT_DOMAIN, VERIFIED_CORROBORATED_DOMAIN,
+                           VERIFIED_DOMAIN_AMBIGUOUS, VERIFIED_DOMAIN_MISMATCH):
+        return "verified"
+    return "other"
+
+
+#: First-alternate failures worth a SECOND candidate. A missing or extrapolated e-mail
+#: is a property of THAT PERSON, so another employee is an independent draw. A domain
+#: mismatch is a property of the EMPLOYER, so a colleague reproduces it -- measured:
+#: the alternate-domain rule contributed 0 recoveries across 42 first alternates.
+SECOND_ALTERNATE_WORTHWHILE = frozenset({NO_EMAIL, EXTRAPOLATED})
+
+
+def second_alternate_eligible(attempt: Dict[str, Any], *, pool_depth: int = 0) -> bool:
+    """True when a company's first-alternate failure justifies a second candidate."""
+    if attempt.get("recovered"):
+        return False
+    if str(attempt.get("alternate_contact_result") or "") not in SECOND_ALTERNATE_WORTHWHILE:
+        return False
+    depth = int(pool_depth or attempt.get("candidate_pool_depth") or 0)
+    return depth >= 2
+
+
+def write_attempts(path: str, attempts: Iterable[Dict[str, Any]]) -> int:
+    """Append attempt records as JSONL. Best-effort: never raises into the caller."""
+    rows = [a for a in attempts if a]
+    if not rows:
+        return 0
+    try:
+        import os
+
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        with open(path, "a", encoding="utf-8") as handle:
+            for row in rows:
+                handle.write(json.dumps(row, sort_keys=True) + "\n")
+        return len(rows)
+    except Exception:  # pragma: no cover - observability must never break recovery
+        return 0
