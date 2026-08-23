@@ -70,6 +70,13 @@ class LedgerRow:
     functional_activity_cluster: str = ""   # ontology cluster id, when derivable
     matching_title_clause: str = ""  # the specific clause that matched
     organization_slug: str = ""      # provider exclusion key (slug crosswalk bridge)
+    ai_taxonomy_primary: str = ""    # server-queryable functional signal (observation)
+    ai_taxonomies: List[str] = field(default_factory=list)
+    # SHADOW metric: would FANTASTIC_FUNCTION_AWARE_UPSTREAM_DEDUPE_ENABLED have
+    # excluded this row BEFORE billing? Purely observational -- never affects the
+    # provider query while the feature flag is OFF.
+    function_aware_would_exclude: bool = False
+    function_aware_reason: str = ""
     role_bucket: str = ""
     company_domain: str = ""         # normalized employer domain (not PII)
     industry: str = ""
@@ -140,6 +147,8 @@ class YieldLedger:
                     functional_activity_cluster=str(j.get("_activity_cluster") or ""),
                     matching_title_clause=str(j.get("_matched_role") or ""),
                     organization_slug=str(j.get("org_linkedin_slug") or ""),
+                    ai_taxonomy_primary=str(j.get("_ai_taxonomy_primary") or ""),
+                    ai_taxonomies=list(j.get("_ai_taxonomies") or []),
                     role_bucket=str(j.get("_role_bucket") or ""),
                     company_domain=str(j.get("employer_website") or "").lower(),
                     industry=str(j.get("_org_industry") or ""),

@@ -400,6 +400,13 @@ def map_record(record: Dict[str, Any], source_label: str, seg: Optional[Dict[str
         "_staffing_agency_flag": _bool(record.get("org_linkedin_recruitment_agency_derived")),
         "_ats_duplicate": _bool(record.get("ats_duplicate")),
         "_domain_candidates": domain_candidates,
+        # AI taxonomy (SERVER-QUERYABLE via ai_taxonomies_a / _primary /
+        # exclude_ai_taxonomies_a). Captured for OBSERVATION only -- historical
+        # artifacts contain none, so taxonomy->yield is currently unmeasurable;
+        # persisting it now lets the yield ledger measure it from live runs.
+        "_ai_taxonomies": [str(t) for t in (record.get("ai_taxonomies_a") or []) if str(t or "").strip()],
+        "_ai_taxonomy_primary": (str((record.get("ai_taxonomies_a") or [""])[0]).strip()
+                                 if (record.get("ai_taxonomies_a") or []) else ""),
         # Provider index time (assign-once; the date_created watermark key) kept
         # separately from date_posted so the two clocks are never conflated.
         "_fantastic_date_created": _safe_iso(record.get("date_created")),

@@ -422,6 +422,11 @@ class Orchestrator:
         # later slice (no second Airtable read; delivery stays the backstop).
         snapshot = self._existing_identity_snapshot()
         live_function_keys = set(snapshot["company_function_keys"]) if snapshot else set()
+        # Frozen copy of the coverage that existed AT RUN START. The shadow
+        # function-aware-dedupe metric must be judged against this, not against
+        # ``live_function_keys`` (which grows as this run creates rows) -- otherwise
+        # a row created earlier in the same run would be scored as "avoidable".
+        covered_at_start = frozenset(live_function_keys)
         account_keys = (set(snapshot["company_bare_keys"])
                         if (snapshot and config.AIRTABLE_SUPPRESS_ACCOUNT_LEVEL) else set())
         existing = snapshot["existing"] if snapshot else None
@@ -528,7 +533,8 @@ class Orchestrator:
             net_new = self._count_net_new_send_safe(enrichment.leads, delivery)
             last_circuit = bool(getattr(enrichment, "enrichment_incomplete", False)
                                 and "apollo" in str(getattr(enrichment, "stop_reason", "")))
-            self._ledger_mark_outcomes(ledger, enrichment.leads, delivery)
+            self._ledger_mark_outcomes(ledger, enrichment.leads, delivery,
+                                       covered_at_start=covered_at_start)
 
             supp.commit_postings(enrichment.terminal_posting_ids())
             supp.commit_delivered(getattr(delivery, "delivered_lead_keys", []) or [])
@@ -707,7 +713,7 @@ class Orchestrator:
             return YieldLedger("", self.ctx.run_id, enabled=False)
 
     @staticmethod
-    def _ledger_mark_outcomes(ledger, leads, delivery) -> None:
+    def _ledger_mark_outcomes(ledger, leads, delivery, covered_at_start=frozenset()) -> None:
         """Attribute enrichment + delivery outcomes to each lead's PRIMARY posting
         and mark its related postings as collapsed (credit counted once)."""
         try:
@@ -726,7 +732,29 @@ class Orchestrator:
                     safe = bool(airtable_client.send_safe_facts(airtable_client._job_to_fields(row))[0]) if row else False
                 except Exception:  # noqa: BLE001
                     safe = False
+                # SHADOW: would the (default-OFF) function-aware upstream dedupe
+                # have excluded this row before Fantastic billed it? Judged against
+                # the run-start coverage using the SAME key helper delivery uses,
+                # so the shadow can never disagree with the real suppression.
+                shadow_exclude, shadow_reason = False, ""
+                try:
+                    fkeys = airtable_client.company_function_keys_for_job(row)
+                    hit = sorted(fkeys & set(covered_at_start))
+                    if hit:
+                        shadow_exclude, shadow_reason = True, hit[0]
+                except Exception:  # noqa: BLE001 - shadow metric never breaks a run
+                    pass
+                fam = ""
+                try:
+                    from orchestrator.function_acquisition import family_for_role
+                    fam = family_for_role(str(row.get("_matched_role")
+                                              or lead.contact.get("_matched_role") or ""))
+                except Exception:  # noqa: BLE001
+                    pass
                 ledger.mark(pid, exit_stage="enriched",
+                            function_aware_would_exclude=shadow_exclude,
+                            function_aware_reason=shadow_reason,
+                            acquisition_function_family=fam,
                             org_id_fallback_attempted=bool(row.get("_apollo_org_id_recovered")
                                                            or lead.contact.get("_apollo_org_id_recovered")),
                             org_id_fallback_recovered=bool(row.get("_apollo_org_id_recovered")),
