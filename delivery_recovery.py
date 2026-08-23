@@ -286,9 +286,25 @@ def classify_role_hold(fields: Dict[str, Any]) -> RecoveryProposal:
     # Fail closed: the outbound role must be text lifted out of the posting title and
     # must still contain the catalog role. Anything reordered or invented stays held.
     if not _is_contiguous_extraction(rendered, raw):
-        return RecoveryProposal(
-            ROLE_RENDER_NOT_EXTRACTIVE, NONE, "rendered_role_not_verbatim_in_title", evidence=base
-        )
+        # The renderer reordered or rewrote the title. That does not make the row
+        # ambiguous if the catalog role itself sits verbatim in the title -- using it
+        # is extraction, not choice, and it is the role this row was already
+        # qualified, bucketed and HM-searched on.
+        # Scoped to match the resolver invariant: a DELIMITED title may advertise two
+        # distinct roles, so naming one is unsafe there. Without a delimiter the extra
+        # words are qualifiers ("Account Manager Team Lead"), and lifting the catalog
+        # role out of the title is extraction, not choice.
+        verbatim = ("" if _rdr._has_delimited_competing_heads(raw)
+                    else _rdr.catalog_role_verbatim(raw, matched))
+        if verbatim:
+            rendered = verbatim
+            base["rendered"] = rendered
+            base["anchor_method"] = "catalog_role_verbatim"
+        else:
+            return RecoveryProposal(
+                ROLE_RENDER_NOT_EXTRACTIVE, NONE,
+                "rendered_role_not_verbatim_in_title", evidence=base,
+            )
     if not _is_contiguous_extraction(matched, rendered):
         return RecoveryProposal(
             ROLE_RENDER_NOT_EXTRACTIVE, NONE, "rendered_role_dropped_the_catalog_role", evidence=base

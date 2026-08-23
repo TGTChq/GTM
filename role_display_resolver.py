@@ -735,6 +735,28 @@ def _result(
     )
 
 
+_CATALOG_VERBATIM_CACHE: Dict[str, str] = {}
+
+
+def catalog_role_verbatim(title: str, matched_role: str) -> str:
+    """Return the catalog role exactly as it appears in ``title``, else "".
+
+    The competing-head guards exist to stop the resolver PICKING a head when a title
+    contains several. They do not apply when we are not picking: the catalog
+    ``Matched Role`` is the role this row was already qualified, bucketed and
+    HM-searched on. If that exact phrase sits in the posting title on token
+    boundaries, using it is extraction, not choice -- nothing is invented and no
+    responsibility is asserted that the title does not already state.
+    """
+    raw = _text(title)
+    role = _text(matched_role)
+    if not raw or not role:
+        return ""
+    match = re.search(
+        r"(?<![A-Za-z0-9])" + re.escape(role) + r"(?![A-Za-z0-9])", raw, flags=re.I)
+    return raw[match.start():match.end()] if match else ""
+
+
 def resolve_role_display(job: Dict[str, Any]) -> RoleDisplayResult:
     """Resolve one concise outbound title without mutating ``job``."""
     raw_source = _text(job.get("canonical_job_title") or job.get("job_title"))
@@ -761,6 +783,12 @@ def resolve_role_display(job: Dict[str, Any]) -> RoleDisplayResult:
         )
 
     if _has_delimited_competing_heads(raw):
+        # INVARIANT (do not relax): a delimiter-separated title may be advertising two
+        # DISTINCT roles, and naming one of them misrepresents the opening. The current
+        # ontology cannot separate a qualifier+role ("Sales Associate (Account
+        # Executive)") from two different roles ("Customer Care Associate (Business
+        # Development Representative)") -- _role_heads returns bare nouns and
+        # _functional_groups is too sparse to discriminate. Until it can, these hold.
         evidence["rules"].append("competing_role_heads")
         return _result(
             name=raw, raw_source=raw_source, confidence="low", hold=True,
@@ -771,6 +799,15 @@ def resolve_role_display(job: Dict[str, Any]) -> RoleDisplayResult:
     if matched_role and anchor_start >= 0:
         if _anchor_is_secondary_or_conflicting(raw, matched_role):
             evidence["rules"].append("matched_role_secondary_or_competing_head")
+            verbatim = catalog_role_verbatim(raw, matched_role)
+            if verbatim:
+                evidence["rules"].append("catalog_role_extracted_verbatim_from_title")
+                evidence["anchor_corroborated"] = True
+                evidence["anchor_method"] = "catalog_role_verbatim"
+                return _result(
+                    name=verbatim, raw_source=raw_source, confidence="medium", hold=False,
+                    status="RESOLVED", evidence=evidence,
+                )
             return _result(
                 name=raw, raw_source=raw_source, confidence="low", hold=True,
                 status="AMBIGUOUS", evidence=evidence,
