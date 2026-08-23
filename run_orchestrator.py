@@ -54,6 +54,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--lanes", default="", help="Comma: ats,jsearch,free_feeds,fantastic. Empty = ats.")
     p.add_argument("--boards", help="ATS board registry JSON (read-only).")
     p.add_argument("--corpus", action="append", default=[])
+    p.add_argument("--external-batch", default="",
+                   help="Already-acquired external Fantastic batch (Apify CSV). Adds the "
+                        "'external_batch' lane, which issues no provider request and "
+                        "consumes no Fantastic job credits.")
     p.add_argument("--artifact-root", default=str(Path(config.ARTIFACT_ROOT) / "orchestrator"))
     p.add_argument("--run-id", default=None)
     p.add_argument("--resume", action="store_true")
@@ -560,6 +564,12 @@ def main(argv=None) -> int:
         if "fantastic" in lanes:
             from orchestrator.adapters_real import real_fantastic_runner
             lane_runners["fantastic"] = real_fantastic_runner()
+        if "external_batch" in lanes:
+            from orchestrator.adapters_real import real_external_batch_runner
+            if not a.external_batch:
+                print("--lanes external_batch requires --external-batch <csv>", file=sys.stderr)
+                return 2
+            lane_runners["external_batch"] = real_external_batch_runner(a.external_batch)
         if "free_feeds" in lanes:
             from free_job_sources import default_fetcher
             lane_runners["free_feeds"] = real_free_feeds_runner(

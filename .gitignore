@@ -43,3 +43,19 @@ reports/jobs_enriched_*.json
 /orchestrator.patch
 /ROLLBACK_MANIFEST.json
 data/logs/
+
+# External acquisition batches. Provider exports are large and licensed; the
+# pipeline reads them from disk and never needs them in version control.
+imports/
+
+# Orchestrator run state and artifacts. Runtime only, and the enriched lead
+# rows / resume checkpoints carry contact PII -- they must stay local.
+data/external_batch/
+data/orchestrator_*/
+
+# Operational run reports (write-ready leads, per-row outcomes). These carry
+# contact PII and are deliberately kept local, matching existing practice.
+reports/apify_batch_*/
+
+# Local recovery snapshots.
+recovery_*/
