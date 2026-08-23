@@ -32,6 +32,9 @@ def _cfg(path, **over):
              FANTASTIC_MONTHLY_RESERVE_PCT=RESERVE, FANTASTIC_DAILY_MIN_JOBS=100,
              FANTASTIC_DAILY_MAX_JOBS=0, FANTASTIC_GOVERNOR_USE_PROVIDER_HEADERS=True,
              FANTASTIC_GOVERNOR_USE_COUNT_HINT=False, FANTASTIC_GOVERNOR_CARRY_CAP_DAYS=3.0,
+             # This suite exercises GOVERNED pacing, not the mid-cycle arming
+             # transition (that is test_governor_auto_arm.py), so arm immediately.
+             FANTASTIC_GOVERNOR_AUTO_ARM=False,
              FANTASTIC_BILLING_RESET_AT="", FANTASTIC_GOVERNOR_LEDGER_PATH=path,
              FANTASTIC_JOBS_MAX_JOBS_PER_RUN=6000, FANTASTIC_JOBS_MIN_JOBS_QUOTA_REMAINING=500)
     b.update(over)

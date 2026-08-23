@@ -1125,6 +1125,90 @@ class DateCreatedWatermarkEngine:
         self.metrics["watermark"]["drained"] = self.state["window_drained"]
 
 
+def audit_closed_windows(http_get: HttpGet, base_params: Dict[str, Any],
+                         metrics: Dict[str, Any], *, now: Optional[datetime] = None) -> Dict[str, Any]:
+    """VISIBILITY-LAG SELF-AUDIT -- 0 Jobs credits, count endpoint only.
+
+    The 180-minute lag buffer is an assumption, not a measurement. Each run
+    re-counts ONE previously closed ``date_created`` window with the count endpoint
+    (which returns no rows and therefore bills no Jobs credits) and compares against
+    the count recorded when that window was closed. Rows appearing later are, by
+    definition, records that became visible AFTER we declared the window complete --
+    i.e. real evidence that the configured lag is too small.
+
+    On detected late growth the audit does NOT silently mutate state: it records the
+    evidence, raises a loud metric/warning, and reports the observed maximum so the
+    lag can be widened deliberately (config), with head/deep remaining the safe
+    fallback. Never raises into acquisition.
+    """
+    out: Dict[str, Any] = {"performed": False}
+    try:
+        eng = DateCreatedWatermarkEngine(result=None, quota=None, http_get=None,
+                                         seen_ids=set(), metrics={}, run_cap=0)
+        st = eng.state
+        closed = list(st.get("closed_windows") or [])
+        if not closed:
+            out["reason"] = "no_closed_windows_yet"
+            metrics["watermark_audit"] = out
+            return out
+        now = now or datetime.now(timezone.utc)
+        # Audit the oldest window not yet re-checked enough times (bounded work: 1/run).
+        target = min(closed, key=lambda w: (int(w.get("rechecks", 0)), str(w.get("upper", ""))))
+        params = dict(base_params)
+        params["date_created_gte"] = target["lower"]
+        params["date_created_lt"] = target["upper"]
+        params.pop("limit", None); params.pop("offset", None)
+        url = f"{config.FANTASTIC_JOBS_BASE_URL.rstrip('/')}/v1/active-jb-count"
+        headers = {"Authorization": f"Bearer {config.FANTASTIC_JOBS_API_KEY}"}
+        resp = http_get(url, headers=headers, params=params,
+                        timeout=config.FANTASTIC_JOBS_REQUEST_TIMEOUT_SECONDS)
+        if getattr(resp, "status_code", 0) != 200:
+            out["reason"] = f"count_http_{getattr(resp, 'status_code', '?')}"
+            metrics["watermark_audit"] = out
+            return out
+        body = resp.json()
+        later = body if isinstance(body, int) else None
+        if later is None and isinstance(body, dict):
+            for k in ("count", "total", "total_count"):
+                if isinstance(body.get(k), int):
+                    later = body[k]; break
+        if later is None:
+            out["reason"] = "count_unparseable"
+            metrics["watermark_audit"] = out
+            return out
+        first = int(target.get("count_at_close", 0) or 0)
+        try:
+            closed_at = datetime.fromisoformat(str(target.get("closed_at")).replace("Z", "+00:00"))
+            hours = round((now - closed_at).total_seconds() / 3600.0, 2)
+        except (ValueError, TypeError):
+            hours = None
+        growth = max(0, later - first)
+        target["rechecks"] = int(target.get("rechecks", 0)) + 1
+        target["last_count"] = later
+        target["late_growth"] = growth
+        st["closed_windows"] = closed[-int(getattr(config, "FANTASTIC_WATERMARK_AUDIT_KEEP", 12) or 12):]
+        if growth > 0:
+            st["observed_late_growth_max"] = max(int(st.get("observed_late_growth_max", 0) or 0), growth)
+            st["observed_late_growth_hours"] = hours
+        eng._save()
+        out.update({"performed": True, "window": f'{target["lower"]}..{target["upper"]}',
+                    "count_at_close": first, "later_count": later,
+                    "hours_since_close": hours, "late_growth": growth,
+                    "observed_late_growth_max": int(st.get("observed_late_growth_max", 0) or 0),
+                    "configured_lag_minutes": int(getattr(config, "FANTASTIC_DATE_CREATED_LAG_MINUTES", 0) or 0)})
+        if growth > 0:
+            out["ALERT"] = ("late_visible_rows_after_window_close -- configured lag is "
+                            "TOO SMALL for this provider; widen FANTASTIC_DATE_CREATED_LAG_MINUTES")
+            logger.warning("WATERMARK LAG ALERT: window %s gained %d rows %.2fh after close "
+                           "(lag=%dm). Widen the lag buffer; head/deep remains the safe fallback.",
+                           out["window"], growth, hours or -1.0,
+                           int(getattr(config, "FANTASTIC_DATE_CREATED_LAG_MINUTES", 0) or 0))
+    except Exception as exc:  # noqa: BLE001 - the audit never affects acquisition
+        out["reason"] = f"audit_error:{type(exc).__name__}"
+    metrics["watermark_audit"] = out
+    return out
+
+
 def commit_watermark(*, success: bool) -> Dict[str, Any]:
     """Advance the date_created watermark to the open window's ``upper`` bound.
 
@@ -1153,6 +1237,13 @@ def commit_watermark(*, success: bool) -> Dict[str, Any]:
         return {"committed": False, "reason": "window_truncated_replay_next_run", "upper": upper,
                 "acquired_so_far": len(st.get("window_acquired_ids") or [])}
     acquired_ids = list(st.get("window_acquired_ids") or [])
+    # Record the closed window + the count we believed complete, so a later run can
+    # re-count it (0 Jobs credits) and MEASURE the provider's true visibility lag.
+    closed = list(st.get("closed_windows") or [])
+    closed.append({"lower": str(st.get("window_start") or ""), "upper": upper,
+                   "count_at_close": len(acquired_ids),
+                   "closed_at": datetime.now(timezone.utc).isoformat(), "rechecks": 0})
+    st["closed_windows"] = closed[-int(getattr(config, "FANTASTIC_WATERMARK_AUDIT_KEEP", 12) or 12):]
     st.update({"last_successful_watermark": upper, "in_flight_window_end": "",
                "overlap_band_ids": acquired_ids, "boundary_ids": [],
                "run_epoch": int(st.get("run_epoch", 0) or 0) + 1,
@@ -1295,6 +1386,8 @@ def run_fantastic_jobs_acquisition(http_get: HttpGet = _http_get) -> SourceResul
     # buckets so a head pass can never regress the deep floor (which would re-bill).
     stream_head_jobs: List[Dict[str, Any]] = []
     stream_deep_jobs: List[Dict[str, Any]] = []
+    # Filter set reused by the 0-credit watermark visibility-lag audit (count only).
+    jb_audit_params: Dict[str, Any] = {}
 
     def _run_single_stream(endpoint: str, base_jb: Dict[str, Any], label: str,
                            cap_limit: int, accept: Optional[Tuple[str, ...]]) -> None:
@@ -1387,6 +1480,7 @@ def run_fantastic_jobs_acquisition(http_get: HttpGet = _http_get) -> SourceResul
                          "title_advanced": title_advanced_expr}
             jb_params.update(_jb_filter_params())
             _apply_server_industry_exclusions(jb_params)
+            jb_audit_params = dict(jb_params)
             if watermark_engine is not None:
                 watermark_engine.run_stream("/v1/active-jb", jb_params, "fantastic_jobs_linkedin",
                                             config.FANTASTIC_JOBS_LINKEDIN_LIMIT, ("linkedin",))
@@ -1517,6 +1611,12 @@ def run_fantastic_jobs_acquisition(http_get: HttpGet = _http_get) -> SourceResul
     # the watermark advances in the PIPELINE after processing + persistence (D4).
     if watermark_engine is not None:
         watermark_engine.checkpoint()
+        # Visibility-lag self-audit: re-count ONE previously closed window with the
+        # count endpoint (0 Jobs credits) to measure real late-visibility.
+        if bool(getattr(config, "FANTASTIC_WATERMARK_AUDIT_ENABLED", True)):
+            audit_base = dict(jb_audit_params or {})
+            if audit_base:
+                audit_closed_windows(http_get, audit_base, metrics)
 
     # Advance and persist the continuation cursor from the jobs actually acquired
     # (billed). ``_cursor_stats`` spans BOTH edges of the merged head+deep set in one

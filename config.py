@@ -779,6 +779,13 @@ FANTASTIC_DAILY_MAX_JOBS = _env_int("FANTASTIC_DAILY_MAX_JOBS", 0)        # 0 = 
 FANTASTIC_GOVERNOR_USE_PROVIDER_HEADERS = _env_bool("FANTASTIC_GOVERNOR_USE_PROVIDER_HEADERS", True)
 FANTASTIC_GOVERNOR_USE_COUNT_HINT = _env_bool("FANTASTIC_GOVERNOR_USE_COUNT_HINT", False)
 FANTASTIC_GOVERNOR_CARRY_CAP_DAYS = float(os.getenv("FANTASTIC_GOVERNOR_CARRY_CAP_DAYS", "3") or 3.0)
+# AUTO-ARM: when the governor flag is switched on MID-CYCLE, arming immediately
+# would grant 0 (remaining already below the reserve) and strand an expiring
+# remainder. With auto-arm the already-running cycle keeps legacy drain behaviour
+# and the governor takes control automatically at the next billing-cycle rollover
+# -- no later variable change, no human action at reset. Missing/corrupt arm state
+# fails ARMED (bounded spend is the conservative outcome).
+FANTASTIC_GOVERNOR_AUTO_ARM = _env_bool("FANTASTIC_GOVERNOR_AUTO_ARM", True)
 # Explicit reset date fallback (ISO) when the provider doesn't expose one; the
 # provider header x-api-next-billing-date wins when present.
 FANTASTIC_BILLING_RESET_AT = os.getenv("FANTASTIC_BILLING_RESET_AT", "").strip()
@@ -851,6 +858,12 @@ FANTASTIC_DATE_CREATED_LAG_MINUTES = _env_int("FANTASTIC_DATE_CREATED_LAG_MINUTE
 FANTASTIC_DATE_CREATED_OVERLAP_MINUTES = _env_int("FANTASTIC_DATE_CREATED_OVERLAP_MINUTES", 60)
 FANTASTIC_WATERMARK_STATE_PATH = os.getenv(
     "FANTASTIC_WATERMARK_STATE_PATH", str(Path(STATE_DIR) / "fantastic_watermark.json"))
+# Visibility-lag SELF-AUDIT: how many closed date_created windows to retain for
+# later re-counting. Each run re-checks ONE with the count endpoint (0 Jobs
+# credits) to measure whether rows appear AFTER a window was declared complete --
+# replacing the assumed 180-minute lag with observed evidence over time.
+FANTASTIC_WATERMARK_AUDIT_ENABLED = _env_bool("FANTASTIC_WATERMARK_AUDIT_ENABLED", True)
+FANTASTIC_WATERMARK_AUDIT_KEEP = _env_int("FANTASTIC_WATERMARK_AUDIT_KEEP", 12)
 
 # --- active-ats source (Category 2; DEFAULT OFF; FANTASTIC_JOBS_ATS_LIMIT stays 0 in prod)
 # Complementary, non-overlapping with active-jb(exclude_ats_duplicate=true).

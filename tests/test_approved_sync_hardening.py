@@ -39,6 +39,8 @@ def _fields(**overrides):
         "Role Bucket": "marketing",
         "Campaign ID": "camp-123",
         "Website": "https://acme.com",
+        # Delivery requires Role Focus; a row without it is not truly send-safe.
+        "Role Focus": "building the outbound motion",
     }
     f.update(overrides)
     f["Validation Fingerprint"] = validation_fingerprint(f)
@@ -62,7 +64,20 @@ class EligibilityPredicateTests(unittest.TestCase):
         self.assertEqual((cat, reason), ("eligible", "eligible"))
 
     def test_explicit_hold_remains_blocked(self):
+        # Hold with both confidences acceptable => stale workflow state; still
+        # blocked, but attributed precisely instead of being reported as an
+        # ambiguous company name.
         cat, reason = approved_row_eligibility(_fields(**{"Outbound Hold": True}))
+        self.assertEqual((cat, reason), ("invalid", "outbound_hold_stale_no_current_condition"))
+
+    def test_role_side_hold_is_attributed_to_the_role(self):
+        cat, reason = approved_row_eligibility(_fields(**{
+            "Outbound Hold": True, "Outbound Role Confidence": "low"}))
+        self.assertEqual((cat, reason), ("invalid", "outbound_role_held_for_review"))
+
+    def test_company_side_hold_is_attributed_to_the_company(self):
+        cat, reason = approved_row_eligibility(_fields(**{
+            "Outbound Hold": True, "Outbound Company Confidence": "low"}))
         self.assertEqual((cat, reason), ("invalid", "outbound_company_held_for_review"))
 
     # 1 — legacy: missing Final Decision.

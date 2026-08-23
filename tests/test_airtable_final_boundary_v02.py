@@ -93,6 +93,7 @@ class AirtableFinalBoundaryTests(unittest.TestCase):
                 "Outbound Company Identity": "domain:example.com",
                 "Outbound Hold": False,
                 "Outbound Role": "Staff Accountant",
+                "Role Focus": "owning the monthly close",
                 "Campaign ID": "camp-1", "Website": "https://example.com",
             }
             fields["Validation Fingerprint"] = validation_fingerprint(fields)

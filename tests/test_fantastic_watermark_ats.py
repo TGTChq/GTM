@@ -309,7 +309,12 @@ class WatermarkEngineTests(unittest.TestCase):
         feed2 = _Feed([])
         res2 = self._run(feed2, now=NOW, FANTASTIC_DATE_CREATED_OVERLAP_MINUTES=0)
         self.assertTrue(res2.metadata["watermark"]["empty_interval"])
-        self.assertEqual(len(feed2.calls), 0)                  # no request issued
+        # No ACQUISITION (row) request may be issued. The visibility-lag self-audit
+        # may still issue a count request -- it returns no rows and bills no Jobs
+        # credits, so it can never consume acquisition budget.
+        row_calls = [u for u, _ in feed2.calls if not u.endswith("-count")]
+        self.assertEqual(row_calls, [])
+        self.assertEqual(len(res2.jobs), 0)
 
     def test_legacy_continuation_file_untouched_and_flag_off_restores_head_deep(self):
         legacy = os.path.join(self.tmp, "cont.json")

@@ -237,6 +237,7 @@ class GovernorTopupWiringTests(unittest.TestCase):
                                  FANTASTIC_MONTHLY_RESERVE_PCT=0.10, FANTASTIC_DAILY_MIN_JOBS=100,
                                  FANTASTIC_DAILY_MAX_JOBS=0, FANTASTIC_GOVERNOR_USE_PROVIDER_HEADERS=True,
                                  FANTASTIC_GOVERNOR_USE_COUNT_HINT=False, FANTASTIC_GOVERNOR_CARRY_CAP_DAYS=3.0,
+                    FANTASTIC_GOVERNOR_AUTO_ARM=False,
                                  FANTASTIC_BILLING_RESET_AT="", FANTASTIC_GOVERNOR_LEDGER_PATH=state_files["ledger"],
                                  FANTASTIC_QUOTA_SNAPSHOT_PATH=state_files["snap"], YIELD_LEDGER_ENABLED=True,
                                  YIELD_LEDGER_PATH=state_files["yl"], FANTASTIC_DATE_CREATED_WATERMARK_ENABLED=False):

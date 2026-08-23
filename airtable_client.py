@@ -1060,7 +1060,27 @@ def send_safe_facts(fields: Dict) -> tuple[bool, str]:
     # 3) Outbound identity resolved, unheld (company OR role hold sets this), and
     #    unambiguous. Never falsify: canonical fields are read, not rewritten.
     if bool(fields.get("Outbound Hold")):
-        return False, "outbound_company_held_for_review"
+        # "Outbound Hold" is set by EITHER a company-display hold OR a role-display
+        # hold (see _job_to_fields), so a single conflated reason misdiagnoses the
+        # backlog. Attribute the side that actually holds, using the same
+        # confidence semantics the checks below apply. Neither side is weakened --
+        # this only names the correct gate.
+        _cc = str(fields.get("Outbound Company Confidence") or "").strip().lower()
+        _rc = str(fields.get("Outbound Role Confidence") or "").strip().lower()
+        _company_side = (not str(fields.get("Outbound Company") or "").strip()
+                         or _cc not in {"high", "medium"})
+        _role_side = (not str(fields.get("Outbound Role") or "").strip()
+                      or (_rc and _rc not in {"high", "medium"}))
+        if _company_side and _role_side:
+            return False, "outbound_company_and_role_held_for_review"
+        if _role_side:
+            return False, "outbound_role_held_for_review"
+        if _company_side:
+            return False, "outbound_company_held_for_review"
+        # Hold flag set with no current qualifying condition -> stale workflow state
+        # from an earlier resolver version. Named explicitly so it is never silently
+        # conflated with a genuine ambiguous-company review.
+        return False, "outbound_hold_stale_no_current_condition"
     if not str(fields.get("Outbound Company") or "").strip():
         return False, "missing_outbound_company"
     if str(fields.get("Outbound Company Confidence") or "").strip().lower() not in {"high", "medium"}:
@@ -1070,6 +1090,14 @@ def send_safe_facts(fields: Dict) -> tuple[bool, str]:
     role_conf = str(fields.get("Outbound Role Confidence") or "").strip().lower()
     if role_conf and role_conf not in {"high", "medium"}:
         return False, "outbound_role_confidence_not_send_safe"
+    # 3b) GATE-PARITY with delivery: instantly_client.airtable_record_to_lead treats
+    #     Role Focus as a REQUIRED field (it is an outreach template variable), but
+    #     send-safety did not check it -- so a row could be written, manually
+    #     approved, pass eligibility, and only then die at the delivery precheck
+    #     ("Missing required approved-lead fields: Role Focus"), wasting the
+    #     operator's review. Checking it here fails EARLIER; it weakens nothing.
+    if not str(fields.get("Role Focus") or "").strip():
+        return False, "missing_role_focus"
     # 4) No material firmographic contradiction (a REJECT is written for no
     #    reviewable row; NEEDS_CHECK/PASS are acceptable, an explicit REJECT is not).
     if str(fields.get("Firmographics Status") or "").strip().upper() == "REJECT":

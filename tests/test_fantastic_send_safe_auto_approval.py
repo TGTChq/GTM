@@ -36,6 +36,10 @@ def _fields(**over):
         "Role Bucket": "engineering",
         "Campaign ID": "camp-1",
         "Website": "https://acme.com",
+        # REQUIRED for delivery (instantly_client.airtable_record_to_lead treats
+        # Role Focus as a required outreach variable). A row without it is not
+        # actually send-safe -- it dies at the delivery precheck.
+        "Role Focus": "scaling the internal automation stack",
     }
     f.update(over)
     f["Validation Fingerprint"] = validation_fingerprint(f)
@@ -109,9 +113,39 @@ class SendSafeFactsTests(unittest.TestCase):
         self.assertEqual(reason, "email_gate_not_pass")
 
     def test_outbound_hold_is_not_safe(self):
+        # Hold set while BOTH confidences are high => no current qualifying
+        # condition, i.e. stale workflow state. Still not safe, but now named.
         ok, reason = self._safe(**{"Outbound Hold": True})
         self.assertFalse(ok)
+        self.assertEqual(reason, "outbound_hold_stale_no_current_condition")
+
+    def test_hold_reason_attributes_the_company_side(self):
+        ok, reason = self._safe(**{"Outbound Hold": True,
+                                   "Outbound Company Confidence": "low"})
+        self.assertFalse(ok)
         self.assertEqual(reason, "outbound_company_held_for_review")
+
+    def test_hold_reason_attributes_the_role_side(self):
+        # Previously reported as a COMPANY hold -- the mislabel that made 43 of the
+        # 375 production holds look like ambiguous company names.
+        ok, reason = self._safe(**{"Outbound Hold": True,
+                                   "Outbound Role Confidence": "low"})
+        self.assertFalse(ok)
+        self.assertEqual(reason, "outbound_role_held_for_review")
+
+    def test_hold_reason_attributes_both_sides(self):
+        ok, reason = self._safe(**{"Outbound Hold": True,
+                                   "Outbound Company Confidence": "low",
+                                   "Outbound Role Confidence": "low"})
+        self.assertFalse(ok)
+        self.assertEqual(reason, "outbound_company_and_role_held_for_review")
+
+    def test_missing_role_focus_is_not_send_safe(self):
+        # Gate parity with delivery: a row that cannot build an Instantly payload
+        # must never be marked send-safe and sent for human approval.
+        ok, reason = self._safe(**{"Role Focus": ""})
+        self.assertFalse(ok)
+        self.assertEqual(reason, "missing_role_focus")
 
     def test_ambiguous_company_is_not_safe(self):
         ok, reason = self._safe(**{"Outbound Company Confidence": "low"})

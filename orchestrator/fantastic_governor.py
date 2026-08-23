@@ -258,6 +258,16 @@ class GovernorLedger:
     def cycle_key_for(reset_at: Optional[datetime]) -> str:
         return reset_at.date().isoformat() if reset_at else "unknown"
 
+    # Arm state must SURVIVE a cycle rollover (it is what detects the rollover),
+    # so it is carried across every reset of the per-cycle spend counters.
+    _ARM_KEYS = ("armed", "arm_pending_cycle_key", "armed_at_cycle_key")
+
+    def _carry_arm(self, fresh: Dict[str, Any]) -> Dict[str, Any]:
+        for k in self._ARM_KEYS:
+            if k in self.state:
+                fresh[k] = self.state[k]
+        return fresh
+
     def ensure_cycle(self, reset_at: Optional[datetime], now: datetime) -> bool:
         """Roll to a new cycle when the reset date changed OR the recorded reset
         has passed. Returns True when a rollover happened."""
@@ -266,15 +276,17 @@ class GovernorLedger:
         rolled = False
         if self.state.get("cycle_key") != key and key != "unknown":
             rolled = bool(self.state.get("cycle_key"))
-            self.state = {"schema": LEDGER_SCHEMA, "cycle_key": key,
-                          "cycle_reset_at": reset_at.isoformat() if reset_at else "",
-                          "used": 0, "runs": [], "carry_forward": 0, "last_allowance_day": ""}
+            self.state = self._carry_arm({
+                "schema": LEDGER_SCHEMA, "cycle_key": key,
+                "cycle_reset_at": reset_at.isoformat() if reset_at else "",
+                "used": 0, "runs": [], "carry_forward": 0, "last_allowance_day": ""})
         elif recorded_reset is not None and now >= recorded_reset and key == "unknown":
             # Reset passed but provider didn't tell us the next date: start fresh.
             rolled = True
-            self.state = {"schema": LEDGER_SCHEMA, "cycle_key": "unknown",
-                          "cycle_reset_at": "", "used": 0, "runs": [],
-                          "carry_forward": 0, "last_allowance_day": ""}
+            self.state = self._carry_arm({
+                "schema": LEDGER_SCHEMA, "cycle_key": "unknown",
+                "cycle_reset_at": "", "used": 0, "runs": [],
+                "carry_forward": 0, "last_allowance_day": ""})
         if not self.state:
             self.state = {"schema": LEDGER_SCHEMA, "cycle_key": key,
                           "cycle_reset_at": reset_at.isoformat() if reset_at else "",
@@ -358,16 +370,58 @@ class GovernorContext:
     decision: Optional[GovernorDecision]
     ledger: Optional[GovernorLedger]
     cycle_rolled: bool = False
+    armed: bool = True          # False => pre-arm legacy drain (no budget cap)
+    arm_state: str = ""
 
     @property
     def run_budget(self) -> Optional[int]:
-        return self.decision.run_budget if (self.enabled and self.decision) else None
+        """None => impose NO governor cap (feature off, or deliberately not yet
+        armed for the cycle that was already running when it was switched on)."""
+        if not (self.enabled and self.decision and self.armed):
+            return None
+        return self.decision.run_budget
 
     def to_dict(self) -> Dict[str, Any]:
-        return {"enabled": self.enabled,
+        return {"enabled": self.enabled, "armed": self.armed, "arm_state": self.arm_state,
                 "decision": self.decision.to_dict() if self.decision else None,
                 "ledger": self.ledger.to_dict() if self.ledger else None,
                 "cycle_rolled": self.cycle_rolled}
+
+
+def resolve_arm_state(ledger: "GovernorLedger", cycle_key: str, *, auto_arm: bool) -> tuple:
+    """Decide whether the governor governs THIS cycle, and persist the decision.
+
+    Problem: switching the governor on mid-cycle, when the remaining quota is
+    already below the reserve, would grant 0 and STRAND the remainder. Waiting and
+    flipping a variable later requires a human at reset. Auto-arm removes both:
+
+      * first sight of the flag -> record ``arm_pending_cycle_key`` = the cycle that
+        is ALREADY running, and stay UNARMED so that cycle drains under legacy
+        behaviour (exactly as before the flag was set);
+      * any later cycle (billing reset detected via a changed cycle key) -> ARMED,
+        permanently, with no configuration change;
+      * missing/corrupt arm state -> ARMED. Governing is the bounded, conservative
+        outcome; the only cost of being wrong is stranding an already-expiring
+        remainder, whereas failing open risks unbounded spend.
+
+    Returns ``(armed: bool, state: str)``.
+    """
+    if not auto_arm:
+        return True, "auto_arm_disabled_always_armed"
+    st = ledger.state
+    pending = str(st.get("arm_pending_cycle_key") or "")
+    if st.get("armed") is True:
+        return True, "already_armed"
+    if not pending:
+        # First run since the flag was enabled: protect the in-flight cycle.
+        st["arm_pending_cycle_key"] = str(cycle_key)
+        st["armed"] = False
+        return False, "pre_arm_current_cycle_drains"
+    if str(cycle_key) != pending:
+        st["armed"] = True
+        st["armed_at_cycle_key"] = str(cycle_key)
+        return True, "armed_on_cycle_rollover"
+    return False, "pre_arm_current_cycle_drains"
 
 
 def build_context(cfg, *, run_id: str, provider_jobs_remaining: Optional[int] = None,
@@ -417,8 +471,12 @@ def build_context(cfg, *, run_id: str, provider_jobs_remaining: Optional[int] = 
         ledger_has_runs=bool(ledger.state.get("runs")),
     )
     decision = decide(inp)
+    armed, arm_state = resolve_arm_state(
+        ledger, ledger.cycle_key_for(reset_at),
+        auto_arm=bool(getattr(cfg, "FANTASTIC_GOVERNOR_AUTO_ARM", True)))
     ledger.save()
-    return GovernorContext(enabled=True, decision=decision, ledger=ledger, cycle_rolled=rolled)
+    return GovernorContext(enabled=True, decision=decision, ledger=ledger,
+                           cycle_rolled=rolled, armed=armed, arm_state=arm_state)
 
 
 def commit_run(ctx: GovernorContext, *, run_id: str, billed: int, now: Optional[datetime] = None) -> None:
