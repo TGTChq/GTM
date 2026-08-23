@@ -878,14 +878,25 @@ def repair_missing_role_focus(batch_size: int = 10) -> Dict:
         if not result.text:
             skipped_no_mapping += 1
             continue
+        repair_fields = {
+            "Role Focus": result.text,
+            "Focus Quality": result.quality,
+            "Focus Evidence": " | ".join(result.evidence),
+        }
+        # "Role Focus" is a SIGNED field. Backfilling it without re-signing would
+        # turn an honest `missing_role_focus` into `validation_fingerprint_mismatch`
+        # -- a strictly worse, legacy-classified state -- so the repair would REDUCE
+        # deliverability. Re-sign rows that are currently authentic; rows whose
+        # fingerprint is already invalid are left unsigned (they cannot get worse,
+        # and re-signing one would launder it into a validity it never had).
+        if fingerprint_matches(fields):
+            repair_fields["Validation Fingerprint"] = validation_fingerprint(
+                {**fields, **repair_fields}
+            )
         repairs.append({
             "id": record.get("id"),
             "lead_key": lead_key,
-            "fields": {
-                "Role Focus": result.text,
-                "Focus Quality": result.quality,
-                "Focus Evidence": " | ".join(result.evidence),
-            },
+            "fields": repair_fields,
         })
 
     updated = 0
