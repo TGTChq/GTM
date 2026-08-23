@@ -391,6 +391,36 @@ def _selection_tier(title: str | None) -> str:
     return "functional_executive"
 
 
+# --- alternate-contact cascade budget ----------------------------------------
+_ALTERNATE_BUDGET = {"used": 0}
+
+
+def reset_alternate_contact_budget() -> None:
+    """Reset the run-level alternate-enrichment budget. Called once per run."""
+    _ALTERNATE_BUDGET["used"] = 0
+
+
+def alternate_contact_budget_used() -> int:
+    return int(_ALTERNATE_BUDGET["used"])
+
+
+def _alternate_budget_available() -> bool:
+    if not bool(getattr(config, "ALTERNATE_CONTACT_CASCADE_ENABLED", False)):
+        return False
+    cap = int(getattr(config, "ALTERNATE_CONTACT_MAX_ENRICHMENTS_PER_RUN", 0) or 0)
+    return cap > 0 and _ALTERNATE_BUDGET["used"] < cap
+
+
+def _person_level_unverified(person) -> bool:
+    """True when THIS PERSON simply lacks a verified e-mail.
+
+    That is a property of the individual, so another employee is an independent
+    draw. Employer-level problems are handled by the loop's existing ``continue``
+    branches and must never trigger an advance.
+    """
+    return str(getattr(person, "email_status", "") or "").strip().lower() != "verified"
+
+
 def _email_confidence(
     person: apollo.PersonMatch,
     hunter_result: Optional[hunter.HunterResult],
@@ -602,7 +632,12 @@ def _process_company_legacy(company_jobs: List[Dict]) -> Tuple[List[Dict], Dict]
         best_identified: Optional[apollo.PersonMatch] = None
         terminal_reason = "no_usable_email"
 
-        for candidate in ranked_candidates[:max_person_attempts]:
+        fallback_person = None
+        selected_rank = 1
+        _considered = ranked_candidates[:max_person_attempts]
+        for _index, candidate in enumerate(_considered):
+            _candidate_rank = _index + 1
+            _has_more_candidates = _index + 1 < len(_considered)
             candidate_tier = _selection_tier(candidate.get("title"))
             if (
                 candidate_tier == "founder_fallback"
@@ -673,12 +708,32 @@ def _process_company_legacy(company_jobs: List[Dict]) -> Tuple[List[Dict], Dict]
                 terminal_reason = "no_usable_email"
                 continue
 
+            # An un-verified e-mail can never pass send_safe_facts, so accepting it
+            # here only manufactures an undeliverable row. Keep it as a fail-open
+            # fallback and try the next ranked candidate instead.
+            if (_person_level_unverified(person)
+                    and _alternate_budget_available()
+                    and _has_more_candidates):
+                if fallback_person is None:
+                    fallback_person = (person, hunter_result, confidence, _candidate_rank)
+                _ALTERNATE_BUDGET["used"] += 1
+                stats["alternate_cascade_advanced"] += 1
+                stats[f"alternate_cascade_from_rank_{_candidate_rank}"] += 1
+                continue
+
             selected_person = person
             selected_hunter = hunter_result
             selected_confidence = confidence
+            selected_rank = _candidate_rank
             terminal_reason = "contact_found"
             break
 
+        if selected_person is None and fallback_person is not None:
+            # Fail-open: no better candidate existed, so keep the original outcome
+            # rather than losing the contact entirely.
+            selected_person, selected_hunter, selected_confidence, selected_rank = fallback_person
+            terminal_reason = "contact_found"
+            stats["alternate_cascade_fell_back_to_primary"] += 1
         person = selected_person or best_identified or apollo.PersonMatch(person_found=False)
         hunter_result = selected_hunter
         found = selected_person is not None
@@ -719,6 +774,7 @@ def _process_company_legacy(company_jobs: List[Dict]) -> Tuple[List[Dict], Dict]
                 "apollo_email_status": person.email_status if found else None,
                 "hunter_email_status": hunter_result.status if hunter_result else None,
                 "hiring_manager_confidence": confidence,
+                "hiring_manager_contact_rank": selected_rank if found else None,
                 "hiring_manager_selection_tier": _selection_tier(person.title) if person.person_found else None,
                 "campaign_id": config.resolve_campaign_id(bucket, org.employee_count),
             }
@@ -1298,7 +1354,12 @@ def _process_company_strict(company_jobs: List[Dict]) -> Tuple[List[Dict], Dict]
             max(1, len(ranked_candidates)),
         )
 
-        for candidate in ranked_candidates[:max_attempts]:
+        fallback_bundle = None
+        selected_rank2 = 1
+        _considered2 = ranked_candidates[:max_attempts]
+        for _index2, candidate in enumerate(_considered2):
+            _rank2 = _index2 + 1
+            _more2 = _index2 + 1 < len(_considered2)
             candidate_id = _candidate_identity_key(candidate)
             if candidate_id:
                 attempted_ids.append(candidate_id)
@@ -1405,15 +1466,37 @@ def _process_company_strict(company_jobs: List[Dict]) -> Tuple[List[Dict], Dict]
                     attempted_id_reasons[candidate_id] = str(email_decision.primary_reason or "")
                 continue
 
+            # NEEDS_CHECK means Apollo did not verify this person's e-mail, so the
+            # row could never pass send_safe_facts. Accepting it here is exactly how
+            # an undeliverable backlog accumulated. Hold it as a fail-open fallback
+            # and try the next ranked candidate first.
+            if (email_decision.state_value == GateState.NEEDS_CHECK.value
+                    and _person_level_unverified(person)
+                    and _alternate_budget_available()
+                    and _more2):
+                if fallback_bundle is None:
+                    fallback_bundle = (person, hunter_result, contact_decision,
+                                       email_decision, _rank2)
+                _ALTERNATE_BUDGET["used"] += 1
+                stats["alternate_cascade_advanced"] += 1
+                stats[f"alternate_cascade_from_rank_{_rank2}"] += 1
+                continue
+
             selected_person = person
             selected_hunter = hunter_result
             selected_contact_decision = contact_decision
             selected_email_decision = email_decision
+            selected_rank2 = _rank2
             break
 
         if attempted_ids:
             company_had_person_match_attempt = True
 
+        if selected_person is None and fallback_bundle is not None:
+            # Fail-open: never lose a contact just because no better one existed.
+            (selected_person, selected_hunter, selected_contact_decision,
+             selected_email_decision, selected_rank2) = fallback_bundle
+            stats["alternate_cascade_fell_back_to_primary"] += 1
         if selected_person and selected_contact_decision and selected_email_decision:
             person = selected_person
             lead.update(
@@ -1432,6 +1515,7 @@ def _process_company_strict(company_jobs: List[Dict]) -> Tuple[List[Dict], Dict]
                     "hiring_manager_email_source": person.email_source,
                     "apollo_email_status": person.email_status,
                     "hunter_email_status": selected_hunter.status if selected_hunter else None,
+                    "hiring_manager_contact_rank": selected_rank2,
                     "hiring_manager_confidence": (
                         "verified"
                         if all(
@@ -1793,6 +1877,9 @@ def run_hiring_manager_identification(
         if value is not None and value < 1:
             raise ValueError(f"{name} must be at least 1")
 
+    # One alternate-enrichment budget per RUN, so a pathological batch cannot
+    # multiply Apollo spend across companies.
+    reset_alternate_contact_budget()
     input_path = input_path or config.STEP2_KEPT_FILE
     payload = json.loads(Path(input_path).read_text(encoding="utf-8"))
     jobs = payload.get("jobs", [])

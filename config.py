@@ -941,6 +941,15 @@ FANTASTIC_FUNCTION_AWARE_UPSTREAM_DEDUPE_ENABLED = _env_bool(
 FANTASTIC_SLUG_CROSSWALK_PATH = os.getenv(
     "FANTASTIC_SLUG_CROSSWALK_PATH", str(Path(STATE_DIR) / "fantastic_slug_crosswalk.json"))
 FANTASTIC_SLUG_CROSSWALK_TTL_DAYS = _env_int("FANTASTIC_SLUG_CROSSWALK_TTL_DAYS", 120)
+# One request per family, so the exclusion list is CAPPED rather than split across
+# extra requests -- extra requests would mean extra billed rows, defeating the point.
+# Truncation is safe: an un-excluded covered company is simply the status quo.
+FANTASTIC_FUNCTION_DEDUPE_MAX_SLUGS_PER_FAMILY = _env_int(
+    "FANTASTIC_FUNCTION_DEDUPE_MAX_SLUGS_PER_FAMILY", 250)
+# Bounded exploration so suppression can never become permanent blindness: every Nth
+# run acquires with NO exclusions and refreshes coverage. 0 disables exploration.
+FANTASTIC_FUNCTION_DEDUPE_EXPLORATION_EVERY_N_RUNS = _env_int(
+    "FANTASTIC_FUNCTION_DEDUPE_EXPLORATION_EVERY_N_RUNS", 7)
 # 250 = safe operational chunk (a live probe honored 500 at 13.6KB, close to common
 # ~16KB URL ceilings); never blindly emit larger URLs.
 FANTASTIC_SLUG_EXCLUSION_CHUNK = _env_int("FANTASTIC_SLUG_EXCLUSION_CHUNK", 250)
@@ -954,6 +963,20 @@ FANTASTIC_FUNCTIONAL_ROLE_EXPANSION_ENABLED = _env_bool(
 
 # --- Segment allocation foundations (Category 2; DEFAULT OFF) -----------------
 SEGMENT_ALLOCATOR_ENABLED = _env_bool("SEGMENT_ALLOCATOR_ENABLED", False)
+# Per-segment yields, produced offline from the yield ledger. Missing/corrupt => the
+# allocator has no evidence and stays BROAD (current acquisition, unchanged).
+SEGMENT_ALLOCATOR_YIELD_TABLE_PATH = os.getenv(
+    "SEGMENT_ALLOCATOR_YIELD_TABLE_PATH", str(Path(STATE_DIR) / "segment_yields.json"))
+# A segment needs this much billed evidence before it may be weighted at all, so a
+# lucky 20-credit cell can never redirect the run.
+SEGMENT_ALLOCATOR_MIN_EVIDENCE_CREDITS = _env_int(
+    "SEGMENT_ALLOCATOR_MIN_EVIDENCE_CREDITS", 500)
+# No single segment may take more than this share of the run -- prevents a
+# whole-budget capture and keeps other families alive on a bad day.
+SEGMENT_ALLOCATOR_MAX_SEGMENT_SHARE = _env_float("SEGMENT_ALLOCATOR_MAX_SEGMENT_SHARE", 0.40)
+# Share always reserved for broad/unevidenced acquisition, so exploration never stops
+# and a starved segment can earn evidence back.
+SEGMENT_ALLOCATOR_EXPLORATION_FLOOR = _env_float("SEGMENT_ALLOCATOR_EXPLORATION_FLOOR", 0.20)
 SEGMENT_YIELD_TABLE_PATH = os.getenv("SEGMENT_YIELD_TABLE_PATH", str(Path(STATE_DIR) / "segment_yield.json"))
 SEGMENT_PRIORITY = _env_json("SEGMENT_PRIORITY_JSON", [])
 
@@ -1120,6 +1143,23 @@ HUNTER_RATE_LIMIT_DELAY = _env_float("HUNTER_RATE_LIMIT_DELAY", 0.35)
 VERIFY_WITH_HUNTER = _env_bool("VERIFY_WITH_HUNTER", True)
 # Search is free, but each Apollo person match can consume credits. Try a small
 # ranked set so one contact with no email does not discard an otherwise good account.
+# --- Automatic alternate-contact cascade -------------------------------------
+# MEASURED: re-enriching the SAME person recovers nothing (0/10). A DIFFERENT
+# hiring manager at the same company recovers a verified email at rank 1 33.3%
+# (14/42), rank 2 26.1% (6/23), rank 3 16.7% (1/6) -- monotonic decay, so rank 3
+# is terminal. Historically the contact loop STOPPED on the first candidate that
+# merely had an e-mail, even an Apollo-"extrapolated" one that can never pass
+# send_safe_facts; that is how a 68-row undeliverable backlog accumulated while
+# APOLLO_MAX_PERSON_MATCH_ATTEMPTS_PER_BUCKET=3 already allowed two more tries.
+# Advancing is ONLY permitted for a PERSON-level failure (no verified e-mail).
+# Employer-level failures (domain mismatch, identity mismatch, company gate) never
+# advance -- a colleague reproduces them (measured: 7/23 at rank 2).
+ALTERNATE_CONTACT_CASCADE_ENABLED = _env_bool("ALTERNATE_CONTACT_CASCADE_ENABLED", False)
+# Run-level ceiling on EXTRA person enrichments so a pathological batch cannot
+# explode Apollo usage. <= 0 disables advancing entirely.
+ALTERNATE_CONTACT_MAX_ENRICHMENTS_PER_RUN = _env_int(
+    "ALTERNATE_CONTACT_MAX_ENRICHMENTS_PER_RUN", 100)
+
 APOLLO_MAX_PERSON_MATCH_ATTEMPTS_PER_BUCKET = _env_int(
     "APOLLO_MAX_PERSON_MATCH_ATTEMPTS_PER_BUCKET", 3
 )

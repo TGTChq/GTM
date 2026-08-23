@@ -1252,13 +1252,117 @@ def commit_watermark(*, success: bool) -> Dict[str, Any]:
     return {"committed": True, "next_watermark": upper, "band_ids": len(acquired_ids)}
 
 
-def run_fantastic_jobs_acquisition(http_get: HttpGet = _http_get) -> SourceResult:
+def _family_grants(families, global_cap, metrics):
+    """Distribute the governor's run budget across title families.
+
+    The GOVERNOR remains the sole budget authority: this only decides how ONE
+    already-granted ``global_cap`` is split, and the returned grants always sum to at
+    most that cap. With the allocator off (or without enough billed evidence) it
+    returns the historical equal split, byte-for-byte.
+    """
+    equal = {t: max(1, global_cap // max(1, len(families))) for t in families}
+    if not bool(getattr(config, "SEGMENT_ALLOCATOR_ENABLED", False)) or not families:
+        return equal, "equal_split"
+    try:
+        from orchestrator.segment_allocator import (
+            BROAD_SEGMENT, allocate, load_yield_table, segments_from_table)
+
+        table = load_yield_table(config.SEGMENT_ALLOCATOR_YIELD_TABLE_PATH)
+        segments = [s for s in segments_from_table(table, list(families))
+                    if s.id in set(families)]
+        alloc = allocate(
+            int(global_cap), segments, enabled=True,
+            min_evidence_credits=int(config.SEGMENT_ALLOCATOR_MIN_EVIDENCE_CREDITS),
+            max_segment_share=float(config.SEGMENT_ALLOCATOR_MAX_SEGMENT_SHARE),
+            exploration_floor=float(config.SEGMENT_ALLOCATOR_EXPLORATION_FLOOR))
+        metrics["segment_allocator"] = alloc.to_dict()
+        if alloc.mode != "weighted":
+            return equal, alloc.mode
+        broad = int(alloc.grants.get(BROAD_SEGMENT, 0))
+        # The broad remainder is exploration: spread it evenly so no family starves.
+        spread = broad // max(1, len(families))
+        grants = {t: int(alloc.grants.get(t, 0)) + spread for t in families}
+        # Families with no grant at all still get a floor so they can re-earn evidence.
+        grants = {t: max(1, v) for t, v in grants.items()}
+        total = sum(grants.values())
+        if total > global_cap:  # HARD INVARIANT: never exceed the governor's grant
+            scale = global_cap / float(total)
+            grants = {t: max(1, int(v * scale)) for t, v in grants.items()}
+        metrics["segment_allocator"]["applied_grants"] = dict(grants)
+        return grants, "weighted"
+    except Exception:  # noqa: BLE001 - allocation never breaks acquisition
+        metrics["segment_allocator"] = {"mode": "error_fallback_broad"}
+        return equal, "error_fallback_broad"
+
+
+def _function_dedupe_context(covered_function_keys, metrics):
+    """Open the slug crosswalk and decide whether THIS run suppresses covered orgs.
+
+    Returns ``(crosswalk, covered_keys, suppress)``. Everything is best-effort: any
+    failure yields ``(None, frozenset(), False)`` so acquisition proceeds exactly as
+    it does with the feature off. Never raises.
+    """
+    if not bool(getattr(config, "FANTASTIC_FUNCTION_AWARE_UPSTREAM_DEDUPE_ENABLED", False)):
+        return None, frozenset(), False
+    try:
+        from orchestrator.function_acquisition import SlugCrosswalk
+
+        crosswalk = SlugCrosswalk(
+            config.FANTASTIC_SLUG_CROSSWALK_PATH,
+            ttl_days=int(config.FANTASTIC_SLUG_CROSSWALK_TTL_DAYS))
+        if covered_function_keys is None:
+            import airtable_client
+
+            covered_function_keys = frozenset(airtable_client.snapshot_existing_identity())
+        # Bounded exploration: every Nth run suppresses nothing, so a stale crosswalk
+        # can never blind acquisition permanently.
+        every = int(getattr(config, "FANTASTIC_FUNCTION_DEDUPE_EXPLORATION_EVERY_N_RUNS", 0) or 0)
+        runs = int(crosswalk.state.get("runs", 0)) + 1
+        crosswalk.state["runs"] = runs
+        crosswalk._dirty = True
+        suppress = not (every > 0 and runs % every == 0)
+        metrics["function_dedupe"] = {
+            "enabled": True, "run_index": runs, "suppressing": suppress,
+            "crosswalk_entries": len(crosswalk.state.get("by_slug") or {}),
+            "families_excluded": {}, "truncated_families": [], "provider_fallbacks": [],
+        }
+        return crosswalk, frozenset(covered_function_keys or ()), suppress
+    except Exception:  # noqa: BLE001 - dedupe must never break acquisition
+        metrics["function_dedupe"] = {"enabled": True, "error": "context_unavailable"}
+        return None, frozenset(), False
+
+
+def _family_exclusion_slugs(crosswalk, covered_keys, term, metrics):
+    """Covered slugs to exclude for ONE title family (ACTIVE coverage only)."""
+    try:
+        from orchestrator.function_acquisition import (
+            chunk_slugs, covered_slugs_for_family, family_for_role)
+
+        family = family_for_role(str(term))
+        slugs = covered_slugs_for_family(crosswalk, covered_keys, family)
+        if not slugs:
+            return []
+        cap = int(getattr(config, "FANTASTIC_FUNCTION_DEDUPE_MAX_SLUGS_PER_FAMILY", 250))
+        chunks = chunk_slugs(slugs, chunk_size=max(1, cap))
+        first = chunks[0] if chunks else []
+        block = metrics.setdefault("function_dedupe", {})
+        block.setdefault("families_excluded", {})[str(term)] = len(first)
+        if len(chunks) > 1:
+            block.setdefault("truncated_families", []).append(str(term))
+        return first
+    except Exception:  # noqa: BLE001
+        return []
+
+
+def run_fantastic_jobs_acquisition(http_get: HttpGet = _http_get, *,
+                                   covered_function_keys=None) -> SourceResult:
     """Entry point used by the orchestrator. Fail-open at the source level."""
     result = SourceResult(source="fantastic_jobs")
     if not config.FANTASTIC_JOBS_ENABLED:
         result.metadata = {"enabled": False, "skipped_reason": "disabled"}
         return result
 
+    _cw = None
     metrics: Dict[str, Any] = {"enabled": True, "segments": {}, "stop_reason": ""}
     try:
         config.validate_fantastic_jobs_config()
@@ -1495,16 +1599,19 @@ def run_fantastic_jobs_acquisition(http_get: HttpGet = _http_get) -> SourceResul
             # -> a job returned by two families is billed twice but processed once;
             # its cross-family duplicate is counted for billing observability. Each
             # family keeps its OWN date_posted cursor so streams never leak.
+            _cw, _covered_keys, _suppress = _function_dedupe_context(
+                covered_function_keys, metrics)
             fam_states = (cont_state.get("families") or {}) if continuation_enabled else {}
             families = [str(t).strip() for t in (config.FANTASTIC_JOBS_TITLE_FAMILIES or []) if str(t).strip()]
             global_cap = int(run_cap)
-            per_family_cap = max(1, global_cap // max(1, len(families)))
+            _grants, _alloc_mode = _family_grants(families, global_cap, metrics)
             metrics["title_families_planned"] = len(families)
+            metrics["title_family_allocation_mode"] = _alloc_mode
             for term in families:
                 if quota.stop_reason or len(result.jobs) >= global_cap:
                     break
                 fid = _family_id(term)
-                cap = min(per_family_cap, global_cap - len(result.jobs))
+                cap = min(int(_grants.get(term, 1)), global_cap - len(result.jobs))
                 if cap <= 0:
                     break
                 fam = fam_states.get(fid) or {}
@@ -1524,9 +1631,27 @@ def run_fantastic_jobs_acquisition(http_get: HttpGet = _http_get) -> SourceResul
                 jb_params.update(_jb_filter_params())
                 if fam_lt:
                     jb_params["date_posted_lt"] = fam_lt
+                _excluded = (_family_exclusion_slugs(_cw, _covered_keys, term, metrics)
+                             if (_cw is not None and _suppress) else [])
+                if _excluded:
+                    # style=form, explode=false -> ONE comma-joined value. Repeated
+                    # params are silently ignored past the first by this provider.
+                    jb_params["exclude_organization_slug"] = ",".join(_excluded)
                 fam_jobs = _fetch_segment(
                     "/v1/active-jb", jb_params, f"fantastic_jobs_linkedin::{fid}",
                     cap, quota, http_get, seen_ids, metrics, accept_source=("linkedin",))
+                if _excluded and not fam_jobs and metrics["segments"].get(
+                        f"fantastic_jobs_linkedin::{fid}", {}).get("error_code"):
+                    # The provider rejected/ignored the exclusion. Losing a family's
+                    # acquisition is worse than acquiring a covered company, so retry
+                    # once WITHOUT it rather than accepting a silent zero-row family.
+                    metrics.setdefault("function_dedupe", {}).setdefault(
+                        "provider_fallbacks", []).append(str(term))
+                    jb_params.pop("exclude_organization_slug", None)
+                    fam_jobs = _fetch_segment(
+                        "/v1/active-jb", jb_params, f"fantastic_jobs_linkedin::{fid}",
+                        cap, quota, http_get, seen_ids, metrics,
+                        accept_source=("linkedin",))
                 for job in fam_jobs:
                     job["_fantastic_title_family"] = fid
                     job["_fantastic_title_term"] = term
@@ -1561,6 +1686,16 @@ def run_fantastic_jobs_acquisition(http_get: HttpGet = _http_get) -> SourceResul
         metrics["stop_reason"] = "source_error"
         if not config.FANTASTIC_JOBS_FAIL_OPEN:
             raise
+
+    # Learn slug -> domain/company/function from THIS run's rows, then persist so the
+    # crosswalk survives restarts. Best-effort: never fails the run.
+    try:
+        if _cw is not None:
+            learned = _cw.observe_jobs(result.jobs)
+            _cw.save()
+            metrics.setdefault("function_dedupe", {})["slugs_learned"] = learned
+    except Exception:  # noqa: BLE001
+        pass
 
     # Aggregate sanitized per-segment request errors (fail-open preserved).
     segment_errors = []

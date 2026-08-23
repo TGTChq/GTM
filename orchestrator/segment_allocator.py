@@ -52,7 +52,9 @@ def load_yield_table(path: str) -> Dict[str, Dict[str, Any]]:
 
 
 def allocate(budget: int, segments: List[Segment], *, enabled: bool,
-             min_evidence_credits: int = 500) -> Allocation:
+             min_evidence_credits: int = 500,
+             max_segment_share: float = 1.0,
+             exploration_floor: float = 0.0) -> Allocation:
     """Default (``enabled=False`` or insufficient evidence): ONE broad grant equal
     to the budget -- preserves current acquisition exactly.
 
@@ -69,13 +71,20 @@ def allocate(budget: int, segments: List[Segment], *, enabled: bool,
                           detail={"reason": "insufficient_evidence"})
     ordered = sorted(evidenced, key=lambda s: (-s.priority, -(s.yield_estimate or 0.0)))
     total_w = sum(max(0.0, s.yield_estimate or 0.0) for s in ordered) or 1.0
+    # Reserve an exploration floor FIRST: a starved segment must always be able to
+    # earn evidence back, and one bad day must not permanently redirect the run.
+    floor = int(budget * min(1.0, max(0.0, exploration_floor)))
+    weighted_budget = max(0, budget - floor)
+    # And cap any single segment, so a narrow evidenced cell cannot capture the run.
+    per_segment_cap = int(budget * min(1.0, max(0.0, max_segment_share))) or budget
     grants: Dict[str, int] = {}
     used = 0
     for s in ordered:
-        share = int(budget * max(0.0, s.yield_estimate or 0.0) / total_w)
+        share = int(weighted_budget * max(0.0, s.yield_estimate or 0.0) / total_w)
+        share = min(share, per_segment_cap)
         if s.inventory_hint is not None:
             share = min(share, max(0, int(s.inventory_hint)))
-        share = min(share, budget - used)
+        share = min(share, weighted_budget - used)
         if share > 0:
             grants[s.id] = share
             used += share

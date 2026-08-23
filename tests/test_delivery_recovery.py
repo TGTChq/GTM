@@ -125,11 +125,19 @@ class RoleRecoveryTests(unittest.TestCase):
         p = dr.classify_role_hold(_role_fields("Warehouse Associate", "Account Executive"))
         self.assertFalse(p.applicable)
 
-    def test_non_extractive_render_is_refused(self):
+    def test_invented_render_is_discarded_never_written(self):
+        """An invented render must never reach Airtable; fall back to the title text."""
         with mock.patch.object(dr._rdr, "_render_from_anchor", return_value=("Invented Title", [])):
             p = dr.classify_role_hold(_role_fields("Account Manager Team Lead", "Account Manager"))
-        self.assertEqual(p.classification, dr.ROLE_RENDER_NOT_EXTRACTIVE)
+        self.assertNotEqual(p.patch.get("Outbound Role"), "Invented Title")
+        # "Account Manager" IS verbatim in the title, so extraction is safe.
+        self.assertEqual(p.patch["Outbound Role"], "Account Manager")
+
+    def test_invented_render_with_no_verbatim_catalog_role_is_refused(self):
+        with mock.patch.object(dr._rdr, "_render_from_anchor", return_value=("Invented Title", [])):
+            p = dr.classify_role_hold(_role_fields("Warehouse Ops Lead", "Account Manager"))
         self.assertFalse(p.applicable)
+        self.assertEqual(p.patch, {})
 
     def test_render_that_drops_the_catalog_role_is_refused(self):
         with mock.patch.object(dr._rdr, "_render_from_anchor", return_value=("Team Lead", [])):
@@ -337,3 +345,76 @@ class RoleFocusRepairSigningTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CatalogRoleVerbatimTests(unittest.TestCase):
+    """Undelimited qualifier titles extract; DELIMITED ones must still hold."""
+
+    def test_fallback_never_fires_for_a_delimited_title(self):
+        """INVARIANT: a delimited title may advertise two DISTINCT roles, so the
+        catalog-role fallback must not rescue one when the renderer declines.
+
+        (The resolver's own renderer still handles delimited titles it can extract
+        contiguously -- that path shipped and delivered 33 rows successfully.)"""
+        for title, matched in (
+                ("Sales Associate (Account Executive)", "Account Executive"),
+                ("Payroll Administrator/General Ledger Accountant", "Accountant")):
+            with self.subTest(title=title):
+                with mock.patch.object(dr._rdr, "_render_from_anchor",
+                                       return_value=("Invented Title", [])):
+                    p = dr.classify_role_hold(_role_fields(title, matched))
+                self.assertFalse(p.applicable)
+                self.assertEqual(p.patch, {})
+
+    def test_undelimited_qualifier_title_extracts_the_catalog_role(self):
+        p = dr.classify_role_hold(_role_fields("Account Manager Team Lead", "Account Manager"))
+        self.assertEqual(p.confidence, dr.HIGH)
+        self.assertEqual(p.patch["Outbound Role"], "Account Manager")
+
+    def test_catalog_role_absent_from_title_still_holds(self):
+        p = dr.classify_role_hold(_role_fields("Digital Designer and Video Editor",
+                                               "Graphic Designer"))
+        self.assertFalse(p.applicable)
+
+    def test_cross_function_still_holds_even_if_verbatim(self):
+        p = dr.classify_role_hold(_role_fields(
+            "Billing Support Specialist", "Customer Support",
+            rules=("material_cross_function_disagreement",)))
+        self.assertEqual(p.classification, dr.ROLE_CROSS_FUNCTION_AMBIGUOUS)
+        self.assertFalse(p.applicable)
+
+    def test_extraction_preserves_the_titles_own_casing(self):
+        role = dr._rdr.catalog_role_verbatim("SENIOR ACCOUNT MANAGER Team Lead",
+                                             "Account Manager")
+        self.assertEqual(role, "ACCOUNT MANAGER")
+
+
+class ResolverCatalogVerbatimTests(unittest.TestCase):
+    """The production resolver stops accumulating UNDELIMITED qualifier cases."""
+
+    def test_secondary_head_resolves_via_the_catalog_role(self):
+        import role_display_resolver as rdr
+        out = rdr.resolve_role_display(
+            {"job_title": "Account Manager Team Lead", "_matched_role": "Account Manager"})
+        self.assertFalse(out.hold)
+        self.assertEqual(out.name, "Account Manager")
+
+    def test_delimited_competing_heads_still_hold(self):
+        import role_display_resolver as rdr
+        out = rdr.resolve_role_display(
+            {"job_title": "Payroll Administrator/General Ledger Accountant",
+             "_matched_role": "Accountant"})
+        self.assertTrue(out.hold)
+
+    def test_absent_catalog_role_still_holds(self):
+        import role_display_resolver as rdr
+        out = rdr.resolve_role_display(
+            {"job_title": "VIP & Upper Stories Host | Thompson Palm Springs",
+             "_matched_role": "Graphic Designer"})
+        self.assertTrue(out.hold)
+
+    def test_verbatim_helper_requires_token_boundaries(self):
+        import role_display_resolver as rdr
+        self.assertEqual(rdr.catalog_role_verbatim("Reaccountant Manager", "Accountant"), "")
+        self.assertEqual(rdr.catalog_role_verbatim("Staff Accountant - Leasing", "Accountant"),
+                         "Accountant")
