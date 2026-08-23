@@ -194,7 +194,9 @@ def run(*, revalidate_providers: bool | None = None) -> dict:
     # Explicit, unit-labelled metrics (eligible/legacy/invalid never conflated).
     result.update(base_metrics)
     result["approved_attempted"] = len(safe_records)
-    result["instantly_success"] = int(result.get("enrolled", 0)) + int(result.get("duplicates", 0))
+    # Accepted-by-API, NOT delivered. Kept for backwards-compatible logs only.
+    result["instantly_success"] = int(result.get("api_accepted", 0)) or (
+        int(result.get("enrolled", 0)) + int(result.get("duplicates", 0)))
     result["instantly_failed"] = len(instantly_failures)
     result["airtable_marked_enrolled"] = len(result["enrolled_record_ids"])
     # mark_error writes only for ELIGIBLE rows that failed (revalidation or Instantly)
@@ -306,15 +308,26 @@ def _print_sync_summary(result: dict) -> None:
     print(f"{'APPROVED_FOUND':<24}{approved}")
     print(f"{'REVALIDATED':<24}{approved - revalidation_failed}")
     print(f"{'REVALIDATION_FAILED':<24}{revalidation_failed}")
-    print(f"{'SENT_TO_INSTANTLY':<24}{int(result.get('enrolled', 0) or 0)}")
-    print(f"{'DUPLICATES_SKIPPED':<24}{int(result.get('duplicates', 0) or 0)}")
-    print(f"{'FAILED':<24}{int(result.get('failed', 0) or 0)}")
-    # Accepted-by-API is not the same as delivered: report the truthful figure too.
-    print(f"{'NET_NEW_DELIVERED':<24}{int(result.get('net_new_delivered', 0) or 0)}")
-    print(f"{'PRE_EXISTING_IN_INSTANTLY':<24}{int(result.get('pre_existing_in_instantly', 0) or 0)}")
-    for name, count in sorted((result.get("membership") or {}).items()):
-        if count:
-            print(f"   {name:<33}{count}")
+    membership = result.get("membership") or {}
+    # "accepted an API request" and "delivered a lead" are different facts. Instantly
+    # answers 200 for an email that already exists in the workspace, so the legacy
+    # SENT_TO_INSTANTLY line is labelled as acceptance and NET_NEW_DELIVERED is the
+    # economic output metric.
+    print(f"{'API_ACCEPTED (not delivery)':<32}{int(result.get('instantly_success', 0) or 0)}")
+    print(f"{'SENT_TO_INSTANTLY (accepted)':<32}{int(result.get('enrolled', 0) or 0)}")
+    print(f"{'NET_NEW_DELIVERED':<32}{int(result.get('net_new_delivered', 0) or 0)}")
+    print(f"{'ALREADY_IN_TARGET_CAMPAIGN':<32}"
+          f"{int(membership.get('instantly_already_in_target_campaign', 0) or 0)}")
+    print(f"{'PRE_EXISTING_OTHER_CAMPAIGN':<32}"
+          f"{int(membership.get('instantly_existing_other_campaign', 0) or 0)}")
+    print(f"{'PRE_EXISTING_WORKSPACE_UNKNOWN':<32}"
+          f"{int(membership.get('instantly_already_exists_workspace', 0) or 0)}")
+    print(f"{'MEMBERSHIP_UNKNOWN':<32}"
+          f"{int(membership.get('instantly_membership_unknown', 0) or 0)}")
+    print(f"{'API_ERRORS':<32}{int(membership.get('instantly_api_error', 0) or 0)}")
+    print(f"{'DUPLICATES_SKIPPED':<32}{int(result.get('duplicates', 0) or 0)}")
+    print(f"{'NOT_DELIVERED':<32}{int(result.get('not_delivered', 0) or 0)}")
+    print(f"{'FAILED':<32}{int(result.get('failed', 0) or 0)}")
     print("==============================================")
 
 

@@ -31,6 +31,18 @@ import run_approved
 from validation_integrity import validation_fingerprint
 
 
+def _lead_resp(lead_id="lead"):
+    """A realistic Instantly create-lead response.
+
+    The live API always returns ``timestamp_created``; without it the response is
+    (correctly) classified as membership-unknown and never marked Enrolled.
+    """
+    from datetime import datetime, timezone
+    return _Resp({"id": lead_id, "campaign": None,
+                  "timestamp_created": datetime.now(timezone.utc)
+                  .isoformat().replace("+00:00", "Z")})
+
+
 # --------------------------------------------------------------------------
 # Fakes
 # --------------------------------------------------------------------------
@@ -149,7 +161,7 @@ class SelectionGatingTests(_Base):
 
         def fake_instantly(method, url, *, headers=None, params=None, json_body=None, **kw):
             instantly["created"].append(json_body.get("email"))
-            return _Resp({"id": "lead-1"})
+            return _lead_resp("lead-1")
 
         with mock.patch.object(airtable_client, "request_with_retry", fake.request), \
              mock.patch.object(instantly_client, "request_with_retry", fake_instantly):
@@ -219,11 +231,32 @@ class EnrollmentSafetyTests(_Base):
         return requests.HTTPError("409", response=r)
 
     def test_existing_instantly_lead_is_duplicate_not_recreated(self):
+        """A duplicate IN THE TARGET campaign is delivered -- not recreated."""
+        err = self._dup_response()
+
+        def request(method, url, **kw):
+            if url.endswith("/leads"):
+                raise err
+            return mock.Mock()
+
+        with mock.patch.object(instantly_client, "request_with_retry", side_effect=request), \
+             mock.patch.object(instantly_client, "safe_json",
+                               return_value={"items": [{"id": "c"}]}), \
+             mock.patch.object(instantly_client, "airtable_record_to_lead",
+                               return_value={"email": "hm@acme.com", "campaign": "c"}):
+            res = instantly_client.enroll_record(_rec("r1"))
+        self.assertTrue(res.success)
+        self.assertEqual(res.status, "duplicate")
+        self.assertFalse(res.net_new)               # present already -- not net-new
+
+    def test_duplicate_with_unresolvable_membership_fails_closed(self):
+        """If we cannot prove target membership, never mark the row Enrolled."""
         with mock.patch.object(instantly_client, "request_with_retry",
                                side_effect=self._dup_response()):
             res = instantly_client.enroll_record(_rec("r1"))
-        self.assertTrue(res.success)
-        self.assertEqual(res.status, "duplicate")   # skipped safely, counts as success
+        self.assertFalse(res.success)
+        self.assertEqual(res.status, "not_delivered")
+        self.assertEqual(res.membership, instantly_client.MEMBERSHIP_UNKNOWN)
 
     def test_failed_enrollment_is_not_marked_successful(self):
         r = requests.Response()
@@ -248,7 +281,7 @@ class EnrollmentSafetyTests(_Base):
                 r._content = b"boom"; r.url = url
                 r.request = requests.Request("POST", url).prepare()
                 raise requests.HTTPError("500", response=r)
-            return _Resp({"id": "lead-good"})
+            return _lead_resp("lead-good")
 
         with mock.patch.object(airtable_client, "request_with_retry", fake.request), \
              mock.patch.object(instantly_client, "request_with_retry", fake_instantly):
@@ -281,7 +314,7 @@ class ContainmentReconciliationTests(_Base):
         def fake_instantly(method, url, *, headers=None, params=None, json_body=None, **kw):
             if json_body.get("email") == "b@acme.com":
                 raise RuntimeError("transient instantly error")
-            return _Resp({"id": "lead"})
+            return _lead_resp()
 
         with mock.patch.object(airtable_client, "request_with_retry", fake.request), \
              mock.patch.object(instantly_client, "request_with_retry", fake_instantly):
@@ -295,7 +328,7 @@ class ContainmentReconciliationTests(_Base):
         fake = FakeAirtable(records)
         with mock.patch.object(airtable_client, "request_with_retry", fake.request), \
              mock.patch.object(instantly_client, "request_with_retry",
-                               lambda *a, **k: _Resp({"id": "lead"})):
+                               lambda *a, **k: _lead_resp()):
             result = run_approved.run(revalidate_providers=False)
         approved = result["approved"]
         accounted = result["enrolled"] + result["duplicates"] + result["failed"]
@@ -364,7 +397,7 @@ class WorkerIsolationTests(_Base):
         fake = FakeAirtable(records)
         with mock.patch.object(airtable_client, "request_with_retry", fake.request), \
              mock.patch.object(instantly_client, "request_with_retry",
-                               lambda *a, **k: _Resp({"id": "lead"})), \
+                               lambda *a, **k: _lead_resp()), \
              mock.patch("free_job_sources.build_adapters",
                         side_effect=AssertionError("acquisition!")), \
              mock.patch("jsearch_scraper.scrape_jobs",
@@ -378,7 +411,7 @@ class WorkerIsolationTests(_Base):
         with self.assertLogs("run_approved", level="INFO") as cm, \
              mock.patch.object(airtable_client, "request_with_retry", fake.request), \
              mock.patch.object(instantly_client, "request_with_retry",
-                               lambda *a, **k: _Resp({"id": "lead"})):
+                               lambda *a, **k: _lead_resp()):
             run_approved.run(revalidate_providers=False)
         blob = "\n".join(cm.output)
         self.assertNotIn(config.INSTANTLY_API_KEY, blob)
