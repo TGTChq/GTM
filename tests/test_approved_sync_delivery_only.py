@@ -193,17 +193,44 @@ def test_instantly_failure_never_marks_enrolled():
     assert result["failed"] == 1 and result["airtable_marked_enrolled"] == 0
 
 
-def test_duplicate_is_treated_as_success_and_not_re_enrolled():
-    """Instantly 409/422 duplicate -> success, so the row leaves the queue."""
-    resp = SimpleNamespace(status_code=409, text="lead already exists")
+def _duplicate_run(search_campaigns):
+    """Drive enroll_record through a 409 duplicate with a given membership answer.
+
+    A duplicate rejection proves the email EXISTS; it does not prove the lead is in
+    the campaign we targeted. Membership is therefore resolved authoritatively.
+    """
     import requests
+    resp = SimpleNamespace(status_code=409, text="lead already exists")
     err = requests.HTTPError("409"); err.response = resp
+
+    def request(method, url, **kw):
+        if url.endswith("/leads"):
+            raise err
+        return SimpleNamespace()
+
     with patch.object(instantly_client, "validate_preflight"), \
          patch.object(instantly_client, "airtable_record_to_lead",
                       return_value={"email": "hm@acme.com", "campaign": "c"}), \
-         patch.object(instantly_client, "request_with_retry", side_effect=err):
-        out = instantly_client.enroll_record(_rec("recDup"))
+         patch.object(instantly_client, "request_with_retry", side_effect=request), \
+         patch.object(instantly_client, "safe_json",
+                      return_value={"items": [{"id": c} for c in search_campaigns]}):
+        return instantly_client.enroll_record(_rec("recDup", Email="hm@acme.com"))
+
+
+def test_duplicate_in_the_target_campaign_leaves_the_queue():
+    """Already in the campaign we targeted -> delivered, so the row is done."""
+    out = _duplicate_run(["c"])
     assert out.success and out.status == "duplicate"
+    assert out.membership == instantly_client.ALREADY_IN_TARGET_CAMPAIGN
+    assert not out.net_new
+
+
+def test_duplicate_in_another_campaign_is_not_delivered():
+    """A duplicate elsewhere was never delivered to our target -- never Enrolled."""
+    out = _duplicate_run(["some-other-campaign"])
+    assert not out.success
+    assert out.status == "not_delivered"
+    assert out.membership == instantly_client.EXISTING_OTHER_CAMPAIGN
 
 
 # ------------------------------------------------------------ 9. local gates
