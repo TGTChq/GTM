@@ -644,9 +644,15 @@ def _bucket_rank(lead) -> int:
 
 
 def _existing_person_keys(existing) -> set:
-    """Person-email index over existing Airtable rows (bucket-agnostic), derived
-    from whatever the snapshot exposes. Tolerant of every snapshot shape; an
-    unreadable snapshot yields an empty index (collapse still applies within-run)."""
+    """Person-email index over existing Airtable rows (bucket-agnostic).
+
+    NOTE: the existing-leads snapshot deliberately fetches a NARROW field set that
+    does NOT include ``Email`` -- so the index is derived primarily from the
+    ``Lead Key`` (format ``domain|email|bucket``), which IS fetched. Falling back to
+    an ``Email``/``Website`` field when a caller supplies a richer record keeps this
+    tolerant of every snapshot shape. An unreadable snapshot yields an empty index,
+    which degrades to within-run collapse only (never over-suppresses).
+    """
     keys: set = set()
     if not existing:
         return keys
@@ -657,9 +663,13 @@ def _existing_person_keys(existing) -> set:
             continue
         email = _norm_email(f.get("Email") or f.get("hiring_manager_email") or f.get("email"))
         domain = _norm_domain(f.get("Website") or f.get("employer_website") or f.get("company_domain") or "")
-        if not domain:
-            lk = str(f.get("lead_key") or f.get("Lead Key") or "")
-            domain = _norm_domain(lk.split("|", 1)[0]) if "|" in lk else ""
+        lk = str(f.get("lead_key") or f.get("Lead Key") or "")
+        if "|" in lk:
+            parts = lk.split("|")
+            if not domain:
+                domain = _norm_domain(parts[0])
+            if not email and len(parts) >= 2 and "@" in parts[1]:
+                email = _norm_email(parts[1])
         if email and domain:
             keys.add(f"{domain}|{email}")
     return keys

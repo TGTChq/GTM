@@ -55,6 +55,24 @@ class PersonEmployerUniquenessTests(unittest.TestCase):
             kept, losers = AR._collapse_person_employer(leads, existing=existing)
         self.assertEqual(kept, []); self.assertEqual(len(losers), 1)
 
+    def test_person_index_works_from_lead_key_alone(self):
+        # The real snapshot fetches "Lead Key" but NOT "Email" -- the index must be
+        # derivable from the lead_key (domain|email|bucket) or cross-run protection
+        # silently no-ops.
+        existing = {"rec1": {"fields": {"Lead Key": "acme.com|rob@acme.com|marketing",
+                                        "Role Bucket": "marketing"}}}
+        self.assertEqual(AR._existing_person_keys(existing), {"acme.com|rob@acme.com"})
+        leads = [_lead("rob@acme.com", "gtm_revenue")]
+        with mock.patch.object(config, "ENROLLMENT_PERSON_EMPLOYER_UNIQUENESS", True):
+            kept, losers = AR._collapse_person_employer(leads, existing=existing)
+        self.assertEqual(kept, []); self.assertEqual(len(losers), 1)
+
+    def test_person_index_ignores_malformed_lead_keys(self):
+        existing = {"a": {"fields": {"Lead Key": "acme.com"}},
+                    "b": {"fields": {"Lead Key": "acme.com|notanemail|gtm"}},
+                    "c": {"fields": {}}}
+        self.assertEqual(AR._existing_person_keys(existing), set())
+
     def test_deliver_drops_losers_and_never_marks_them_delivered(self):
         captured = {}
         def fake_push(rows, existing=None):
