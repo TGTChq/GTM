@@ -15,6 +15,7 @@ activation is gated by ``config.SEGMENT_ALLOCATOR_ENABLED`` and requires evidenc
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
@@ -105,3 +106,31 @@ def segments_from_table(table: Dict[str, Dict[str, Any]], priority: List[str]) -
         except (TypeError, ValueError):
             continue
     return out
+
+def refresh_yield_table(ledger_path: str, table_path: str, *, by: str = "title_family") -> int:
+    """Rebuild the per-segment yield table from the yield ledger.
+
+    Without this the allocator has no evidence producer and its flag would be
+    decorative. Run at the START of an acquisition run, so it summarises COMPLETED
+    runs only and never reads a ledger it is concurrently writing. The metric is the
+    north star -- net-new send-safe per BILLED job -- never gross FINAL_PASS.
+
+    Best-effort: any failure leaves the previous table in place (and a missing table
+    simply keeps the allocator broad). Returns the number of segments written.
+    """
+    try:
+        from orchestrator.yield_ledger import aggregate_yield
+
+        table = aggregate_yield(ledger_path, by=by)
+        if not table:
+            return 0
+        d = os.path.dirname(table_path)
+        if d:
+            os.makedirs(d, exist_ok=True)
+        tmp = f"{table_path}.tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(table, fh)
+        os.replace(tmp, table_path)
+        return len(table)
+    except Exception:  # noqa: BLE001 - evidence refresh never breaks acquisition
+        return 0

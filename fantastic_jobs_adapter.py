@@ -1265,9 +1265,16 @@ def _family_grants(families, global_cap, metrics):
         return equal, "equal_split"
     try:
         from orchestrator.segment_allocator import (
-            BROAD_SEGMENT, allocate, load_yield_table, segments_from_table)
+            BROAD_SEGMENT, allocate, load_yield_table, refresh_yield_table,
+            segments_from_table)
 
+        # Rebuild the evidence from COMPLETED runs before allocating. Without this
+        # the allocator has no producer and the flag would be decorative.
+        refreshed = refresh_yield_table(
+            str(getattr(config, "YIELD_LEDGER_PATH", "")),
+            config.SEGMENT_ALLOCATOR_YIELD_TABLE_PATH)
         table = load_yield_table(config.SEGMENT_ALLOCATOR_YIELD_TABLE_PATH)
+        metrics["segment_allocator_evidence_segments"] = refreshed
         segments = [s for s in segments_from_table(table, list(families))
                     if s.id in set(families)]
         alloc = allocate(
