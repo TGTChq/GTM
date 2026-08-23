@@ -75,6 +75,8 @@ class FamilyGrantWiringTests(unittest.TestCase):
     def _cfg(self, enabled=True, **over):
         base = dict(SEGMENT_ALLOCATOR_ENABLED=enabled,
                     SEGMENT_ALLOCATOR_YIELD_TABLE_PATH=self.path,
+                    # No ledger => the refresh is a no-op and the seeded table stands.
+                    YIELD_LEDGER_PATH=os.path.join(self.tmp, "no_ledger.jsonl"),
                     SEGMENT_ALLOCATOR_MIN_EVIDENCE_CREDITS=500,
                     SEGMENT_ALLOCATOR_MAX_SEGMENT_SHARE=0.40,
                     SEGMENT_ALLOCATOR_EXPLORATION_FLOOR=0.20)
@@ -141,3 +143,53 @@ class FamilyGrantWiringTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class YieldEvidenceProducerTests(unittest.TestCase):
+    """The allocator must have a real evidence producer, not a decorative flag."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.ledger = os.path.join(self.tmp, "ledger.jsonl")
+        self.table = os.path.join(self.tmp, "yields.json")
+
+    def _write_ledger(self, rows):
+        with open(self.ledger, "w", encoding="utf-8") as fh:
+            for r in rows:
+                fh.write(json.dumps(r) + "\n")
+
+    def test_table_is_built_from_the_ledger(self):
+        from orchestrator.segment_allocator import refresh_yield_table
+        self._write_ledger([
+            {"title_family": "Account Executive", "fantastic_credits": 1,
+             "send_safe": True, "net_new_send_safe": True},
+            {"title_family": "Account Executive", "fantastic_credits": 1,
+             "send_safe": False, "net_new_send_safe": False},
+            {"title_family": "Accountant", "fantastic_credits": 1,
+             "send_safe": False, "net_new_send_safe": False},
+        ])
+        self.assertEqual(refresh_yield_table(self.ledger, self.table), 2)
+        table = json.load(open(self.table, encoding="utf-8"))
+        self.assertAlmostEqual(table["Account Executive"]["yield"], 0.5)
+        self.assertAlmostEqual(table["Accountant"]["yield"], 0.0)
+
+    def test_metric_is_net_new_per_billed_job_not_gross(self):
+        """North star: never optimise raw FINAL_PASS."""
+        from orchestrator.segment_allocator import refresh_yield_table
+        self._write_ledger([
+            {"title_family": "F", "fantastic_credits": 4,
+             "send_safe": True, "net_new_send_safe": False},
+        ])
+        refresh_yield_table(self.ledger, self.table)
+        self.assertEqual(json.load(open(self.table, encoding="utf-8"))["F"]["yield"], 0.0)
+
+    def test_missing_ledger_leaves_the_table_untouched(self):
+        from orchestrator.segment_allocator import refresh_yield_table
+        self.assertEqual(refresh_yield_table(os.path.join(self.tmp, "nope"), self.table), 0)
+        self.assertFalse(os.path.exists(self.table))
+
+    def test_producer_is_invoked_before_allocating(self):
+        import inspect
+        src = inspect.getsource(FJA._family_grants)
+        self.assertIn("refresh_yield_table(", src)
+        self.assertLess(src.index("refresh_yield_table("), src.index("allocate("))
