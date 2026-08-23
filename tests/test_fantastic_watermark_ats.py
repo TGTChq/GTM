@@ -163,7 +163,11 @@ class ServerIndustryExclusionTests(unittest.TestCase):
         # Downstream firmographic fields are still present for the ICP gate.
         self.assertEqual(res.jobs[0]["_org_industry"], "Software Development")
 
-    def test_multiple_labels_serialized_as_list_no_apollo_translation(self):
+    def test_multiple_labels_use_comma_form_not_repeated_params(self):
+        # PROVEN contract (live count probe): the param is an array with
+        # style=form/explode=false -> ONE comma-joined value. A Python list would be
+        # emitted by `requests` as repeated params, which the API honors only for the
+        # FIRST label (silent under-filtering).
         feed = _Feed(_recs(2))
         labels = ["Hospitals and Health Care", "Government Administration"]
         with mock.patch.multiple(config, **dict(_PROD, FANTASTIC_SERVER_INDUSTRY_EXCLUSION_ENABLED=True,
@@ -171,8 +175,12 @@ class ServerIndustryExclusionTests(unittest.TestCase):
                                                 APOLLO_EXCLUDED_INDUSTRY_KEYWORDS=["staffing", "nonprofit"])):
             fja.run_fantastic_jobs_acquisition(http_get=feed)
         p = feed.calls[0][1]
-        self.assertEqual(p["exclude_organization_industry"], labels)   # exact labels only
-        self.assertNotIn("staffing", str(p["exclude_organization_industry"]))
+        self.assertIsInstance(p["exclude_organization_industry"], str)
+        self.assertEqual(p["exclude_organization_industry"],
+                         "Hospitals and Health Care,Government Administration")
+        # No Apollo keyword ever leaks into the provider-taxonomy value.
+        self.assertNotIn("staffing", p["exclude_organization_industry"])
+        self.assertNotIn("nonprofit", p["exclude_organization_industry"])
 
     def test_disabled_sends_nothing(self):
         feed = _Feed(_recs(2))

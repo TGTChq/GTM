@@ -582,11 +582,19 @@ def _server_industry_exclusions() -> List[str]:
 
 
 def _apply_server_industry_exclusions(params: Dict[str, Any]) -> Dict[str, Any]:
-    """Attach ``exclude_organization_industry`` (multi-value as repeated params, the
-    OpenAPI array encoding) and record attribution in the params' sidecar."""
+    """Attach ``exclude_organization_industry`` using the PROVEN multi-value encoding.
+
+    The OpenAPI schema declares ``type: array, style: form, explode: false`` -- i.e. a
+    SINGLE comma-joined value, NOT repeated query params. Verified live against
+    /v1/active-jb-count (2026-08-23): comma form removed both labels (6118 -> 6116)
+    while repeated params (``a=x&a=y``, what ``requests`` emits for a list) applied
+    only the FIRST label and silently under-filtered. Labels are exact, case-sensitive
+    LinkedIn taxonomy strings taken from configuration -- never translated from Apollo
+    keyword lists.
+    """
     labels = _server_industry_exclusions()
     if labels:
-        params["exclude_organization_industry"] = labels if len(labels) > 1 else labels[0]
+        params["exclude_organization_industry"] = ",".join(labels)
     return params
 
 

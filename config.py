@@ -794,8 +794,23 @@ FANTASTIC_QUOTA_SNAPSHOT_PATH = os.getenv(
 # keywords. Only "Hospitals and Health Care" is proven (live count probe: honored;
 # historical: 82 billed jobs -> 0 FINAL_PASS). Additional labels stay unconfigured
 # until proven. The downstream ICP gate remains intact (defense-in-depth).
+# VALIDATED SET (per-label historical evidence, 1,696-posting corpus): each label
+# produced 0 FINAL_PASS AND its records were rejected downstream for a STRUCTURAL
+# POLICY reason (REJECT_HEALTHCARE / REJECT_GOVERNMENT / REJECT_EXCLUDED_INDUSTRY),
+# so excluding it upstream saves the credit without removing convertible inventory.
+# Labels whose zero-yield came from UNVERIFIED/NEEDS_CHECK (an enrichment-coverage
+# miss, NOT a policy reject) are deliberately EXCLUDED from this set.
+# Sent as ONE comma-joined value (schema: array, style=form, explode=false).
 FANTASTIC_EXCLUDED_ORG_INDUSTRIES = _env_json(
-    "FANTASTIC_EXCLUDED_ORG_INDUSTRIES_JSON", ["Hospitals and Health Care"])
+    "FANTASTIC_EXCLUDED_ORG_INDUSTRIES_JSON", [
+        "Hospitals and Health Care",                     # n=82, REJECT_HEALTHCARE
+        "Home Health Care Services",                     # n=23, 'health care' policy
+        "Government Administration",                     # n=21, REJECT_GOVERNMENT
+        "Non-profit Organizations",                      # n=18, REJECT_EXCLUDED_INDUSTRY
+        "Mental Health Care",                            # n=11, REJECT_HEALTHCARE
+        "Medical Practices",                             # n=10, REJECT_HEALTHCARE
+        "Public Relations and Communications Services",  # n=10, REJECT_EXCLUDED_INDUSTRY
+    ])
 FANTASTIC_SERVER_INDUSTRY_EXCLUSION_ENABLED = _env_bool(
     "FANTASTIC_SERVER_INDUSTRY_EXCLUSION_ENABLED", False)
 
