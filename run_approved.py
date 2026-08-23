@@ -201,6 +201,13 @@ def run(*, revalidate_providers: bool | None = None) -> dict:
     # -- never for legacy/invalid rows, which were skipped before this point.
     result["airtable_mark_error"] = len(revalidation_failures) + len(instantly_failures)
     result["duplicates_suppressed"] = int(result.get("duplicates", 0))
+    # ``enrolled`` counts ACCEPTED API responses. Instantly v2 answers 200 for an
+    # email that already exists in the workspace (no 409/422, no created-vs-existing
+    # flag), so accepted != delivered. ``net_new_delivered`` counts only leads this
+    # run actually created, derived from the returned Lead's timestamp_created.
+    result.setdefault("net_new_delivered", 0)
+    result.setdefault("pre_existing_in_instantly", 0)
+    result.setdefault("membership", {})
     _log_enrollment_result(result)
     return result
 
@@ -302,6 +309,12 @@ def _print_sync_summary(result: dict) -> None:
     print(f"{'SENT_TO_INSTANTLY':<24}{int(result.get('enrolled', 0) or 0)}")
     print(f"{'DUPLICATES_SKIPPED':<24}{int(result.get('duplicates', 0) or 0)}")
     print(f"{'FAILED':<24}{int(result.get('failed', 0) or 0)}")
+    # Accepted-by-API is not the same as delivered: report the truthful figure too.
+    print(f"{'NET_NEW_DELIVERED':<24}{int(result.get('net_new_delivered', 0) or 0)}")
+    print(f"{'PRE_EXISTING_IN_INSTANTLY':<24}{int(result.get('pre_existing_in_instantly', 0) or 0)}")
+    for name, count in sorted((result.get("membership") or {}).items()):
+        if count:
+            print(f"   {name:<33}{count}")
     print("==============================================")
 
 
