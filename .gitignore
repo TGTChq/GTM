@@ -65,3 +65,7 @@ reports/weekly/
 
 # Local recovery snapshots.
 recovery_*/
+
+# Outbound Wave 1 dry-run review artifacts. They carry company names and
+# hiring-manager first names, so they stay local like the other run reports.
+reports/wave1_dryrun*.json

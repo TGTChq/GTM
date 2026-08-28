@@ -1314,6 +1314,44 @@ INSTANTLY_CAMPAIGN_ID = os.getenv("INSTANTLY_CAMPAIGN_ID", "")
 INSTANTLY_RATE_LIMIT_DELAY = _env_float("INSTANTLY_RATE_LIMIT_DELAY", 0.35)
 INSTANTLY_VERIFY_ON_IMPORT = _env_bool("INSTANTLY_VERIFY_ON_IMPORT", False)
 
+# ---------- Outbound Wave 1 A/B experiment ----------
+# Control A is the live campaign copy and is never touched by this code path.
+# Challenger B is resolved locally (see the ``outbound_wave1`` package) and
+# delivered as Instantly custom variables.
+#
+# DEFAULT OFF. With OUTBOUND_WAVE1_ENABLED false the enrollment payload is
+# byte-identical to today's, so deploying this code changes nothing until the
+# flag is set. OUTBOUND_WAVE1_B_SPLIT_PCT is the share of ACCOUNTS (never
+# contacts, never campaigns) routed to the challenger; 0 keeps everyone on
+# Control A even when the feature is enabled.
+OUTBOUND_WAVE1_ENABLED = _env_bool("OUTBOUND_WAVE1_ENABLED", False)
+OUTBOUND_WAVE1_EXPERIMENT_ID = os.getenv(
+    "OUTBOUND_WAVE1_EXPERIMENT_ID", "outbound_wave1_challenger_v1"
+).strip()
+OUTBOUND_WAVE1_B_SPLIT_PCT = _env_int("OUTBOUND_WAVE1_B_SPLIT_PCT", 0)
+#: Optional salt for a re-randomisation. Changing it reshuffles every account,
+#: so it must stay fixed for the life of an experiment.
+OUTBOUND_WAVE1_ASSIGNMENT_SALT = os.getenv("OUTBOUND_WAVE1_ASSIGNMENT_SALT", "").strip()
+#: Static claim / role-page registry. No runtime web lookup is ever performed.
+OUTBOUND_WAVE1_CLAIM_REGISTRY_PATH = os.getenv(
+    "OUTBOUND_WAVE1_CLAIM_REGISTRY_PATH", str(BASE_DIR / "data" / "wave1_claims.json")
+)
+#: Instantly campaign ids for the Challenger arm, keyed by role bucket, e.g.
+#: {"finance": "<campaign-uuid>"}. A bucket with no challenger campaign stays on
+#: Control A no matter what the account assignment says, so B can never be sent
+#: into a control campaign.
+OUTBOUND_WAVE1_CHALLENGER_CAMPAIGNS = _env_json(
+    "OUTBOUND_WAVE1_CHALLENGER_CAMPAIGNS_JSON", {}
+)
+
+
+def resolve_wave1_challenger_campaign_id(role_bucket: str) -> str:
+    """Challenger campaign id for a bucket, or "" when none is configured."""
+    mapping = OUTBOUND_WAVE1_CHALLENGER_CAMPAIGNS
+    if not isinstance(mapping, dict):
+        return ""
+    return str(mapping.get(str(role_bucket or "").strip().lower()) or "").strip()
+
 # Campaign routing. More-specific keys win over broader keys.
 # Example env names:
 # INSTANTLY_CAMPAIGN_MARKETING_SMALL, INSTANTLY_CAMPAIGN_MARKETING,

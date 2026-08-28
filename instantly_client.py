@@ -182,6 +182,59 @@ def _flat(value):
     return str(value)
 
 
+def wave1_enrollment_overlay(record: Dict) -> tuple[str, Dict[str, str]]:
+    """Outbound Wave 1 overlay for one approved record.
+
+    Returns ``(challenger_campaign_id, custom_variables)``. Both are empty for a
+    Control A record, so the enrollment payload stays byte-identical to what
+    production sends today.
+
+    Four independent conditions must ALL hold before a record is routed to the
+    challenger; any one of them failing leaves the record on Control A:
+
+    1. ``OUTBOUND_WAVE1_ENABLED`` is set;
+    2. the account hashes into arm B at the configured split;
+    3. every Wave 1 QA gate passes for the rendered copy;
+    4. a challenger campaign id is configured for that role bucket.
+
+    The whole overlay is wrapped: a failure inside the experiment must never be
+    able to break, or silently alter, a control enrollment.
+    """
+    if not getattr(config, "OUTBOUND_WAVE1_ENABLED", False):
+        return "", {}
+    try:
+        from outbound_wave1 import resolve_wave1
+        from outbound_wave1.assignment import ARM_B
+        from outbound_wave1.claims import load_claim_registry
+
+        fields = record.get("fields") or {}
+        resolution = resolve_wave1(
+            fields,
+            experiment_id=config.OUTBOUND_WAVE1_EXPERIMENT_ID,
+            b_split_pct=config.OUTBOUND_WAVE1_B_SPLIT_PCT,
+            salt=config.OUTBOUND_WAVE1_ASSIGNMENT_SALT,
+            registry=load_claim_registry(config.OUTBOUND_WAVE1_CLAIM_REGISTRY_PATH),
+            record_id=str(record.get("id") or ""),
+        )
+        if resolution.experiment_arm != ARM_B:
+            return "", {}
+        if not resolution.qa_pass:
+            logger.info(
+                "Wave 1 challenger withheld for %s: %s",
+                resolution.record_id, ",".join(resolution.qa_reasons)[:200],
+            )
+            return "", {}
+        challenger_campaign = config.resolve_wave1_challenger_campaign_id(
+            resolution.role_bucket
+        )
+        if not challenger_campaign:
+            return "", {}
+        return challenger_campaign, resolution.to_custom_variables()
+    except Exception as exc:  # noqa: BLE001 - the experiment never breaks delivery
+        logger.warning("Wave 1 overlay skipped: %s", str(exc)[:200])
+        return "", {}
+
+
 def airtable_record_to_lead(record: Dict, *, probe: bool = True) -> Dict:
     fields = record.get("fields") or {}
 
@@ -246,6 +299,11 @@ def airtable_record_to_lead(record: Dict, *, probe: bool = True) -> Dict:
     custom_variables = {
         key: _flat(value) for key, value in custom_variables.items() if value not in (None, "")
     }
+
+    wave1_campaign, wave1_variables = wave1_enrollment_overlay(record)
+    if wave1_campaign:
+        campaign_id = wave1_campaign
+    custom_variables.update(wave1_variables)
 
     return {
         "campaign": campaign_id,
