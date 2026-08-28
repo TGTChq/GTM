@@ -14,6 +14,8 @@ inherited from E1 so the offer cannot change mid-thread.
 
 from __future__ import annotations
 
+import html as _html
+import re
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
@@ -102,6 +104,47 @@ def _cap(text: str) -> str:
 
 def _paragraphs(*parts: str) -> str:
     return "\n\n".join(part.strip() for part in parts if part and part.strip())
+
+
+#: Instantly campaign bodies are HTML. A plain-text value interpolated into one
+#: loses every paragraph break, because HTML collapses newlines to whitespace --
+#: verified against the live workspace, whose campaign bodies are
+#: ``<div>para</div><div><br /></div><div>para</div>``. So each rendered email is
+#: ALSO published in that exact shape.
+#:
+#: This is a transport conversion, not a copy decision. It escapes, wraps and
+#: joins; it adds no word, link, image or attribute of its own, and ``html_to_text``
+#: proves the round trip so a QA gate can assert nothing was introduced.
+_PARAGRAPH_SPLIT = re.compile(r"\n\s*\n")
+_TAG_RE = re.compile(r"</?div>")
+
+
+def to_html(text: str) -> str:
+    """Convert one rendered plain-text email to the campaign body's HTML shape."""
+    paragraphs = [
+        part.strip() for part in _PARAGRAPH_SPLIT.split(str(text or "")) if part.strip()
+    ]
+    if not paragraphs:
+        return ""
+    blocks: List[str] = []
+    for index, paragraph in enumerate(paragraphs):
+        if index:
+            blocks.append("<div><br /></div>")
+        escaped = "<br />".join(
+            _html.escape(line.strip(), quote=False)
+            for line in paragraph.split("\n") if line.strip()
+        )
+        blocks.append(f"<div>{escaped}</div>")
+    return "".join(blocks)
+
+
+def html_to_text(markup: str) -> str:
+    """Inverse of :func:`to_html`. Used by QA to prove the conversion is faithful."""
+    text = str(markup or "")
+    text = text.replace("<div><br /></div>", "\n\n")
+    text = text.replace("<br />", "\n")
+    text = _TAG_RE.sub("", text)
+    return _html.unescape(text).strip()
 
 
 # ---------------------------------------------------------------------------

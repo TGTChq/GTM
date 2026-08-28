@@ -39,7 +39,7 @@ from .campaigns import (
 from .claims import ClaimRegistry, load_claim_registry, resolve_role_page
 from .evidence import MAX_FOCUS_ITEMS_IN_EMAIL, read_focus_evidence, render_evidence_list
 from .qa import audit_arm_consistency, run_qa_gates
-from .render import COPY_VERSION, RenderInputs, render_sequence
+from .render import COPY_VERSION, RenderInputs, render_sequence, to_html
 from .scope import derive_scope_combination
 from .signals import (
     EMPTY_COMPANY_CONTEXT,
@@ -127,6 +127,12 @@ class Wave1Resolution:
     rendered_email_2: str = ""
     rendered_email_3: str = ""
     rendered_email_4: str = ""
+    #: The same four emails in the HTML shape an Instantly campaign body needs.
+    #: The plain text above stays the auditable canonical output.
+    rendered_email_1_html: str = ""
+    rendered_email_2_html: str = ""
+    rendered_email_3_html: str = ""
+    rendered_email_4_html: str = ""
     e1_segments: Dict[str, str] = field(default_factory=dict)
     send_schedule: List[Dict[str, Any]] = field(default_factory=list)
 
@@ -173,6 +179,12 @@ class Wave1Resolution:
             "rendered_email_2": self.rendered_email_2,
             "rendered_email_3": self.rendered_email_3,
             "rendered_email_4": self.rendered_email_4,
+            # The Challenger campaign body uses the _html variants; Instantly
+            # bodies are HTML and would collapse the plain-text paragraphs.
+            "rendered_email_1_html": self.rendered_email_1_html,
+            "rendered_email_2_html": self.rendered_email_2_html,
+            "rendered_email_3_html": self.rendered_email_3_html,
+            "rendered_email_4_html": self.rendered_email_4_html,
         }
         return {key: value for key, value in payload.items() if value not in (None, "")}
 
@@ -384,6 +396,12 @@ def resolve_challenger(
         result.rendered_email_3,
         result.rendered_email_4,
     ) = rendered.emails
+    (
+        result.rendered_email_1_html,
+        result.rendered_email_2_html,
+        result.rendered_email_3_html,
+        result.rendered_email_4_html,
+    ) = tuple(to_html(body) for body in rendered.emails)
     result.friction_angle = rendered.friction_angle
     result.offer_noun = rendered.offer_noun
     result.e1_segments = dict(rendered.e1_segments)
@@ -413,6 +431,10 @@ def _control_from(challenger: Wave1Resolution, assigned: Assignment) -> Wave1Res
         rendered_email_2="",
         rendered_email_3="",
         rendered_email_4="",
+        rendered_email_1_html="",
+        rendered_email_2_html="",
+        rendered_email_3_html="",
+        rendered_email_4_html="",
         e1_segments={},
         send_schedule=[],
         wave1_eligible=True,

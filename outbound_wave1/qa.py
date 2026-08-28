@@ -36,7 +36,9 @@ from .render import (
     FRICTION_PARALLEL_POOL,
     FRICTION_SCREENING_BANDWIDTH,
     FRICTION_TIME_OPEN,
+    html_to_text,
     offer_question,
+    to_html,
 )
 
 #: Which frictions may accompany each (proof, offer) pair.
@@ -293,6 +295,21 @@ def run_qa_gates(resolution: Dict, *, policy: CampaignPolicy) -> Tuple[bool, Lis
     # --- banned challenger language ----------------------------------------
     for label in _find_banned(all_text):
         reasons.append(label)
+
+    # --- the HTML body must be a faithful transport of the plain text -------
+    # It is what Instantly actually sends, so it is gated as hard as the text: it
+    # must round-trip back to the exact plain-text email, which makes it
+    # impossible for a link, an image or a stray word to enter via the HTML.
+    for index, body in enumerate(emails, start=1):
+        markup = str(resolution.get(f"rendered_email_{index}_html") or "")
+        if not body.strip():
+            continue
+        if not markup.strip():
+            reasons.append(f"missing_html_body_for_email_{index}")
+        elif html_to_text(markup) != body.strip():
+            reasons.append(f"html_body_does_not_match_email_{index}")
+        elif markup != to_html(body):
+            reasons.append(f"html_body_was_not_produced_by_the_converter_{index}")
 
     # --- links / images / attachments --------------------------------------
     for index in (1, 2):
