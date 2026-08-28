@@ -29,7 +29,7 @@ from collections import defaultdict
 from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
-from .assignment import ARM_A, ARM_B
+from .assignment import ARM_A, ARM_B, ARM_NONE
 
 #: Strata every metric can be broken down by.
 STRATA: Tuple[str, ...] = (
@@ -105,8 +105,15 @@ def randomization_row(
     are classified the same way treatment rows are), while the arm stays A.
     """
     payload = resolution.to_dict() if hasattr(resolution, "to_dict") else dict(resolution)
-    eligible = bool(payload.get("eligible")) and bool(payload.get("qa_pass"))
-    reasons = list(payload.get("qa_reasons") or [])
+    # ``wave1_eligible`` is set by the resolver's shared, pre-randomisation gate.
+    # Fall back to the underlying signals for a raw dict that predates it.
+    if "wave1_eligible" in payload:
+        eligible = bool(payload.get("wave1_eligible"))
+    else:
+        eligible = bool(payload.get("eligible")) and bool(payload.get("qa_pass"))
+    reasons = [
+        part for part in str(payload.get("suppression_reason") or "").split(";") if part
+    ] or list(payload.get("qa_reasons") or [])
     if not payload.get("company_assignment_key"):
         eligible = False
         reasons.append("no_resolvable_company_assignment_key")
@@ -138,11 +145,11 @@ def build_frame(
 ) -> List[RandomizationRow]:
     """Assemble the experiment frame from a resolved batch.
 
-    ``resolutions`` are the real per-record outcomes (control rows carry no copy);
-    ``challenger_previews`` are the challenger renders for the control rows, which
-    is what makes the eligibility rule arm-independent. A control row with no
-    preview is still included, marked ineligible, so it can never be silently
-    dropped from the denominator without a reason.
+    Eligibility is already arm-independent -- the resolver decides it before it
+    randomises -- and a control-arm resolution keeps the record's classification,
+    so the frame needs nothing extra to stratify control the way it stratifies
+    treatment. ``challenger_previews`` is accepted for callers that hold them but
+    is no longer required.
     """
     previews = {
         str(getattr(item, "record_id", "") or ""): item for item in challenger_previews
@@ -151,13 +158,12 @@ def build_frame(
     for resolution in resolutions:
         arm = str(getattr(resolution, "experiment_arm", ARM_A) or ARM_A)
         record_id = str(getattr(resolution, "record_id", "") or "")
-        source = resolution if arm == ARM_B else previews.get(record_id, resolution)
+        source = previews.get(record_id, resolution) if arm == ARM_A else resolution
         row = randomization_row(source, arm=arm)
-        if arm == ARM_A and record_id not in previews:
+        if arm == ARM_NONE:
+            # Suppressed before randomisation: in neither denominator, and never
+            # silently folded into the control group.
             row.randomized_eligible = False
-            row.eligibility_reasons = sorted(
-                set(row.eligibility_reasons) | {"no_challenger_preview_for_control_row"}
-            )
         rows.append(row)
     return rows
 

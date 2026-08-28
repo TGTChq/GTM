@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
 from .campaigns import (
-    OFFER_NOUNS,
+    PLURAL_OFFER_NOUNS,
     OFFER_REMOTE_READINESS_OVERVIEW,
     OFFER_ROLE_ECONOMICS,
     OFFER_TESTING_OVERVIEW,
@@ -43,6 +43,10 @@ FRICTION_MULTI_AREA_SHORTLIST = "multi_area_shortlist"
 FRICTION_COMBINED_SCOPE_POOL = "combined_scope_pool"
 FRICTION_TIME_OPEN = "time_open"
 FRICTION_PARALLEL_POOL = "parallel_pool"
+#: Used ONLY on the economics path. It must never survive a degrade to a
+#: testing offer -- a cost-framed friction paired with "how we test" is
+#: incoherent, and a QA gate rejects that pairing.
+FRICTION_COST_COMPARISON = "cost_comparison"
 
 
 @dataclass(frozen=True)
@@ -208,6 +212,12 @@ _FRICTION_BY_CAMPAIGN: Dict[str, Tuple[str, str]] = {
     ),
 }
 
+_ECONOMICS_FRICTION = (
+    FRICTION_COST_COMPARISON,
+    "Working out what that actually costs against a local hire is usually the slow "
+    "part.",
+)
+
 _T2_FRICTION = (
     FRICTION_TIME_OPEN,
     "That usually means the shortlist has not produced the right fit yet, rather "
@@ -221,7 +231,16 @@ _T3_FRICTION = (
 )
 
 
-def _friction(policy: CampaignPolicy, signal_type: str) -> Tuple[str, str]:
+def _friction(policy: CampaignPolicy, signal_type: str, proof_type: str) -> Tuple[str, str]:
+    """Friction is resolved AFTER the proof, so a degrade changes the whole triple.
+
+    When a campaign cannot support economics it does not merely swap the proof and
+    the offer: the cost-framed friction goes with them, and the record gets the
+    scope/bandwidth friction that actually leads into "we test candidates on
+    role-specific work".
+    """
+    if proof_type == PROOF_ECONOMICS:
+        return _ECONOMICS_FRICTION
     if signal_type == SIGNAL_JOB_AGE:
         return _T2_FRICTION
     if signal_type == SIGNAL_ACTIVE_REQ:
@@ -267,23 +286,14 @@ def _proof_line(proof_type: str, data: RenderInputs) -> str:
 # Offer lines
 # ---------------------------------------------------------------------------
 
-#: E1 offer questions. The testing_overview wording is the Wave 1 specification's
-#: frozen safe offer; its E2-E4 noun ("how we test for this role") is the frozen
-#: noun for the SAME offer type, so the offer never changes -- only the sentence
-#: shape does.
-_OFFER_QUESTIONS: Dict[str, str] = {
-    OFFER_TESTING_OVERVIEW: "Want me to send how our testing works?",
-    OFFER_ROLE_ECONOMICS: "Want me to send the numbers for this role?",
-    OFFER_REMOTE_READINESS_OVERVIEW: "Want me to send how we assess remote readiness?",
-}
+def offer_noun(policy: CampaignPolicy, offer_type: str) -> str:
+    """The exact words this campaign uses for this offer, resolved once."""
+    return policy.offer_noun(offer_type)
 
 
-def offer_question(offer_type: str) -> str:
-    return _OFFER_QUESTIONS.get(offer_type, _OFFER_QUESTIONS[OFFER_TESTING_OVERVIEW])
-
-
-def offer_noun(offer_type: str) -> str:
-    return OFFER_NOUNS.get(offer_type, OFFER_NOUNS[OFFER_TESTING_OVERVIEW])
+def offer_question(noun: str) -> str:
+    """E1 asks for the offer using the SAME words E2-E4 refer back to."""
+    return f"Want me to send {noun}?"
 
 
 # ---------------------------------------------------------------------------
@@ -297,11 +307,12 @@ def render_email_1(
     proof_type: str,
     offer_type: str,
     data: RenderInputs,
+    noun: str = "",
 ) -> RenderedEmail:
     signal = _signal_line(policy, signal_type, data)
-    friction_angle, friction = _friction(policy, signal_type)
+    friction_angle, friction = _friction(policy, signal_type, proof_type)
     proof = _proof_line(proof_type, data)
-    offer = offer_question(offer_type)
+    offer = offer_question(noun or offer_noun(policy, offer_type))
     greeting = f"Hi {data.first_name},"
     body = _paragraphs(greeting, signal, friction, proof, offer)
     return RenderedEmail(
@@ -326,11 +337,17 @@ def render_email_2(noun: str) -> str:
 
 
 def render_email_3(noun: str) -> str:
+    # The frozen sentence is "<noun> is still there if you want it first". A plural
+    # noun ("the numbers for this role") disagrees with it, so the verb and the
+    # pronoun are selected mechanically. Word choice is untouched.
+    plural = noun in PLURAL_OFFER_NOUNS
+    verb = "are" if plural else "is"
+    pronoun = "them" if plural else "it"
     return _paragraphs(
         "One thing I left out.",
         "You don't pay anything until you've picked someone. If nobody on the "
         "shortlist clears your bar, you owe nothing and we keep looking.",
-        f"{_cap(noun)} is still there if you want it first.",
+        f"{_cap(noun)} {verb} still there if you want {pronoun} first.",
     )
 
 
@@ -351,13 +368,14 @@ def render_sequence(
     data: RenderInputs,
 ) -> RenderedSequence:
     """Render all four Challenger emails for one record."""
-    noun = offer_noun(offer_type)
+    noun = offer_noun(policy, offer_type)
     email_1 = render_email_1(
         policy,
         signal_type=signal_type,
         proof_type=proof_type,
         offer_type=offer_type,
         data=data,
+        noun=noun,
     )
     return RenderedSequence(
         subject=email_1.subject,

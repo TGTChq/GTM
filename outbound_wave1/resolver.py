@@ -13,11 +13,18 @@ zero writes.
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import date, datetime
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
-from .assignment import ARM_A, ARM_B, Assignment, account_assignment, company_assignment_key
+from .assignment import (
+    ARM_A,
+    ARM_B,
+    ARM_NONE,
+    Assignment,
+    account_assignment,
+    company_assignment_key,
+)
 from .campaigns import (
     OFFER_CLASS_BY_TYPE,
     OFFER_TESTING_OVERVIEW,
@@ -124,10 +131,16 @@ class Wave1Resolution:
     send_schedule: List[Dict[str, Any]] = field(default_factory=list)
 
     # --- QA -----------------------------------------------------------------
+    #: Passed the structural pre-render checks (campaign known, fields present,
+    #: posting still eligible).
     eligible: bool = True
     ineligible_reason: str = ""
     qa_pass: bool = False
     qa_reasons: List[str] = field(default_factory=list)
+    #: In the experiment at all. False means SUPPRESSED -- the record is not in
+    #: arm A, not in arm B, and not in either denominator.
+    wave1_eligible: bool = False
+    suppression_reason: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -380,6 +393,100 @@ def resolve_challenger(
     return result
 
 
+def _control_from(challenger: Wave1Resolution, assigned: Assignment) -> Wave1Resolution:
+    """A control-arm resolution for a record that passed the SHARED gate.
+
+    It keeps the record's classification -- campaign, signal tier, proof, offer,
+    friction -- because those describe the opportunity, not the arm. That is what
+    lets the analysis stratify control the same way it stratifies treatment. The
+    rendered copy is dropped: Control A is the live Instantly sequence and nothing
+    here produces it.
+    """
+    control = replace(
+        challenger,
+        experiment_arm=ARM_A,
+        assignment_bucket=assigned.bucket,
+        assignment_reason=assigned.reason,
+        copy_version="control-a-live-instantly-copy",
+        rendered_subject="",
+        rendered_email_1="",
+        rendered_email_2="",
+        rendered_email_3="",
+        rendered_email_4="",
+        e1_segments={},
+        send_schedule=[],
+        wave1_eligible=True,
+        suppression_reason="",
+        qa_pass=True,
+        qa_reasons=[CONTROL_COPY_NOTE],
+    )
+    return control
+
+
+def resolve_wave1_pair(
+    fields: Dict,
+    *,
+    experiment_id: str = DEFAULT_EXPERIMENT_ID,
+    b_split_pct: int = 50,
+    salt: str = "",
+    registry: Optional[ClaimRegistry] = None,
+    company: CompanyContext = EMPTY_COMPANY_CONTEXT,
+    record_id: str = "",
+    as_of: Optional[datetime] = None,
+    sequence_start: Optional[date | datetime | str] = None,
+) -> Tuple[Wave1Resolution, Wave1Resolution]:
+    """Resolve one record, returning ``(outcome, challenger_render)``.
+
+    The challenger render is returned alongside the outcome so a reviewer can read
+    the copy a control-arm record WOULD have received, without re-deriving it.
+
+    Eligibility comes FIRST and is arm-independent: the challenger is rendered and
+    QA'd before anything is randomised. Only records that clear that shared gate
+    are assigned to A or B, so the two arms are drawn from one identical eligible
+    population.
+
+    A record that fails the gate is SUPPRESSED -- ``wave1_eligible=False``,
+    ``experiment_arm=NONE``, ``suppression_reason`` set. It is never relabelled A.
+    """
+    # Phase 1: shared eligibility, computed without reference to any arm.
+    challenger = resolve_challenger(
+        fields,
+        experiment_id=experiment_id,
+        registry=registry,
+        company=company,
+        record_id=record_id,
+        as_of=as_of,
+        sequence_start=sequence_start,
+    )
+    assigned = account_assignment(
+        fields, experiment_id=experiment_id, b_split_pct=b_split_pct, salt=salt
+    )
+    challenger.assignment_bucket = assigned.bucket
+    challenger.assignment_reason = assigned.reason
+
+    suppression: List[str] = []
+    if not challenger.eligible:
+        suppression.append(challenger.ineligible_reason or "record_not_wave1_eligible")
+    elif not challenger.qa_pass:
+        suppression.extend(challenger.qa_reasons)
+    if not assigned.assignable:
+        suppression.append(assigned.reason)
+
+    if suppression:
+        challenger.wave1_eligible = False
+        challenger.experiment_arm = ARM_NONE
+        challenger.suppression_reason = ";".join(dict.fromkeys(suppression))
+        challenger.qa_pass = False
+        return challenger, challenger
+
+    # Phase 2: randomise the eligible record.
+    challenger.wave1_eligible = True
+    if assigned.arm == ARM_B:
+        challenger.experiment_arm = ARM_B
+        return challenger, challenger
+    return _control_from(challenger, assigned), challenger
+
+
 def resolve_wave1(
     fields: Dict,
     *,
@@ -392,50 +499,19 @@ def resolve_wave1(
     as_of: Optional[datetime] = None,
     sequence_start: Optional[date | datetime | str] = None,
 ) -> Wave1Resolution:
-    """Resolve one record's actual Wave 1 outcome, arm included."""
-    assigned = account_assignment(
-        fields, experiment_id=experiment_id, b_split_pct=b_split_pct, salt=salt
-    )
-    if assigned.arm == ARM_B:
-        return resolve_challenger(
-            fields,
-            experiment_id=experiment_id,
-            registry=registry,
-            company=company,
-            assignment=assigned,
-            record_id=record_id,
-            as_of=as_of,
-            sequence_start=sequence_start,
-        )
-
-    bucket = _text(fields.get("Role Bucket")).lower()
-    policy = campaign_for_bucket(bucket)
-    control = Wave1Resolution(
-        record_id=record_id or _text(fields.get("id")),
-        lead_key=_text(fields.get("Lead Key")),
-        company=_text(fields.get("Outbound Company")) or _text(fields.get("Company")),
-        role=_text(fields.get("Outbound Role")) or _text(fields.get("Open Role")),
-        canonical_role=_text(fields.get("Matched Role")),
-        role_bucket=bucket,
-        role_confidence=_text(fields.get("Outbound Role Confidence")),
-        company_confidence=_text(fields.get("Outbound Company Confidence")),
+    """Resolve one record's actual Wave 1 outcome. See ``resolve_wave1_pair``."""
+    outcome, _challenger = resolve_wave1_pair(
+        fields,
         experiment_id=experiment_id,
-        experiment_arm=ARM_A,
-        company_assignment_key=assigned.key,
-        assignment_bucket=assigned.bucket,
-        assignment_reason=assigned.reason,
-        campaign=policy.name if policy else "",
-        campaign_key=policy.key if policy else "",
-        campaign_id=_text(fields.get("Campaign ID")),
-        copy_version="control-a-live-instantly-copy",
-        # Control A is the live sequence. It is not rendered, inspected or gated
-        # here, so it passes through untouched.
-        eligible=policy is not None,
-        ineligible_reason="" if policy else f"role_bucket_not_in_wave1:{bucket or 'blank'}",
-        qa_pass=policy is not None,
-        qa_reasons=[CONTROL_COPY_NOTE] if policy else ["role_bucket_not_in_wave1"],
+        b_split_pct=b_split_pct,
+        salt=salt,
+        registry=registry,
+        company=company,
+        record_id=record_id,
+        as_of=as_of,
+        sequence_start=sequence_start,
     )
-    return control
+    return outcome
 
 
 def build_company_index(
@@ -506,7 +582,7 @@ def resolve_batch(
             record_id = _text(fields.get("id"))
         key = company_assignment_key(fields)
         company = index.get(key, EMPTY_COMPANY_CONTEXT)
-        resolution = resolve_wave1(
+        resolution, challenger = resolve_wave1_pair(
             fields,
             experiment_id=experiment_id,
             b_split_pct=b_split_pct,
@@ -519,17 +595,7 @@ def resolve_batch(
         )
         resolutions.append(resolution)
         if challenger_preview and resolution.experiment_arm == ARM_A:
-            previews.append(
-                resolve_challenger(
-                    fields,
-                    experiment_id=experiment_id,
-                    registry=claim_registry,
-                    company=company,
-                    record_id=record_id,
-                    as_of=as_of,
-                    sequence_start=sequence_start,
-                )
-            )
+            previews.append(challenger)
 
     failures = audit_arm_consistency([item.to_dict() for item in resolutions])
     return resolutions, previews, failures

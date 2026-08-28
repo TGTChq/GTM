@@ -189,16 +189,22 @@ def wave1_enrollment_overlay(record: Dict) -> tuple[str, Dict[str, str]]:
     Control A record, so the enrollment payload stays byte-identical to what
     production sends today.
 
-    Four independent conditions must ALL hold before a record is routed to the
-    challenger; any one of them failing leaves the record on Control A:
+    Eligibility is decided BEFORE randomisation, so there is no such thing here as
+    "a B record whose copy failed QA". A record that cannot render safely is
+    suppressed from the experiment (``wave1_eligible=False``, arm ``NONE``,
+    ``suppression_reason`` set) and never enters either arm. It keeps whatever the
+    pipeline did before Wave 1 existed -- that is the absence of an experiment, not
+    a reassignment to the control group, and it is excluded from both denominators
+    by ``outbound_wave1.measurement``.
+
+    Three conditions must hold for the challenger to apply:
 
     1. ``OUTBOUND_WAVE1_ENABLED`` is set;
-    2. the account hashes into arm B at the configured split;
-    3. every Wave 1 QA gate passes for the rendered copy;
-    4. a challenger campaign id is configured for that role bucket.
+    2. the record is Wave 1 eligible AND its account hashes into arm B;
+    3. a challenger campaign id is configured for that role bucket.
 
     The whole overlay is wrapped: a failure inside the experiment must never be
-    able to break, or silently alter, a control enrollment.
+    able to break, or silently alter, an enrollment.
     """
     if not getattr(config, "OUTBOUND_WAVE1_ENABLED", False):
         return "", {}
@@ -216,13 +222,16 @@ def wave1_enrollment_overlay(record: Dict) -> tuple[str, Dict[str, str]]:
             registry=load_claim_registry(config.OUTBOUND_WAVE1_CLAIM_REGISTRY_PATH),
             record_id=str(record.get("id") or ""),
         )
-        if resolution.experiment_arm != ARM_B:
-            return "", {}
-        if not resolution.qa_pass:
+        if not resolution.wave1_eligible:
+            # Suppressed by the shared pre-randomisation gate. Logged explicitly so
+            # it is never a silent outcome, and deliberately NOT relabelled as
+            # control traffic.
             logger.info(
-                "Wave 1 challenger withheld for %s: %s",
-                resolution.record_id, ",".join(resolution.qa_reasons)[:200],
+                "Wave 1 suppressed (not reassigned to control) for %s: %s",
+                resolution.record_id, resolution.suppression_reason[:200],
             )
+            return "", {}
+        if resolution.experiment_arm != ARM_B:
             return "", {}
         challenger_campaign = config.resolve_wave1_challenger_campaign_id(
             resolution.role_bucket

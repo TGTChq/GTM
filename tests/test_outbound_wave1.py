@@ -15,6 +15,7 @@ import instantly_client
 from outbound_wave1 import (
     ARM_A,
     ARM_B,
+    ARM_NONE,
     CAMPAIGNS,
     WAVE1_CAMPAIGN_NAMES,
     account_assignment,
@@ -173,9 +174,9 @@ def test_assignment_key_prefers_canonical_identity_then_domain_then_name():
     assert company_assignment_key({}) == ""
 
 
-def test_unassignable_company_stays_on_control():
+def test_unassignable_company_is_suppressed_not_put_in_control():
     assignment = account_assignment({}, experiment_id=EXPERIMENT, b_split_pct=100)
-    assert assignment.arm == ARM_A
+    assert assignment.arm == ARM_NONE
     assert not assignment.assignable
 
 
@@ -841,18 +842,33 @@ def test_no_challenger_campaign_configured_keeps_the_record_on_control(monkeypat
     assert "experiment_arm" not in lead["custom_variables"]
 
 
-def test_a_qa_failure_keeps_the_record_on_control(monkeypatch):
+def test_a_suppressed_record_gets_the_unchanged_production_payload(monkeypatch):
     monkeypatch.setattr(config, "OUTBOUND_WAVE1_ENABLED", True)
     monkeypatch.setattr(config, "OUTBOUND_WAVE1_B_SPLIT_PCT", 100)
     monkeypatch.setattr(
         config, "OUTBOUND_WAVE1_CHALLENGER_CAMPAIGNS", {"finance": "challenger-campaign-id"}
     )
     record = _approved_record()
-    record["fields"]["Outbound Role"] = "Financial Analyst | Remote | $90k"
-    record["fields"]["Outbound Roles"] = "Financial Analyst | Remote | $90k"
+    unsafe = "Financial Analyst | Remote | 90k"
+    record["fields"]["Outbound Role"] = unsafe
+    record["fields"]["Outbound Roles"] = unsafe
+
+    # The record never entered the experiment, so it is not arm B -- and it is not
+    # arm A either. It simply keeps the payload the pipeline built before Wave 1
+    # existed, and the measurement frame excludes it from BOTH denominators.
+    from outbound_wave1 import ARM_NONE, resolve_wave1
+
+    resolution = resolve_wave1(
+        record["fields"], experiment_id=config.OUTBOUND_WAVE1_EXPERIMENT_ID,
+        b_split_pct=100,
+    )
+    assert resolution.experiment_arm == ARM_NONE
+    assert not resolution.wave1_eligible
+
     lead = instantly_client.airtable_record_to_lead(record, probe=False)
     assert lead["campaign"] == "control-campaign-id"
     assert "rendered_email_1" not in lead["custom_variables"]
+    assert "experiment_arm" not in lead["custom_variables"]
 
 
 def test_an_overlay_failure_never_breaks_a_control_enrollment(monkeypatch):
@@ -868,11 +884,12 @@ def test_an_overlay_failure_never_breaks_a_control_enrollment(monkeypatch):
     assert "experiment_arm" not in lead["custom_variables"]
 
 
-def test_email_1_offer_question_matches_the_offer_type():
+def test_email_1_asks_for_the_resolved_offer_noun_verbatim():
     from outbound_wave1.render import offer_question
 
     resolution = resolve_challenger(_fields(), experiment_id=EXPERIMENT, registry=empty_registry())
-    assert resolution.e1_segments["offer"] == offer_question(resolution.outbound_offer_type)
+    assert resolution.e1_segments["offer"] == offer_question(resolution.offer_noun)
+    assert resolution.offer_noun in resolution.rendered_email_1
     assert resolution.qa_pass
 
 
@@ -886,7 +903,7 @@ def test_a_mismatched_offer_question_fails_qa():
     resolution["e1_segments"]["offer"] = "Want me to send the numbers for this role?"
     passed, reasons = run_qa_gates(resolution, policy=campaign_for_bucket("finance"))
     assert not passed
-    assert "email_1_offer_is_not_the_registered_offer_for_its_type" in reasons
+    assert "email_1_does_not_ask_for_the_resolved_offer_noun" in reasons
 
 
 def test_an_offer_noun_swapped_mid_thread_fails_qa():

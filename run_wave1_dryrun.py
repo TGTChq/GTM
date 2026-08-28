@@ -206,53 +206,183 @@ def build_population(limit: int) -> List[Dict[str, Any]]:
     return selected
 
 
+def _clock(as_of: Optional[datetime]) -> Dict[str, Any]:
+    """Label the run's clock.
+
+    Job age is the only time-dependent input, so a run with ``--as-of`` in the
+    future is a VALIDATION of the T2 branch, not a picture of production state.
+    The artifact says which it is so the two are never read as one number.
+    """
+    now = datetime.now(timezone.utc)
+    if as_of is None or as_of.date() == now.date():
+        return {
+            "as_of": now.isoformat(),
+            "mode": "current_date",
+            "note": "Job age derived from today. These are current production-state counts.",
+        }
+    return {
+        "as_of": as_of.isoformat(),
+        "mode": "simulated_future_date",
+        "real_now": now.isoformat(),
+        "note": (
+            "SIMULATED CLOCK. Job age is re-derived as if today were the as_of date, "
+            "which exercises the 45-60 day T2 window against the same real records. "
+            "These are test-evidence counts, NOT current production state."
+        ),
+    }
+
+
 def _counts(resolutions: Iterable[Dict[str, Any]], key: str) -> Dict[str, int]:
     return dict(sorted(Counter(str(r.get(key) or "") for r in resolutions).items()))
 
 
+#: Which population each breakdown is counted over. Every dimension names its
+#: denominator so no two numbers in the artifact can be compared by accident.
+DENOMINATOR_OF = {
+    "by_arm": "evaluated",
+    "by_campaign": "evaluated",
+    "by_source_artifact": "evaluated",
+    "by_signal_tier": "rendered",
+    "by_signal_type": "rendered",
+    "by_proof": "rendered",
+    "by_offer": "rendered",
+    "by_offer_class": "rendered",
+    "by_friction_angle": "rendered",
+    "role_page_match": "rendered",
+    "qa_pass_fail": "rendered",
+    "suppression_reasons": "suppressed",
+    "not_rendered_reasons": "not_rendered",
+}
+
+
 def summarize(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
-    challenger = [r for r in rows if r.get("experiment_arm") == "B"]
-    reviewable = [r for r in rows if r.get("copy_reviewable")]
+    """Counts with explicit denominators, plus an arithmetic reconciliation.
+
+    Three populations, nested:
+
+    * ``evaluated``   -- every record read from the local artifacts;
+    * ``rendered``    -- those that got far enough to produce challenger copy
+                         (a record held or missing a required field does not);
+    * ``wave1_eligible`` -- rendered AND QA-passing AND randomisable. Only these
+                         are assigned to an arm.
+
+    ``suppressed`` is ``evaluated - wave1_eligible`` and covers both the records
+    that never rendered and the ones whose copy failed QA.
+    """
+    evaluated = rows
+    rendered = [r for r in rows if r.get("copy_reviewable")]
+    not_rendered = [r for r in rows if not r.get("copy_reviewable")]
+    eligible = [r for r in rows if r.get("wave1_eligible")]
+    suppressed = [r for r in rows if not r.get("wave1_eligible")]
+
     qa_reason_counts: Counter = Counter()
-    for row in reviewable:
+    for row in rendered:
         for reason in row.get("qa_reasons") or []:
             qa_reason_counts[reason] += 1
-    return {
-        "evaluated": len(rows),
-        "by_arm": _counts(rows, "experiment_arm"),
-        "by_campaign": _counts(rows, "campaign"),
-        "by_signal_tier": _counts(reviewable, "signal_tier"),
-        "by_signal_type": _counts(reviewable, "signal_type"),
-        "by_proof": _counts(reviewable, "proof_type"),
-        "by_offer": _counts(reviewable, "outbound_offer_type"),
-        "by_offer_class": _counts(reviewable, "offer_class"),
-        "by_friction_angle": _counts(reviewable, "friction_angle"),
-        "role_page_match": {
-            "true": sum(1 for r in reviewable if r.get("role_page_match")),
-            "false": sum(1 for r in reviewable if not r.get("role_page_match")),
+    suppression_counts: Counter = Counter()
+    for row in suppressed:
+        for reason in str(row.get("suppression_reason") or "").split(";"):
+            if reason:
+                suppression_counts[reason] += 1
+    not_rendered_counts = Counter(
+        str(r.get("ineligible_reason") or "unspecified") for r in not_rendered
+    )
+
+    qa_pass = sum(1 for r in rendered if r.get("qa_pass"))
+    qa_fail = len(rendered) - qa_pass
+    by_arm = _counts(evaluated, "experiment_arm")
+    arm_a = by_arm.get("A", 0)
+    arm_b = by_arm.get("B", 0)
+    arm_none = by_arm.get("NONE", 0)
+
+    summary: Dict[str, Any] = {
+        "denominators": {
+            "evaluated": len(evaluated),
+            "rendered": len(rendered),
+            "not_rendered": len(not_rendered),
+            "wave1_eligible": len(eligible),
+            "suppressed": len(suppressed),
+            "arm_a": arm_a,
+            "arm_b": arm_b,
+            "arm_none_suppressed": arm_none,
         },
-        "challenger_assigned": len(challenger),
-        "copy_reviewed": len(reviewable),
-        "qa_pass": sum(1 for r in reviewable if r.get("qa_pass")),
-        "qa_fail": sum(1 for r in reviewable if not r.get("qa_pass")),
+        "denominator_of": dict(DENOMINATOR_OF),
+        "by_arm": by_arm,
+        "by_campaign": _counts(evaluated, "campaign"),
+        "by_signal_tier": _counts(rendered, "signal_tier"),
+        "by_signal_type": _counts(rendered, "signal_type"),
+        "by_proof": _counts(rendered, "proof_type"),
+        "by_offer": _counts(rendered, "outbound_offer_type"),
+        "by_offer_class": _counts(rendered, "offer_class"),
+        "by_friction_angle": _counts(rendered, "friction_angle"),
+        "by_offer_noun": _counts(rendered, "offer_noun"),
+        "role_page_match": {
+            "true": sum(1 for r in rendered if r.get("role_page_match")),
+            "false": sum(1 for r in rendered if not r.get("role_page_match")),
+        },
+        "qa_pass_fail": {"pass": qa_pass, "fail": qa_fail},
         "qa_reason_counts": dict(sorted(qa_reason_counts.items(), key=lambda kv: -kv[1])),
+        "suppression_reasons": dict(sorted(suppression_counts.items(), key=lambda kv: -kv[1])),
+        "not_rendered_reasons": dict(sorted(not_rendered_counts.items(), key=lambda kv: -kv[1])),
         "by_source_artifact": {
             source: {
-                "reviewed": sum(1 for r in reviewable if r.get("source_artifact") == source),
+                "evaluated": sum(1 for r in evaluated if r.get("source_artifact") == source),
+                "rendered": sum(1 for r in rendered if r.get("source_artifact") == source),
                 "qa_pass": sum(
-                    1 for r in reviewable
+                    1 for r in rendered
                     if r.get("source_artifact") == source and r.get("qa_pass")
                 ),
             }
-            for source in sorted({str(r.get("source_artifact") or "") for r in reviewable})
+            for source in sorted({str(r.get("source_artifact") or "") for r in evaluated})
         },
-        "contact_present": sum(1 for r in rows if r.get("contact_present")),
-        "contact_synthetic": sum(1 for r in rows if not r.get("contact_present")),
-        "enrollable_challenger_qa_pass": sum(
-            1 for r in rows
-            if r.get("experiment_arm") == "B" and r.get("contact_present") and r.get("qa_pass")
+        "contact_present": sum(1 for r in evaluated if r.get("contact_present")),
+        "contact_synthetic": sum(1 for r in evaluated if not r.get("contact_present")),
+        "enrollable_challenger": sum(
+            1 for r in evaluated
+            if r.get("experiment_arm") == "B" and r.get("contact_present")
         ),
     }
+    summary["reconciliation"] = _reconcile(summary, evaluated, rendered)
+    return summary
+
+
+def _reconcile(
+    summary: Dict[str, Any], evaluated: List[Dict[str, Any]], rendered: List[Dict[str, Any]]
+) -> Dict[str, Any]:
+    """Every count must add up to a named denominator. Anything false is a bug."""
+    d = summary["denominators"]
+    checks = {
+        "rendered_plus_not_rendered_equals_evaluated":
+            d["rendered"] + d["not_rendered"] == d["evaluated"],
+        "eligible_plus_suppressed_equals_evaluated":
+            d["wave1_eligible"] + d["suppressed"] == d["evaluated"],
+        "arm_a_plus_arm_b_equals_eligible":
+            d["arm_a"] + d["arm_b"] == d["wave1_eligible"],
+        "arm_none_equals_suppressed":
+            d["arm_none_suppressed"] == d["suppressed"],
+        "all_arms_sum_to_evaluated":
+            d["arm_a"] + d["arm_b"] + d["arm_none_suppressed"] == d["evaluated"],
+        "qa_pass_plus_fail_equals_rendered":
+            sum(summary["qa_pass_fail"].values()) == d["rendered"],
+        "signal_tier_counts_sum_to_rendered":
+            sum(summary["by_signal_tier"].values()) == d["rendered"],
+        "proof_counts_sum_to_rendered":
+            sum(summary["by_proof"].values()) == d["rendered"],
+        "offer_counts_sum_to_rendered":
+            sum(summary["by_offer"].values()) == d["rendered"],
+        "campaign_counts_sum_to_evaluated":
+            sum(summary["by_campaign"].values()) == d["evaluated"],
+        "role_page_match_sums_to_rendered":
+            sum(summary["role_page_match"].values()) == d["rendered"],
+        "every_eligible_row_passed_qa":
+            all(r.get("qa_pass") for r in evaluated if r.get("wave1_eligible")),
+        "no_suppressed_row_is_in_an_arm":
+            all(
+                r.get("experiment_arm") == "NONE"
+                for r in evaluated if not r.get("wave1_eligible")
+            ),
+    }
+    return {"checks": checks, "all_pass": all(checks.values())}
 
 
 def run(
@@ -293,17 +423,22 @@ def run(
         payload["source_artifact"] = meta.get("_source", "")
         payload["contact_present"] = bool(meta.get("_contact_present"))
         payload["copy_reviewable"] = bool(payload.get("rendered_email_1"))
+        # The arm and the eligibility verdict always come from the real outcome,
+        # never from the preview render.
+        payload["experiment_arm"] = resolution.experiment_arm
+        payload["wave1_eligible"] = resolution.wave1_eligible
+        payload["suppression_reason"] = resolution.suppression_reason
         rows.append(payload)
 
     artifact = {
         "schema": "tgtc-outbound-wave1-dryrun/1",
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "mode": "dry_run",
+        "clock": _clock(as_of),
         "external_writes": 0,
         "provider_operations": [],
         "experiment_id": experiment_id,
         "b_split_pct": b_split_pct,
-        "as_of": (as_of or datetime.now(timezone.utc)).isoformat(),
         "claim_registry": {
             "path": registry.path,
             "role_pages": len(registry.role_pages),
@@ -370,10 +505,20 @@ def main() -> None:
         claims_path=args.claims,
     )
     summary = artifact["summary"]
+    clock = artifact["clock"]
+    print(f"CLOCK: {clock['mode']} ({clock['as_of']})")
+    print(clock["note"])
+    print()
     print(json.dumps(summary, indent=2))
     print(f"\nartifact: {args.out}")
     if artifact["batch_qa_failures"]:
         print("BATCH QA FAILURES:", artifact["batch_qa_failures"])
+    reconciliation = summary["reconciliation"]
+    if not reconciliation["all_pass"]:
+        failed = [name for name, ok in reconciliation["checks"].items() if not ok]
+        print("RECONCILIATION FAILED:", failed)
+        raise SystemExit(1)
+    print("RECONCILIATION: every count adds up to its named denominator.")
 
 
 if __name__ == "__main__":

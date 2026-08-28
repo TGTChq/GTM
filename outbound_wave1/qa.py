@@ -16,16 +16,48 @@ from typing import Dict, List, Sequence, Tuple
 
 from .campaigns import (
     OFFER_CLASS_PUBLISHED,
-    OFFER_NOUNS,
+    OFFER_REMOTE_READINESS_OVERVIEW,
+    OFFER_ROLE_ECONOMICS,
+    OFFER_TESTING_OVERVIEW,
     PROOF_ECONOMICS,
     PROOF_REMOTE_READINESS,
+    PROOF_TESTING_MECHANICS,
     SIGNAL_MULTI_OPENING,
     TIER_1,
     TIER_2,
     VALID_OFFER_NOUNS,
     CampaignPolicy,
 )
-from .render import offer_question
+from .render import (
+    FRICTION_COMBINED_SCOPE_POOL,
+    FRICTION_COST_COMPARISON,
+    FRICTION_CROSS_FUNCTION_SCREENING,
+    FRICTION_MULTI_AREA_SHORTLIST,
+    FRICTION_PARALLEL_POOL,
+    FRICTION_SCREENING_BANDWIDTH,
+    FRICTION_TIME_OPEN,
+    offer_question,
+)
+
+#: Which frictions may accompany each (proof, offer) pair.
+#:
+#: A degrade has to move all three together. The cost-framed friction belongs to
+#: the economics path and NOTHING else -- pairing it with "how we test for this
+#: role" would leave the reader a budget problem and a testing answer. The
+#: economics path likewise may not borrow a scope/bandwidth friction.
+COHERENT_FRICTIONS = {
+    (PROOF_ECONOMICS, OFFER_ROLE_ECONOMICS): frozenset({FRICTION_COST_COMPARISON}),
+    (PROOF_TESTING_MECHANICS, OFFER_TESTING_OVERVIEW): frozenset({
+        FRICTION_SCREENING_BANDWIDTH, FRICTION_CROSS_FUNCTION_SCREENING,
+        FRICTION_MULTI_AREA_SHORTLIST, FRICTION_COMBINED_SCOPE_POOL,
+        FRICTION_TIME_OPEN, FRICTION_PARALLEL_POOL,
+    }),
+    (PROOF_REMOTE_READINESS, OFFER_REMOTE_READINESS_OVERVIEW): frozenset({
+        FRICTION_CROSS_FUNCTION_SCREENING, FRICTION_SCREENING_BANDWIDTH,
+        FRICTION_MULTI_AREA_SHORTLIST, FRICTION_COMBINED_SCOPE_POOL,
+        FRICTION_TIME_OPEN, FRICTION_PARALLEL_POOL,
+    }),
+}
 
 #: Anything that still looks like a template placeholder.
 _MERGE_VARIABLE_RE = re.compile(r"\{\{[^}]*\}\}|\{[A-Za-z_][A-Za-z0-9_]*\}")
@@ -227,30 +259,34 @@ def run_qa_gates(resolution: Dict, *, policy: CampaignPolicy) -> Tuple[bool, Lis
                     reasons.append("customer_experience_mislabels_support_vs_success")
                     break
 
-    # --- offer stability across the thread ---------------------------------
-    # E1 asks the offer as a question ("Want me to send how our testing works?");
-    # E2-E4 refer back to it as a noun ("how we test for this role"). Both are
-    # frozen wording for the SAME offer type, so identity is checked on the offer
-    # type and its registered question, not on the two sentences matching.
-    offer_type = str(resolution.get("outbound_offer_type") or "")
-    e1_offer = str((resolution.get("e1_segments") or {}).get("offer") or "")
-    if e1_offer and e1_offer != offer_question(offer_type):
-        reasons.append("email_1_offer_is_not_the_registered_offer_for_its_type")
+    # --- friction -> proof -> offer must degrade together -------------------
+    friction_angle = str(resolution.get("friction_angle") or "")
+    allowed = COHERENT_FRICTIONS.get((proof, str(resolution.get("outbound_offer_type") or "")))
+    if allowed is None:
+        reasons.append("proof_offer_pair_is_not_a_wave1_combination")
+    elif friction_angle and friction_angle not in allowed:
+        reasons.append("friction_incoherent_with_proof_and_offer")
 
+    # --- offer wording is identical in all four emails ----------------------
+    # The noun is resolved once and is the literal text the reader sees, so this
+    # compares rendered strings, not semantic labels.
+    offer_type = str(resolution.get("outbound_offer_type") or "")
     noun = str(resolution.get("offer_noun") or "")
-    if noun != OFFER_NOUNS.get(offer_type, noun):
-        reasons.append("offer_noun_does_not_match_the_offer_type")
     if noun not in VALID_OFFER_NOUNS:
         reasons.append("offer_noun_outside_frozen_vocabulary")
-    else:
-        for index in (2, 3, 4):
+    if noun and noun != policy.offer_noun(offer_type):
+        reasons.append("offer_noun_is_not_this_campaigns_noun_for_the_offer_type")
+    e1_offer = str((resolution.get("e1_segments") or {}).get("offer") or "")
+    if noun and e1_offer and e1_offer != offer_question(noun):
+        reasons.append("email_1_does_not_ask_for_the_resolved_offer_noun")
+    if noun:
+        for index in (1, 2, 3, 4):
             body = str(resolution.get(f"rendered_email_{index}") or "")
             if noun.lower() not in body.lower():
                 reasons.append(f"offer_noun_missing_from_email_{index}")
-        other_nouns = [n for n in VALID_OFFER_NOUNS if n != noun]
         thread = " ".join(emails).lower()
-        for other in other_nouns:
-            if other.lower() in thread:
+        for other in VALID_OFFER_NOUNS:
+            if other != noun and other.lower() in thread:
                 reasons.append("offer_changed_within_thread")
                 break
 
@@ -273,13 +309,19 @@ def run_qa_gates(resolution: Dict, *, policy: CampaignPolicy) -> Tuple[bool, Lis
 
 
 def audit_arm_consistency(resolutions: Sequence[Dict]) -> List[str]:
-    """Fail if any company key appears under both arms in one batch."""
+    """Fail if any company key appears under both arms in one batch.
+
+    Suppressed records carry no arm, so they are skipped: a company may well have
+    one opportunity suppressed and another in B, and that is not a split -- it is
+    the shared eligibility gate doing its job per opportunity.
+    """
     by_key: Dict[str, set] = {}
     for item in resolutions:
         key = str(item.get("company_assignment_key") or "")
-        if not key:
+        arm = str(item.get("experiment_arm") or "")
+        if not key or arm not in {"A", "B"}:
             continue
-        by_key.setdefault(key, set()).add(str(item.get("experiment_arm") or ""))
+        by_key.setdefault(key, set()).add(arm)
     return sorted(
         f"company_received_both_arms:{key}"
         for key, arms in by_key.items()

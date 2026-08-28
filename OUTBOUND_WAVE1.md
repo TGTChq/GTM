@@ -24,14 +24,34 @@ run_approved.py
 ```
 
 `wave1_enrollment_overlay` returns `("", {})` — i.e. changes nothing — unless
-**all four** of these hold:
+**all three** of these hold:
 
 1. `OUTBOUND_WAVE1_ENABLED` is on;
-2. the account hashes into arm B at the configured split;
-3. every QA gate passes for the rendered copy;
-4. a Challenger campaign id is configured for that role bucket.
+2. the record is Wave 1 eligible AND its account hashes into arm B;
+3. a Challenger campaign id is configured for that role bucket.
 
-Any exception inside the overlay is swallowed and the record stays on Control A.
+Any exception inside the overlay is swallowed and the enrollment is unchanged.
+
+## Eligibility comes before randomisation
+
+A record that cannot render the challenger safely is **suppressed from the
+experiment**, not moved to Control A:
+
+```
+wave1_eligible   = false
+experiment_arm   = NONE          <- never A
+qa_pass          = false
+suppression_reason = "<gate>;<gate>"
+```
+
+The order matters. `resolve_wave1` renders and QA-checks the challenger FIRST,
+without reference to any arm, and only then randomises the records that passed.
+So a copy failure can never enrich the control group, and the two arms are drawn
+from one identical eligible population. `outbound_wave1.measurement` excludes
+suppressed rows from both denominators.
+
+A suppressed record keeps whatever the pipeline did before Wave 1 existed. That
+is the absence of an experiment, not a reassignment, and it is logged as such.
 
 ## Modules
 
@@ -59,7 +79,39 @@ Any exception inside the overlay is swallowed and the record stays on Control A.
 
 The campaign is deliberately **not** an input, so one company can never be A in
 one campaign and B in another. A record with no resolvable key is not
-randomisable and stays on Control A.
+randomisable, so it is suppressed (arm `NONE`) rather than counted as control.
+
+## Fallback coherence
+
+A degrade moves the whole triple. When a campaign cannot support economics it
+does not merely swap the proof and the offer — the cost-framed friction goes
+with them:
+
+| | friction | proof | offer | offer noun |
+| --- | --- | --- | --- | --- |
+| economics available | `cost_comparison` | `economics` | `role_economics` | the numbers for this role |
+| degraded | scope / bandwidth / time | `testing_mechanics` | `testing_overview` | the campaign's testing noun |
+
+`qa.COHERENT_FRICTIONS` is the hard gate: `cost_comparison` may appear only with
+`(economics, role_economics)`, and that pair may use nothing else.
+
+## Offer wording
+
+The offer noun is resolved once, per campaign, and is the literal text the reader
+sees in all four emails — E1 asks `Want me to send <noun>?` and E2/E3/E4 repeat
+the same words.
+
+| campaign | noun |
+| --- | --- |
+| Product, Ecommerce | how our testing works |
+| Operations, GTM, Finance, CX, Marketing (degraded) | how we test for this role |
+| AI & Technical Automation | how the assessment works |
+| People & HR | how we assess remote readiness |
+| any campaign on the economics path | the numbers for this role |
+
+E3's frozen sentence is `<noun> is still there if you want it first`. A plural
+noun takes `are`/`them`; the verb and pronoun are selected mechanically and no
+word choice changes.
 
 ## The claim registry
 
@@ -82,9 +134,15 @@ python run_wave1_dryrun.py --limit 108 --out reports/wave1_dryrun.json
 ```
 
 Reads local run artifacts only — no Airtable, no Instantly, no provider calls,
-no writes. `--as-of <ISO date>` re-derives job age so the T2 window can be
-reviewed against the same real records. `--claims <path>` previews the economics
-path against an alternate registry.
+no writes. The artifact carries explicit `denominators`, a `denominator_of` map
+saying which population each breakdown is counted over, and a `reconciliation`
+block; the script exits non-zero if any count fails to add up.
+
+`--as-of <ISO date>` re-derives job age so the 45-60 day T2 window can be
+exercised against the same real records. Such a run is stamped
+`clock.mode = "simulated_future_date"` and its counts are test evidence, **not**
+current production state. `--claims <path>` previews the economics path against
+an alternate registry.
 
 ## Going live
 

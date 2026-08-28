@@ -20,6 +20,11 @@ from typing import Dict, Optional
 
 ARM_A = "A"
 ARM_B = "B"
+#: Not in the experiment at all. A record that cannot safely render the challenger
+#: is suppressed with this arm -- it is NEVER relabelled A. Reassigning a copy
+#: failure to the control would quietly make Control A's population different from
+#: Challenger B's, and the comparison would stop being a treatment effect.
+ARM_NONE = "NONE"
 
 #: Ordered account-key sources. The first that yields a value wins, so the key
 #: is as stable as the identity the pipeline already resolved for the company.
@@ -105,9 +110,10 @@ def account_assignment(
     """
     account_key = key if key is not None else company_assignment_key(fields)
     if not account_key:
-        # No identity -> not randomisable. Fail closed onto the live control
-        # experience rather than sending challenger copy to an unknown account.
-        return Assignment("", ARM_A, -1, False, "no_resolvable_company_assignment_key")
+        # No identity -> not randomisable, so the record is outside the experiment.
+        # It is NOT labelled A: an unrandomisable record in the control group would
+        # contaminate the control population.
+        return Assignment("", ARM_NONE, -1, False, "no_resolvable_company_assignment_key")
     split = max(0, min(100, int(b_split_pct)))
     bucket = _bucket_of(experiment_id, account_key, salt)
     arm = ARM_B if bucket < split else ARM_A

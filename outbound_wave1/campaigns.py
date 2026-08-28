@@ -44,16 +44,35 @@ OFFER_REMOTE_READINESS_OVERVIEW = "remote_readiness_overview"
 OFFER_CLASS_PROCESS = "process_explainer"
 OFFER_CLASS_PUBLISHED = "published_economics"
 
-#: The only offer nouns Wave 1 may use. The noun is chosen once for E1 and is
-#: reused verbatim in E2/E3/E4 -- it must never change mid-thread.
-OFFER_NOUNS: Dict[str, str] = {
+#: Default offer noun per offer type. A campaign may override it (see
+#: ``CampaignPolicy.offer_nouns``) because the same offer is named differently in
+#: different campaigns -- Product says "how our testing works" where Operations
+#: says "how we test for this role".
+#:
+#: The noun is resolved ONCE for E1 and then appears verbatim in E1, E2, E3 and
+#: E4. It is the literal rendered text, not a semantic label: E1 asks
+#: "Want me to send <noun>?" so the reader sees the same words every time.
+DEFAULT_OFFER_NOUNS: Dict[str, str] = {
     OFFER_TESTING_OVERVIEW: "how we test for this role",
     OFFER_ROLE_ECONOMICS: "the numbers for this role",
     OFFER_REMOTE_READINESS_OVERVIEW: "how we assess remote readiness",
 }
-#: Permitted vocabulary (a QA gate asserts membership). "how the assessment
-#: works" is reserved for a campaign that later configures a named assessment.
-VALID_OFFER_NOUNS = frozenset(set(OFFER_NOUNS.values()) | {"how the assessment works"})
+#: Backwards-compatible alias for the default map.
+OFFER_NOUNS = DEFAULT_OFFER_NOUNS
+
+#: Permitted vocabulary. A QA gate asserts the resolved noun is one of these.
+VALID_OFFER_NOUNS = frozenset({
+    "how we test for this role",
+    "how our testing works",
+    "how the assessment works",
+    "how we assess remote readiness",
+    "the numbers for this role",
+})
+
+#: Nouns that take a plural verb. The frozen E3 sentence is
+#: "<noun> is still there if you want it first", which disagrees with a plural
+#: noun, so agreement is selected mechanically. No word choice changes.
+PLURAL_OFFER_NOUNS = frozenset({"the numbers for this role"})
 
 OFFER_CLASS_BY_TYPE: Dict[str, str] = {
     OFFER_TESTING_OVERVIEW: OFFER_CLASS_PROCESS,
@@ -90,6 +109,16 @@ class CampaignPolicy:
     #: Claim id (in the claim registry) that licenses the campaign's strongest
     #: proof wording. Unconfigured -> the safe wording is used instead.
     strong_claim_id: str = ""
+    #: Per-campaign visible offer noun, keyed by offer type. Falls back to
+    #: ``DEFAULT_OFFER_NOUNS``.
+    offer_nouns: Dict[str, str] = field(default_factory=dict)
+
+    def offer_noun(self, offer_type: str) -> str:
+        """The exact words this campaign uses for ``offer_type``."""
+        return self.offer_nouns.get(
+            offer_type,
+            DEFAULT_OFFER_NOUNS.get(offer_type, DEFAULT_OFFER_NOUNS[OFFER_TESTING_OVERVIEW]),
+        )
 
 
 def _facets(*pairs: Tuple[str, Tuple[str, ...]]) -> Tuple[Tuple[str, Tuple[str, ...]], ...]:
@@ -106,6 +135,7 @@ PRODUCT = CampaignPolicy(
     fallback_proof=PROOF_TESTING_MECHANICS,
     preferred_offer=OFFER_TESTING_OVERVIEW,
     fallback_offer=OFFER_TESTING_OVERVIEW,
+    offer_nouns={OFFER_TESTING_OVERVIEW: "how our testing works"},
 )
 
 OPERATIONS = CampaignPolicy(
@@ -178,6 +208,7 @@ ECOMMERCE = CampaignPolicy(
     fallback_proof=PROOF_TESTING_MECHANICS,
     preferred_offer=OFFER_TESTING_OVERVIEW,
     fallback_offer=OFFER_TESTING_OVERVIEW,
+    offer_nouns={OFFER_TESTING_OVERVIEW: "how our testing works"},
 )
 
 CUSTOMER_EXPERIENCE = CampaignPolicy(
@@ -281,6 +312,7 @@ AI_TECHNICAL = CampaignPolicy(
     fallback_offer=OFFER_TESTING_OVERVIEW,
     t1_min_evidence=2,
     strong_claim_id="ai_live_llm_evaluation",
+    offer_nouns={OFFER_TESTING_OVERVIEW: "how the assessment works"},
 )
 
 CAMPAIGNS: Tuple[CampaignPolicy, ...] = (

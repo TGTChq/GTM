@@ -20,6 +20,7 @@ from __future__ import annotations
 from .assignment import (
     ARM_A,
     ARM_B,
+    ARM_NONE,
     account_assignment,
     company_assignment_key,
 )
@@ -44,12 +45,14 @@ from .resolver import (
     resolve_batch,
     resolve_challenger,
     resolve_wave1,
+    resolve_wave1_pair,
 )
 from .timing import SEQUENCE_OFFSET_DAYS, sequence_schedule
 
 __all__ = [
     "ARM_A",
     "ARM_B",
+    "ARM_NONE",
     "CAMPAIGNS",
     "CAMPAIGN_BY_BUCKET",
     "COPY_VERSION",
@@ -70,5 +73,6 @@ __all__ = [
     "resolve_batch",
     "resolve_challenger",
     "resolve_wave1",
+    "resolve_wave1_pair",
     "sequence_schedule",
 ]
