@@ -59,3 +59,6 @@ reports/apify_batch_*/
 
 # Local recovery snapshots.
 recovery_*/
+
+# Anchor-conflict simulation artifact (carries real company text).
+reports/anchor_conflict_simulation.json
