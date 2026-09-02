@@ -67,7 +67,7 @@ FRICTION_EMPLOYMENT_OBLIGATION = "employment_obligation"
 FRICTION_TITLE_INFLATION = "title_inflation"
 FRICTION_INTERVIEW_WEAK_SIGNAL = "interview_weak_signal"
 FRICTION_SCOPE_SPLIT = "scope_split"
-FRICTION_RARE_INTERSECTION = "rare_intersection"
+FRICTION_PIECES_NOT_JOINED = "pieces_not_joined"
 FRICTION_NO_TRACK_RECORD_YET = "no_track_record_yet"
 #: Used ONLY on the economics path. It must never survive a degrade to a
 #: testing offer -- a cost-framed friction paired with "how we test" is
@@ -271,16 +271,17 @@ _FRICTION_BY_CAMPAIGN: Dict[str, Tuple[str, str]] = {
     # The closest to OPERATIONS, and knowingly so -- see the ECOMMERCE policy.
     "ecommerce": (
         FRICTION_TITLE_INFLATION,
-        "Ecommerce titles can mean very different work depending on the size of "
-        "the store.",
+        # "Depending on the size of the store" was plausible but not evidence we
+        # hold, so only the supportable half of the point is stated.
+        "Ecommerce titles can cover quite different mixes of work.",
     ),
     # An interview is incomplete evidence of day-to-day work. Note what this
     # does NOT say: nothing about how candidates for these roles usually
     # perform in interviews, which we have no basis to claim.
     "customer_experience": (
         FRICTION_INTERVIEW_WEAK_SIGNAL,
-        "A good interview still doesn't tell you much about how someone "
-        "handles the work day to day.",
+        "A good interview doesn't always show how someone handles the work day "
+        "to day.",
     ),
     # States the hypothetical outright rather than inferring WHY the reader
     # scoped the role the way they did. The claim is scoped to our own
@@ -290,11 +291,13 @@ _FRICTION_BY_CAMPAIGN: Dict[str, Tuple[str, str]] = {
         "If you end up splitting that scope across more than one person, the "
         "second hire doesn't need another headcount slot with us.",
     ),
-    # In RevOps the parts are common and the join is rare.
+    # The combination is what a CV cannot evidence. It says nothing about how
+    # common or rare any of it is -- "fewer do the whole mix" was a prevalence
+    # claim we have no basis for.
     "gtm_systems": (
-        FRICTION_RARE_INTERSECTION,
-        "Plenty of people do one of those. Fewer do the whole mix, and that's "
-        "the part a CV struggles to show.",
+        FRICTION_PIECES_NOT_JOINED,
+        "A CV can show each of those on its own without showing that someone has "
+        "put them together.",
     ),
     # Nothing in this category is old enough for tenure to mean anything.
     "ai_technical": (
@@ -418,7 +421,7 @@ _FRICTION_REQUIRES_SIGNAL: Dict[str, frozenset] = {
     FRICTION_TITLE_INFLATION: frozenset({SIGNAL_MULTI_OPENING}),
     FRICTION_INTERVIEW_WEAK_SIGNAL: frozenset({SIGNAL_MULTI_OPENING}),
     FRICTION_SCOPE_SPLIT: frozenset({SIGNAL_SCOPE_COMBINATION}),
-    FRICTION_RARE_INTERSECTION: frozenset({SIGNAL_SCOPE_COMBINATION}),
+    FRICTION_PIECES_NOT_JOINED: frozenset({SIGNAL_SCOPE_COMBINATION}),
     FRICTION_EMPLOYMENT_OBLIGATION: frozenset({SIGNAL_SCOPE_COMBINATION}),
     FRICTION_TITLE_VS_SCOPE: frozenset({SIGNAL_ROLE_FOCUS_MATCH}),
     FRICTION_NO_TRACK_RECORD_YET: frozenset({SIGNAL_ROLE_FOCUS_MATCH}),

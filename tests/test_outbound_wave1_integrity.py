@@ -517,7 +517,7 @@ def test_a_headcount_proof_never_answers_an_evidence_friction():
         _campaign_fields("product", "Product Manager"),
         experiment_id=EXPERIMENT, registry=empty_registry(),
     ).to_dict()
-    resolution["friction_angle"] = "rare_intersection"
+    resolution["friction_angle"] = "pieces_not_joined"
     passed, reasons = run_qa_gates(resolution, policy=campaign_for_bucket("product"))
     assert not passed
     assert "friction_incoherent_with_proof_and_offer" in reasons
@@ -552,7 +552,11 @@ def test_a_signal_dependent_friction_is_not_rendered_behind_another_signal():
 #: is a HYPOTHESIS the reader can accept or reject, never something the copy
 #: claims to know about them, so these may not appear in one.
 _UNSUPPORTED_ABSOLUTES = (
-    r"\bnobody\b", r"\bno one\b", r"\balways\b", r"\bnever\b",
+    r"\bnobody\b", r"\bno one\b", r"\bnever\b",
+    # "always" is an absolute only when ASSERTED. "doesn't always show" is a
+    # negated universal -- strictly weaker than the claim it replaced -- so the
+    # pattern excludes a preceding negation rather than banning the word.
+    r"(?<!n't )(?<!not )\balways\b",
     r"\bcannot show\b", r"\bcan'?t show\b", r"\btells you (?:almost )?nothing\b",
     r"\bby definition\b", r"\bis not telling you\b", r"\bthe rare part\b",
     r"\bweakest\b", r"\bguarantee",

@@ -144,6 +144,17 @@ class UnauthorisedWrite(RuntimeError):
     """Raised when a call would write anything outside the allowlist."""
 
 
+class UnexpectedCampaignStatus(RuntimeError):
+    """A newly created campaign is not in Draft. Creation stops immediately."""
+
+
+#: Instantly campaign status is read-only in the API schema; 0 is Draft. Every
+#: campaign this script creates MUST land in Draft -- anything else means the
+#: workspace did something we did not ask for, and the remaining campaigns are
+#: not created until a human has looked.
+DRAFT_STATUS = 0
+
+
 def _request(
     method: str,
     path: str,
@@ -425,18 +436,40 @@ def execute(
             created.append(dict(progress[key]))
             continue
         response = _request("POST", "campaigns", entry["post_body"], allow_write=True)
+        campaign_id = str(response.get("id") or "")
+        status = response.get("status")
+        status_source = "post_response"
+        if status is None and campaign_id:
+            # The POST response did not carry a status, so read it back.
+            status = _request(
+                "GET", f"campaigns/{quote(campaign_id, safe='')}").get("status")
+            status_source = "get_readback"
         record = {
             "campaign_key": key,
             "role_buckets": entry["role_buckets"],
-            "challenger_campaign_id": response.get("id"),
+            "challenger_campaign_id": campaign_id or response.get("id"),
             "challenger_name": response.get("name"),
-            "status": response.get("status"),
+            "status": status,
+            "status_source": status_source,
         }
-        # Persist FIRST. Everything after this point may fail without losing it.
+        # Persist FIRST, before the status assertion. A campaign that came back
+        # in the wrong state still exists, so its id must be recoverable.
         progress[key] = record
         save_checkpoint(state_path, progress)
         created.append(record)
-        print(f"created {key}: {response.get('id')} (checkpointed)")
+
+        if status != DRAFT_STATUS:
+            # Stop here. Do not create the rest, and do NOT try to fix this one:
+            # no activate, no pause, no PATCH. A human looks at it.
+            raise UnexpectedCampaignStatus(
+                f"{key}: campaign {campaign_id} was created with status "
+                f"{status!r} ({status_source}), expected {DRAFT_STATUS} (Draft). "
+                f"It is recorded in {state_path}. The remaining "
+                f"{len(entries) - len(created)} campaigns were NOT created and "
+                "nothing has been altered. Review this campaign manually."
+            )
+
+        print(f"created {key}: {campaign_id} (status {status} = Draft, checkpointed)")
         time.sleep(0.5)
     return created
 

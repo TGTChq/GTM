@@ -394,3 +394,92 @@ def test_preflight_is_clean_on_an_empty_workspace(monkeypatch):
     report = builder.preflight([_entry()], state={})
     assert report["safe_to_create"] is True
     assert report["existing_challengers"] == []
+
+
+# ---------------------------------------------------------------------------
+# Postcondition: every created campaign must land in Draft before continuing
+# ---------------------------------------------------------------------------
+
+def test_creation_stops_when_a_campaign_is_not_created_as_a_draft(tmp_path):
+    """Status is read-only in the API schema and 0 is Draft. Anything else means
+    the workspace did something we did not ask for, so the run stops."""
+    state_path = str(tmp_path / "cp.json")
+    posted = []
+
+    def _fake(method, path, body=None, *, allow_write=False):
+        if method == "POST":
+            posted.append(body["name"])
+            # The second campaign comes back ACTIVE (1) instead of Draft (0).
+            status = 1 if len(posted) == 2 else 0
+            return {"id": f"id-{len(posted)}", "name": body["name"], "status": status}
+        raise AssertionError(f"unexpected {method} {path}")
+
+    monkey = pytest.MonkeyPatch()
+    monkey.setattr(builder, "_request", _fake)
+    entries = [_entry(f"k{i}", f"WAVE1 CHALLENGER - {i}") for i in range(1, 5)]
+    with pytest.raises(builder.UnexpectedCampaignStatus) as excinfo:
+        builder.execute(entries, state_path=state_path)
+    monkey.undo()
+
+    # Stopped immediately: campaigns three and four were never created.
+    assert posted == ["WAVE1 CHALLENGER - 1", "WAVE1 CHALLENGER - 2"], posted
+    # Both created campaigns are recoverable, including the bad one.
+    saved = builder.load_checkpoint(state_path)
+    assert sorted(saved) == ["k1", "k2"], saved
+    assert saved["k2"]["status"] == 1
+    assert saved["k2"]["challenger_campaign_id"] == "id-2"
+    # And the operator is told what to look at.
+    assert "expected 0 (Draft)" in str(excinfo.value)
+    assert "NOT created" in str(excinfo.value)
+
+
+def test_no_remediation_is_attempted_on_a_non_draft_campaign(tmp_path):
+    """No activate, no pause, no PATCH -- the only call is the POST itself."""
+    state_path = str(tmp_path / "cp.json")
+    calls = []
+
+    def _fake(method, path, body=None, *, allow_write=False):
+        calls.append((method, path))
+        return {"id": "id-1", "name": body["name"], "status": 2}
+
+    monkey = pytest.MonkeyPatch()
+    monkey.setattr(builder, "_request", _fake)
+    with pytest.raises(builder.UnexpectedCampaignStatus):
+        builder.execute([_entry("k1", "WAVE1 CHALLENGER - 1")], state_path=state_path)
+    monkey.undo()
+    assert calls == [("POST", "campaigns")], calls
+
+
+def test_a_missing_status_is_read_back_with_a_get(tmp_path):
+    state_path = str(tmp_path / "cp.json")
+    calls = []
+
+    def _fake(method, path, body=None, *, allow_write=False):
+        calls.append((method, path))
+        if method == "POST":
+            return {"id": "id-1", "name": body["name"]}   # no status field
+        return {"id": "id-1", "status": 0}
+
+    monkey = pytest.MonkeyPatch()
+    monkey.setattr(builder, "_request", _fake)
+    created = builder.execute(
+        [_entry("k1", "WAVE1 CHALLENGER - 1")], state_path=state_path)
+    monkey.undo()
+    assert calls == [("POST", "campaigns"), ("GET", "campaigns/id-1")], calls
+    assert created[0]["status"] == 0
+    assert created[0]["status_source"] == "get_readback"
+
+
+def test_a_draft_run_records_the_status_it_verified(tmp_path):
+    state_path = str(tmp_path / "cp.json")
+
+    def _fake(method, path, body=None, *, allow_write=False):
+        return {"id": "id-1", "name": body["name"], "status": 0}
+
+    monkey = pytest.MonkeyPatch()
+    monkey.setattr(builder, "_request", _fake)
+    created = builder.execute(
+        [_entry("k1", "WAVE1 CHALLENGER - 1")], state_path=state_path)
+    monkey.undo()
+    assert created[0]["status"] == builder.DRAFT_STATUS == 0
+    assert builder.load_checkpoint(state_path)["k1"]["status"] == 0
