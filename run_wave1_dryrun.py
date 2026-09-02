@@ -33,7 +33,7 @@ import os
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 # The dry run is an offline transform of local artifacts. Production mode is
 # only about the validation signing key here, and nothing is written anywhere.
@@ -44,7 +44,7 @@ from outbound_wave1 import resolve_batch  # noqa: E402
 from outbound_wave1.assignment import company_assignment_key  # noqa: E402
 from outbound_wave1.claims import load_claim_registry  # noqa: E402
 from outbound_wave1.measurement import analyze, build_frame  # noqa: E402
-from outbound_wave1.resolver import DEFAULT_EXPERIMENT_ID  # noqa: E402
+from outbound_wave1.resolver import DEFAULT_EXPERIMENT_ID, parse_instant  # noqa: E402
 
 #: Local production artifacts, richest first. Every one is a real pipeline run.
 CORPORA: Tuple[Tuple[str, str], ...] = (
@@ -393,6 +393,8 @@ def run(
     experiment_id: str,
     as_of: Optional[datetime] = None,
     claims_path: str = "",
+    min_created_at: Optional[datetime] = None,
+    configured_buckets: Optional[Sequence[str]] = None,
 ) -> Dict[str, Any]:
     population = build_population(limit)
     registry = load_claim_registry(claims_path or None)
@@ -404,6 +406,8 @@ def run(
         registry=registry,
         as_of=as_of,
         challenger_preview=True,
+        min_created_at=min_created_at,
+        configured_buckets=configured_buckets,
     )
     preview_by_record = {p.record_id: p for p in previews}
     meta_by_record = {r["id"]: r for r in population}
@@ -483,6 +487,26 @@ def main() -> None:
     )
     parser.add_argument("--experiment-id", default=DEFAULT_EXPERIMENT_ID)
     parser.add_argument(
+        "--min-created-at",
+        default="",
+        help=(
+            "Experiment start watermark (ISO). Previews the production "
+            "OUTBOUND_WAVE1_MIN_RECORD_CREATED_AT gate: rows created before it are "
+            "suppressed. Local run artifacts usually carry no createdTime, so "
+            "setting this on an artifact-derived population suppresses everything "
+            "-- which is the point of the gate, and what production would do."
+        ),
+    )
+    parser.add_argument(
+        "--buckets",
+        default="",
+        help=(
+            "Comma-separated role buckets that have a Challenger campaign, i.e. the "
+            "rollout scope. Records outside it are suppressed rather than counted "
+            "as control. Empty = no bucket gate (preview the whole population)."
+        ),
+    )
+    parser.add_argument(
         "--as-of",
         default="",
         help=(
@@ -496,6 +520,14 @@ def main() -> None:
     as_of = None
     if args.as_of:
         as_of = datetime.fromisoformat(args.as_of).replace(tzinfo=timezone.utc)
+    min_created_at = None
+    if args.min_created_at:
+        min_created_at = parse_instant(args.min_created_at)
+        if min_created_at is None:
+            raise SystemExit(f"--min-created-at is not an ISO instant: {args.min_created_at!r}")
+    buckets = None
+    if args.buckets.strip():
+        buckets = [part.strip().lower() for part in args.buckets.split(",") if part.strip()]
     artifact = run(
         args.limit,
         args.out,
@@ -503,6 +535,8 @@ def main() -> None:
         experiment_id=args.experiment_id,
         as_of=as_of,
         claims_path=args.claims,
+        min_created_at=min_created_at,
+        configured_buckets=buckets,
     )
     summary = artifact["summary"]
     clock = artifact["clock"]

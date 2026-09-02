@@ -1345,12 +1345,44 @@ OUTBOUND_WAVE1_CHALLENGER_CAMPAIGNS = _env_json(
 )
 
 
+#: Experiment start watermark. ONLY Airtable rows created at or after this
+#: instant may enter Wave 1, which is what keeps the pilot to genuinely new
+#: leads: an older Approved row can belong to a person the live Control
+#: campaigns already emailed, and delivering that person into a Challenger
+#: campaign would both double-touch them and contaminate the comparison.
+#:
+#: Required when Wave 1 is enabled. Leaving it blank does not silently widen the
+#: population -- ``instantly_client.wave1_enrollment_overlay`` fails closed and
+#: every record stays on Control A.
+OUTBOUND_WAVE1_MIN_RECORD_CREATED_AT = os.getenv(
+    "OUTBOUND_WAVE1_MIN_RECORD_CREATED_AT", ""
+).strip()
+
+
 def resolve_wave1_challenger_campaign_id(role_bucket: str) -> str:
     """Challenger campaign id for a bucket, or "" when none is configured."""
     mapping = OUTBOUND_WAVE1_CHALLENGER_CAMPAIGNS
     if not isinstance(mapping, dict):
         return ""
     return str(mapping.get(str(role_bucket or "").strip().lower()) or "").strip()
+
+
+def wave1_configured_challenger_buckets() -> frozenset:
+    """Role buckets that actually have a Challenger campaign id configured.
+
+    A small rollout maps only some buckets. A record in an unmapped bucket is
+    delivered on Control A regardless of its hash, so the resolver suppresses it
+    rather than labelling it ``B`` -- otherwise a control-delivered row would sit
+    in the treatment arm of the analysis.
+    """
+    mapping = OUTBOUND_WAVE1_CHALLENGER_CAMPAIGNS
+    if not isinstance(mapping, dict):
+        return frozenset()
+    return frozenset(
+        str(bucket or "").strip().lower()
+        for bucket, campaign in mapping.items()
+        if str(campaign or "").strip() and str(bucket or "").strip()
+    )
 
 # Campaign routing. More-specific keys win over broader keys.
 # Example env names:

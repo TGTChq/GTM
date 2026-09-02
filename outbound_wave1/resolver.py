@@ -14,8 +14,8 @@ zero writes.
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field, replace
-from datetime import date, datetime
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from datetime import date, datetime, timezone
+from typing import Any, Collection, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from .assignment import (
     ARM_A,
@@ -55,6 +55,71 @@ DEFAULT_EXPERIMENT_ID = "outbound_wave1_challenger_v1"
 #: Arm label used when a record stays on the live control sequence.
 CONTROL_COPY_NOTE = "control_arm_uses_live_instantly_campaign_copy"
 
+#: Suppression reasons emitted by the two SEGMENTATION gates. Both run before
+#: randomisation, so a record they stop is arm ``NONE`` -- never relabelled A.
+SUPPRESS_PREDATES_START = "record_predates_wave1_start"
+SUPPRESS_NO_CREATED_AT = "record_created_at_unknown"
+SUPPRESS_CAMPAIGN_NOT_CONFIGURED = "challenger_campaign_not_configured"
+
+
+def parse_instant(value: Any) -> Optional[datetime]:
+    """Best-effort ISO-8601 -> aware UTC datetime. Returns ``None``, never raises."""
+    if isinstance(value, datetime):
+        moment = value
+    else:
+        text = str(value or "").strip()
+        if not text:
+            return None
+        if text.endswith("Z"):
+            text = text[:-1] + "+00:00"
+        try:
+            moment = datetime.fromisoformat(text)
+        except ValueError:
+            return None
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    return moment.astimezone(timezone.utc)
+
+
+def _segmentation_suppressions(
+    *,
+    role_bucket: str,
+    record_created_at: str,
+    min_created_at: Optional[datetime],
+    configured_buckets: Optional[Collection[str]],
+) -> List[str]:
+    """Wave 1 segmentation gates, evaluated BEFORE any randomisation.
+
+    Two separate promises are kept here, and both fail closed:
+
+    ``min_created_at``
+        Only leads that entered the pipeline after the experiment started may
+        take part. Without it, an Approved row created months ago -- for a person
+        the live Control campaigns may already have emailed -- could be delivered
+        into a Challenger campaign, which would both double-touch the recipient
+        and contaminate the comparison. A row whose ``createdTime`` is missing is
+        suppressed too: an unknown creation instant cannot be proven to be new.
+
+    ``configured_buckets``
+        A small rollout configures a Challenger campaign for some buckets only.
+        A record in an unconfigured bucket is delivered on Control A no matter
+        what the hash says, so labelling it ``B`` would put a control-delivered
+        row in the treatment arm. It is suppressed instead, which keeps the
+        delivered payload and the measurement frame in agreement.
+    """
+    out: List[str] = []
+    if min_created_at is not None:
+        created = parse_instant(record_created_at)
+        if created is None:
+            out.append(SUPPRESS_NO_CREATED_AT)
+        elif created < min_created_at:
+            out.append(f"{SUPPRESS_PREDATES_START}:{created.date().isoformat()}")
+    if configured_buckets is not None:
+        allowed = {str(item or "").strip().lower() for item in configured_buckets}
+        if str(role_bucket or "").strip().lower() not in allowed:
+            out.append(f"{SUPPRESS_CAMPAIGN_NOT_CONFIGURED}:{role_bucket or 'blank'}")
+    return out
+
 
 def _text(value: Any) -> str:
     return str(value or "").strip()
@@ -78,6 +143,10 @@ class Wave1Resolution:
     role_bucket: str = ""
     role_confidence: str = ""
     company_confidence: str = ""
+    #: Airtable ``record.createdTime`` for this row. Not a field -- Airtable stamps
+    #: it on the record itself -- so it is threaded in rather than read from
+    #: ``fields``. Empty when the caller did not supply it.
+    record_created_at: str = ""
 
     # --- experiment ---------------------------------------------------------
     experiment_id: str = ""
@@ -456,6 +525,9 @@ def resolve_wave1_pair(
     record_id: str = "",
     as_of: Optional[datetime] = None,
     sequence_start: Optional[date | datetime | str] = None,
+    record_created_at: str = "",
+    min_created_at: Optional[datetime] = None,
+    configured_buckets: Optional[Collection[str]] = None,
 ) -> Tuple[Wave1Resolution, Wave1Resolution]:
     """Resolve one record, returning ``(outcome, challenger_render)``.
 
@@ -469,6 +541,11 @@ def resolve_wave1_pair(
 
     A record that fails the gate is SUPPRESSED -- ``wave1_eligible=False``,
     ``experiment_arm=NONE``, ``suppression_reason`` set. It is never relabelled A.
+
+    ``min_created_at`` and ``configured_buckets`` are the SEGMENTATION gates (see
+    :func:`_segmentation_suppressions`). They run in the same pre-randomisation
+    phase, so a record they stop is excluded from both arms and both denominators.
+    Leaving either at ``None`` disables that gate; production sets both.
     """
     # Phase 1: shared eligibility, computed without reference to any arm.
     challenger = resolve_challenger(
@@ -480,6 +557,7 @@ def resolve_wave1_pair(
         as_of=as_of,
         sequence_start=sequence_start,
     )
+    challenger.record_created_at = _text(record_created_at)
     assigned = account_assignment(
         fields, experiment_id=experiment_id, b_split_pct=b_split_pct, salt=salt
     )
@@ -493,6 +571,14 @@ def resolve_wave1_pair(
         suppression.extend(challenger.qa_reasons)
     if not assigned.assignable:
         suppression.append(assigned.reason)
+    suppression.extend(
+        _segmentation_suppressions(
+            role_bucket=challenger.role_bucket,
+            record_created_at=challenger.record_created_at,
+            min_created_at=min_created_at,
+            configured_buckets=configured_buckets,
+        )
+    )
 
     if suppression:
         challenger.wave1_eligible = False
@@ -520,6 +606,9 @@ def resolve_wave1(
     record_id: str = "",
     as_of: Optional[datetime] = None,
     sequence_start: Optional[date | datetime | str] = None,
+    record_created_at: str = "",
+    min_created_at: Optional[datetime] = None,
+    configured_buckets: Optional[Collection[str]] = None,
 ) -> Wave1Resolution:
     """Resolve one record's actual Wave 1 outcome. See ``resolve_wave1_pair``."""
     outcome, _challenger = resolve_wave1_pair(
@@ -532,6 +621,9 @@ def resolve_wave1(
         record_id=record_id,
         as_of=as_of,
         sequence_start=sequence_start,
+        record_created_at=record_created_at,
+        min_created_at=min_created_at,
+        configured_buckets=configured_buckets,
     )
     return outcome
 
@@ -583,6 +675,8 @@ def resolve_batch(
     as_of: Optional[datetime] = None,
     sequence_start: Optional[date | datetime | str] = None,
     challenger_preview: bool = False,
+    min_created_at: Optional[datetime] = None,
+    configured_buckets: Optional[Collection[str]] = None,
 ) -> Tuple[List[Wave1Resolution], List[Wave1Resolution], List[str]]:
     """Resolve a whole batch.
 
@@ -599,9 +693,12 @@ def resolve_batch(
         if isinstance(record, dict) and "fields" in record:
             fields = record.get("fields") or {}
             record_id = _text(record.get("id"))
+            # Airtable stamps createdTime on the RECORD, not inside ``fields``.
+            created_at = _text(record.get("createdTime"))
         else:
             fields = record or {}
             record_id = _text(fields.get("id"))
+            created_at = _text(fields.get("createdTime"))
         key = company_assignment_key(fields)
         company = index.get(key, EMPTY_COMPANY_CONTEXT)
         resolution, challenger = resolve_wave1_pair(
@@ -614,6 +711,9 @@ def resolve_batch(
             record_id=record_id,
             as_of=as_of,
             sequence_start=sequence_start,
+            record_created_at=created_at,
+            min_created_at=min_created_at,
+            configured_buckets=configured_buckets,
         )
         resolutions.append(resolution)
         if challenger_preview and resolution.experiment_arm == ARM_A:

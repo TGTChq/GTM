@@ -786,7 +786,15 @@ def test_custom_variables_carry_the_analysis_metadata():
 # Enrollment wiring
 # ---------------------------------------------------------------------------
 
-def _approved_record():
+#: Experiment start watermark used by the overlay tests, and a record created
+#: after it. Wave 1 refuses to run without a watermark, so every enabled-path
+#: test states one explicitly rather than inheriting a default.
+WAVE1_START = "2026-09-01T00:00:00Z"
+RECORD_CREATED_AFTER_START = "2026-09-05T12:00:00.000Z"
+RECORD_CREATED_BEFORE_START = "2026-06-01T12:00:00.000Z"
+
+
+def _approved_record(created_time=RECORD_CREATED_AFTER_START):
     fields = _fields()
     fields.update({
         "Final Decision": "FINAL_PASS",
@@ -796,7 +804,18 @@ def _approved_record():
         "Campaign ID": "control-campaign-id",
         "Job URL Status": "verified",
     })
-    return {"id": "recTest", "fields": fields}
+    return {"id": "recTest", "createdTime": created_time, "fields": fields}
+
+
+def _enable_wave1(monkeypatch, *, b_split_pct=100, campaigns=None, start=WAVE1_START):
+    monkeypatch.setattr(config, "OUTBOUND_WAVE1_ENABLED", True)
+    monkeypatch.setattr(config, "OUTBOUND_WAVE1_B_SPLIT_PCT", b_split_pct)
+    monkeypatch.setattr(config, "OUTBOUND_WAVE1_MIN_RECORD_CREATED_AT", start)
+    monkeypatch.setattr(
+        config,
+        "OUTBOUND_WAVE1_CHALLENGER_CAMPAIGNS",
+        {"finance": "challenger-campaign-id"} if campaigns is None else campaigns,
+    )
 
 
 def test_enrollment_payload_is_unchanged_while_the_flag_is_off(monkeypatch):
@@ -808,11 +827,7 @@ def test_enrollment_payload_is_unchanged_while_the_flag_is_off(monkeypatch):
 
 
 def test_challenger_overlay_switches_campaign_and_adds_variables(monkeypatch):
-    monkeypatch.setattr(config, "OUTBOUND_WAVE1_ENABLED", True)
-    monkeypatch.setattr(config, "OUTBOUND_WAVE1_B_SPLIT_PCT", 100)
-    monkeypatch.setattr(
-        config, "OUTBOUND_WAVE1_CHALLENGER_CAMPAIGNS", {"finance": "challenger-campaign-id"}
-    )
+    _enable_wave1(monkeypatch)
     lead = instantly_client.airtable_record_to_lead(_approved_record(), probe=False)
     assert lead["campaign"] == "challenger-campaign-id"
     assert lead["custom_variables"]["experiment_arm"] == "B"
@@ -823,31 +838,21 @@ def test_challenger_overlay_switches_campaign_and_adds_variables(monkeypatch):
 
 
 def test_control_arm_records_keep_the_control_campaign(monkeypatch):
-    monkeypatch.setattr(config, "OUTBOUND_WAVE1_ENABLED", True)
-    monkeypatch.setattr(config, "OUTBOUND_WAVE1_B_SPLIT_PCT", 0)
-    monkeypatch.setattr(
-        config, "OUTBOUND_WAVE1_CHALLENGER_CAMPAIGNS", {"finance": "challenger-campaign-id"}
-    )
+    _enable_wave1(monkeypatch, b_split_pct=0)
     lead = instantly_client.airtable_record_to_lead(_approved_record(), probe=False)
     assert lead["campaign"] == "control-campaign-id"
     assert "experiment_arm" not in lead["custom_variables"]
 
 
 def test_no_challenger_campaign_configured_keeps_the_record_on_control(monkeypatch):
-    monkeypatch.setattr(config, "OUTBOUND_WAVE1_ENABLED", True)
-    monkeypatch.setattr(config, "OUTBOUND_WAVE1_B_SPLIT_PCT", 100)
-    monkeypatch.setattr(config, "OUTBOUND_WAVE1_CHALLENGER_CAMPAIGNS", {})
+    _enable_wave1(monkeypatch, campaigns={})
     lead = instantly_client.airtable_record_to_lead(_approved_record(), probe=False)
     assert lead["campaign"] == "control-campaign-id"
     assert "experiment_arm" not in lead["custom_variables"]
 
 
 def test_a_suppressed_record_gets_the_unchanged_production_payload(monkeypatch):
-    monkeypatch.setattr(config, "OUTBOUND_WAVE1_ENABLED", True)
-    monkeypatch.setattr(config, "OUTBOUND_WAVE1_B_SPLIT_PCT", 100)
-    monkeypatch.setattr(
-        config, "OUTBOUND_WAVE1_CHALLENGER_CAMPAIGNS", {"finance": "challenger-campaign-id"}
-    )
+    _enable_wave1(monkeypatch)
     record = _approved_record()
     unsafe = "Financial Analyst | Remote | 90k"
     record["fields"]["Outbound Role"] = unsafe
@@ -872,8 +877,7 @@ def test_a_suppressed_record_gets_the_unchanged_production_payload(monkeypatch):
 
 
 def test_an_overlay_failure_never_breaks_a_control_enrollment(monkeypatch):
-    monkeypatch.setattr(config, "OUTBOUND_WAVE1_ENABLED", True)
-    monkeypatch.setattr(config, "OUTBOUND_WAVE1_B_SPLIT_PCT", 100)
+    _enable_wave1(monkeypatch)
 
     def _boom(*_args, **_kwargs):
         raise RuntimeError("registry exploded")
@@ -919,3 +923,144 @@ def test_an_offer_noun_swapped_mid_thread_fails_qa():
     assert not passed
     assert "offer_changed_within_thread" in reasons
     assert "offer_noun_missing_from_email_3" in reasons
+
+
+# ---------------------------------------------------------------------------
+# Segmentation: only NEW leads, and only buckets with a Challenger campaign
+# ---------------------------------------------------------------------------
+
+def test_wave1_refuses_to_run_without_an_experiment_start_watermark(monkeypatch):
+    """No watermark is a misconfiguration, not "no restriction".
+
+    Without one there is nothing separating a genuinely new lead from an Approved
+    row created months ago for a person the live Control campaigns may already
+    have emailed, so the overlay fails closed.
+    """
+    _enable_wave1(monkeypatch, start="")
+    lead = instantly_client.airtable_record_to_lead(_approved_record(), probe=False)
+    assert lead["campaign"] == "control-campaign-id"
+    assert "experiment_arm" not in lead["custom_variables"]
+
+    # An unparseable watermark is treated exactly like a missing one.
+    _enable_wave1(monkeypatch, start="not-a-date")
+    lead = instantly_client.airtable_record_to_lead(_approved_record(), probe=False)
+    assert lead["campaign"] == "control-campaign-id"
+    assert "experiment_arm" not in lead["custom_variables"]
+
+
+def test_a_record_created_before_the_watermark_is_suppressed(monkeypatch):
+    _enable_wave1(monkeypatch)
+    record = _approved_record(created_time=RECORD_CREATED_BEFORE_START)
+    lead = instantly_client.airtable_record_to_lead(record, probe=False)
+    assert lead["campaign"] == "control-campaign-id"
+    assert "experiment_arm" not in lead["custom_variables"]
+    assert "rendered_email_1" not in lead["custom_variables"]
+
+
+def test_a_record_with_no_created_time_is_suppressed(monkeypatch):
+    """An unknown creation instant cannot be proven to be new, so it fails closed."""
+    _enable_wave1(monkeypatch)
+    record = _approved_record()
+    record.pop("createdTime")
+    lead = instantly_client.airtable_record_to_lead(record, probe=False)
+    assert lead["campaign"] == "control-campaign-id"
+    assert "experiment_arm" not in lead["custom_variables"]
+
+
+def test_the_watermark_is_inclusive_of_its_own_instant():
+    from outbound_wave1 import ARM_B, resolve_wave1
+    from outbound_wave1.resolver import parse_instant
+
+    start = parse_instant(WAVE1_START)
+    resolution = resolve_wave1(
+        _fields(), experiment_id=EXPERIMENT, b_split_pct=100,
+        registry=empty_registry(),
+        record_created_at=WAVE1_START, min_created_at=start,
+        configured_buckets={"finance"},
+    )
+    assert resolution.experiment_arm == ARM_B
+    assert resolution.wave1_eligible
+
+
+def test_a_predating_record_is_suppressed_not_relabelled_control():
+    from outbound_wave1 import ARM_NONE, resolve_wave1
+    from outbound_wave1.resolver import SUPPRESS_PREDATES_START, parse_instant
+
+    resolution = resolve_wave1(
+        _fields(), experiment_id=EXPERIMENT, b_split_pct=100,
+        registry=empty_registry(),
+        record_created_at=RECORD_CREATED_BEFORE_START,
+        min_created_at=parse_instant(WAVE1_START),
+        configured_buckets={"finance"},
+    )
+    assert resolution.experiment_arm == ARM_NONE
+    assert not resolution.wave1_eligible
+    assert SUPPRESS_PREDATES_START in resolution.suppression_reason
+
+
+def test_an_unconfigured_bucket_is_suppressed_not_counted_as_control():
+    """A bucket with no Challenger campaign is delivered on Control A regardless.
+
+    Labelling such a record ``B`` would put a control-delivered row in the
+    treatment arm, so it is suppressed and excluded from both denominators.
+    """
+    from outbound_wave1 import ARM_NONE, resolve_wave1
+    from outbound_wave1.resolver import SUPPRESS_CAMPAIGN_NOT_CONFIGURED, parse_instant
+
+    resolution = resolve_wave1(
+        _fields(), experiment_id=EXPERIMENT, b_split_pct=100,
+        registry=empty_registry(),
+        record_created_at=RECORD_CREATED_AFTER_START,
+        min_created_at=parse_instant(WAVE1_START),
+        configured_buckets={"marketing"},   # finance is not in the rollout
+    )
+    assert resolution.experiment_arm == ARM_NONE
+    assert not resolution.wave1_eligible
+    assert SUPPRESS_CAMPAIGN_NOT_CONFIGURED in resolution.suppression_reason
+
+
+def test_the_segmentation_gates_are_off_when_not_configured():
+    """Both gates are opt-in at the resolver level, so the dry run is unchanged."""
+    from outbound_wave1 import ARM_B, resolve_wave1
+
+    resolution = resolve_wave1(
+        _fields(), experiment_id=EXPERIMENT, b_split_pct=100, registry=empty_registry()
+    )
+    assert resolution.experiment_arm == ARM_B
+    assert resolution.wave1_eligible
+
+
+def test_resolve_batch_reads_created_time_off_the_record():
+    from outbound_wave1 import ARM_NONE, resolve_batch
+    from outbound_wave1.resolver import SUPPRESS_PREDATES_START, parse_instant
+
+    records = [
+        {"id": "recNew", "createdTime": RECORD_CREATED_AFTER_START, "fields": _fields()},
+        {"id": "recOld", "createdTime": RECORD_CREATED_BEFORE_START,
+         "fields": _fields(**{
+             "Lead Key": "oldco.com|sam@oldco.com|finance",
+             "Outbound Company Identity": "domain:oldco.com",
+             "Website": "https://oldco.com",
+         })},
+    ]
+    resolutions, _previews, failures = resolve_batch(
+        records, experiment_id=EXPERIMENT, b_split_pct=100,
+        registry=empty_registry(),
+        min_created_at=parse_instant(WAVE1_START),
+        configured_buckets={"finance"},
+    )
+    by_id = {item.record_id: item for item in resolutions}
+    assert by_id["recNew"].record_created_at == RECORD_CREATED_AFTER_START
+    assert by_id["recNew"].wave1_eligible
+    assert by_id["recOld"].experiment_arm == ARM_NONE
+    assert SUPPRESS_PREDATES_START in by_id["recOld"].suppression_reason
+    assert failures == []
+
+
+def test_configured_buckets_helper_ignores_blank_campaign_ids(monkeypatch):
+    monkeypatch.setattr(
+        config,
+        "OUTBOUND_WAVE1_CHALLENGER_CAMPAIGNS",
+        {"finance": "id-1", "Marketing": " ", "product": "id-2", "": "id-3"},
+    )
+    assert config.wave1_configured_challenger_buckets() == frozenset({"finance", "product"})

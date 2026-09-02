@@ -197,11 +197,21 @@ def wave1_enrollment_overlay(record: Dict) -> tuple[str, Dict[str, str]]:
     a reassignment to the control group, and it is excluded from both denominators
     by ``outbound_wave1.measurement``.
 
-    Three conditions must hold for the challenger to apply:
+    Four conditions must hold for the challenger to apply:
 
     1. ``OUTBOUND_WAVE1_ENABLED`` is set;
-    2. the record is Wave 1 eligible AND its account hashes into arm B;
-    3. a challenger campaign id is configured for that role bucket.
+    2. ``OUTBOUND_WAVE1_MIN_RECORD_CREATED_AT`` parses -- the experiment start
+       watermark, which keeps Wave 1 to leads created after it began. It is
+       REQUIRED, not optional: with no watermark there is nothing separating a
+       new lead from an Approved row created months ago for a person the live
+       Control campaigns may already have emailed, so the overlay fails closed
+       and everything stays on Control A;
+    3. the record is Wave 1 eligible AND its account hashes into arm B -- which
+       now includes the segmentation gates, so a record that predates the
+       watermark, or whose bucket has no Challenger campaign, is suppressed
+       rather than assigned;
+    4. a challenger campaign id is configured for that role bucket (kept as
+       defence in depth behind the same map the resolver was given).
 
     The whole overlay is wrapped: a failure inside the experiment must never be
     able to break, or silently alter, an enrollment.
@@ -212,6 +222,17 @@ def wave1_enrollment_overlay(record: Dict) -> tuple[str, Dict[str, str]]:
         from outbound_wave1 import resolve_wave1
         from outbound_wave1.assignment import ARM_B
         from outbound_wave1.claims import load_claim_registry
+        from outbound_wave1.resolver import parse_instant
+
+        min_created_at = parse_instant(
+            getattr(config, "OUTBOUND_WAVE1_MIN_RECORD_CREATED_AT", "")
+        )
+        if min_created_at is None:
+            logger.warning(
+                "Wave 1 enabled without a usable OUTBOUND_WAVE1_MIN_RECORD_CREATED_AT; "
+                "every record stays on Control A"
+            )
+            return "", {}
 
         fields = record.get("fields") or {}
         resolution = resolve_wave1(
@@ -221,6 +242,10 @@ def wave1_enrollment_overlay(record: Dict) -> tuple[str, Dict[str, str]]:
             salt=config.OUTBOUND_WAVE1_ASSIGNMENT_SALT,
             registry=load_claim_registry(config.OUTBOUND_WAVE1_CLAIM_REGISTRY_PATH),
             record_id=str(record.get("id") or ""),
+            # Airtable stamps createdTime on the RECORD, alongside id/fields.
+            record_created_at=str(record.get("createdTime") or ""),
+            min_created_at=min_created_at,
+            configured_buckets=config.wave1_configured_challenger_buckets(),
         )
         if not resolution.wave1_eligible:
             # Suppressed by the shared pre-randomisation gate. Logged explicitly so

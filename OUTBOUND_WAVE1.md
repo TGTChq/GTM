@@ -24,13 +24,40 @@ run_approved.py
 ```
 
 `wave1_enrollment_overlay` returns `("", {})` — i.e. changes nothing — unless
-**all three** of these hold:
+**all four** of these hold:
 
 1. `OUTBOUND_WAVE1_ENABLED` is on;
-2. the record is Wave 1 eligible AND its account hashes into arm B;
-3. a Challenger campaign id is configured for that role bucket.
+2. `OUTBOUND_WAVE1_MIN_RECORD_CREATED_AT` parses as an instant;
+3. the record is Wave 1 eligible AND its account hashes into arm B;
+4. a Challenger campaign id is configured for that role bucket.
 
 Any exception inside the overlay is swallowed and the enrollment is unchanged.
+
+## Segmentation: new leads only, configured buckets only
+
+Two gates run in the same pre-randomisation phase as every other eligibility
+check, so a record either of them stops is arm `NONE` — not arm A.
+
+**`OUTBOUND_WAVE1_MIN_RECORD_CREATED_AT`** is the experiment start watermark and
+is **required**. Only Airtable rows whose `record.createdTime` is at or after it
+may take part. Without it there is nothing separating a genuinely new lead from
+an Approved row created months ago for a person the live Control campaigns may
+already have emailed — delivering that person into a Challenger campaign would
+both double-touch them and contaminate the comparison. A blank or unparseable
+watermark is a misconfiguration, not "no restriction": the overlay logs and
+leaves every record on Control A. A row with no `createdTime` at all is
+suppressed too, because an unknown creation instant cannot be proven to be new.
+
+**`OUTBOUND_WAVE1_CHALLENGER_CAMPAIGNS_JSON`** doubles as the rollout scope. A
+record whose bucket has no Challenger campaign is delivered on Control A no
+matter what its hash says, so labelling it `B` would put a control-delivered row
+in the treatment arm. It is suppressed instead, which keeps the delivered payload
+and the measurement frame in agreement. Starting small therefore means mapping
+one or two buckets at a 50/50 split — never lowering the split.
+
+Both gates are opt-in at the resolver level (`min_created_at`,
+`configured_buckets` default to `None`), so `run_wave1_dryrun.py` still previews
+the whole population unless it is asked not to.
 
 ## Eligibility comes before randomisation
 
@@ -150,10 +177,13 @@ an alternate registry.
    `{{rendered_email_N}}` + `{{accountSignature}}`; E1 carries the subject,
    E2–E4 reply on the same thread with an empty subject. Sequence delays are
    3 / 4 / 5 days (Day 1 → 4 → 8 → 13) on the existing business-day schedule.
-2. Set `OUTBOUND_WAVE1_CHALLENGER_CAMPAIGNS_JSON` to the bucket → campaign map.
+2. Set `OUTBOUND_WAVE1_CHALLENGER_CAMPAIGNS_JSON` to the bucket → campaign map,
+   on **GTM Approved Sync** — `run_approved.py` is the only production caller of
+   `airtable_record_to_lead`, so that is the only service the overlay runs in.
 3. Populate `data/wave1_claims.json` for any role whose economics you want to
    quote, or leave it as shipped and run Wave 1 without economics.
-4. Set `OUTBOUND_WAVE1_ENABLED=1` and `OUTBOUND_WAVE1_B_SPLIT_PCT=50`.
+4. Set `OUTBOUND_WAVE1_MIN_RECORD_CREATED_AT` to the moment the pilot starts,
+   then `OUTBOUND_WAVE1_ENABLED=1` and `OUTBOUND_WAVE1_B_SPLIT_PCT=50`.
 5. Deploy, then activate the Challenger campaigns.
 
 Steps 2, 4 and 5 are production environment/deploy actions and are deliberately
