@@ -172,6 +172,45 @@ second cron firing on the same day neither re-scans Instantly nor rewrites the
 report. `--force` overrides it. Files are written via temp file + `os.replace`, so
 a crash can never leave a half-written document for a dashboard to parse.
 
+## Slack delivery (`--slack`)
+
+One HTTP POST of the **already generated** human summary to a Slack App Incoming
+Webhook. No OAuth, no Socket Mode, no event subscriptions, no bot user. Nothing is
+recomputed for Slack, and the machine-readable JSON is never sent.
+
+The webhook lives in `SLACK_WEEKLY_REPORT_WEBHOOK_URL` and is treated as a secret:
+never printed, never written to an artifact or receipt, and scrubbed out of error
+text before it reaches a log (a `requests` exception embeds the request URL, so
+redaction is unconditional rather than applied where it "looks risky").
+
+**It cannot break the pipeline.** Delivery runs only after both artifacts are on
+disk, and every failure mode -- missing webhook, timeout, 4xx, 5xx, malformed
+response, an unforeseen exception -- resolves to a returned outcome, never a
+raise. The exit status is unchanged either way.
+
+**It cannot double-send.** Success is recorded as
+`weekly_report_<ISO week>.slack_sent.json`, written atomically *after* Slack
+accepts. On a later run:
+
+| report | receipt | behaviour |
+|---|---|---|
+| exists | exists | skip Slack entirely |
+| exists | missing | re-deliver **from the summary already on disk** — no rebuild, no Instantly read |
+| missing | — | generate, then deliver |
+
+The receipt is the only record of delivery, so a 2xx we failed to record is sent
+again next week's run — erring toward a duplicate rather than a silently lost
+report. It carries only safe metadata: report id, window, `sent_at`, HTTP status,
+attempt count. No URL, no secret.
+
+**It is bounded separately from the reporter.** 10s per attempt, at most 3
+attempts, 2s incremental backoff — roughly 35s worst case, so it cannot spend the
+`--max-seconds 480` reporting budget. Only 408/425/429/5xx are retried; a 403 or
+404 means the webhook is wrong or revoked and retrying it is noise.
+
+If `--slack` is passed without the env var set, the report is still written and
+the gap is reported on stdout.
+
 ---
 
 # Deployment (requires approval — nothing below has been applied)
@@ -293,6 +332,24 @@ Reads are `POST /leads/list` with the **singular** `campaign` filter — the plu
 counted by `timestamp_created`; a campaign that fails or hits the 200-page ceiling
 is named in `campaigns_failed` / `campaigns_truncated`, contributes nothing
 silently, and drops the metric to `partial`.
+
+## Enabling Slack (a separate, later change)
+
+Slack is off until two things happen, in this order:
+
+1. **Add the variable to GTM** (Railway UI, GTM service only):
+   `SLACK_WEEKLY_REPORT_WEBHOOK_URL = <webhook from the Slack app>`.
+   Nothing else needs it; do not add it to Approved Sync.
+2. **Add `--slack` to the reporter half of the Start Command**, leaving the
+   acquisition half untouched:
+
+```sh
+sh -c 'python -u run_weekly_report.py --artifact-root /app/data/state/orchestrator_v2 --if-due friday --once-per-window --instantly --slack --max-seconds 480 || true; exec python -u run_orchestrator.py --mode live_acquisition_and_enrichment --lanes fantastic --target 300 --airtable-write --global-budget 1500 --artifact-root /app/data/state/orchestrator_v2'
+```
+
+Cron stays `0 13 * * *`. To disable Slack again, drop `--slack` (the variable can
+stay); to disable without a deploy, clear the variable — the report still writes
+and simply declares the delivery gap.
 
 ## Gates that still need explicit authorization
 

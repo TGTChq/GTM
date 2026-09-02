@@ -26,6 +26,7 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import List, Optional, Sequence
 
+from weekly_report import slack
 from weekly_report.external import CollectorResult, collect_airtable, collect_instantly, disabled
 from weekly_report.render import render_summary
 from weekly_report.report import HEADLINE_ORDER, build_report
@@ -162,6 +163,45 @@ def _output_paths(
     return json_path, summary_path
 
 
+def _deliver_existing(
+    window: ReportingWindow, json_path: Path, summary_path: Path
+) -> "slack.SlackDelivery":
+    """Retry Slack for a report already on disk, recomputing nothing.
+
+    Reached when a previous invocation wrote the report but did not record a
+    delivery receipt. The summary text is read back rather than re-rendered, so no
+    metric is recalculated and no provider is contacted.
+    """
+    if not summary_path.exists():
+        return slack.SlackDelivery(
+            status=slack.STATUS_FAILED,
+            attempted=False,
+            error=(
+                f"the report JSON exists but {summary_path.name} does not, so there is no "
+                "summary to deliver; re-run with --force to regenerate both"
+            ),
+        )
+    try:
+        summary = summary_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        return slack.SlackDelivery(
+            status=slack.STATUS_FAILED, attempted=False, error=slack.redact(exc)
+        )
+    return slack.deliver(
+        summary,
+        report_id=window.iso_week,
+        report_path=json_path,
+        window=window.to_dict(),
+    )
+
+
+def _report_slack(delivery: "slack.SlackDelivery", args: argparse.Namespace) -> None:
+    """Print the (already redacted) delivery outcome. Never raises, never exits."""
+    if args.quiet and delivery.delivered:
+        return
+    print(delivery.describe())
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Generate the weekly TGTC pipeline report (read-only).",
@@ -237,6 +277,13 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Regenerate even when --once-per-window would skip.",
     )
+    parser.add_argument(
+        "--slack",
+        action="store_true",
+        help=f"POST the human summary to the Slack incoming webhook in ${slack.ENV_WEBHOOK}. "
+        "Sends at most once per window, recorded by a receipt file written only after "
+        "Slack accepts. A delivery failure never changes the exit status.",
+    )
     parser.add_argument("--no-write", action="store_true", help="Print only; write no files.")
     parser.add_argument("--quiet", action="store_true", help="Do not print the summary to stdout.")
     parser.add_argument(
@@ -279,8 +326,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         if not args.quiet:
             print(
                 f"weekly report for {window.iso_week} already exists at {json_path}; "
-                "skipping (pass --force to regenerate)"
+                "skipping regeneration (pass --force to regenerate)"
             )
+        # Delivery is tracked separately from generation. A run that crashed after
+        # writing the report but before Slack accepted it must still deliver -- from
+        # the summary already on disk, without rebuilding anything or re-reading
+        # Instantly. If the receipt exists too, this is a no-op.
+        if args.slack:
+            _report_slack(_deliver_existing(window, json_path, summary_path), args)
         return 0
 
     instantly, airtable = _collectors(args, window)
@@ -307,6 +360,26 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             print()
             for path in written:
                 print(f"wrote {path}")
+
+    # Slack runs only after the artifacts are safely on disk, so a delivery failure
+    # can never cost us the report. It is also the last thing that can go wrong: it
+    # cannot raise, and it does not influence the exit status below.
+    if args.slack:
+        if args.no_write:
+            print(
+                "slack: skipped -- --no-write means there is no report on disk to record "
+                "a delivery receipt against"
+            )
+        else:
+            _report_slack(
+                slack.deliver(
+                    summary,
+                    report_id=window.iso_week,
+                    report_path=json_path,
+                    window=window.to_dict(),
+                ),
+                args,
+            )
 
     if args.strict:
         unmeasured = [
