@@ -343,6 +343,73 @@ def stage_patch(state: Dict[str, Any], *, execute: bool) -> Dict[str, Any]:
     return state["patch"]
 
 
+#: Literal marker for the discriminating probe. It contains no variable syntax,
+#: so it cannot be removed by a merge-variable sanitiser -- only by the sequence
+#: body not being written at all.
+PATCH_PROBE_MARKER = "WAVE1_PATCH_PROBE"
+
+
+def probe_patch_payload(current: Dict[str, Any]) -> Dict[str, Any]:
+    """Change STEP 1 ONLY, carrying both a literal marker and the variable.
+
+    Steps 2-4 are passed through byte-identical to what is stored, so the only
+    thing this patch can alter is step one's body. Three outcomes tell apart the
+    two hypotheses we could not separate before:
+
+        marker + token   PATCH writes sequences AND the registered variable is
+                         now accepted
+        marker only      PATCH writes sequences, but the variable is still
+                         stripped despite the campaign knowing its name
+        neither          PATCH is not applying the sequence body at all
+
+    The previous attempt could not distinguish these, because a stripped token
+    left the body byte-identical to what was already there.
+    """
+    sequences = json.loads(json.dumps(current.get("sequences") or []))
+    if not sequences:
+        raise RuntimeError("campaign has no sequences to patch")
+    steps = sequences[0].get("steps") or []
+    if len(steps) != 4:
+        raise RuntimeError(f"expected 4 steps, found {len(steps)}")
+    stored = [(s.get("variants") or [{}])[0].get("body") for s in steps]
+    steps[0]["variants"][0]["body"] = (
+        f"<div>{PATCH_PROBE_MARKER}</div><div><br /></div>"
+        f"{{{{rendered_email_1_html}}}}{SIGNATURE_BLOCK}"
+    )
+    # Steps 2-4 must be byte-identical to what is live.
+    for index in (1, 2, 3):
+        assert (steps[index].get("variants") or [{}])[0].get("body") == stored[index], (
+            f"step {index + 1} body was altered; the probe must touch step 1 only")
+    return {"sequences": sequences}
+
+
+def stage_probe(state: Dict[str, Any], *, execute: bool) -> Dict[str, Any]:
+    current = get_campaign()
+    payload = probe_patch_payload(current)
+    if not execute:
+        return {"would_patch": payload}
+    response = _request(
+        "PATCH", f"campaigns/{PRODUCT_CHALLENGER_ID}", payload, execute=True)
+    state["probe"] = {"patch_response": response}
+    return state["probe"]
+
+
+def classify_probe(campaign: Dict[str, Any]) -> Dict[str, Any]:
+    """A / B / C, read off the STORED step-1 body."""
+    steps = (campaign.get("sequences") or [{}])[0].get("steps") or []
+    body = str((steps[0].get("variants") or [{}])[0].get("body") or "") if steps else ""
+    marker = PATCH_PROBE_MARKER in body
+    token = "{{rendered_email_1_html}}" in body
+    if marker and token:
+        verdict, meaning = "A", "PATCH writes sequences and the registered variable is accepted"
+    elif marker:
+        verdict, meaning = "B", "PATCH writes sequences, but Instantly still strips the variable token"
+    else:
+        verdict, meaning = "C", "PATCH is not applying the sequence body"
+    return {"verdict": verdict, "meaning": meaning,
+            "marker_present": marker, "token_present": token, "step_1_body": body}
+
+
 def stage_verify(state: Dict[str, Any]) -> Dict[str, Any]:
     campaign = describe_campaign(get_campaign())
     result: Dict[str, Any] = {"campaign": campaign}
@@ -375,7 +442,8 @@ def stage_verify(state: Dict[str, Any]) -> Dict[str, Any]:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--stage", required=True, choices=("lead", "patch", "verify"))
+    parser.add_argument("--stage", required=True,
+                        choices=("lead", "patch", "probe", "verify"))
     parser.add_argument("--email", default="", help="Synthetic lead address (stage=lead).")
     parser.add_argument("--out", default="reports/wave1_variable_validation.json")
     parser.add_argument(
@@ -396,6 +464,11 @@ def main() -> int:
         if not args.email:
             raise SystemExit("--email is required for stage=lead")
         artifact["result"] = stage_lead(args.email, state, execute=args.execute)
+    elif args.stage == "probe":
+        artifact["result"] = stage_probe(state, execute=args.execute)
+        if args.execute:
+            artifact["classification"] = classify_probe(get_campaign())
+            print("CLASSIFICATION:", json.dumps(artifact["classification"], indent=2))
     elif args.stage == "patch":
         if args.execute and not (state.get("lead") or {}).get("id"):
             raise SystemExit(

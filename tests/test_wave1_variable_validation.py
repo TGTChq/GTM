@@ -208,3 +208,58 @@ def test_the_lead_stage_dry_run_writes_nothing():
     result = tool.stage_lead("wave1@example.invalid", {}, execute=False)
     assert "would_post" in result
     assert result["would_post"]["campaign"] == tool.PRODUCT_CHALLENGER_ID
+
+
+# ---------------------------------------------------------------------------
+# Discriminating probe
+# ---------------------------------------------------------------------------
+
+def test_the_probe_touches_step_one_only():
+    campaign = _live_campaign()
+    stored = [s["variants"][0]["body"] for s in campaign["sequences"][0]["steps"]]
+    payload = tool.probe_patch_payload(campaign)
+    steps = payload["sequences"][0]["steps"]
+    assert steps[0]["variants"][0]["body"] != stored[0]
+    for index in (1, 2, 3):
+        assert steps[index]["variants"][0]["body"] == stored[index], index
+
+
+def test_the_probe_body_carries_both_marker_and_variable():
+    payload = tool.probe_patch_payload(_live_campaign())
+    body = payload["sequences"][0]["steps"][0]["variants"][0]["body"]
+    assert tool.PATCH_PROBE_MARKER in body
+    assert "{{rendered_email_1_html}}" in body
+    assert body.endswith(tool.SIGNATURE_BLOCK)
+
+
+def test_the_marker_contains_no_variable_syntax():
+    """It must be removable only by the body not being written, never by a
+    merge-variable sanitiser."""
+    assert "{{" not in tool.PATCH_PROBE_MARKER and "}}" not in tool.PATCH_PROBE_MARKER
+
+
+def test_the_probe_sends_only_sequences():
+    assert set(tool.probe_patch_payload(_live_campaign())) == {"sequences"}
+
+
+def test_the_probe_preserves_delays_and_subjects():
+    steps = tool.probe_patch_payload(_live_campaign())["sequences"][0]["steps"]
+    assert [s["delay"] for s in steps] == [3, 4, 5, 1]
+    assert [s["variants"][0]["subject"] for s in steps] == [
+        "{{rendered_subject}}", "", "", ""]
+
+
+@pytest.mark.parametrize("body,expected", [
+    ("<div>WAVE1_PATCH_PROBE</div>{{rendered_email_1_html}}<div>sig</div>", "A"),
+    ("<div>WAVE1_PATCH_PROBE</div><div>sig</div>", "B"),
+    ("<div><br /></div><div>{{accountSignature}}</div>", "C"),
+    ("", "C"),
+])
+def test_classification_is_read_off_the_stored_body(body, expected):
+    campaign = {"sequences": [{"steps": [{"variants": [{"body": body}]}]}]}
+    assert tool.classify_probe(campaign)["verdict"] == expected
+
+
+def test_the_probe_dry_run_writes_nothing(monkeypatch):
+    monkeypatch.setattr(tool, "get_campaign", _live_campaign)
+    assert "would_patch" in tool.stage_probe({}, execute=False)
