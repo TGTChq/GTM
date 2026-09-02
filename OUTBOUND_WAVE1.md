@@ -118,17 +118,25 @@ them — so `tests/test_outbound_wave1_integrity.py` now gates the differentiati
 directly: nine distinct CTAs, nine distinct frictions, and no single proof
 sentence on more than four campaigns.
 
+The three slots carry different burdens of proof, and a QA gate holds each to
+its own: the **signal** is the real hiring event read off the record and stays
+factual and unhedged; the **friction** is a hypothesis the reader can accept or
+reject, so it is hedged (`can`, `may`, `often`, `usually`, `tends to`) or else
+true of any hire rather than of this reader, and may never state a flat absolute
+or assert something about the reader's own process; the **proof** is an approved
+TGTC fact and nothing else.
+
 | campaign | buyer's reason to care (friction) | verified fact sold (proof) | asks for |
 | --- | --- | --- | --- |
-| PRODUCT | getting several reqs approved at once is the hard part | headcount model | how the headcount side works |
-| OPERATIONS | an ops title says nothing about the actual mix | role-specific testing | how we test for a scope like this |
+| PRODUCT | getting several approved at once can be the harder half | headcount model | how the headcount side works |
+| OPERATIONS | an ops title on its own may not say much about the actual mix | role-specific testing | how we test for a scope like this |
 | FINANCE | a hire is also a payroll/tax/benefits obligation to administer | employment administration | what we carry on the employment side |
 | PEOPLE & HR | hiring across functions concentrates the screening load | remote-readiness assessment | how we assess remote readiness |
-| ECOMMERCE | ecommerce titles cover very different work by store size | role-specific testing | how our testing works |
-| CUSTOMER EXPERIENCE | these candidates interview well by definition | role-specific testing | what the testing covers |
-| MARKETING & CREATIVE | one approved line asked to cover several jobs | headcount model | how an embedded hire works |
-| GTM SYSTEMS | the parts are common, the intersection is rare | role-specific testing | how we test the combination |
-| AI & TECHNICAL | nobody has a long track record in tooling this new | role-specific testing | how the assessment works |
+| ECOMMERCE | ecommerce titles can cover very different work by store size | role-specific testing | how our testing works |
+| CUSTOMER EXPERIENCE | people good at these roles are often good in an interview too | role-specific testing | what the testing covers |
+| MARKETING & CREATIVE | a wide scope can mean one line asked to cover several jobs | headcount model | how an embedded hire works |
+| GTM SYSTEMS | the parts are common; the combination tends to be rarer | role-specific testing | how we test the combination |
+| AI & TECHNICAL | tooling this new has not existed long enough for long track records | role-specific testing | how the assessment works |
 
 **ECOMMERCE is knowingly the weakest.** Every ecommerce-specific idea worth
 selling — seasonal capacity, platform-specific proof — needs a capability that is

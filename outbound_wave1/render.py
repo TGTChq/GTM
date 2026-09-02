@@ -227,20 +227,19 @@ _FRICTION_BY_CAMPAIGN: Dict[str, Tuple[str, str]] = {
     # Approvals, not candidate supply, are what hold a multi-req product team up.
     "product": (
         FRICTION_APPROVAL_SEQUENCING,
-        "Getting them all approved at the same time is usually the harder half "
-        "of it.",
+        "Getting several approved at the same time can be the harder half of it.",
     ),
     # An ops title is a container for whatever the company piled into it.
     "operations": (
         FRICTION_TITLE_VS_SCOPE,
-        "An ops title tells you almost nothing about whether someone has actually "
-        "run that particular mix.",
+        "An ops title on its own may not say much about whether someone has run "
+        "that particular mix.",
     ),
     # A controller reads a hire as an administrative and compliance obligation.
     "finance": (
         FRICTION_EMPLOYMENT_OBLIGATION,
-        "Whoever fills it is also a payroll, tax and benefits obligation for "
-        "someone on your side to administer.",
+        "Whoever fills it is also a payroll, tax and benefits obligation that "
+        "someone has to administer.",
     ),
     "people_hr": (
         FRICTION_CROSS_FUNCTION_SCREENING,
@@ -250,35 +249,34 @@ _FRICTION_BY_CAMPAIGN: Dict[str, Tuple[str, str]] = {
     # The closest to OPERATIONS, and knowingly so -- see the ECOMMERCE policy.
     "ecommerce": (
         FRICTION_TITLE_INFLATION,
-        "Ecommerce titles cover very different work depending on the size of the "
-        "store behind them.",
+        "Ecommerce titles can cover very different work depending on the size of "
+        "the store behind them.",
     ),
     # The one reason only CX can use: the interview is the least diagnostic
     # signal precisely because talking to people is the job.
     "customer_experience": (
         FRICTION_INTERVIEW_WEAK_SIGNAL,
-        "Candidates for these roles interview well almost by definition, since "
-        "talking to people is the job. That makes the interview itself one of the "
-        "weaker signals you have.",
+        "People who are good at these roles are often good in an interview too, "
+        "which can make the interview itself a weaker signal than usual.",
     ),
     # A very wide marketing scope usually means one approved line covering several
     # jobs -- a budget shape, not a hiring preference.
     "marketing_creative": (
         FRICTION_SCOPE_COMPRESSION,
-        "A scope that wide usually means one approved line is being asked to cover "
+        "A scope that wide can mean one approved line is being asked to cover "
         "several jobs.",
     ),
     # In RevOps the parts are common and the join is rare.
     "gtm_systems": (
         FRICTION_RARE_INTERSECTION,
-        "Each of those is common on its own. The intersection is the rare part, "
-        "and it is the part a CV cannot show you.",
+        "Each of those is common on its own. It is the combination that tends to "
+        "be rarer, and the part a CV is least likely to evidence.",
     ),
     # Nothing in this category is old enough for tenure to mean anything.
     "ai_technical": (
         FRICTION_NO_TRACK_RECORD_YET,
-        "Nobody has a long track record in tooling this new, so years of "
-        "experience on a CV is not telling you much here.",
+        "Tooling this new has not been around long enough for track records in it "
+        "to be long, so years of experience on a CV may say less than usual here.",
     ),
 }
 

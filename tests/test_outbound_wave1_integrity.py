@@ -542,3 +542,49 @@ def test_a_signal_dependent_friction_is_not_rendered_behind_another_signal():
     assert resolution.friction_angle != "approval_sequencing"
     assert "approved at the same time" not in resolution.rendered_email_1
     assert resolution.qa_pass, resolution.qa_reasons
+
+
+#: Flat absolutes and asserted facts about the reader's own process. A friction
+#: is a HYPOTHESIS the reader can accept or reject, never something the copy
+#: claims to know about them, so these may not appear in one.
+_UNSUPPORTED_ABSOLUTES = (
+    r"\bnobody\b", r"\bno one\b", r"\balways\b", r"\bnever\b",
+    r"\bcannot show\b", r"\bcan'?t show\b", r"\btells you (?:almost )?nothing\b",
+    r"\bby definition\b", r"\bis not telling you\b", r"\bthe rare part\b",
+    r"\bweakest\b", r"\bguarantee",
+)
+
+#: A friction that makes a claim about the reader's situation must hedge it.
+_HEDGES = r"\b(?:can|could|may|might|often|usually|tends? to|if)\b"
+
+
+def test_no_friction_states_an_unsupported_absolute():
+    import re
+    for resolution in _differentiation_resolutions():
+        friction = resolution.e1_segments["friction"]
+        for pattern in _UNSUPPORTED_ABSOLUTES:
+            assert not re.search(pattern, friction, re.I), (
+                resolution.campaign, pattern, friction)
+
+
+def test_no_friction_asserts_the_readers_own_situation_as_fact():
+    """Either the sentence is hedged, or it is true of any hire rather than of
+    this reader. FINANCE's is the second kind: employing someone creates a
+    payroll, tax and benefits obligation whoever administers it."""
+    import re
+    for resolution in _differentiation_resolutions():
+        friction = resolution.e1_segments["friction"]
+        hedged = bool(re.search(_HEDGES, friction, re.I))
+        addresses_reader = " your " in f" {friction.lower()} "
+        assert hedged or not addresses_reader, (resolution.campaign, friction)
+
+
+def test_the_signal_line_stays_factual_and_unhedged():
+    """Only the friction is a hypothesis. The signal is the real hiring event
+    read off the record, and hedging it would throw away the one thing in the
+    email that is verifiably true."""
+    for resolution in _differentiation_resolutions():
+        signal = resolution.e1_segments["signal"]
+        assert signal
+        for weasel in ("might be", "may be", "could be", "possibly", "perhaps"):
+            assert weasel not in signal.lower(), (resolution.campaign, signal)

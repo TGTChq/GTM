@@ -321,8 +321,8 @@ MARKETING_CREATIVE = CampaignPolicy(
     proof_texts={
         PROOF_HEADCOUNT_MODEL: (
             "Ours join your team full-time without going onto your official "
-            "headcount, so the rest of the scope does not have to wait for the "
-            "next budget cycle."
+            "headcount, so covering the rest of the scope does not need another "
+            "line."
         )
     },
     scope_facets=_facets(
