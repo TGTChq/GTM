@@ -41,11 +41,12 @@ from .render import (
     FRICTION_INTERVIEW_WEAK_SIGNAL,
     FRICTION_MULTI_AREA_SHORTLIST,
     FRICTION_NO_TRACK_RECORD_YET,
-    FRICTION_PARALLEL_POOL,
+    FRICTION_MORE_CVS,
     FRICTION_RARE_INTERSECTION,
     FRICTION_SCOPE_SPLIT,
+    FRICTION_ADMIN_ON_CLOSE,
     FRICTION_SCREENING_BANDWIDTH,
-    FRICTION_TIME_OPEN,
+    FRICTION_SECOND_SEARCH_HEADCOUNT,
     FRICTION_TITLE_INFLATION,
     FRICTION_TITLE_VS_SCOPE,
     html_to_text,
@@ -60,10 +61,11 @@ from .render import (
 #: the economics path and NOTHING else -- pairing it with "how we test for this
 #: role" would leave the reader a budget problem and a testing answer. The
 #: economics path likewise may not borrow a scope/bandwidth friction.
-#: Frictions that describe a degraded signal rather than a campaign argument.
-#: Any proof/offer pair may carry them, because T2/T3 records keep their
-#: campaign's proof while losing its signal-specific reason.
-_DEGRADED_FRICTIONS = frozenset({FRICTION_TIME_OPEN, FRICTION_PARALLEL_POOL})
+#: Degraded-tier frictions, each tied to the proof it hands off to. They are NOT
+#: interchangeable: that was the defect this map exists to stop. A T2/T3 record
+#: keeps its campaign's proof, so it must also get the friction that leads into
+#: that proof -- a stalled-search friction followed by "we handle payroll" leaves
+#: the reader a hiring problem and a bookkeeping answer.
 
 #: Frictions that lead into "so we test on the work". They set up an EVIDENCE
 #: problem -- the title, the CV or the interview is not telling the reader what
@@ -74,7 +76,8 @@ _TESTING_FRICTIONS = frozenset({
     FRICTION_TITLE_VS_SCOPE, FRICTION_TITLE_INFLATION,
     FRICTION_INTERVIEW_WEAK_SIGNAL, FRICTION_RARE_INTERSECTION,
     FRICTION_NO_TRACK_RECORD_YET,
-}) | _DEGRADED_FRICTIONS
+    FRICTION_MORE_CVS,
+})
 
 COHERENT_FRICTIONS = {
     (PROOF_ECONOMICS, OFFER_ROLE_ECONOMICS): frozenset({FRICTION_COST_COMPARISON}),
@@ -82,19 +85,21 @@ COHERENT_FRICTIONS = {
     (PROOF_REMOTE_READINESS, OFFER_REMOTE_READINESS_OVERVIEW): frozenset({
         FRICTION_CROSS_FUNCTION_SCREENING, FRICTION_SCREENING_BANDWIDTH,
         FRICTION_MULTI_AREA_SHORTLIST, FRICTION_COMBINED_SCOPE_POOL,
-    }) | _DEGRADED_FRICTIONS,
+        FRICTION_MORE_CVS,
+    }),
     # The headcount proof answers an APPROVAL problem: too many lines to get
     # signed off, or one line asked to cover too much. It must never be paired
     # with an evidence friction -- "a CV cannot show you that" followed by "they
     # are not on your headcount" answers a question the reader did not ask.
     (PROOF_HEADCOUNT_MODEL, OFFER_HEADCOUNT_OVERVIEW): frozenset({
         FRICTION_HEADCOUNT_ADDITION, FRICTION_SCOPE_SPLIT,
-    }) | _DEGRADED_FRICTIONS,
+        FRICTION_SECOND_SEARCH_HEADCOUNT,
+    }),
     # The employment-administration proof answers an ADMINISTRATIVE BURDEN
     # problem, and nothing else.
     (PROOF_EMPLOYMENT_ADMIN, OFFER_EMPLOYMENT_ADMIN_OVERVIEW): frozenset({
-        FRICTION_EMPLOYMENT_OBLIGATION,
-    }) | _DEGRADED_FRICTIONS,
+        FRICTION_EMPLOYMENT_OBLIGATION, FRICTION_ADMIN_ON_CLOSE,
+    }),
 }
 
 #: Anything that still looks like a template placeholder.
@@ -353,7 +358,9 @@ def run_qa_gates(resolution: Dict, *, policy: CampaignPolicy) -> Tuple[bool, Lis
     noun = str(resolution.get("offer_noun") or "")
     if noun not in VALID_OFFER_NOUNS:
         reasons.append("offer_noun_outside_frozen_vocabulary")
-    if noun and noun != policy.offer_noun(offer_type):
+    if noun and noun not in {
+        policy.offer_noun(offer_type), policy.degraded_offer_noun(offer_type),
+    } - {""}:
         reasons.append("offer_noun_is_not_this_campaigns_noun_for_the_offer_type")
     e1_offer = str((resolution.get("e1_segments") or {}).get("offer") or "")
     if noun and e1_offer and e1_offer != offer_question(noun):

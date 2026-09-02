@@ -166,6 +166,36 @@ someone* and *we keep sourcing if the shortlist is not right*. They are E3's
 frozen payload, introduced there as "One thing I left out" — putting them in E1
 would falsify that line.
 
+### Degraded tiers carry the argument, not just the grammar
+
+T2 and T3 keep the campaign's PROOF but lose its T1 reason, so they need a
+friction that hands off to that proof. One shared "the search has stalled" line
+could not do it: followed by "we handle payroll" it left the reader a hiring
+problem and a bookkeeping answer. `render._DEGRADED_FRICTION_BY_PROOF` therefore
+picks the degraded friction by proof, not by tier:
+
+| proof | degraded friction |
+| --- | --- |
+| headcount model | running a second search usually means finding the headcount for it too |
+| employment administration | whenever it does close, there's employment admin behind it |
+| testing / remote readiness | if the right person hasn't turned up yet, more CVs may not be what's missing |
+
+Job age is a FACT and the signal states it. Every reading of what that age means
+is conditional, because a posting open for 50 days does not prove a shortlist
+failed or that one exists. The old T2 line asserted exactly that, and the old T3
+line called a parallel search "usually the cheapest way to keep moving" -- an
+economics claim nothing here supports. Both are gone.
+
+A campaign whose offer noun names its own signal (OPERATIONS' "a scope like
+this", GTM's "the combination") declares a tier-safe noun for records where that
+signal did not fire, so no CTA points at something the email never described.
+The noun is still resolved once per record and reused verbatim in E1-E4: it
+varies across TIERS, never within one lead's thread.
+
+**This matters more than the T1 copy does.** Over the whole local corpus of 2,405
+stored opportunities, 98% of eligible rows resolve to T3 and only 2% to T1. The
+degraded copy is what production will actually send.
+
 ## Fallback coherence
 
 A degrade moves the whole triple. When a campaign cannot support economics it

@@ -128,6 +128,9 @@ class CampaignPolicy:
     #: Per-campaign visible offer noun, keyed by offer type. Falls back to
     #: ``DEFAULT_OFFER_NOUNS``.
     offer_nouns: Dict[str, str] = field(default_factory=dict)
+    #: Offer noun for records whose T1 signal did NOT fire. Set only where the
+    #: campaign's own noun names something the degraded email never describes.
+    degraded_offer_nouns: Dict[str, str] = field(default_factory=dict)
     #: Per-campaign phrasing of a proof line, keyed by proof type. The CLAIM is
     #: identical -- only the sentence that carries it changes, so it follows this
     #: campaign's own argument instead of reading as one template reused nine
@@ -140,6 +143,10 @@ class CampaignPolicy:
             offer_type,
             DEFAULT_OFFER_NOUNS.get(offer_type, DEFAULT_OFFER_NOUNS[OFFER_TESTING_OVERVIEW]),
         )
+
+    def degraded_offer_noun(self, offer_type: str) -> str:
+        """Tier-safe noun for ``offer_type``, or "" to keep the campaign's own."""
+        return self.degraded_offer_nouns.get(offer_type, "")
 
     def proof_text(self, proof_type: str) -> str:
         """This campaign's phrasing of ``proof_type``, or "" for the shared one."""
@@ -183,6 +190,9 @@ OPERATIONS = CampaignPolicy(
     fallback_offer=OFFER_TESTING_OVERVIEW,
     t1_min_evidence=2,
     offer_nouns={OFFER_TESTING_OVERVIEW: "how we test for a scope like this"},
+    # Behind a degraded signal no scope is described, so "a scope like this"
+    # points at nothing.
+    degraded_offer_nouns={OFFER_TESTING_OVERVIEW: "how we test for this role"},
     proof_texts={
         PROOF_TESTING_MECHANICS: (
             "We test candidates on the actual work before they get to you."
@@ -354,6 +364,8 @@ GTM_SYSTEMS = CampaignPolicy(
     t1_min_evidence=2,
     strong_claim_id="gtm_combination_directly_tested",
     offer_nouns={OFFER_TESTING_OVERVIEW: "how we test the combination"},
+    # Behind a degraded signal no combination is described.
+    degraded_offer_nouns={OFFER_TESTING_OVERVIEW: "how we test for this role"},
     proof_texts={
         PROOF_TESTING_MECHANICS: (
             "We test for the combination, not just the individual pieces."

@@ -46,8 +46,13 @@ FRICTION_SCREENING_BANDWIDTH = "screening_bandwidth"
 FRICTION_CROSS_FUNCTION_SCREENING = "cross_function_screening"
 FRICTION_MULTI_AREA_SHORTLIST = "multi_area_shortlist"
 FRICTION_COMBINED_SCOPE_POOL = "combined_scope_pool"
-FRICTION_TIME_OPEN = "time_open"
-FRICTION_PARALLEL_POOL = "parallel_pool"
+#: Degraded-tier frictions. One shared friction could not work: T2/T3 keep the
+#: campaign's proof, and a stalled-search friction does not lead into "they are
+#: not on your headcount" or "we handle payroll". So the degraded friction is
+#: chosen by the PROOF it has to hand off to, not by the tier.
+FRICTION_MORE_CVS = "more_cvs"
+FRICTION_SECOND_SEARCH_HEADCOUNT = "second_search_headcount"
+FRICTION_ADMIN_ON_CLOSE = "admin_on_close"
 #: Campaign-specific frictions. Each one states the reason THIS buyer has for
 #: caring, which is what makes the nine arguments different rather than nine
 #: wordings of one argument. All are hedged observations about the reader's own
@@ -301,16 +306,33 @@ _ECONOMICS_FRICTION = (
     "part.",
 )
 
-_T2_FRICTION = (
-    FRICTION_TIME_OPEN,
-    "That usually means the right person hasn't turned up yet, not that the "
-    "search stopped.",
-)
+#: Degraded-tier friction by the proof it must hand off to.
+#:
+#: Job age is a FACT and the signal states it. Any reading of what that age
+#: means is conditional here ("If the right person hasn't turned up yet"),
+#: because a posting sitting open for 50 days does not prove a shortlist failed,
+#: or that one exists. The old wording asserted exactly that, and the old T3
+#: friction called a parallel search "usually the cheapest way to keep moving",
+#: which is an economics claim nothing in this repository supports.
+_DEGRADED_FRICTION_BY_PROOF: Dict[str, Tuple[str, str]] = {
+    # -> "they don't go on your official headcount"
+    PROOF_HEADCOUNT_MODEL: (
+        FRICTION_SECOND_SEARCH_HEADCOUNT,
+        "Running a second search alongside it usually means finding the headcount "
+        "for it too.",
+    ),
+    # -> "we handle payroll, taxes, benefits and compliance"
+    PROOF_EMPLOYMENT_ADMIN: (
+        FRICTION_ADMIN_ON_CLOSE,
+        "Whenever it does close, there's employment admin behind it.",
+    ),
+}
 
-_T3_FRICTION = (
-    FRICTION_PARALLEL_POOL,
-    "If the shortlist hasn't worked out yet, running a second search alongside "
-    "it is usually the cheapest way to keep moving.",
+#: Used for the evidence proofs (role-specific testing, remote readiness), which
+#: both answer "you have not seen the right person yet".
+_DEGRADED_EVIDENCE_FRICTION = (
+    FRICTION_MORE_CVS,
+    "If the right person hasn't turned up yet, more CVs may not be what's missing.",
 )
 
 #: Campaign proof phrasings that refer back to the signal. GTM says "the
@@ -374,10 +396,10 @@ def _friction(policy: CampaignPolicy, signal_type: str, proof_type: str) -> Tupl
     """
     if proof_type == PROOF_ECONOMICS:
         return _ECONOMICS_FRICTION
-    if signal_type == SIGNAL_JOB_AGE:
-        return _T2_FRICTION
-    if signal_type == SIGNAL_ACTIVE_REQ:
-        return _T3_FRICTION
+    if signal_type in (SIGNAL_JOB_AGE, SIGNAL_ACTIVE_REQ):
+        # The campaign's T1 reason is unavailable, but its PROOF still is, so the
+        # degraded friction is the one that hands off to that proof.
+        return _DEGRADED_FRICTION_BY_PROOF.get(proof_type, _DEGRADED_EVIDENCE_FRICTION)
     campaign_friction = _FRICTION_BY_CAMPAIGN.get(policy.key)
     if campaign_friction is None:
         return _T3_FRICTION
@@ -446,8 +468,23 @@ def _proof_line(proof_type: str, data: RenderInputs) -> str:
 # Offer lines
 # ---------------------------------------------------------------------------
 
-def offer_noun(policy: CampaignPolicy, offer_type: str) -> str:
-    """The exact words this campaign uses for this offer, resolved once."""
+def offer_noun(policy: CampaignPolicy, offer_type: str, *, signal_type: str = "") -> str:
+    """The exact words this campaign uses for this offer, resolved once.
+
+    Two campaigns name their offer after their own T1 signal -- OPERATIONS asks
+    for "how we test for a scope like this", GTM for "how we test the
+    combination". Behind a degraded signal the email never describes a scope or a
+    combination, so those CTAs point at nothing. Such a campaign may declare a
+    tier-safe noun instead.
+
+    The noun is still resolved ONCE per record and reused verbatim in E1-E4, so
+    one lead's thread stays internally consistent. It is only across TIERS that
+    the noun can differ, which no single reader ever sees.
+    """
+    if signal_type and signal_type != policy.t1_signal:
+        degraded = policy.degraded_offer_noun(offer_type)
+        if degraded:
+            return degraded
     return policy.offer_noun(offer_type)
 
 
@@ -545,7 +582,7 @@ def render_sequence(
     data: RenderInputs,
 ) -> RenderedSequence:
     """Render all four Challenger emails for one record."""
-    noun = offer_noun(policy, offer_type)
+    noun = offer_noun(policy, offer_type, signal_type=signal_type)
     email_1 = render_email_1(
         policy,
         signal_type=signal_type,

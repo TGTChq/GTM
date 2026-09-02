@@ -338,9 +338,13 @@ def test_wave1_is_launchable_with_no_economics_configured():
 )
 def test_campaign_offer_noun_appears_verbatim_in_all_four_emails(bucket, role, expected_noun):
     registry = load_claim_registry(config.OUTBOUND_WAVE1_CLAIM_REGISTRY_PATH)
-    resolution = resolve_challenger(
-        _campaign_fields(bucket, role), experiment_id=EXPERIMENT, registry=registry
-    )
+    fields = _campaign_fields(bucket, role)
+    # These are the campaigns' T1 nouns, so the T1 signal has to fire. OPERATIONS
+    # and GTM name their offer after that signal and fall back to a tier-safe
+    # noun without it.
+    fields["Focus Evidence"] = "crm administration | lead routing | pipeline reporting"
+    fields["Outbound Roles"] = f"{role}|Second Role"
+    resolution = resolve_challenger(fields, experiment_id=EXPERIMENT, registry=registry)
     assert resolution.offer_noun == expected_noun
     assert f"Want me to send {expected_noun}?" in resolution.rendered_email_1
     for index in (1, 2, 3, 4):
@@ -677,3 +681,127 @@ def test_a_banned_word_we_actually_wrote_still_fails():
     text = "Acme Solutions has two roles open. Our platform will transform hiring."
     assert _find_banned(authored_text(text, "Acme Solutions")) == [
         "buzzword_platform", "buzzword_transform"]
+
+
+# ---------------------------------------------------------------------------
+# 9. Degraded-tier coherence: the proof must answer THAT tier's friction
+# ---------------------------------------------------------------------------
+#
+# A T2/T3 email is not coherent just because every sentence is grammatical, the
+# proof is verified and the CTA noun is valid. One shared "the search has
+# stalled" friction used to hand off to "they are not on your headcount" and to
+# "we handle payroll" -- leaving the reader a hiring problem and an unrelated
+# answer. The degraded friction is now chosen by the proof it leads into.
+
+_DEGRADED_TIERS = (
+    ("T2", {"Job Freshness": "aging"}),
+    ("T3", {}),
+)
+
+
+def _degraded_resolution(bucket, role, tier):
+    from datetime import datetime, timedelta, timezone
+    now = datetime(2026, 9, 2, tzinfo=timezone.utc)
+    fields = _campaign_fields(bucket, role)
+    fields.update({"Role Focus": "", "Focus Evidence": "", "Outbound Roles": role})
+    if tier == "T2":
+        fields["Posted At"] = (now - timedelta(days=50)).isoformat()
+        fields["Job Freshness"] = "aging"
+    else:
+        fields["Posted At"] = (now - timedelta(days=5)).isoformat()
+    registry = load_claim_registry(config.OUTBOUND_WAVE1_CLAIM_REGISTRY_PATH)
+    return resolve_challenger(
+        fields, experiment_id=EXPERIMENT, registry=registry, as_of=now)
+
+
+#: Which degraded friction each proof is allowed to answer. This is the whole
+#: point of the fix: they are not interchangeable.
+_EXPECTED_DEGRADED_FRICTION = {
+    "headcount_model": "second_search_headcount",
+    "employment_admin": "admin_on_close",
+    "testing_mechanics": "more_cvs",
+    "remote_readiness": "more_cvs",
+}
+
+
+@pytest.mark.parametrize("bucket,role", [
+    ("product", "Product Manager"),
+    ("operations", "Operations Manager"),
+    ("finance", "Financial Analyst"),
+    ("people_hr", "Talent Acquisition Specialist"),
+    ("ecommerce", "Ecommerce Manager"),
+    ("customer_success", "Customer Success Manager"),
+    ("marketing", "Marketing Manager"),
+    ("gtm_revenue", "Revenue Operations Manager"),
+    ("engineering", "AI Automation Engineer"),
+])
+def test_degraded_friction_hands_off_to_that_campaigns_proof(bucket, role):
+    for tier, _extra in _DEGRADED_TIERS:
+        resolution = _degraded_resolution(bucket, role, tier)
+        assert resolution.signal_tier == tier, (bucket, tier, resolution.signal_tier)
+        expected = _EXPECTED_DEGRADED_FRICTION[resolution.proof_type]
+        assert resolution.friction_angle == expected, (
+            bucket, tier, resolution.proof_type, resolution.friction_angle)
+        assert resolution.qa_pass, (bucket, tier, resolution.qa_reasons)
+
+
+@pytest.mark.parametrize("bucket,role", [
+    ("product", "Product Manager"),
+    ("operations", "Operations Manager"),
+    ("finance", "Financial Analyst"),
+    ("people_hr", "Talent Acquisition Specialist"),
+    ("ecommerce", "Ecommerce Manager"),
+    ("customer_success", "Customer Success Manager"),
+    ("marketing", "Marketing Manager"),
+    ("gtm_revenue", "Revenue Operations Manager"),
+    ("engineering", "AI Automation Engineer"),
+])
+def test_no_degraded_cta_points_at_something_the_email_never_described(bucket, role):
+    """OPERATIONS asks for "a scope like this" and GTM for "the combination".
+    Neither is described behind a degraded signal, so both fall back to a
+    tier-safe noun."""
+    for tier, _extra in _DEGRADED_TIERS:
+        resolution = _degraded_resolution(bucket, role, tier)
+        body = resolution.rendered_email_1.lower()
+        noun = resolution.offer_noun.lower()
+        for pointer, described in (
+            ("a scope like this", "combines"),
+            ("the combination", "combines"),
+        ):
+            if pointer in noun:
+                assert described in body, (bucket, tier, noun)
+
+
+@pytest.mark.parametrize("bucket,role", [
+    ("operations", "Operations Manager"),
+    ("gtm_revenue", "Revenue Operations Manager"),
+])
+def test_one_leads_thread_keeps_one_noun_even_when_it_is_the_tier_safe_one(bucket, role):
+    """The noun may differ ACROSS tiers, never within one lead's four emails."""
+    for tier, _extra in _DEGRADED_TIERS:
+        resolution = _degraded_resolution(bucket, role, tier)
+        noun = resolution.offer_noun
+        assert noun == "how we test for this role", (bucket, tier, noun)
+        for index in (1, 2, 3, 4):
+            body = getattr(resolution, f"rendered_email_{index}")
+            capitalised = noun[0].upper() + noun[1:]
+            assert noun in body or capitalised in body, (bucket, tier, index)
+
+
+def test_no_degraded_friction_makes_an_economics_or_shortlist_claim():
+    """Job age is a fact; what it means is not. The old wording asserted that a
+    stale posting meant a shortlist had failed, and called a parallel search
+    "usually the cheapest way to keep moving" -- an economics claim nothing in
+    this repository supports."""
+    banned = ("cheapest", "cheaper", "fastest", "quickest",
+              "the shortlist has not produced", "the shortlist hasn't produced",
+              "not that the search stopped")
+    for bucket, role in (
+        ("product", "Product Manager"), ("finance", "Financial Analyst"),
+        ("operations", "Operations Manager"), ("marketing", "Marketing Manager"),
+        ("people_hr", "Talent Acquisition Specialist"),
+    ):
+        for tier, _extra in _DEGRADED_TIERS:
+            friction = _degraded_resolution(bucket, role, tier).e1_segments["friction"]
+            for phrase in banned:
+                assert phrase not in friction.lower(), (bucket, tier, phrase, friction)
