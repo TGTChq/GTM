@@ -32,6 +32,8 @@ from outbound_wave1.campaigns import (
     PROOF_ECONOMICS,
     PROOF_REMOTE_READINESS,
     PROOF_TESTING_MECHANICS,
+    PROOF_EMPLOYMENT_ADMIN,
+    OFFER_EMPLOYMENT_ADMIN_OVERVIEW,
     VALID_OFFER_NOUNS,
 )
 from outbound_wave1.claims import ClaimRegistry, load_claim_registry, empty_registry
@@ -433,12 +435,18 @@ def test_reposted_and_first_hire_signals_are_not_implemented():
 # ---------------------------------------------------------------------------
 
 def test_economics_never_renders_without_a_role_page():
+    """FINANCE degrades to the EMPLOYMENT ADMINISTRATION proof, not to testing.
+
+    A controller's objection to a hire is who carries the payroll, tax, benefits
+    and compliance load, so that is the verified fact the campaign falls back to.
+    """
     fields = _fields()
     resolution = resolve_challenger(fields, experiment_id=EXPERIMENT, registry=empty_registry())
     assert resolution.role_page_match is False
-    assert resolution.proof_type == PROOF_TESTING_MECHANICS
-    assert resolution.outbound_offer_type == OFFER_TESTING_OVERVIEW
+    assert resolution.proof_type == PROOF_EMPLOYMENT_ADMIN
+    assert resolution.outbound_offer_type == OFFER_EMPLOYMENT_ADMIN_OVERVIEW
     assert resolution.offer_fallback_type == OFFER_ROLE_ECONOMICS
+    assert "payroll, taxes, benefits" in resolution.rendered_email_1
     assert resolution.qa_pass
 
 
@@ -461,7 +469,7 @@ def test_a_modified_title_does_not_inherit_the_plain_roles_economics():
     resolution = resolve_challenger(fields, experiment_id=EXPERIMENT, registry=registry)
     assert resolution.role_page_match is False
     assert resolution.role_page_reason == "display_role_is_not_the_exact_mapped_role"
-    assert resolution.proof_type == PROOF_TESTING_MECHANICS
+    assert resolution.proof_type == PROOF_EMPLOYMENT_ADMIN
     assert "monthly cost" not in resolution.rendered_email_1
 
 
@@ -474,13 +482,13 @@ def test_one_roles_economics_is_never_used_for_another_role():
     resolution = resolve_challenger(fields, experiment_id=EXPERIMENT, registry=registry)
     assert resolution.role_page_match is False
     assert "Financial Analyst" not in resolution.rendered_email_1
-    assert resolution.proof_type == PROOF_TESTING_MECHANICS
+    assert resolution.proof_type == PROOF_EMPLOYMENT_ADMIN
 
 
 def test_economics_without_a_claim_source_degrades():
     registry = _registry_with_economics(claim_source="")
     resolution = resolve_challenger(_fields(), experiment_id=EXPERIMENT, registry=registry)
-    assert resolution.proof_type == PROOF_TESTING_MECHANICS
+    assert resolution.proof_type == PROOF_EMPLOYMENT_ADMIN
     assert resolution.qa_pass
 
 
@@ -533,11 +541,15 @@ def test_gtm_uses_safe_wording_without_a_verified_claim():
     })
     registry = load_claim_registry(config.OUTBOUND_WAVE1_CLAIM_REGISTRY_PATH)
     resolution = resolve_challenger(fields, experiment_id=EXPERIMENT, registry=registry)
+    # The campaign phrases the SAME verified testing claim in its own words. It
+    # must never reach for the unverified "we test that exact combination
+    # directly" wording the registry deliberately leaves unusable.
     assert (
-        "We test candidates on role-specific work rather than relying on the title "
-        "or tool list alone." in resolution.rendered_email_1
+        "So we test candidates on the combination rather than on any one piece "
+        "of it." in resolution.rendered_email_1
     )
-    assert "directly test" not in resolution.rendered_email_1.lower()
+    assert resolution.proof_type == PROOF_TESTING_MECHANICS
+    assert "directly" not in resolution.rendered_email_1.lower()
 
 
 def test_ai_campaign_makes_no_live_llm_claim_without_a_source():
@@ -601,7 +613,10 @@ def test_offer_noun_is_inherited_by_every_follow_up():
 def test_frozen_follow_up_copy_is_rendered_verbatim():
     resolution = resolve_challenger(_fields(), experiment_id=EXPERIMENT, registry=empty_registry())
     assert resolution.rendered_email_2.startswith("Bumping this in case it slipped past.")
-    assert "Still happy to send how we test for this role if it's useful." in resolution.rendered_email_2
+    assert (
+        "Still happy to send what we carry on the employment side if it's useful."
+        in resolution.rendered_email_2
+    )
     assert resolution.rendered_email_3.startswith("One thing I left out.")
     assert (
         "You don't pay anything until you've picked someone. If nobody on the "
@@ -917,7 +932,7 @@ def test_an_offer_noun_swapped_mid_thread_fails_qa():
         _fields(), experiment_id=EXPERIMENT, registry=empty_registry()
     ).to_dict()
     resolution["rendered_email_3"] = resolution["rendered_email_3"].replace(
-        "How we test for this role", "The numbers for this role"
+        "What we carry on the employment side", "The numbers for this role"
     )
     passed, reasons = run_qa_gates(resolution, policy=campaign_for_bucket("finance"))
     assert not passed

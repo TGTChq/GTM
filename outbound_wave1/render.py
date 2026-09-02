@@ -21,10 +21,14 @@ from typing import Dict, List, Optional, Tuple
 
 from .campaigns import (
     PLURAL_OFFER_NOUNS,
+    OFFER_EMPLOYMENT_ADMIN_OVERVIEW,
+    OFFER_HEADCOUNT_OVERVIEW,
     OFFER_REMOTE_READINESS_OVERVIEW,
     OFFER_ROLE_ECONOMICS,
     OFFER_TESTING_OVERVIEW,
     PROOF_ECONOMICS,
+    PROOF_EMPLOYMENT_ADMIN,
+    PROOF_HEADCOUNT_MODEL,
     PROOF_REMOTE_READINESS,
     PROOF_TESTING_MECHANICS,
     SIGNAL_ACTIVE_REQ,
@@ -45,6 +49,18 @@ FRICTION_MULTI_AREA_SHORTLIST = "multi_area_shortlist"
 FRICTION_COMBINED_SCOPE_POOL = "combined_scope_pool"
 FRICTION_TIME_OPEN = "time_open"
 FRICTION_PARALLEL_POOL = "parallel_pool"
+#: Campaign-specific frictions. Each one states the reason THIS buyer has for
+#: caring, which is what makes the nine arguments different rather than nine
+#: wordings of one argument. All are hedged observations about the reader's own
+#: situation ("usually", "almost nothing"), never asserted facts about their team.
+FRICTION_APPROVAL_SEQUENCING = "approval_sequencing"
+FRICTION_TITLE_VS_SCOPE = "title_vs_scope"
+FRICTION_EMPLOYMENT_OBLIGATION = "employment_obligation"
+FRICTION_TITLE_INFLATION = "title_inflation"
+FRICTION_INTERVIEW_WEAK_SIGNAL = "interview_weak_signal"
+FRICTION_SCOPE_COMPRESSION = "scope_compression"
+FRICTION_RARE_INTERSECTION = "rare_intersection"
+FRICTION_NO_TRACK_RECORD_YET = "no_track_record_yet"
 #: Used ONLY on the economics path. It must never survive a degrade to a
 #: testing offer -- a cost-framed friction paired with "how we test" is
 #: incoherent, and a QA gate rejects that pairing.
@@ -208,50 +224,61 @@ def _campaign_role_noun(policy: CampaignPolicy) -> str:
 # ---------------------------------------------------------------------------
 
 _FRICTION_BY_CAMPAIGN: Dict[str, Tuple[str, str]] = {
+    # Approvals, not candidate supply, are what hold a multi-req product team up.
     "product": (
-        FRICTION_SCREENING_BANDWIDTH,
-        "Running that many product searches at once usually stretches whoever is "
-        "doing the first pass.",
+        FRICTION_APPROVAL_SEQUENCING,
+        "Getting them all approved at the same time is usually the harder half "
+        "of it.",
     ),
-    "ecommerce": (
-        FRICTION_SCREENING_BANDWIDTH,
-        "Running that many ecommerce searches at once usually stretches whoever is "
-        "doing the first pass.",
+    # An ops title is a container for whatever the company piled into it.
+    "operations": (
+        FRICTION_TITLE_VS_SCOPE,
+        "An ops title tells you almost nothing about whether someone has actually "
+        "run that particular mix.",
     ),
-    "customer_experience": (
-        FRICTION_SCREENING_BANDWIDTH,
-        "Running that many searches at once usually stretches whoever is doing the "
-        "first pass.",
+    # A controller reads a hire as an administrative and compliance obligation.
+    "finance": (
+        FRICTION_EMPLOYMENT_OBLIGATION,
+        "Whoever fills it is also a payroll, tax and benefits obligation for "
+        "someone on your side to administer.",
     ),
     "people_hr": (
         FRICTION_CROSS_FUNCTION_SCREENING,
         "Hiring across that many functions usually concentrates the screening load, "
         "wherever that sits.",
     ),
-    "operations": (
-        FRICTION_MULTI_AREA_SHORTLIST,
-        "Postings that span more than one area usually take longer to fill, because "
-        "the shortlist has to clear all of it.",
+    # The closest to OPERATIONS, and knowingly so -- see the ECOMMERCE policy.
+    "ecommerce": (
+        FRICTION_TITLE_INFLATION,
+        "Ecommerce titles cover very different work depending on the size of the "
+        "store behind them.",
     ),
-    "ai_technical": (
-        FRICTION_MULTI_AREA_SHORTLIST,
-        "Postings that span more than one area usually take longer to fill, because "
-        "the shortlist has to clear all of it.",
+    # The one reason only CX can use: the interview is the least diagnostic
+    # signal precisely because talking to people is the job.
+    "customer_experience": (
+        FRICTION_INTERVIEW_WEAK_SIGNAL,
+        "Candidates for these roles interview well almost by definition, since "
+        "talking to people is the job. That makes the interview itself one of the "
+        "weaker signals you have.",
     ),
-    "finance": (
-        FRICTION_COMBINED_SCOPE_POOL,
-        "A combined scope like that usually narrows the pool more than the title "
-        "suggests.",
-    ),
+    # A very wide marketing scope usually means one approved line covering several
+    # jobs -- a budget shape, not a hiring preference.
     "marketing_creative": (
-        FRICTION_COMBINED_SCOPE_POOL,
-        "A combined scope like that usually narrows the pool more than the title "
-        "suggests.",
+        FRICTION_SCOPE_COMPRESSION,
+        "A scope that wide usually means one approved line is being asked to cover "
+        "several jobs.",
     ),
+    # In RevOps the parts are common and the join is rare.
     "gtm_systems": (
-        FRICTION_COMBINED_SCOPE_POOL,
-        "A combined scope like that usually narrows the pool more than the title "
-        "suggests.",
+        FRICTION_RARE_INTERSECTION,
+        "Each of those is common on its own. The intersection is the rare part, "
+        "and it is the part a CV cannot show you.",
+    ),
+    # Nothing in this category is old enough for tenure to mean anything.
+    "ai_technical": (
+        FRICTION_NO_TRACK_RECORD_YET,
+        "Nobody has a long track record in tooling this new, so years of "
+        "experience on a CV is not telling you much here.",
     ),
 }
 
@@ -273,6 +300,21 @@ _T3_FRICTION = (
     "alongside it is usually the cheapest way to keep moving.",
 )
 
+#: Frictions whose wording depends on the signal that fired. PRODUCT's approval
+#: line reads off a multi-opening count and PEOPLE & HR's off a cross-bucket
+#: count, so neither may be rendered behind a different signal.
+_FRICTION_REQUIRES_SIGNAL: Dict[str, frozenset] = {
+    FRICTION_APPROVAL_SEQUENCING: frozenset({SIGNAL_MULTI_OPENING}),
+    FRICTION_CROSS_FUNCTION_SCREENING: frozenset({SIGNAL_MULTI_OPENING_CROSS_BUCKET}),
+    FRICTION_TITLE_INFLATION: frozenset({SIGNAL_MULTI_OPENING}),
+    FRICTION_INTERVIEW_WEAK_SIGNAL: frozenset({SIGNAL_MULTI_OPENING}),
+    FRICTION_SCOPE_COMPRESSION: frozenset({SIGNAL_SCOPE_COMBINATION}),
+    FRICTION_RARE_INTERSECTION: frozenset({SIGNAL_SCOPE_COMBINATION}),
+    FRICTION_EMPLOYMENT_OBLIGATION: frozenset({SIGNAL_SCOPE_COMBINATION}),
+    FRICTION_TITLE_VS_SCOPE: frozenset({SIGNAL_ROLE_FOCUS_MATCH}),
+    FRICTION_NO_TRACK_RECORD_YET: frozenset({SIGNAL_ROLE_FOCUS_MATCH}),
+}
+
 
 def _friction(policy: CampaignPolicy, signal_type: str, proof_type: str) -> Tuple[str, str]:
     """Friction is resolved AFTER the proof, so a degrade changes the whole triple.
@@ -288,7 +330,17 @@ def _friction(policy: CampaignPolicy, signal_type: str, proof_type: str) -> Tupl
         return _T2_FRICTION
     if signal_type == SIGNAL_ACTIVE_REQ:
         return _T3_FRICTION
-    return _FRICTION_BY_CAMPAIGN.get(policy.key, _T3_FRICTION)
+    campaign_friction = _FRICTION_BY_CAMPAIGN.get(policy.key)
+    if campaign_friction is None:
+        return _T3_FRICTION
+    # A campaign friction that reads off the signal cannot be used when that
+    # signal did not fire. PRODUCT's "getting them all approved" only makes sense
+    # behind a multi-opening count, so a degraded signal takes the generic
+    # friction instead of asserting something the record does not support.
+    angle, _text = campaign_friction
+    if angle in _FRICTION_REQUIRES_SIGNAL and signal_type not in _FRICTION_REQUIRES_SIGNAL[angle]:
+        return _T3_FRICTION
+    return campaign_friction
 
 
 # ---------------------------------------------------------------------------
@@ -300,6 +352,21 @@ def _friction(policy: CampaignPolicy, signal_type: str, proof_type: str) -> Tupl
 SAFE_TESTING_MECHANICS = (
     "We test candidates on role-specific work rather than relying on the title or "
     "tool list alone."
+)
+
+#: Placed people join the client's team full-time and are NOT on the client's
+#: official headcount. A verified fact about the offer, stated plainly and with
+#: no implied speed, price or quality claim.
+HEADCOUNT_MODEL_PROOF = (
+    "Ours join your team full-time without going onto your official headcount."
+)
+
+#: TGTC carries payroll, taxes, benefits, compliance and HR administration. Also
+#: verified, and deliberately worded as what WE carry rather than what the reader
+#: saves, so it states a fact and not an outcome.
+EMPLOYMENT_ADMIN_PROOF = (
+    "With ours that sits with us: payroll, taxes, benefits, and the compliance "
+    "and HR administration around them."
 )
 
 
@@ -320,6 +387,10 @@ def _proof_line(proof_type: str, data: RenderInputs) -> str:
             f"Every candidate clears a {data.verified_claim_text} before we send "
             "them."
         )
+    if proof_type == PROOF_HEADCOUNT_MODEL:
+        return HEADCOUNT_MODEL_PROOF
+    if proof_type == PROOF_EMPLOYMENT_ADMIN:
+        return EMPLOYMENT_ADMIN_PROOF
     # A campaign may state something stronger than the generic process claim only
     # when the claim registry carries a VERIFIED sentence for it.
     return data.strong_claim_text or SAFE_TESTING_MECHANICS
@@ -354,7 +425,15 @@ def render_email_1(
 ) -> RenderedEmail:
     signal = _signal_line(policy, signal_type, data)
     friction_angle, friction = _friction(policy, signal_type, proof_type)
+    # A campaign may phrase a proof in its own words. The CLAIM is unchanged --
+    # only the sentence carrying it differs, so the proof follows this campaign's
+    # argument instead of reading as one template used nine times. A verified
+    # registry claim still wins, because it carries its own source.
     proof = _proof_line(proof_type, data)
+    if proof_type == PROOF_TESTING_MECHANICS and not data.strong_claim_text:
+        proof = policy.proof_text(proof_type) or proof
+    elif proof_type in (PROOF_HEADCOUNT_MODEL, PROOF_EMPLOYMENT_ADMIN):
+        proof = policy.proof_text(proof_type) or proof
     offer = offer_question(noun or offer_noun(policy, offer_type))
     greeting = f"Hi {data.first_name},"
     body = _paragraphs(greeting, signal, friction, proof, offer)

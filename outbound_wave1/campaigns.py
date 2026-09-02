@@ -29,14 +29,25 @@ TIER_2 = "T2"
 TIER_3 = "T3"
 
 # --- proof types ------------------------------------------------------------
+#: Every proof below is a VERIFIED fact about the TGTC offer. Nothing here may
+#: assert a capability that is not on that list -- a bucket that cannot be
+#: differentiated with a verified fact keeps a shared proof rather than gaining
+#: an invented one.
 PROOF_TESTING_MECHANICS = "testing_mechanics"
 PROOF_ECONOMICS = "economics"
 PROOF_REMOTE_READINESS = "remote_readiness"
+#: Placed people join the client's team full-time without going onto the
+#: client's official headcount.
+PROOF_HEADCOUNT_MODEL = "headcount_model"
+#: TGTC carries payroll, taxes, benefits, compliance and HR administration.
+PROOF_EMPLOYMENT_ADMIN = "employment_admin"
 
 # --- offers -----------------------------------------------------------------
 OFFER_TESTING_OVERVIEW = "testing_overview"
 OFFER_ROLE_ECONOMICS = "role_economics"
 OFFER_REMOTE_READINESS_OVERVIEW = "remote_readiness_overview"
+OFFER_HEADCOUNT_OVERVIEW = "headcount_overview"
+OFFER_EMPLOYMENT_ADMIN_OVERVIEW = "employment_admin_overview"
 
 #: Offer classes. ``process_explainer`` describes how TGTC works and needs no
 #: external published source. ``published_economics`` quotes a number TGTC has
@@ -56,6 +67,8 @@ DEFAULT_OFFER_NOUNS: Dict[str, str] = {
     OFFER_TESTING_OVERVIEW: "how we test for this role",
     OFFER_ROLE_ECONOMICS: "the numbers for this role",
     OFFER_REMOTE_READINESS_OVERVIEW: "how we assess remote readiness",
+    OFFER_HEADCOUNT_OVERVIEW: "how the headcount side works",
+    OFFER_EMPLOYMENT_ADMIN_OVERVIEW: "what we carry on the employment side",
 }
 #: Backwards-compatible alias for the default map.
 OFFER_NOUNS = DEFAULT_OFFER_NOUNS
@@ -67,6 +80,12 @@ VALID_OFFER_NOUNS = frozenset({
     "how the assessment works",
     "how we assess remote readiness",
     "the numbers for this role",
+    "how we test for a scope like this",
+    "what the testing covers",
+    "how we test the combination",
+    "how the headcount side works",
+    "how an embedded hire works",
+    "what we carry on the employment side",
 })
 
 #: Nouns that take a plural verb. The frozen E3 sentence is
@@ -77,6 +96,8 @@ PLURAL_OFFER_NOUNS = frozenset({"the numbers for this role"})
 OFFER_CLASS_BY_TYPE: Dict[str, str] = {
     OFFER_TESTING_OVERVIEW: OFFER_CLASS_PROCESS,
     OFFER_REMOTE_READINESS_OVERVIEW: OFFER_CLASS_PROCESS,
+    OFFER_HEADCOUNT_OVERVIEW: OFFER_CLASS_PROCESS,
+    OFFER_EMPLOYMENT_ADMIN_OVERVIEW: OFFER_CLASS_PROCESS,
     OFFER_ROLE_ECONOMICS: OFFER_CLASS_PUBLISHED,
 }
 
@@ -112,6 +133,11 @@ class CampaignPolicy:
     #: Per-campaign visible offer noun, keyed by offer type. Falls back to
     #: ``DEFAULT_OFFER_NOUNS``.
     offer_nouns: Dict[str, str] = field(default_factory=dict)
+    #: Per-campaign phrasing of a proof line, keyed by proof type. The CLAIM is
+    #: identical -- only the sentence that carries it changes, so it follows this
+    #: campaign's own argument instead of reading as one template reused nine
+    #: times. An unset proof type falls back to the shared wording.
+    proof_texts: Dict[str, str] = field(default_factory=dict)
 
     def offer_noun(self, offer_type: str) -> str:
         """The exact words this campaign uses for ``offer_type``."""
@@ -120,22 +146,29 @@ class CampaignPolicy:
             DEFAULT_OFFER_NOUNS.get(offer_type, DEFAULT_OFFER_NOUNS[OFFER_TESTING_OVERVIEW]),
         )
 
+    def proof_text(self, proof_type: str) -> str:
+        """This campaign's phrasing of ``proof_type``, or "" for the shared one."""
+        return self.proof_texts.get(proof_type, "")
+
 
 def _facets(*pairs: Tuple[str, Tuple[str, ...]]) -> Tuple[Tuple[str, Tuple[str, ...]], ...]:
     return tuple(pairs)
 
 
+#: PRODUCT sells the HEADCOUNT MODEL. A product leader with more than one req
+#: open is rarely short of candidates -- they are short of approvals, and the
+#: second and third role wait on the next planning cycle. The verified fact that
+#: answers that is the one about official headcount, not the one about testing.
 PRODUCT = CampaignPolicy(
     key="product",
     name="PRODUCT",
     buckets=("product",),
     env_keys=("INSTANTLY_CAMPAIGN_PRODUCT",),
     t1_signal=SIGNAL_MULTI_OPENING,
-    preferred_proof=PROOF_TESTING_MECHANICS,
-    fallback_proof=PROOF_TESTING_MECHANICS,
-    preferred_offer=OFFER_TESTING_OVERVIEW,
-    fallback_offer=OFFER_TESTING_OVERVIEW,
-    offer_nouns={OFFER_TESTING_OVERVIEW: "how our testing works"},
+    preferred_proof=PROOF_HEADCOUNT_MODEL,
+    fallback_proof=PROOF_HEADCOUNT_MODEL,
+    preferred_offer=OFFER_HEADCOUNT_OVERVIEW,
+    fallback_offer=OFFER_HEADCOUNT_OVERVIEW,
 )
 
 OPERATIONS = CampaignPolicy(
@@ -146,11 +179,21 @@ OPERATIONS = CampaignPolicy(
     t1_signal=SIGNAL_ROLE_FOCUS_MATCH,
     # Wave 1 is FIXED to testing_overview here. Operations must not bifurcate
     # into an economics offer, so preferred and fallback are deliberately equal.
+    # The ARGUMENT is ops-specific: an ops title is a container for whatever the
+    # company happened to pile into it, so a title match is close to meaningless
+    # and the scope is the only thing worth evaluating against.
     preferred_proof=PROOF_TESTING_MECHANICS,
     fallback_proof=PROOF_TESTING_MECHANICS,
     preferred_offer=OFFER_TESTING_OVERVIEW,
     fallback_offer=OFFER_TESTING_OVERVIEW,
     t1_min_evidence=2,
+    offer_nouns={OFFER_TESTING_OVERVIEW: "how we test for a scope like this"},
+    proof_texts={
+        PROOF_TESTING_MECHANICS: (
+            "So we test candidates on the specific work a role covers before we "
+            "put them in front of you."
+        )
+    },
 )
 
 FINANCE = CampaignPolicy(
@@ -158,11 +201,16 @@ FINANCE = CampaignPolicy(
     name="FINANCE",
     buckets=("finance",),
     env_keys=("INSTANTLY_CAMPAIGN_FINANCE",),
+    # FINANCE degrades to the EMPLOYMENT ADMINISTRATION fact, not to testing. A
+    # controller's objection to a hire is rarely "can they do the work" -- it is
+    # who carries the payroll, tax, benefits and compliance load behind the
+    # person. Economics stays the preferred proof for the day a published number
+    # exists; until then the fallback is the strongest verified CFO argument.
     t1_signal=SIGNAL_SCOPE_COMBINATION,
     preferred_proof=PROOF_ECONOMICS,
-    fallback_proof=PROOF_TESTING_MECHANICS,
+    fallback_proof=PROOF_EMPLOYMENT_ADMIN,
     preferred_offer=OFFER_ROLE_ECONOMICS,
-    fallback_offer=OFFER_TESTING_OVERVIEW,
+    fallback_offer=OFFER_EMPLOYMENT_ADMIN_OVERVIEW,
     t1_min_evidence=2,
     scope_facets=_facets(
         ("transactional accounting", (
@@ -198,6 +246,13 @@ PEOPLE_HR = CampaignPolicy(
     strong_claim_id="remote_readiness_1000_hires",
 )
 
+#: ECOMMERCE is the one bucket that could NOT be given a distinct verified
+#: angle. Every ecommerce-specific idea worth selling (seasonal/peak capacity,
+#: platform-specific proof) needs a capability that is not on the verified list,
+#: and inventing one is exactly what the policy forbids. It therefore keeps the
+#: shared testing proof with an ecommerce-specific reason, and is flagged as
+#: strategically closest to OPERATIONS. It is excluded from Pilot 1 anyway --
+#: its live Control campaign is `completed`.
 ECOMMERCE = CampaignPolicy(
     key="ecommerce",
     name="ECOMMERCE",
@@ -209,6 +264,12 @@ ECOMMERCE = CampaignPolicy(
     preferred_offer=OFFER_TESTING_OVERVIEW,
     fallback_offer=OFFER_TESTING_OVERVIEW,
     offer_nouns={OFFER_TESTING_OVERVIEW: "how our testing works"},
+    proof_texts={
+        PROOF_TESTING_MECHANICS: (
+            "So we test candidates on the specific work a role covers rather than "
+            "reading it off the title."
+        )
+    },
 )
 
 CUSTOMER_EXPERIENCE = CampaignPolicy(
@@ -216,11 +277,22 @@ CUSTOMER_EXPERIENCE = CampaignPolicy(
     name="CUSTOMER EXPERIENCE",
     buckets=("customer_success", "customer_support"),
     env_keys=("INSTANTLY_CAMPAIGN_CUSTOMER_SUCCESS", "INSTANTLY_CAMPAIGN_CUSTOMER_SUPPORT"),
+    # CX sells TESTING, on a reason no other campaign can use: people in these
+    # roles are professionally good at conversations, which makes the interview
+    # the least diagnostic signal the buyer has. Economics is dropped here rather
+    # than kept as an unreachable preferred -- this argument is the stronger one
+    # even if a published number appears later.
     t1_signal=SIGNAL_MULTI_OPENING,
-    preferred_proof=PROOF_ECONOMICS,
+    preferred_proof=PROOF_TESTING_MECHANICS,
     fallback_proof=PROOF_TESTING_MECHANICS,
-    preferred_offer=OFFER_ROLE_ECONOMICS,
+    preferred_offer=OFFER_TESTING_OVERVIEW,
     fallback_offer=OFFER_TESTING_OVERVIEW,
+    offer_nouns={OFFER_TESTING_OVERVIEW: "what the testing covers"},
+    proof_texts={
+        PROOF_TESTING_MECHANICS: (
+            "So we test them on the work itself before you meet anyone."
+        )
+    },
     # Support and Success are different jobs. Rendering "support roles" at a
     # Customer Success record is a hard QA failure, so the audience noun is
     # carried explicitly rather than inferred at render time.
@@ -235,12 +307,24 @@ MARKETING_CREATIVE = CampaignPolicy(
     name="MARKETING & CREATIVE",
     buckets=("marketing",),
     env_keys=("INSTANTLY_CAMPAIGN_MARKETING",),
+    # MARKETING sells the HEADCOUNT MODEL, on a different reason from PRODUCT's.
+    # A marketing req that spans paid, lifecycle and content usually exists
+    # because one line was approved and it has to cover several jobs -- so the
+    # useful fact is that the rest of the scope does not need another line.
     t1_signal=SIGNAL_SCOPE_COMBINATION,
-    preferred_proof=PROOF_ECONOMICS,
-    fallback_proof=PROOF_TESTING_MECHANICS,
-    preferred_offer=OFFER_ROLE_ECONOMICS,
-    fallback_offer=OFFER_TESTING_OVERVIEW,
+    preferred_proof=PROOF_HEADCOUNT_MODEL,
+    fallback_proof=PROOF_HEADCOUNT_MODEL,
+    preferred_offer=OFFER_HEADCOUNT_OVERVIEW,
+    fallback_offer=OFFER_HEADCOUNT_OVERVIEW,
     t1_min_evidence=2,
+    offer_nouns={OFFER_HEADCOUNT_OVERVIEW: "how an embedded hire works"},
+    proof_texts={
+        PROOF_HEADCOUNT_MODEL: (
+            "Ours join your team full-time without going onto your official "
+            "headcount, so the rest of the scope does not have to wait for the "
+            "next budget cycle."
+        )
+    },
     scope_facets=_facets(
         ("paid media", (
             "paid media", "paid acquisition", "paid social", "ppc", "google ads",
@@ -269,6 +353,9 @@ GTM_SYSTEMS = CampaignPolicy(
     name="GTM SYSTEMS & REVENUE AUTOMATION",
     buckets=("gtm_revenue",),
     env_keys=("INSTANTLY_CAMPAIGN_GTM",),
+    # GTM sells TESTING on the INTERSECTION. Each part of a RevOps scope is
+    # common on its own; it is the combination that is rare, and a CV lists the
+    # parts without ever evidencing the join.
     t1_signal=SIGNAL_SCOPE_COMBINATION,
     preferred_proof=PROOF_TESTING_MECHANICS,
     fallback_proof=PROOF_TESTING_MECHANICS,
@@ -276,6 +363,13 @@ GTM_SYSTEMS = CampaignPolicy(
     fallback_offer=OFFER_TESTING_OVERVIEW,
     t1_min_evidence=2,
     strong_claim_id="gtm_combination_directly_tested",
+    offer_nouns={OFFER_TESTING_OVERVIEW: "how we test the combination"},
+    proof_texts={
+        PROOF_TESTING_MECHANICS: (
+            "So we test candidates on the combination rather than on any one "
+            "piece of it."
+        )
+    },
     scope_facets=_facets(
         ("CRM administration", (
             "crm", "salesforce", "hubspot", "crm automation", "crm administration",
@@ -313,6 +407,15 @@ AI_TECHNICAL = CampaignPolicy(
     t1_min_evidence=2,
     strong_claim_id="ai_live_llm_evaluation",
     offer_nouns={OFFER_TESTING_OVERVIEW: "how the assessment works"},
+    # The ARGUMENT here is the strongest one available and needs no new claim:
+    # the tooling is too new for anyone to have a long track record in it, so
+    # years-of-experience on a CV carries almost no signal in this category.
+    proof_texts={
+        PROOF_TESTING_MECHANICS: (
+            "So we have candidates work against what the role actually asks for "
+            "instead."
+        )
+    },
 )
 
 CAMPAIGNS: Tuple[CampaignPolicy, ...] = (

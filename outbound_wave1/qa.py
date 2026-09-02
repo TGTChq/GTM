@@ -16,10 +16,14 @@ from typing import Dict, List, Sequence, Tuple
 
 from .campaigns import (
     OFFER_CLASS_PUBLISHED,
+    OFFER_EMPLOYMENT_ADMIN_OVERVIEW,
+    OFFER_HEADCOUNT_OVERVIEW,
     OFFER_REMOTE_READINESS_OVERVIEW,
     OFFER_ROLE_ECONOMICS,
     OFFER_TESTING_OVERVIEW,
     PROOF_ECONOMICS,
+    PROOF_EMPLOYMENT_ADMIN,
+    PROOF_HEADCOUNT_MODEL,
     PROOF_REMOTE_READINESS,
     PROOF_TESTING_MECHANICS,
     SIGNAL_MULTI_OPENING,
@@ -29,13 +33,21 @@ from .campaigns import (
     CampaignPolicy,
 )
 from .render import (
+    FRICTION_APPROVAL_SEQUENCING,
     FRICTION_COMBINED_SCOPE_POOL,
     FRICTION_COST_COMPARISON,
     FRICTION_CROSS_FUNCTION_SCREENING,
+    FRICTION_EMPLOYMENT_OBLIGATION,
+    FRICTION_INTERVIEW_WEAK_SIGNAL,
     FRICTION_MULTI_AREA_SHORTLIST,
+    FRICTION_NO_TRACK_RECORD_YET,
     FRICTION_PARALLEL_POOL,
+    FRICTION_RARE_INTERSECTION,
+    FRICTION_SCOPE_COMPRESSION,
     FRICTION_SCREENING_BANDWIDTH,
     FRICTION_TIME_OPEN,
+    FRICTION_TITLE_INFLATION,
+    FRICTION_TITLE_VS_SCOPE,
     html_to_text,
     offer_question,
     to_html,
@@ -47,18 +59,41 @@ from .render import (
 #: the economics path and NOTHING else -- pairing it with "how we test for this
 #: role" would leave the reader a budget problem and a testing answer. The
 #: economics path likewise may not borrow a scope/bandwidth friction.
+#: Frictions that describe a degraded signal rather than a campaign argument.
+#: Any proof/offer pair may carry them, because T2/T3 records keep their
+#: campaign's proof while losing its signal-specific reason.
+_DEGRADED_FRICTIONS = frozenset({FRICTION_TIME_OPEN, FRICTION_PARALLEL_POOL})
+
+#: Frictions that lead into "so we test on the work". They set up an EVIDENCE
+#: problem -- the title, the CV or the interview is not telling the reader what
+#: they need -- which is the only setup a testing proof answers.
+_TESTING_FRICTIONS = frozenset({
+    FRICTION_SCREENING_BANDWIDTH, FRICTION_CROSS_FUNCTION_SCREENING,
+    FRICTION_MULTI_AREA_SHORTLIST, FRICTION_COMBINED_SCOPE_POOL,
+    FRICTION_TITLE_VS_SCOPE, FRICTION_TITLE_INFLATION,
+    FRICTION_INTERVIEW_WEAK_SIGNAL, FRICTION_RARE_INTERSECTION,
+    FRICTION_NO_TRACK_RECORD_YET,
+}) | _DEGRADED_FRICTIONS
+
 COHERENT_FRICTIONS = {
     (PROOF_ECONOMICS, OFFER_ROLE_ECONOMICS): frozenset({FRICTION_COST_COMPARISON}),
-    (PROOF_TESTING_MECHANICS, OFFER_TESTING_OVERVIEW): frozenset({
-        FRICTION_SCREENING_BANDWIDTH, FRICTION_CROSS_FUNCTION_SCREENING,
-        FRICTION_MULTI_AREA_SHORTLIST, FRICTION_COMBINED_SCOPE_POOL,
-        FRICTION_TIME_OPEN, FRICTION_PARALLEL_POOL,
-    }),
+    (PROOF_TESTING_MECHANICS, OFFER_TESTING_OVERVIEW): _TESTING_FRICTIONS,
     (PROOF_REMOTE_READINESS, OFFER_REMOTE_READINESS_OVERVIEW): frozenset({
         FRICTION_CROSS_FUNCTION_SCREENING, FRICTION_SCREENING_BANDWIDTH,
         FRICTION_MULTI_AREA_SHORTLIST, FRICTION_COMBINED_SCOPE_POOL,
-        FRICTION_TIME_OPEN, FRICTION_PARALLEL_POOL,
-    }),
+    }) | _DEGRADED_FRICTIONS,
+    # The headcount proof answers an APPROVAL problem: too many lines to get
+    # signed off, or one line asked to cover too much. It must never be paired
+    # with an evidence friction -- "a CV cannot show you that" followed by "they
+    # are not on your headcount" answers a question the reader did not ask.
+    (PROOF_HEADCOUNT_MODEL, OFFER_HEADCOUNT_OVERVIEW): frozenset({
+        FRICTION_APPROVAL_SEQUENCING, FRICTION_SCOPE_COMPRESSION,
+    }) | _DEGRADED_FRICTIONS,
+    # The employment-administration proof answers an ADMINISTRATIVE BURDEN
+    # problem, and nothing else.
+    (PROOF_EMPLOYMENT_ADMIN, OFFER_EMPLOYMENT_ADMIN_OVERVIEW): frozenset({
+        FRICTION_EMPLOYMENT_OBLIGATION,
+    }) | _DEGRADED_FRICTIONS,
 }
 
 #: Anything that still looks like a template placeholder.

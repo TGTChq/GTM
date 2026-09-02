@@ -108,6 +108,40 @@ The campaign is deliberately **not** an input, so one company can never be A in
 one campaign and B in another. A record with no resolvable key is not
 randomisable, so it is suppressed (arm `NONE`) rather than counted as control.
 
+## One argument per campaign, not one argument nine times
+
+There is no universal Challenger framework. Each campaign sells the reason ITS
+buyer has to care, built on a VERIFIED fact about the TGTC offer. An earlier
+revision drifted into a single argument with nine wordings — 8 of 9 campaigns
+shipped the identical proof sentence and the nine CTAs used three nouns between
+them — so `tests/test_outbound_wave1_integrity.py` now gates the differentiation
+directly: nine distinct CTAs, nine distinct frictions, and no single proof
+sentence on more than four campaigns.
+
+| campaign | buyer's reason to care (friction) | verified fact sold (proof) | asks for |
+| --- | --- | --- | --- |
+| PRODUCT | getting several reqs approved at once is the hard part | headcount model | how the headcount side works |
+| OPERATIONS | an ops title says nothing about the actual mix | role-specific testing | how we test for a scope like this |
+| FINANCE | a hire is also a payroll/tax/benefits obligation to administer | employment administration | what we carry on the employment side |
+| PEOPLE & HR | hiring across functions concentrates the screening load | remote-readiness assessment | how we assess remote readiness |
+| ECOMMERCE | ecommerce titles cover very different work by store size | role-specific testing | how our testing works |
+| CUSTOMER EXPERIENCE | these candidates interview well by definition | role-specific testing | what the testing covers |
+| MARKETING & CREATIVE | one approved line asked to cover several jobs | headcount model | how an embedded hire works |
+| GTM SYSTEMS | the parts are common, the intersection is rare | role-specific testing | how we test the combination |
+| AI & TECHNICAL | nobody has a long track record in tooling this new | role-specific testing | how the assessment works |
+
+**ECOMMERCE is knowingly the weakest.** Every ecommerce-specific idea worth
+selling — seasonal capacity, platform-specific proof — needs a capability that is
+not on the verified list, and inventing one is what this whole design forbids. It
+therefore shares the testing proof with an ecommerce-specific reason, and is
+flagged rather than forced. Its live Control is `completed`, so it is out of
+Pilot 1 anyway.
+
+Two verified facts are deliberately NOT used in E1: *no payment until you select
+someone* and *we keep sourcing if the shortlist is not right*. They are E3's
+frozen payload, introduced there as "One thing I left out" — putting them in E1
+would falsify that line.
+
 ## Fallback coherence
 
 A degrade moves the whole triple. When a campaign cannot support economics it
@@ -117,42 +151,36 @@ with them:
 | | friction | proof | offer | offer noun |
 | --- | --- | --- | --- | --- |
 | economics available | `cost_comparison` | `economics` | `role_economics` | the numbers for this role |
-| degraded | scope / bandwidth / time | `testing_mechanics` | `testing_overview` | the campaign's testing noun |
+| degraded (FINANCE) | `employment_obligation` | `employment_admin` | `employment_admin_overview` | what we carry on the employment side |
 
-`qa.COHERENT_FRICTIONS` is the hard gate: `cost_comparison` may appear only with
-`(economics, role_economics)`, and that pair may use nothing else.
+`qa.COHERENT_FRICTIONS` is the hard gate. `cost_comparison` may appear only with
+`(economics, role_economics)`. Beyond that it enforces the shape of each
+argument: a headcount proof answers an APPROVAL friction and an employment-admin
+proof answers an ADMINISTRATIVE friction, so neither can be paired with an
+evidence friction — "a CV cannot show you that" followed by "they are not on your
+headcount" answers a question the reader did not ask.
+
+FINANCE is the only campaign still on the economics path, kept for the day a
+published number exists. CUSTOMER EXPERIENCE and MARKETING & CREATIVE were moved
+off it: each has a verified angle stronger for its buyer than a price, so an
+unreachable economics preference bought them nothing.
+
+A friction whose wording reads off a signal is not rendered behind a different
+one (`render._FRICTION_REQUIRES_SIGNAL`). PRODUCT's "getting them all approved"
+needs a multi-opening count, so a single-opening record degrades to the generic
+friction rather than asserting something the record does not support.
 
 ## Offer wording
 
 The offer noun is resolved once, per campaign, and is the literal text the reader
 sees in all four emails — E1 asks `Want me to send <noun>?` and E2/E3/E4 repeat
-the same words.
-
-| campaign | noun |
-| --- | --- |
-| Product, Ecommerce | how our testing works |
-| Operations, GTM, Finance, CX, Marketing (degraded) | how we test for this role |
-| AI & Technical Automation | how the assessment works |
-| People & HR | how we assess remote readiness |
-| any campaign on the economics path | the numbers for this role |
+the same words. The nine nouns are in the table above and must stay distinct: a
+QA gate fails any thread that contains another campaign's noun.
 
 E3's frozen sentence is `<noun> is still there if you want it first`. A plural
 noun takes `are`/`them`; the verb and pronoun are selected mechanically and no
 word choice changes.
 
-## The claim registry
-
-`data/wave1_claims.json` enumerates all 118 canonical roles with an empty `url`
-and `economics_available: false`. That is intentional:
-
-* `role_page_match` is true only for an exact canonical-role entry **with a URL**
-  whose display role is that same role verbatim (so "Senior Financial Analyst"
-  never inherits "Financial Analyst"'s page);
-* economics renders only when that same entry also carries
-  `economics_available` and a `claim_source`.
-
-Until an operator fills in real published URLs, FINANCE / CUSTOMER EXPERIENCE /
-MARKETING & CREATIVE degrade to `testing_overview` and no price is ever stated.
 
 ## Dry run
 
