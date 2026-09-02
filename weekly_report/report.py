@@ -223,6 +223,7 @@ def _collect_gaps(
     problems: Sequence[str],
     window: ReportingWindow,
     excluded_simulated: Sequence[Dict[str, str]] = (),
+    status_census: Optional[Dict[str, int]] = None,
 ) -> List[Gap]:
     """Everything the report could not stand behind, with a concrete remedy."""
     gaps: List[Gap] = []
@@ -260,6 +261,28 @@ def _collect_gaps(
                 remedy=(
                     "They predate run_manifest.finished_at or their manifest is unreadable; "
                     "no action is needed for current runs, which always stamp both ends."
+                ),
+            )
+        )
+
+    unhealthy = {
+        status: count
+        for status, count in (status_census or {}).items()
+        if status.lower() not in ("complete", "success")
+    }
+    if unhealthy:
+        listed = ", ".join(f"{status}={count}" for status, count in sorted(unhealthy.items()))
+        gaps.append(
+            Gap(
+                metric="run_completeness",
+                reason=f"{sum(unhealthy.values())} of {len(runs)} run(s) did not complete ({listed})",
+                impact=(
+                    "Counters from a run that stopped early describe a partial run, so the "
+                    "week's totals understate what the configuration would otherwise produce."
+                ),
+                remedy=(
+                    "Read stop_reason on those runs in runs[]; a stopped run is an execution "
+                    "problem, not a yield result, and should be fixed before re-tuning targeting."
                 ),
             )
         )
@@ -377,6 +400,7 @@ class WeeklyReport:
     collectors: List[CollectorResult] = field(default_factory=list)
     reasons: Dict[str, int] = field(default_factory=dict)
     dispositions: Dict[str, int] = field(default_factory=dict)
+    run_status_census: Dict[str, int] = field(default_factory=dict)
     lane_failures: List[Dict[str, Any]] = field(default_factory=list)
     unattributable_run_ids: List[str] = field(default_factory=list)
     excluded_simulated: List[Dict[str, str]] = field(default_factory=list)
@@ -426,6 +450,7 @@ class WeeklyReport:
         payload["bottleneck"] = self.bottleneck.to_dict()
         payload["action_plan"] = [action.to_dict() for action in self.actions]
         payload["gaps"] = [gap.to_dict() for gap in self.gaps]
+        payload["run_status_census"] = dict(self.run_status_census)
         payload["loss_reasons"] = dict(self.reasons)
         payload["disposition_census"] = dict(self.dispositions)
         payload["acquisition_lane_failures"] = list(self.lane_failures)
@@ -478,6 +503,9 @@ def build_report(
     reasons = reason_census(in_window)
     dispositions = disposition_census(in_window)
     lane_failures = acquisition_failures(in_window)
+    status_census: Dict[str, int] = {}
+    for run in in_window:
+        status_census[run.status] = status_census.get(run.status, 0) + 1
 
     rows = [_run_row(run, window) for run in in_window]
     gaps = _collect_gaps(
@@ -487,6 +515,7 @@ def build_report(
         problems=problems,
         window=window,
         excluded_simulated=excluded,
+        status_census=status_census,
     )
     found = identify(
         metrics,
@@ -509,6 +538,7 @@ def build_report(
         collectors=collectors,
         reasons=reasons,
         dispositions=dispositions,
+        run_status_census=status_census,
         lane_failures=lane_failures,
         unattributable_run_ids=[run.run_id for run in unattributable],
         excluded_simulated=excluded,

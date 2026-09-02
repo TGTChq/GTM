@@ -161,86 +161,143 @@ Tests: `python -m pytest tests/test_weekly_report.py -q`.
 
 ---
 
+## Idempotence
+
+Output paths are derived from the ISO week, so the same window always resolves to
+the same pair of files. `--max-seconds N` additionally bounds provider reads in
+wall-clock terms; on expiry the Instantly count is reported as a declared floor
+(`campaigns_skipped_out_of_time`) instead of running long. `--once-per-window` turns a repeat invocation into a true
+no-op: the check runs *before* any provider read, so a container restart or a
+second cron firing on the same day neither re-scans Instantly nor rewrites the
+report. `--force` overrides it. Files are written via temp file + `os.replace`, so
+a crash can never leave a half-written document for a dashboard to parse.
+
+---
+
 # Deployment (requires approval — nothing below has been applied)
+
+## Verified live state (Railway, read-only, 2026-09-01)
+
+Project `tgtc-daily-pipeline` · environment `production` · workspace "My Projects".
+
+| | GTM | GTM Approved Sync |
+|---|---|---|
+| Deployed commit | `a098ec4` | `a098ec4` |
+| Cron | **`0 13 * * *`** | **`0 0 * * *`** |
+| Start Command | `python -u run_orchestrator.py --mode live_acquisition_and_enrichment --lanes fantastic --target 300 --airtable-write --global-budget 1500 --artifact-root /app/data/state/orchestrator_v2` | `python -u run_approved.py` |
+| Volume | `gtm-volume` → `/app/data/state` (5.3 / 19.5 GB) | none |
+| `PIPELINE_ARTIFACT_ROOT` | `/app/data/state/orchestrator_v2` | — |
+| `INSTANTLY_API_KEY` | **already set** | already set |
+| `INSTANTLY_CAMPAIGN_*` | **all 10 buckets set** (36-char ids) | all 10 set |
+| Region / restart | sfo / container exits after the cron run | — |
+
+**Three of these contradict the older runbooks in this repo, which are stale:**
+
+* GTM cron is `0 13 * * *`, not the `0 14 * * *` in
+  `DEPLOY_RAILWAY_STEP_BY_STEP.md` / `PRODUCTION_HANDOFF_CHECKLIST.md`.
+* GTM's live lane set is `--lanes fantastic` with no ATS budget flags, not the
+  `--lanes ats,jsearch,free_feeds …` in `PRODUCTION_DEPLOYMENT.md`.
+* Approved Sync runs daily at `0 0 * * *`, not `*/5 * * * *`.
+
+Always read the live value before quoting a start command.
+
+**Consequence for this feature: no secret needs to be added.** GTM already holds
+`INSTANTLY_API_KEY` and all ten campaign ids, so `--instantly` works on GTM today.
 
 ## The binding constraint
 
-Run artifacts live on **`gtm-volume`**, mounted at `/app/data/state` on the **GTM**
-service, and per `PRODUCTION_DEPLOYMENT.md` they are "only reachable from a
-**running** GTM container". A Railway volume attaches to one service. **A separate
-report service therefore cannot read run artifacts**, and would be limited to the
-Instantly and Airtable metrics.
+Run artifacts live on `gtm-volume`, and a Railway volume attaches to exactly one
+service. A separate report service therefore **cannot** read run artifacts and
+would be limited to the Instantly and Airtable metrics. That constraint, not the
+schedule, decides the architecture.
 
-That constraint, not the schedule, decides the deployment shape.
+## Recommended: report first, then `exec` the pipeline (Option A)
 
-## Option A — chain onto the GTM daily cron (recommended)
+`0 13 * * *` UTC is **06:00 PDT / 05:00 PST** — before 08:00 Pacific year-round,
+with no schedule change at either DST transition. Railway cron is UTC only.
 
-GTM already runs daily, on the volume that holds the artifacts, at a time that is
-before 08:00 Pacific all year. `--if-due friday` makes the report a no-op on the
-other six days.
+Change **GTM → Settings → Start Command** to:
 
-1. In the Railway UI, open **GTM → Settings → Start Command** and record the
-   current value (the acquisition command in `PRODUCTION_DEPLOYMENT.md`).
-2. Replace it with the same command wrapped so the report runs after it and cannot
-   change the pipeline's exit status:
+```sh
+sh -c 'python -u run_weekly_report.py --artifact-root /app/data/state/orchestrator_v2 --if-due friday --once-per-window --instantly --max-seconds 480 || true; exec python -u run_orchestrator.py --mode live_acquisition_and_enrichment --lanes fantastic --target 300 --airtable-write --global-budget 1500 --artifact-root /app/data/state/orchestrator_v2'
+```
 
-   ```sh
-   sh -c 'python -u run_orchestrator.py --mode live_acquisition_and_enrichment --lanes ats,jsearch,free_feeds --target 300 --airtable-write --global-budget 1500 --ats-lane-budget 1200 --reserved-non-ats 200 --board-budget 120 --provider-budget 300 --artifact-root /app/data/state/orchestrator_v2; rc=$?; python -u run_weekly_report.py --artifact-root /app/data/state/orchestrator_v2 --if-due friday --instantly || true; exit $rc'
-   ```
+Cron unchanged. Nothing else changes.
 
-   *Paste the recorded acquisition command verbatim; the one above is the
-   documented value and must be re-checked against the live field.*
-3. Leave **GTM → Cron** unchanged. This repo documents `0 14 * * *`;
-   **verify the live value in the Railway UI**, because both the cron and the
-   start command are service-managed, not config-as-code.
-4. `INSTANTLY_API_KEY` and the `INSTANTLY_CAMPAIGN_*` ids must be present on
-   **GTM** for `--instantly` to work. They are currently set on **GTM Approved
-   Sync** — per `railway-per-service-config-drift`, variables are per service, so
-   confirm each one on GTM before relying on the metric. Drop `--instantly` if you
-   would rather not add the key there; the report then declares
-   `sent_to_instantly` as unavailable rather than guessing.
+Why the report runs **before** the pipeline, not after:
 
-**Timing.** Railway cron is UTC (`DEPLOY_RAILWAY_STEP_BY_STEP.md:13`) and has no
-timezone setting, so the schedule must be safe under both offsets. `0 14 * * *` is
-07:00 PDT and 06:00 PST — before the 08:00 Pacific meeting year-round, with no
-schedule change at either DST transition. The report's own Pacific window is
-computed from the IANA database, so the week boundary stays correct regardless.
+* **Delivery time is guaranteed.** The report finishes within minutes of 05:00/06:00
+  Pacific regardless of how long acquisition takes. Chaining it after the pipeline
+  would put the report's completion at the mercy of run duration, and a long run
+  could push it past Brett's 08:00 meeting.
+* **The data is identical either way.** The reported window ends Friday 00:00
+  Pacific. Friday's own run starts at 05:00/06:00 Pacific, *after* that boundary, so
+  it belongs to next week's report by construction and can never be part of this
+  one. Running first loses nothing.
+* **`exec` preserves exit semantics exactly.** The orchestrator replaces the shell
+  process, so the container's exit code *is* the pipeline's exit code — byte-for-byte
+  today's behaviour. No `rc=$?` bookkeeping, no wrapper swallowing a failure.
+* **The report cannot break the pipeline.** `--max-seconds 480` bounds provider
+  reads *in process* (no dependency on a `timeout` binary in the image), `|| true`
+  absorbs any non-zero exit, and neither can reach the `exec`. Verified locally:
+  with report exit codes 0/1/137 and pipeline exit codes 0/7/42, the wrapper's exit
+  code is always the pipeline's.
+* **`--once-per-window` bounds repeats.** A redeploy or second firing on the same
+  Friday exits immediately without touching Instantly.
 
-**Output.** The summary prints to the GTM deploy logs, and both files are written
-to `/app/data/state/orchestrator_v2/weekly_reports/`, where each week accumulates
-for the dashboard.
+Trade-off worth stating: because the report runs first, a Friday report reflects
+runs through **Thursday**. That is exactly the closed week, so it is correct — but
+it does mean the report never contains the run happening in the same container.
 
-## Option B — a separate "GTM Weekly Report" service
+## Alternative: separate service (Option B)
 
-Only if the report must run independently of acquisition. Accept the loss of
-funnel metrics, or pair it with Option C.
+Only if the report must run independently of acquisition.
 
 | Setting | Value |
 |---|---|
 | Start Command | `python -u run_weekly_report.py --instantly --airtable --out-dir /app/data/weekly_reports` |
-| Cron | `0 13 * * 5` — 06:00 PDT / 05:00 PST Friday, before 08:00 Pacific year-round |
-| Restart policy | NEVER |
-| Volume | none available (`gtm-volume` belongs to GTM) |
-| Variables | `INSTANTLY_API_KEY`, `INSTANTLY_CAMPAIGN_*`, `AIRTABLE_TOKEN`, `AIRTABLE_BASE_ID`, `AIRTABLE_TABLE_NAME` |
+| Cron | `0 13 * * 5` (06:00 PDT / 05:00 PST Friday) |
+| Volume | none available — `gtm-volume` belongs to GTM |
 
 Without the volume, `jobs_captured`, `jobs_reviewed`, `review_rate_pct`,
-`qualified_opportunities` and `contacts_found` are all reported as **unavailable**.
-Only `sent_to_instantly` and the Airtable cross-check are measurable. The report
-will say so plainly — it will not fill the gap with zeros.
+`qualified_opportunities` and `contacts_found` are **unavailable**. Only
+`sent_to_instantly` and the Airtable cross-check are measurable. The report says so
+plainly rather than filling the gap with zeros. Not recommended.
 
-## Option C — publish a metrics ledger (future work, for the dashboard)
+## Instantly campaigns included
 
-To make the funnel readable from any service, GTM would append one compact metrics
-row per run to a store other services can read. The per-run rows this report
-already emits (`runs[]`) are the natural payload. Not implemented; it is a code
-change to the pipeline, not a deployment step.
+`configured_campaign_ids()` reads every `INSTANTLY_CAMPAIGN_*` name in
+`config.CAMPAIGN_ENV_BY_BUCKET`, plus `_SMALL`/`_MID`/`_LARGE` band variants where
+set, plus the default `INSTANTLY_CAMPAIGN_ID`. Against the live GTM environment
+that resolves to exactly the ten role-bucket campaigns:
 
-## Gates that need explicit authorization
+```
+INSTANTLY_CAMPAIGN_CUSTOMER_SUCCESS   INSTANTLY_CAMPAIGN_MARKETING
+INSTANTLY_CAMPAIGN_CUSTOMER_SUPPORT   INSTANTLY_CAMPAIGN_OPERATIONS
+INSTANTLY_CAMPAIGN_ECOMMERCE          INSTANTLY_CAMPAIGN_PEOPLE_HR
+INSTANTLY_CAMPAIGN_ENGINEERING        INSTANTLY_CAMPAIGN_PRODUCT
+INSTANTLY_CAMPAIGN_FINANCE            INSTANTLY_CAMPAIGN_GTM
+```
 
-None of these has been performed:
+No band variants are set, and `INSTANTLY_CAMPAIGN_ID` is present but **empty**, so
+it contributes nothing — matching `config.resolve_campaign_id`, which falls back to
+that empty default only when a bucket has no campaign. Every campaign the pipeline
+can route to is therefore covered.
 
-* changing the GTM Start Command (Option A step 2);
-* creating a service or setting any cron (Option B);
-* adding `INSTANTLY_API_KEY` / campaign ids to the GTM service;
-* deploying or redeploying any Railway service;
-* any Airtable or Instantly write — the layer has no write path at all.
+If Outbound Wave 1 is ever enabled, its challenger campaigns are *not* in
+`CAMPAIGN_ENV_BY_BUCKET` and would need `--campaign-id` (or an env addition) to be
+counted. No Wave 1 variables exist on GTM today.
+
+Reads are `POST /leads/list` with the **singular** `campaign` filter — the plural
+`campaign_ids` filter is ignored by the API and must never be relied on. Leads are
+counted by `timestamp_created`; a campaign that fails or hits the 200-page ceiling
+is named in `campaigns_failed` / `campaigns_truncated`, contributes nothing
+silently, and drops the metric to `partial`.
+
+## Gates that still need explicit authorization
+
+* changing the GTM Start Command (the only production change required);
+* deploying / redeploying GTM.
+
+Not required and not proposed: cron changes, secret changes, new services, Airtable
+or Instantly writes, external sends.

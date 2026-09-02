@@ -2,7 +2,8 @@
 
 The bottleneck is *measured*, not narrated: it is the funnel boundary that lost
 the most records in absolute terms among the stages the report could actually
-measure. The stage is then annotated with the loss reason codes the orchestrator
+measure **and legitimately compare**. Two counters summed over different run sets
+are not subtracted -- that boundary is declared incomparable instead. The stage is then annotated with the loss reason codes the orchestrator
 itself recorded at that boundary, so the finding is traceable to artifact fields
 rather than to an opinion.
 
@@ -60,8 +61,8 @@ REASON_ACTIONS = {
         "for the week before attributing this to data coverage."
     ),
     "not_icp": (
-        "Most postings are rejected as out-of-ICP. Re-check the acquisition query mix: "
-        "budget is being spent acquiring jobs the ICP filter will always reject."
+        "not_icp is a leading recorded reason. Re-check the acquisition query mix: budget "
+        "is being spent acquiring postings the ICP filter rejects."
     ),
     "company_unresolved": (
         "Company identity could not be resolved from the posting. This is a source-quality "
@@ -87,16 +88,18 @@ REASON_ACTIONS = {
 STAGE_ACTIONS = {
     "review": (
         "Runs captured more postings than they reviewed. Check each run's stop_reason and "
-        "topup.final_stop_reason: the pipeline is stopping before it finishes the batch it "
-        "paid for."
+        "topup.final_stop_reason to find out why the run did not finish the batch it "
+        "acquired."
     ),
     "qualification": (
-        "The qualification gate is the largest loss. Re-tune acquisition targeting so budget "
-        "is not spent on postings the role/ICP filters reject."
+        "The qualification gate is the largest measured loss. Review acquisition targeting: "
+        "a large share of the postings acquired this window were rejected by the role/ICP "
+        "filters."
     ),
     "contact_discovery": (
-        "Contact discovery is the largest loss. This is the hiring-manager/domain layer, not "
-        "acquisition volume - adding jobs will not move the output."
+        "Contact discovery is the largest measured loss. The constraint is the "
+        "hiring-manager/domain layer rather than acquisition volume, so adding jobs is "
+        "unlikely to increase output until this boundary improves."
     ),
     "airtable_delivery": (
         "Contacts are found but not written to Airtable. Review the delivery skip breakdown "
@@ -125,6 +128,7 @@ class Bottleneck:
     evidence: List[str] = field(default_factory=list)
     statement: str = ""
     unmeasured_boundaries: List[str] = field(default_factory=list)
+    incomparable_boundaries: List[Dict[str, str]] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -140,6 +144,7 @@ class Bottleneck:
             "evidence": list(self.evidence),
             "statement": self.statement,
             "unmeasured_boundaries": list(self.unmeasured_boundaries),
+            "incomparable_boundaries": list(self.incomparable_boundaries),
         }
 
 
@@ -201,7 +206,30 @@ def identify(
         )
 
     worst: Optional[Bottleneck] = None
+    incomparable: List[Dict[str, str]] = []
     for (from_key, from_metric), (to_key, to_metric) in zip(available, available[1:]):
+        boundary_name = BOUNDARY_NAMES.get((from_key, to_key), f"{from_key}->{to_key}")
+        # Two run-derived counters may have been summed over DIFFERENT run sets when
+        # one of them is partial. Subtracting those is arithmetic on incomparable
+        # populations, so the boundary is declared rather than measured.
+        if from_metric.source == to_metric.source == "run_artifacts":
+            from_runs = set(from_metric.contributing_run_ids)
+            to_runs = set(to_metric.contributing_run_ids)
+            if from_runs != to_runs:
+                only_from = sorted(from_runs - to_runs)
+                only_to = sorted(to_runs - from_runs)
+                incomparable.append(
+                    {
+                        "boundary": boundary_name,
+                        "reason": (
+                            f"{from_key} and {to_key} were summed over different run sets "
+                            f"(only in {from_key}: {', '.join(only_from) or 'none'}; "
+                            f"only in {to_key}: {', '.join(only_to) or 'none'}), so their "
+                            "difference is not a loss"
+                        ),
+                    }
+                )
+                continue
         entered = int(from_metric.value or 0)
         advanced = int(to_metric.value or 0)
         lost = entered - advanced
@@ -209,7 +237,7 @@ def identify(
             continue
         candidate = Bottleneck(
             kind="funnel_boundary",
-            boundary=BOUNDARY_NAMES.get((from_key, to_key), f"{from_key}->{to_key}"),
+            boundary=boundary_name,
             from_metric=from_key,
             to_metric=to_key,
             entered=entered,
@@ -226,18 +254,23 @@ def identify(
         return Bottleneck(
             kind="no_measured_loss",
             statement=(
-                "No measured funnel boundary lost records this window. Either throughput "
-                "was clean end to end, or the stages that lose records are the unmeasured ones."
+                "No funnel boundary could be shown to lose records this window. Either "
+                "throughput was clean end to end, or the stages that lose records are the "
+                "ones this window could not measure."
             ),
             unmeasured_boundaries=unmeasured,
+            incomparable_boundaries=incomparable,
         )
 
+    worst.incomparable_boundaries = incomparable
     worst.top_reasons = [
         {"reason": reason, "count": count} for reason, count in list(reasons.items())[:5]
     ]
+    compared = len(available) - 1 - len(incomparable)
     worst.statement = (
         f"The {worst.boundary.replace('_', ' ')} boundary lost {worst.lost} of {worst.entered} "
-        f"records ({worst.loss_pct}%), the largest measured drop in the funnel."
+        f"records ({worst.loss_pct}%), the largest drop among the {compared} funnel "
+        f"boundar{'y' if compared == 1 else 'ies'} this window could compare."
     )
     return worst
 
@@ -258,8 +291,9 @@ def action_plan(
 
     if bottleneck.kind == "no_pipeline_activity":
         add(
-            "Confirm the GTM cron actually executed every day this week; a week with zero "
-            "runs is a scheduling or start-command failure, not a yield problem.",
+            "Confirm the GTM cron actually executed this week and that the report can read "
+            "the artifact root; a week with zero runs is a scheduling, start-command or "
+            "artifact-access problem, not a yield problem.",
             "run_artifacts: 0 runs attributed to the window",
         )
     elif bottleneck.kind == "acquisition_failure":

@@ -808,3 +808,192 @@ def test_a_failed_instantly_read_asks_for_the_credential_not_for_the_flag_again(
     gap = next(g for g in report.gaps if g.metric == "sent_to_instantly")
     assert "INSTANTLY_API_KEY" in gap.remedy
     assert "--instantly" not in gap.remedy, "the flag was already passed; asking again helps nobody"
+
+
+# --------------------------------------------------------------------------
+# pre-deployment review fixes
+# --------------------------------------------------------------------------
+
+
+def test_a_campaign_that_fails_mid_pagination_contributes_nothing(pacific_week):
+    """The headline must always equal the sum of its own per-campaign breakdown."""
+    state = {"pages": 0}
+
+    def requester(method, url, *, headers=None, params=None, json_body=None, **_):
+        campaign = json_body["campaign"]
+        if campaign == "ok":
+            return {"items": [{"timestamp_created": "2026-08-22T10:00:00Z"}], "next_starting_after": ""}
+        # "flaky" returns one good page of in-window leads, then blows up.
+        state["pages"] += 1
+        if state["pages"] == 1:
+            return {
+                "items": [
+                    {"timestamp_created": "2026-08-23T10:00:00Z"},
+                    {"timestamp_created": "2026-08-24T10:00:00Z"},
+                ],
+                "next_starting_after": "cursor-2",
+            }
+        raise RuntimeError("503 upstream")
+
+    result = collect_instantly(
+        pacific_week, cfg=_cfg(), campaign_ids=["ok", "flaky"], requester=requester
+    )
+    assert result.ok
+    assert result.count == sum(result.detail["per_campaign_in_window"].values())
+    assert result.count == 1, "the 2 hits from the failed campaign must not leak into the total"
+    assert result.detail["campaigns_failed"] == ["flaky"]
+    assert result.detail["campaigns_read"] == ["ok"]
+    assert any("could not be read" in e for e in result.errors)
+
+
+def test_a_truncated_campaign_is_flagged_and_makes_the_metric_partial(artifact_root, pacific_week):
+    seen = {"n": 0}
+
+    def requester(method, url, *, headers=None, params=None, json_body=None, **_):
+        seen["n"] += 1
+        return {
+            "items": [{"timestamp_created": "2026-08-22T10:00:00Z"}],
+            "next_starting_after": f"cursor-{seen['n']}",  # a cursor that never ends
+        }
+
+    result = collect_instantly(pacific_week, cfg=_cfg(), campaign_ids=["big"], requester=requester)
+    assert result.ok
+    assert result.detail["campaigns_truncated"] == ["big"]
+    assert any("floor, not a total" in e for e in result.errors)
+
+    write_run(artifact_root, "a", finished="2026-08-22T13:00:00Z")
+    report = build_report(pacific_week, artifact_roots=[artifact_root], instantly=result)
+    assert report.metrics["sent_to_instantly"].status == STATUS_PARTIAL
+
+
+def test_boundaries_summed_over_different_run_sets_are_not_subtracted(artifact_root, pacific_week):
+    """A partial metric makes the neighbouring boundary arithmetic meaningless."""
+    write_run(
+        artifact_root, "a", finished="2026-08-22T13:00:00Z",
+        postings=100, reviewed=100, qualified=100, contacts=90, created=90,
+    )
+    # 'b' reports postings but is silent about everything downstream.
+    write_run(
+        artifact_root, "b", finished="2026-08-23T13:00:00Z",
+        postings=500, reviewed=None, qualified=None, contacts=None, created=None,
+    )
+    report = build_report(pacific_week, artifact_roots=[artifact_root])
+    assert report.metrics["jobs_captured"].value == 600
+    assert report.metrics["jobs_reviewed"].value == 100
+
+    boundaries = {entry["boundary"] for entry in report.bottleneck.incomparable_boundaries}
+    assert "review" in boundaries, "600 - 100 is not a loss; the run sets differ"
+    assert report.bottleneck.boundary != "review"
+
+
+def test_incomplete_runs_are_declared_as_a_gap(artifact_root, pacific_week):
+    run_dir = write_run(artifact_root, "stopped", finished="2026-08-22T13:00:00Z")
+    (run_dir / "run_status.json").write_text(
+        json.dumps({"run_id": "stopped", "status": "incomplete", "stop_reason": "budget_exhausted"}),
+        encoding="utf-8",
+    )
+    report = build_report(pacific_week, artifact_roots=[artifact_root])
+    assert report.run_status_census == {"incomplete": 1}
+    gap = next(g for g in report.gaps if g.metric == "run_completeness")
+    assert "incomplete=1" in gap.reason
+    assert "Runs not complete: incomplete=1" in render_summary(report)
+
+
+def test_reports_are_written_atomically_leaving_no_partial_file(artifact_root, tmp_path):
+    write_run(artifact_root, "a", finished="2026-08-22T13:00:00Z")
+    out = tmp_path / "out"
+    run_weekly_report.main(
+        [
+            "--artifact-root", str(artifact_root),
+            "--start", "2026-08-21", "--end", "2026-08-28",
+            "--out-dir", str(out), "--quiet",
+        ]
+    )
+    assert list(out.glob("*.tmp")) == [], "no temp file may survive a completed write"
+    json.loads((out / "weekly_report_2026-W35.json").read_text(encoding="utf-8"))
+
+
+def test_once_per_window_makes_a_second_run_a_no_op(artifact_root, tmp_path, capsys):
+    write_run(artifact_root, "a", finished="2026-08-22T13:00:00Z")
+    out = tmp_path / "out"
+    argv = [
+        "--artifact-root", str(artifact_root),
+        "--start", "2026-08-21", "--end", "2026-08-28",
+        "--out-dir", str(out), "--once-per-window", "--quiet",
+    ]
+    assert run_weekly_report.main(argv) == 0
+    target = out / "weekly_report_2026-W35.json"
+    first = target.read_text(encoding="utf-8")
+
+    target.write_text('{"sentinel": true}', encoding="utf-8")
+    assert run_weekly_report.main(argv) == 0
+    assert target.read_text(encoding="utf-8") == '{"sentinel": true}', "second run must not rewrite"
+
+    assert run_weekly_report.main(argv + ["--force"]) == 0
+    assert json.loads(target.read_text(encoding="utf-8"))["included_run_ids"] == ["a"]
+    assert first != '{"sentinel": true}'
+
+
+def test_once_per_window_skips_before_touching_any_provider(artifact_root, tmp_path):
+    """A restart must not re-scan Instantly for a window already reported."""
+    write_run(artifact_root, "a", finished="2026-08-22T13:00:00Z")
+    out = tmp_path / "out"
+    out.mkdir(parents=True)
+    (out / "weekly_report_2026-W35.json").write_text("{}", encoding="utf-8")
+
+    def explode(*args, **kwargs):
+        raise AssertionError("no provider call may happen when the window is already reported")
+
+    original = run_weekly_report.collect_instantly
+    run_weekly_report.collect_instantly = explode
+    try:
+        code = run_weekly_report.main(
+            [
+                "--artifact-root", str(artifact_root),
+                "--start", "2026-08-21", "--end", "2026-08-28",
+                "--out-dir", str(out), "--once-per-window", "--instantly", "--quiet",
+            ]
+        )
+    finally:
+        run_weekly_report.collect_instantly = original
+    assert code == 0
+
+
+def test_the_time_budget_stops_the_instantly_read_and_declares_a_floor(pacific_week):
+    """A hung provider must not outlast the morning the report is due."""
+    calls = {"n": 0}
+
+    def clock():
+        # In budget for the first campaign only; every later check is past the deadline.
+        calls["n"] += 1
+        return 0.0 if calls["n"] == 1 else 100.0
+
+    result = collect_instantly(
+        pacific_week,
+        cfg=_cfg(),
+        campaign_ids=["first", "second", "third"],
+        requester=_instantly_requester(
+            {"first": [{"timestamp_created": "2026-08-22T10:00:00Z"}]}
+        ),
+        deadline=50.0,
+        clock=clock,
+    )
+    assert result.ok and result.count == 1, "what was read still counts"
+    assert result.detail["campaigns_skipped_out_of_time"] == ["second", "third"]
+    assert any("time budget exhausted" in e for e in result.errors)
+
+
+def test_no_deadline_means_no_early_stop(pacific_week):
+    result = collect_instantly(
+        pacific_week,
+        cfg=_cfg(),
+        campaign_ids=["a", "b"],
+        requester=_instantly_requester(
+            {
+                "a": [{"timestamp_created": "2026-08-22T10:00:00Z"}],
+                "b": [{"timestamp_created": "2026-08-23T10:00:00Z"}],
+            }
+        ),
+    )
+    assert result.count == 2
+    assert result.detail["campaigns_skipped_out_of_time"] == []

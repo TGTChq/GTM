@@ -111,10 +111,16 @@ def _collectors(
     if args.instantly or args.airtable:
         import config as cfg  # noqa: PLC0415
 
+    deadline = None
+    if getattr(args, "max_seconds", 0):
+        import time  # noqa: PLC0415
+
+        deadline = time.monotonic() + float(args.max_seconds)
+
     if args.instantly:
         try:
             instantly = collect_instantly(
-                window, cfg=cfg, campaign_ids=args.campaign_id or None
+                window, cfg=cfg, campaign_ids=args.campaign_id or None, deadline=deadline
             )
         except Exception as exc:  # noqa: BLE001 - a provider failure is a gap, not a crash
             instantly = disabled("instantly", f"collector raised: {str(exc)[:200]}")
@@ -129,9 +135,31 @@ def _collectors(
 
 
 def _write(path: Path, text: str) -> Path:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(text, encoding="utf-8")
+    """Write atomically: a crash must never leave a half-written report readable.
+
+    Reuses the project's temp-file + ``os.replace`` writer so a dashboard polling
+    the output directory only ever sees a complete document.
+    """
+    from retrieval_measurement.artifacts import atomic_write_text  # noqa: PLC0415
+
+    atomic_write_text(path, text)
     return path
+
+
+def _output_paths(
+    args: argparse.Namespace, window: ReportingWindow, roots: Sequence[str]
+) -> tuple[Path, Path]:
+    """Where this window's two files go. One deterministic pair per ISO week.
+
+    Naming by ISO week is what makes a re-run idempotent: the same window always
+    resolves to the same pair, so a second run overwrites rather than accumulating
+    a second copy of the same report.
+    """
+    stem = f"weekly_report_{window.iso_week}"
+    out_dir = Path(args.out_dir) if args.out_dir else Path(roots[0]) / _DEFAULT_SUBDIR
+    json_path = Path(args.json_out) if args.json_out else out_dir / f"{stem}.json"
+    summary_path = Path(args.summary_out) if args.summary_out else out_dir / f"{stem}.txt"
+    return json_path, summary_path
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -191,6 +219,24 @@ def build_parser() -> argparse.ArgumentParser:
         help="Count dry-run/preflight runs too. Off by default: their counters are "
         "manufactured and would report fabricated throughput as a business result.",
     )
+    parser.add_argument(
+        "--max-seconds",
+        type=int,
+        default=0,
+        help="Wall-clock budget for provider reads (0 = unlimited). On expiry the "
+        "Instantly count is reported as a declared floor instead of running long.",
+    )
+    parser.add_argument(
+        "--once-per-window",
+        action="store_true",
+        help="Skip entirely (exit 0, no provider reads, no writes) when this window's "
+        "report already exists. Makes a restart or a second cron firing a no-op.",
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Regenerate even when --once-per-window would skip.",
+    )
     parser.add_argument("--no-write", action="store_true", help="Print only; write no files.")
     parser.add_argument("--quiet", action="store_true", help="Do not print the summary to stdout.")
     parser.add_argument(
@@ -224,6 +270,19 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     window = build_window(args, now)
     roots = args.artifact_root or _default_artifact_roots()
+    json_path, summary_path = _output_paths(args, window, roots)
+
+    # Idempotence gate, deliberately BEFORE the collectors: a container restart or a
+    # second cron firing on the same day must not re-scan Instantly or rewrite a
+    # report that already exists for this window.
+    if args.once_per_window and not args.no_write and json_path.exists() and not args.force:
+        if not args.quiet:
+            print(
+                f"weekly report for {window.iso_week} already exists at {json_path}; "
+                "skipping (pass --force to regenerate)"
+            )
+        return 0
+
     instantly, airtable = _collectors(args, window)
 
     report = build_report(
@@ -242,10 +301,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     written: List[Path] = []
     if not args.no_write:
-        stem = f"weekly_report_{window.iso_week}"
-        out_dir = Path(args.out_dir) if args.out_dir else Path(roots[0]) / _DEFAULT_SUBDIR
-        json_path = Path(args.json_out) if args.json_out else out_dir / f"{stem}.json"
-        summary_path = Path(args.summary_out) if args.summary_out else out_dir / f"{stem}.txt"
         written.append(_write(json_path, json.dumps(document, indent=2, sort_keys=False)))
         written.append(_write(summary_path, summary))
         if not args.quiet:

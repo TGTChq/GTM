@@ -78,6 +78,14 @@ def render_summary(report: WeeklyReport) -> str:
     if run_ids:
         for run_id in run_ids:
             lines.append(f"                   {run_id}")
+    unhealthy = {
+        status: count
+        for status, count in report.run_status_census.items()
+        if status.lower() not in ("complete", "success")
+    }
+    if unhealthy:
+        listed = ", ".join(f"{status}={count}" for status, count in sorted(unhealthy.items()))
+        lines.append(f"Runs not complete: {listed}")
     if report.excluded_simulated:
         excluded = ", ".join(entry["run_id"] for entry in report.excluded_simulated)
         lines.extend(

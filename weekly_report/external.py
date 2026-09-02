@@ -93,11 +93,20 @@ def collect_instantly(
     cfg: Any,
     campaign_ids: Optional[Sequence[str]] = None,
     requester: Optional[Any] = None,
+    deadline: Optional[float] = None,
+    clock: Any = None,
 ) -> CollectorResult:
     """Count leads whose ``timestamp_created`` falls inside ``window``.
 
     ``requester`` is injected in tests; in production it is
     ``http_utils.request_with_retry``.
+
+    ``deadline`` is a ``time.monotonic()`` value after which no further request is
+    issued. It exists because the worst case here is unbounded in wall-clock terms:
+    a per-request timeout of 45s with 3 retries, multiplied by pages and campaigns,
+    can outlast the window the report is supposed to be delivered in. Stopping at
+    the deadline yields a declared floor rather than a late report or a hung
+    container, and does not depend on a `timeout` binary existing in the image.
     """
     result = CollectorResult(
         name="instantly",
@@ -127,14 +136,34 @@ def collect_instantly(
         "Accept": "application/json",
     }
 
+    if clock is None:
+        import time  # noqa: PLC0415
+
+        clock = time.monotonic
+
+    def out_of_time() -> bool:
+        return deadline is not None and clock() >= deadline
+
     per_campaign: Dict[str, int] = {}
+    failed_campaigns: List[str] = []
+    truncated_campaigns: List[str] = []
+    skipped_campaigns: List[str] = []
     scanned = 0
-    in_window = 0
     undated = 0
     for campaign_id in ids:
+        if out_of_time():
+            skipped_campaigns.append(campaign_id)
+            continue
         cursor = ""
         pages = 0
+        # Per-campaign accumulators stay LOCAL until the campaign is fully read.
+        # A campaign that fails half way through must contribute nothing: folding
+        # its partial hits into the total while leaving it out of per_campaign
+        # would make the headline number disagree with its own breakdown.
         campaign_hits = 0
+        campaign_scanned = 0
+        campaign_undated = 0
+        truncated = False
         try:
             while True:
                 body: Dict[str, Any] = {
@@ -148,32 +177,47 @@ def collect_instantly(
                 payload = _as_dict(response)
                 items = payload.get("items") or []
                 for item in items:
-                    scanned += 1
+                    campaign_scanned += 1
                     created = parse_instant((item or {}).get("timestamp_created"))
                     if created is None:
-                        undated += 1
+                        campaign_undated += 1
                         continue
                     if window.contains(created):
-                        in_window += 1
                         campaign_hits += 1
                 next_cursor = str(payload.get("next_starting_after") or "")
                 pages += 1
-                if not next_cursor or next_cursor == cursor or pages >= _MAX_PAGES_PER_CAMPAIGN:
-                    if pages >= _MAX_PAGES_PER_CAMPAIGN and next_cursor:
-                        result.errors.append(
-                            f"campaign {campaign_id}: stopped at the {_MAX_PAGES_PER_CAMPAIGN}-page "
-                            "safety ceiling; the count for this campaign is a floor, not a total"
-                        )
+                if not next_cursor or next_cursor == cursor:
+                    break
+                if pages >= _MAX_PAGES_PER_CAMPAIGN or out_of_time():
+                    truncated = True
                     break
                 cursor = next_cursor
         except Exception as exc:  # noqa: BLE001 - a provider failure is a gap, not a crash
+            failed_campaigns.append(campaign_id)
             result.errors.append(f"campaign {campaign_id}: {str(exc)[:200]}")
             continue
         per_campaign[campaign_id] = campaign_hits
+        scanned += campaign_scanned
+        undated += campaign_undated
+        if truncated:
+            truncated_campaigns.append(campaign_id)
+            result.errors.append(
+                f"campaign {campaign_id}: stopped at the {_MAX_PAGES_PER_CAMPAIGN}-page safety "
+                "ceiling or the time budget; the count for this campaign is a floor, not a total"
+            )
+
+    if skipped_campaigns:
+        result.errors.append(
+            f"time budget exhausted before reading {len(skipped_campaigns)} campaign(s): "
+            f"{', '.join(skipped_campaigns)}; the count is a floor, not a total"
+        )
 
     result.detail = {
         "campaigns_requested": ids,
         "campaigns_read": sorted(per_campaign),
+        "campaigns_failed": sorted(failed_campaigns),
+        "campaigns_truncated": sorted(truncated_campaigns),
+        "campaigns_skipped_out_of_time": sorted(skipped_campaigns),
         "leads_scanned": scanned,
         "leads_without_timestamp_created": undated,
         "per_campaign_in_window": per_campaign,
@@ -182,7 +226,13 @@ def collect_instantly(
     if not per_campaign:
         return result
     result.ok = True
-    result.count = in_window
+    # The headline is exactly the sum of the breakdown, always.
+    result.count = sum(per_campaign.values())
+    if failed_campaigns:
+        result.errors.append(
+            f"{len(failed_campaigns)} of {len(ids)} campaign(s) could not be read; the count "
+            "covers only the campaigns that were read in full"
+        )
     if undated:
         result.errors.append(
             f"{undated} lead(s) carry no timestamp_created and could not be attributed"
