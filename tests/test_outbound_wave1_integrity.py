@@ -361,7 +361,7 @@ def test_economics_offer_noun_is_the_numbers_for_this_role_everywhere():
     # The re-offer needs no plural agreement, so a plural noun reads naturally
     # without any word choice changing.
     assert f"Happy to send {noun} whenever." in resolution.rendered_email_3
-    assert f"send {noun} today." in resolution.rendered_email_4
+    assert f"send {noun} over." in resolution.rendered_email_4
 
 
 def test_the_re_offer_reads_the_same_for_any_noun():
@@ -625,11 +625,10 @@ def test_every_email_asks_for_exactly_one_thing():
 
 
 def test_a_proof_never_points_back_at_a_signal_that_did_not_fire():
-    """MARKETING's proof says "the rest of that scope", GTM's says "the
-    combination", AI's ends on a bare "instead". Behind a degraded signal there
-    is nothing for those to refer to, so the shared wording is used instead."""
+    """GTM's proof says "the combination" and AI's ends on a bare "instead".
+    Behind a degraded signal there is nothing for those to refer to, so the
+    shared wording is used instead."""
     for bucket, role, dangling in (
-        ("marketing", "Marketing Manager", "that scope"),
         ("gtm_revenue", "Revenue Operations Manager", "the combination, not just"),
         ("engineering", "AI Automation Engineer", "actual work instead."),
     ):

@@ -312,12 +312,9 @@ MARKETING_CREATIVE = CampaignPolicy(
     fallback_offer=OFFER_HEADCOUNT_OVERVIEW,
     t1_min_evidence=2,
     offer_nouns={OFFER_HEADCOUNT_OVERVIEW: "how an embedded hire works"},
-    proof_texts={
-        PROOF_HEADCOUNT_MODEL: (
-            "People we place join your team full-time but don't go on your "
-            "headcount, so the rest of that scope doesn't need another req."
-        )
-    },
+    # No proof override. The friction now carries the "a second hire needs no
+    # extra slot" idea, so a proof repeating it would say the same thing twice in
+    # consecutive sentences. The shared headcount sentence is the right close.
     scope_facets=_facets(
         ("paid media", (
             "paid media", "paid acquisition", "paid social", "ppc", "google ads",

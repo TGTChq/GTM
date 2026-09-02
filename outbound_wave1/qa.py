@@ -33,7 +33,7 @@ from .campaigns import (
     CampaignPolicy,
 )
 from .render import (
-    FRICTION_APPROVAL_SEQUENCING,
+    FRICTION_HEADCOUNT_ADDITION,
     FRICTION_COMBINED_SCOPE_POOL,
     FRICTION_COST_COMPARISON,
     FRICTION_CROSS_FUNCTION_SCREENING,
@@ -43,7 +43,7 @@ from .render import (
     FRICTION_NO_TRACK_RECORD_YET,
     FRICTION_PARALLEL_POOL,
     FRICTION_RARE_INTERSECTION,
-    FRICTION_SCOPE_COMPRESSION,
+    FRICTION_SCOPE_SPLIT,
     FRICTION_SCREENING_BANDWIDTH,
     FRICTION_TIME_OPEN,
     FRICTION_TITLE_INFLATION,
@@ -88,7 +88,7 @@ COHERENT_FRICTIONS = {
     # with an evidence friction -- "a CV cannot show you that" followed by "they
     # are not on your headcount" answers a question the reader did not ask.
     (PROOF_HEADCOUNT_MODEL, OFFER_HEADCOUNT_OVERVIEW): frozenset({
-        FRICTION_APPROVAL_SEQUENCING, FRICTION_SCOPE_COMPRESSION,
+        FRICTION_HEADCOUNT_ADDITION, FRICTION_SCOPE_SPLIT,
     }) | _DEGRADED_FRICTIONS,
     # The employment-administration proof answers an ADMINISTRATIVE BURDEN
     # problem, and nothing else.

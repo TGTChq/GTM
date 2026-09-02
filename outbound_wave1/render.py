@@ -52,12 +52,12 @@ FRICTION_PARALLEL_POOL = "parallel_pool"
 #: caring, which is what makes the nine arguments different rather than nine
 #: wordings of one argument. All are hedged observations about the reader's own
 #: situation ("usually", "almost nothing"), never asserted facts about their team.
-FRICTION_APPROVAL_SEQUENCING = "approval_sequencing"
+FRICTION_HEADCOUNT_ADDITION = "headcount_addition"
 FRICTION_TITLE_VS_SCOPE = "title_vs_scope"
 FRICTION_EMPLOYMENT_OBLIGATION = "employment_obligation"
 FRICTION_TITLE_INFLATION = "title_inflation"
 FRICTION_INTERVIEW_WEAK_SIGNAL = "interview_weak_signal"
-FRICTION_SCOPE_COMPRESSION = "scope_compression"
+FRICTION_SCOPE_SPLIT = "scope_split"
 FRICTION_RARE_INTERSECTION = "rare_intersection"
 FRICTION_NO_TRACK_RECORD_YET = "no_track_record_yet"
 #: Used ONLY on the economics path. It must never survive a degrade to a
@@ -237,10 +237,12 @@ def _campaign_role_noun(policy: CampaignPolicy) -> str:
 # ---------------------------------------------------------------------------
 
 _FRICTION_BY_CAMPAIGN: Dict[str, Tuple[str, str]] = {
-    # Approvals, not candidate supply, are what hold a multi-req product team up.
+    # Looks FORWARD, not back: the roles being open says nothing about whether
+    # they were hard to approve, but it does mean more than one hire may land
+    # at the same time, which is what the headcount proof answers.
     "product": (
-        FRICTION_APPROVAL_SEQUENCING,
-        "Getting several approved at once is usually the harder part.",
+        FRICTION_HEADCOUNT_ADDITION,
+        "If {opening_subject} turn into hires, that's {opening_count} additions to headcount at once.",
     ),
     # An ops title is a container for whatever the company piled into it.
     "operations": (
@@ -263,19 +265,21 @@ _FRICTION_BY_CAMPAIGN: Dict[str, Tuple[str, str]] = {
         "Ecommerce titles can mean very different work depending on the size of "
         "the store.",
     ),
-    # The one reason only CX can use: the interview is the least diagnostic
-    # signal precisely because talking to people is the job.
+    # An interview is incomplete evidence of day-to-day work. Note what this
+    # does NOT say: nothing about how candidates for these roles usually
+    # perform in interviews, which we have no basis to claim.
     "customer_experience": (
         FRICTION_INTERVIEW_WEAK_SIGNAL,
-        "People who are good at these roles usually interview well. That makes "
-        "the interview itself hard to read.",
+        "A good interview still doesn't tell you much about how someone "
+        "handles the work day to day.",
     ),
-    # A very wide marketing scope usually means one approved line covering several
-    # jobs -- a budget shape, not a hiring preference.
+    # States the hypothetical outright rather than inferring WHY the reader
+    # scoped the role the way they did. The claim is scoped to our own
+    # placements ("with us"), which is exactly what the verified fact covers.
     "marketing_creative": (
-        FRICTION_SCOPE_COMPRESSION,
-        "A scope that wide often means one headcount covering what's really a "
-        "few different jobs.",
+        FRICTION_SCOPE_SPLIT,
+        "If you end up splitting that scope across more than one person, the "
+        "second hire doesn't need another headcount slot with us.",
     ),
     # In RevOps the parts are common and the join is rare.
     "gtm_systems": (
@@ -309,13 +313,12 @@ _T3_FRICTION = (
     "it is usually the cheapest way to keep moving.",
 )
 
-#: Campaign proof phrasings that refer back to the signal. MARKETING says "the
-#: rest of that scope", GTM says "the combination" and AI ends on a bare
-#: "instead" -- each only makes sense when that campaign's own T1 signal fired.
+#: Campaign proof phrasings that refer back to the signal. GTM says "the
+#: combination" and AI ends on a bare "instead" -- each only makes sense when
+#: that campaign's own T1 signal fired.
 #: Campaigns absent from this map phrase their proof self-containedly and may use
 #: it at any tier.
 _PROOF_TEXT_REQUIRES_SIGNAL: Dict[str, frozenset] = {
-    "marketing_creative": frozenset({SIGNAL_SCOPE_COMBINATION}),
     "gtm_systems": frozenset({SIGNAL_SCOPE_COMBINATION}),
     "ai_technical": frozenset({SIGNAL_ROLE_FOCUS_MATCH}),
 }
@@ -330,16 +333,35 @@ def _campaign_proof_text_applies(policy: CampaignPolicy, signal_type: str) -> bo
 #: line reads off a multi-opening count and PEOPLE & HR's off a cross-bucket
 #: count, so neither may be rendered behind a different signal.
 _FRICTION_REQUIRES_SIGNAL: Dict[str, frozenset] = {
-    FRICTION_APPROVAL_SEQUENCING: frozenset({SIGNAL_MULTI_OPENING}),
+    FRICTION_HEADCOUNT_ADDITION: frozenset({SIGNAL_MULTI_OPENING}),
     FRICTION_CROSS_FUNCTION_SCREENING: frozenset({SIGNAL_MULTI_OPENING_CROSS_BUCKET}),
     FRICTION_TITLE_INFLATION: frozenset({SIGNAL_MULTI_OPENING}),
     FRICTION_INTERVIEW_WEAK_SIGNAL: frozenset({SIGNAL_MULTI_OPENING}),
-    FRICTION_SCOPE_COMPRESSION: frozenset({SIGNAL_SCOPE_COMBINATION}),
+    FRICTION_SCOPE_SPLIT: frozenset({SIGNAL_SCOPE_COMBINATION}),
     FRICTION_RARE_INTERSECTION: frozenset({SIGNAL_SCOPE_COMBINATION}),
     FRICTION_EMPLOYMENT_OBLIGATION: frozenset({SIGNAL_SCOPE_COMBINATION}),
     FRICTION_TITLE_VS_SCOPE: frozenset({SIGNAL_ROLE_FOCUS_MATCH}),
     FRICTION_NO_TRACK_RECORD_YET: frozenset({SIGNAL_ROLE_FOCUS_MATCH}),
 }
+
+
+def _fill(text: str, data: RenderInputs) -> str:
+    """Substitute the record's own values into a friction template.
+
+    Only PRODUCT's needs it today: its line counts the openings, so it has to be
+    rendered from the record rather than fixed at "two". Anything with no
+    placeholder is returned untouched, and a leftover placeholder would be caught
+    by the unresolved-merge-variable gate.
+    """
+    if "{" not in text:
+        return text
+    count = int(data.opening_count or 0)
+    return text.format(
+        opening_count=rendered_count(count),
+        opening_subject=(
+            "both searches" if count == 2 else f"all {rendered_count(count)} searches"
+        ),
+    )
 
 
 def _friction(policy: CampaignPolicy, signal_type: str, proof_type: str) -> Tuple[str, str]:
@@ -384,7 +406,8 @@ SAFE_TESTING_MECHANICS = (
 #: official headcount. A verified fact about the offer, stated plainly and with
 #: no implied speed, price or quality claim.
 HEADCOUNT_MODEL_PROOF = (
-    "People we place join your team full-time but don't go on your headcount."
+    "People we place join your team full-time but don't go on your official "
+    "headcount."
 )
 
 #: TGTC carries payroll, taxes, benefits, compliance and HR administration. Also
@@ -448,6 +471,7 @@ def render_email_1(
 ) -> RenderedEmail:
     signal = _signal_line(policy, signal_type, data)
     friction_angle, friction = _friction(policy, signal_type, proof_type)
+    friction = _fill(friction, data)
     # A campaign may phrase a proof in its own words. The CLAIM is unchanged --
     # only the sentence carrying it differs, so the proof follows this campaign's
     # argument instead of reading as one template used nine times. A verified
@@ -508,7 +532,7 @@ def render_email_4(noun: str, role: str) -> str:
     return _paragraphs(
         "Last one from me.",
         f"If the {role} search is already handled, tell me and I'll stop.",
-        f"If it's still open, say the word and I'll send {noun} today.",
+        f"If it's still open, say the word and I'll send {noun} over.",
     )
 
 
