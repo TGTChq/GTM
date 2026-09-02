@@ -721,14 +721,14 @@ def _degraded_resolution(bucket, role, tier):
 #: production actually sends. Six campaigns once shared "more CVs"; each now
 #: argues its own function's reason.
 _EXPECTED_DEGRADED = {
-    "product": ("second_search_headcount", "headcount_model"),
+    "product": ("headcount_is_a_factor", "headcount_model"),
     "operations": ("ops_process_mix", "testing_mechanics"),
     "finance": ("admin_on_close", "employment_admin"),
     "people_hr": ("remote_fit", "remote_readiness"),
     "ecommerce": ("title_inflation", "testing_mechanics"),
     "customer_success": ("interview_weak_signal", "testing_mechanics"),
     "marketing": ("outside_vendor", "headcount_model"),
-    "gtm_revenue": ("rare_mix", "testing_mechanics"),
+    "gtm_revenue": ("pieces_vs_combination", "testing_mechanics"),
     "engineering": ("no_track_record_yet", "testing_mechanics"),
 }
 
@@ -781,7 +781,8 @@ def test_no_degraded_cta_points_at_something_the_email_never_described(bucket, r
         if "a scope like this" in noun:
             assert "combines" in body or "scope" in body, (bucket, tier, noun)
         if "the combination" in noun:
-            assert "combines" in body or "mix" in body, (bucket, tier, noun)
+            assert any(w in body for w in ("combines", "mix", "piece", "connected")), (
+                bucket, tier, noun)
 
 
 @pytest.mark.parametrize("bucket,role", [

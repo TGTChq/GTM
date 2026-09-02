@@ -51,12 +51,12 @@ FRICTION_COMBINED_SCOPE_POOL = "combined_scope_pool"
 #: not on your headcount" or "we handle payroll". So the degraded friction is
 #: chosen by the PROOF it has to hand off to, not by the tier.
 FRICTION_MORE_CVS = "more_cvs"
-FRICTION_SECOND_SEARCH_HEADCOUNT = "second_search_headcount"
+FRICTION_HEADCOUNT_IS_A_FACTOR = "headcount_is_a_factor"
 FRICTION_ADMIN_ON_CLOSE = "admin_on_close"
 FRICTION_OPS_PROCESS_MIX = "ops_process_mix"
 FRICTION_REMOTE_FIT = "remote_fit"
 FRICTION_OUTSIDE_VENDOR = "outside_vendor"
-FRICTION_RARE_MIX = "rare_mix"
+FRICTION_PIECES_VS_COMBINATION = "pieces_vs_combination"
 #: Campaign-specific frictions. Each one states the reason THIS buyer has for
 #: caring, which is what makes the nine arguments different rather than nine
 #: wordings of one argument. All are hedged observations about the reader's own
@@ -321,9 +321,8 @@ _ECONOMICS_FRICTION = (
 _DEGRADED_FRICTION_BY_PROOF: Dict[str, Tuple[str, str]] = {
     # -> "they don't go on your official headcount"
     PROOF_HEADCOUNT_MODEL: (
-        FRICTION_SECOND_SEARCH_HEADCOUNT,
-        "Running a second search alongside it can mean finding the headcount for "
-        "it too.",
+        FRICTION_HEADCOUNT_IS_A_FACTOR,
+        "If headcount is part of the decision, this works differently.",
     ),
     # -> "we handle payroll, taxes, benefits and compliance"
     PROOF_EMPLOYMENT_ADMIN: (
@@ -348,53 +347,60 @@ _DEGRADED_EVIDENCE_FRICTION = (
 #: reason ITS function has to care, using only verified facts and without the
 #: second-order evidence T1 relies on.
 _DEGRADED_FRICTION_BY_CAMPAIGN: Dict[str, Tuple[str, str]] = {
-    # Capacity, answered by the headcount fact.
+    # Headcount, answered by the off-headcount fact. It does NOT claim a second
+    # search needs a second slot -- a second sourcing motion for the same role
+    # does not -- nor that their headcount is constrained. It says only that the
+    # arrangement differs, conditional on headcount mattering at all.
     "product": (
-        FRICTION_SECOND_SEARCH_HEADCOUNT,
-        "Running a second search alongside it can mean finding the headcount for "
-        "it too.",
+        FRICTION_HEADCOUNT_IS_A_FACTOR,
+        "If headcount is part of the decision, this works differently.",
     ),
-    # The job is a mix of processes, answered by testing on the work.
+    # The job is a mix of processes, answered by testing on the work. No
+    # prevalence claim: not "usually" a mix, and not "rarely" shown by a title.
     "operations": (
         FRICTION_OPS_PROCESS_MIX,
-        "Ops roles are usually a specific mix of processes, and a title rarely "
-        "shows which ones someone has run.",
+        "Ops roles cover different mixes of processes, and a title on its own "
+        "may not show which ones someone has run.",
     ),
     # The hire is an administrative obligation, answered by what we carry.
     "finance": (
         FRICTION_ADMIN_ON_CLOSE,
         "Whenever it does close, there's employment admin behind it.",
     ),
-    # Remote fit, answered by the verified remote-readiness assessment. Stated
-    # conditionally: we do not know that they would consider someone remote.
+    # Remote fit, answered by the verified remote-readiness assessment. It is
+    # conditional on their considering someone remote, and makes no claim about
+    # which part of their hiring is hardest -- we do not know that.
     "people_hr": (
         FRICTION_REMOTE_FIT,
-        "If you'd look at someone remote for it, the hard part is usually knowing "
-        "whether that will work out.",
+        "If you'd consider someone remote for it, there's one more thing worth "
+        "checking.",
     ),
-    # Titles mean different things by store size, answered by testing.
+    # Titles cover different work, answered by testing. "Depending on the size of
+    # the store" was a plausible generalisation rather than evidence we hold, so
+    # only the supportable half of the point survives.
     "ecommerce": (
         FRICTION_TITLE_INFLATION,
-        "Ecommerce titles can mean very different work depending on the size of "
-        "the store.",
+        "Ecommerce titles can cover quite different mixes of work.",
     ),
     # The interview is weak evidence for this function, answered by testing.
     "customer_experience": (
         FRICTION_INTERVIEW_WEAK_SIGNAL,
-        "A good interview still doesn't tell you much about how someone handles "
-        "the work day to day.",
+        "A good interview doesn't always show how someone handles the work day "
+        "to day.",
     ),
-    # The competing option is an agency or a freelancer, answered by embedding.
+    # An agency or a freelancer is a DIFFERENT thing, answered by embedding. It
+    # is not asserted to be the usual alternative, or one they are weighing.
     "marketing_creative": (
         FRICTION_OUTSIDE_VENDOR,
-        "The usual alternative for this kind of role is an agency or a "
-        "freelancer, which isn't the same as someone on the team.",
+        "If an agency or a freelancer is on the table, that's a different thing "
+        "to someone on the team.",
     ),
-    # The stack combination is the rare part, answered by testing the combination.
+    # What a CV can and cannot show, answered by testing the combination. No
+    # claim about how common or rare any of it is.
     "gtm_systems": (
-        FRICTION_RARE_MIX,
-        "RevOps roles tend to want a mix that's common in the parts and rare put "
-        "together.",
+        FRICTION_PIECES_VS_COMBINATION,
+        "A CV can show each piece of a RevOps stack without showing that someone "
+        "has connected them.",
     ),
     # Tenure is a weak signal in a young category, answered by testing.
     "ai_technical": (

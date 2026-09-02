@@ -6,6 +6,7 @@ Offline. Nothing here reaches Instantly; the one HTTP entry point is patched.
 from __future__ import annotations
 
 import json
+import os
 
 import pytest
 
@@ -193,20 +194,21 @@ def test_planning_issues_get_requests_only(monkeypatch):
     assert artifact["entries"][0]["challenger_day_labels"] == [1, 4, 8, 13]
 
 
-def test_execute_only_ever_posts_new_campaigns(monkeypatch):
+def test_execute_only_ever_posts_new_campaigns(monkeypatch, tmp_path):
     calls = []
 
-    def _fake(method, path, body=None):
-        calls.append((method, path))
+    def _fake(method, path, body=None, *, allow_write=False):
+        calls.append((method, path, allow_write))
         return {"id": "new-id", "name": body["name"], "status": 0}
 
     monkeypatch.setattr(builder, "_request", _fake)
     created = builder.execute([{
         "campaign_key": "finance",
         "role_buckets": ["finance"],
+        "challenger_name": "WAVE1 CHALLENGER - FINANCE",
         "post_body": builder.build_payload(FINANCE, _control()),
-    }])
-    assert calls == [("POST", "campaigns")]
+    }], state_path=str(tmp_path / "cp.json"))
+    assert calls == [("POST", "campaigns", True)]
     assert created[0]["challenger_campaign_id"] == "new-id"
 
 
@@ -236,3 +238,159 @@ def test_every_wave1_campaign_can_be_built():
         payload = builder.build_payload(policy, _control(name=policy.name))
         assert payload["name"].startswith(builder.CHALLENGER_NAME_PREFIX)
         assert len(payload["sequences"][0]["steps"]) == 4
+
+
+# ---------------------------------------------------------------------------
+# Creator safety: idempotency, partial failure, and the write allowlist
+# ---------------------------------------------------------------------------
+
+def _entry(key="finance", name="WAVE1 CHALLENGER - FINANCE"):
+    return {
+        "campaign_key": key,
+        "role_buckets": [key],
+        "challenger_name": name,
+        "control_campaign_id": "control-id",
+        "control_campaign_name": "FINANCE",
+        "post_body": {"name": name},
+    }
+
+
+def test_a_non_get_is_refused_unless_it_is_the_one_allowed_write():
+    for method, path in (("PATCH", "campaigns/x"), ("DELETE", "campaigns/x"),
+                         ("POST", "leads"), ("POST", "campaigns/x/activate")):
+        with pytest.raises(builder.UnauthorisedWrite):
+            builder._request(method, path, {}, allow_write=True)
+
+
+def test_even_the_allowed_write_is_refused_without_an_explicit_opt_in():
+    with pytest.raises(builder.UnauthorisedWrite):
+        builder._request("POST", "campaigns", {})
+
+
+def test_the_allowlist_holds_exactly_one_write():
+    assert builder.WRITE_ALLOWLIST == frozenset({("POST", "campaigns")})
+
+
+def test_a_created_campaign_is_checkpointed_before_the_next_one_starts(tmp_path):
+    """A failure on campaign three must not lose one and two."""
+    state_path = str(tmp_path / "plan.json.checkpoint.json")
+    calls = []
+
+    def _fake(method, path, body=None, *, allow_write=False):
+        calls.append(body["name"])
+        if len(calls) == 3:
+            raise RuntimeError("Instantly 500")
+        return {"id": f"id-{len(calls)}", "name": body["name"], "status": 0}
+
+    monkey = pytest.MonkeyPatch()
+    monkey.setattr(builder, "_request", _fake)
+    entries = [_entry(f"k{i}", f"WAVE1 CHALLENGER - {i}") for i in range(1, 5)]
+    with pytest.raises(RuntimeError, match="Instantly 500"):
+        builder.execute(entries, state_path=state_path)
+    monkey.undo()
+
+    saved = builder.load_checkpoint(state_path)
+    assert sorted(saved) == ["k1", "k2"], saved
+    assert saved["k1"]["challenger_campaign_id"] == "id-1"
+    assert saved["k2"]["challenger_campaign_id"] == "id-2"
+
+
+def test_a_rerun_skips_what_the_checkpoint_already_records(tmp_path):
+    state_path = str(tmp_path / "plan.json.checkpoint.json")
+    builder.save_checkpoint(state_path, {
+        "k1": {"campaign_key": "k1", "role_buckets": ["finance"],
+               "challenger_campaign_id": "id-1", "challenger_name": "x", "status": 0},
+    })
+    posted = []
+
+    def _fake(method, path, body=None, *, allow_write=False):
+        posted.append(body["name"])
+        return {"id": "id-2", "name": body["name"], "status": 0}
+
+    monkey = pytest.MonkeyPatch()
+    monkey.setattr(builder, "_request", _fake)
+    created = builder.execute(
+        [_entry("k1", "WAVE1 CHALLENGER - 1"), _entry("k2", "WAVE1 CHALLENGER - 2")],
+        state_path=state_path)
+    monkey.undo()
+
+    assert posted == ["WAVE1 CHALLENGER - 2"], posted
+    assert [c["challenger_campaign_id"] for c in created] == ["id-1", "id-2"]
+
+
+def test_a_full_rerun_creates_nothing(tmp_path):
+    state_path = str(tmp_path / "plan.json.checkpoint.json")
+    builder.save_checkpoint(state_path, {
+        "k1": {"campaign_key": "k1", "role_buckets": ["a"],
+               "challenger_campaign_id": "id-1", "challenger_name": "x", "status": 0},
+    })
+
+    def _boom(*_a, **_k):
+        raise AssertionError("must not POST")
+
+    monkey = pytest.MonkeyPatch()
+    monkey.setattr(builder, "_request", _boom)
+    created = builder.execute([_entry("k1", "WAVE1 CHALLENGER - 1")], state_path=state_path)
+    monkey.undo()
+    assert len(created) == 1
+
+
+def test_the_checkpoint_is_written_atomically(tmp_path):
+    path = str(tmp_path / "cp.json")
+    builder.save_checkpoint(path, {"a": {"challenger_campaign_id": "1"}})
+    assert not os.path.exists(f"{path}.tmp")
+    assert builder.load_checkpoint(path)["a"]["challenger_campaign_id"] == "1"
+
+
+def test_an_unreadable_checkpoint_fails_loudly_rather_than_licensing_duplicates(tmp_path):
+    path = str(tmp_path / "cp.json")
+    with open(path, "w", encoding="utf-8") as handle:
+        handle.write("{ truncated")
+    with pytest.raises(RuntimeError, match="could not be read"):
+        builder.load_checkpoint(path)
+
+
+# --- structural identity -----------------------------------------------------
+
+def test_a_challenger_is_identified_by_its_body_shape_not_only_its_name():
+    """A name can be edited in the UI; only this script writes that body."""
+    renamed = {"name": "Renamed By Someone", "sequences": [{"steps": [
+        {"variants": [{"body": "{{rendered_email_1_html}}<div>x</div>"}]}]}]}
+    assert builder.is_challenger_campaign(renamed)
+
+
+def test_a_challenger_is_identified_by_its_name_prefix():
+    assert builder.is_challenger_campaign({"name": "WAVE1 CHALLENGER - FINANCE"})
+
+
+def test_a_control_campaign_is_not_mistaken_for_a_challenger():
+    control = {"name": "FINANCE", "sequences": [{"steps": [
+        {"variants": [{"body": "<div>Hi {{firstName}},</div>"}]}]}]}
+    assert not builder.is_challenger_campaign(control)
+
+
+# --- preflight ---------------------------------------------------------------
+
+def test_preflight_blocks_when_a_challenger_exists_outside_the_checkpoint(monkeypatch):
+    monkeypatch.setattr(builder, "list_all_campaigns", lambda: [
+        {"id": "orphan", "name": "WAVE1 CHALLENGER - FINANCE"}])
+    report = builder.preflight([_entry()], state={})
+    assert report["safe_to_create"] is False
+    assert report["blocking"]
+
+
+def test_preflight_allows_a_resume_of_a_campaign_this_checkpoint_created(monkeypatch):
+    monkeypatch.setattr(builder, "list_all_campaigns", lambda: [
+        {"id": "known", "name": "WAVE1 CHALLENGER - FINANCE"}])
+    state = {"finance": {"challenger_campaign_id": "known"}}
+    report = builder.preflight([_entry()], state=state)
+    assert report["safe_to_create"] is True
+    assert report["resumable"] == [{"campaign_key": "finance", "id": "known"}]
+
+
+def test_preflight_is_clean_on_an_empty_workspace(monkeypatch):
+    monkeypatch.setattr(builder, "list_all_campaigns", lambda: [
+        {"id": "c1", "name": "FINANCE"}])
+    report = builder.preflight([_entry()], state={})
+    assert report["safe_to_create"] is True
+    assert report["existing_challengers"] == []

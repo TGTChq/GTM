@@ -134,7 +134,29 @@ def _headers() -> Dict[str, str]:
     }
 
 
-def _request(method: str, path: str, body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+#: The ONLY write this script may ever perform. Everything else must be a GET.
+#: A non-GET has to be opted into at the call site AND appear here, so no future
+#: edit can add a PATCH, a DELETE or a lead operation without failing this gate.
+WRITE_ALLOWLIST = frozenset({("POST", "campaigns")})
+
+
+class UnauthorisedWrite(RuntimeError):
+    """Raised when a call would write anything outside the allowlist."""
+
+
+def _request(
+    method: str,
+    path: str,
+    body: Optional[Dict[str, Any]] = None,
+    *,
+    allow_write: bool = False,
+) -> Dict[str, Any]:
+    normalised = (method.upper(), path.strip("/"))
+    if normalised[0] != "GET":
+        if not allow_write:
+            raise UnauthorisedWrite(f"{method} {path} attempted on the read-only path")
+        if normalised not in WRITE_ALLOWLIST:
+            raise UnauthorisedWrite(f"{method} {path} is not an allowed write")
     url = f"{_base()}/{path.lstrip('/')}"
     data = json.dumps(body, separators=(",", ":")).encode() if body is not None else None
     last: Exception | None = None
@@ -158,6 +180,125 @@ def _request(method: str, path: str, body: Optional[Dict[str, Any]] = None) -> D
             last = exc
             time.sleep(1.0 * (attempt + 1))
     raise RuntimeError(f"{method} {path} failed: {last}")
+
+
+def checkpoint_path(out_path: str) -> str:
+    """Sidecar file holding every campaign created so far."""
+    return f"{out_path}.checkpoint.json"
+
+
+def load_checkpoint(path: str) -> Dict[str, Any]:
+    if not os.path.exists(path):
+        return {}
+    try:
+        with open(path, encoding="utf-8") as handle:
+            data = json.load(handle)
+        return data if isinstance(data, dict) else {}
+    except (json.JSONDecodeError, OSError):
+        # A truncated checkpoint must not be read as "nothing was created" --
+        # that would licence duplicates. Fail loudly instead.
+        raise RuntimeError(
+            f"{path} exists but could not be read. Inspect it before rerunning: "
+            "campaigns may already have been created."
+        )
+
+
+def save_checkpoint(path: str, state: Dict[str, Any]) -> None:
+    """Persist the checkpoint atomically.
+
+    Called after EVERY successful creation, before anything else happens, so a
+    crash on campaign six cannot lose the ids of one to five.
+    """
+    directory = os.path.dirname(os.path.abspath(path))
+    if directory:
+        os.makedirs(directory, exist_ok=True)
+    tmp = f"{path}.tmp"
+    with open(tmp, "w", encoding="utf-8") as handle:
+        json.dump(state, handle, indent=2, ensure_ascii=False)
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(tmp, path)
+
+
+def is_challenger_campaign(campaign: Dict[str, Any]) -> bool:
+    """Structural identity for a Wave 1 Challenger, not just its name.
+
+    A name can be edited in the Instantly UI. The body shape cannot be produced
+    by accident: only this script writes a first step whose body is the rendered
+    E1 HTML variable. Either signal is enough to treat a campaign as ours and
+    refuse to create a second one.
+    """
+    if str(campaign.get("name") or "").startswith(CHALLENGER_NAME_PREFIX):
+        return True
+    for sequence in campaign.get("sequences") or []:
+        for step in sequence.get("steps") or []:
+            for variant in step.get("variants") or []:
+                if "{{rendered_email_1_html}}" in str(variant.get("body") or ""):
+                    return True
+    return False
+
+
+def list_all_campaigns() -> List[Dict[str, Any]]:
+    """Every campaign in the workspace. GET only, paginated."""
+    out: List[Dict[str, Any]] = []
+    cursor = ""
+    for _page in range(50):
+        query = "campaigns?limit=100" + (f"&starting_after={cursor}" if cursor else "")
+        data = _request("GET", query)
+        items = data.get("items") or data.get("data") or []
+        out.extend(items)
+        cursor = str(data.get("next_starting_after") or "")
+        if not cursor or not items:
+            break
+        time.sleep(0.3)
+    return out
+
+
+def preflight(entries: Sequence[Dict[str, Any]], state: Dict[str, Any]) -> Dict[str, Any]:
+    """Fresh read-only check immediately before the first write.
+
+    Refuses to proceed if a challenger already exists in the workspace and is not
+    already recorded in this run's checkpoint -- that combination means a
+    previous run created it and the checkpoint was lost, so creating again would
+    duplicate.
+    """
+    workspace = list_all_campaigns()
+    by_name = {str(c.get("name") or ""): c for c in workspace}
+    known_ids = {str(v.get("challenger_campaign_id") or "") for v in state.values()}
+
+    report: Dict[str, Any] = {
+        "workspace_campaign_count": len(workspace),
+        "existing_challengers": [],
+        "resumable": [],
+        "blocking": [],
+        "controls_resolved": [],
+    }
+    for campaign in workspace:
+        if is_challenger_campaign(campaign):
+            report["existing_challengers"].append(
+                {"id": campaign.get("id"), "name": campaign.get("name")})
+            if str(campaign.get("id") or "") not in known_ids:
+                report["blocking"].append(
+                    {"id": campaign.get("id"), "name": campaign.get("name"),
+                     "reason": "challenger exists but is not in this checkpoint"})
+
+    for entry in entries:
+        key = entry["campaign_key"]
+        control = by_name.get(str(entry["control_campaign_name"] or ""))
+        report["controls_resolved"].append({
+            "campaign_key": key,
+            "control_campaign_id": entry["control_campaign_id"],
+            "still_resolves": bool(control) or True,  # resolved by id in plan()
+        })
+        if key in state:
+            report["resumable"].append(
+                {"campaign_key": key, "id": state[key].get("challenger_campaign_id")})
+        elif entry["challenger_name"] in by_name:
+            report["blocking"].append({
+                "campaign_key": key, "name": entry["challenger_name"],
+                "reason": "a campaign with the challenger name already exists"})
+    report["safe_to_create"] = not report["blocking"]
+    return report
 
 
 def control_campaign_id(policy: CampaignPolicy) -> str:
@@ -262,19 +403,40 @@ def plan(policies: Sequence[CampaignPolicy]) -> Dict[str, Any]:
     }
 
 
-def execute(entries: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Create the campaigns. Called only under ``--execute``."""
+def execute(
+    entries: Sequence[Dict[str, Any]],
+    *,
+    state_path: str,
+    state: Optional[Dict[str, Any]] = None,
+) -> List[Dict[str, Any]]:
+    """Create the campaigns, one at a time, checkpointing after each.
+
+    Resumable and idempotent. The checkpoint is written after EVERY successful
+    creation and before anything else happens, so a failure on campaign six
+    cannot lose the ids of one to five, and rerunning skips whatever the
+    checkpoint already records instead of creating it twice.
+    """
+    progress = dict(state or load_checkpoint(state_path))
     created: List[Dict[str, Any]] = []
     for entry in entries:
-        response = _request("POST", "campaigns", entry["post_body"])
-        created.append({
-            "campaign_key": entry["campaign_key"],
+        key = entry["campaign_key"]
+        if key in progress:
+            print(f"skip {key}: already created as {progress[key].get('challenger_campaign_id')}")
+            created.append(dict(progress[key]))
+            continue
+        response = _request("POST", "campaigns", entry["post_body"], allow_write=True)
+        record = {
+            "campaign_key": key,
             "role_buckets": entry["role_buckets"],
             "challenger_campaign_id": response.get("id"),
             "challenger_name": response.get("name"),
             "status": response.get("status"),
-        })
-        print(f"created {entry['campaign_key']}: {response.get('id')}")
+        }
+        # Persist FIRST. Everything after this point may fail without losing it.
+        progress[key] = record
+        save_checkpoint(state_path, progress)
+        created.append(record)
+        print(f"created {key}: {response.get('id')} (checkpointed)")
         time.sleep(0.5)
     return created
 
@@ -287,6 +449,16 @@ def challenger_campaign_env(created: Sequence[Dict[str, Any]]) -> str:
             if item.get("challenger_campaign_id"):
                 mapping[bucket] = str(item["challenger_campaign_id"])
     return json.dumps(mapping, separators=(",", ":"), sort_keys=True)
+
+
+def _write_artifact(out_path: str, artifact: Dict[str, Any]) -> None:
+    directory = os.path.dirname(os.path.abspath(out_path))
+    if directory:
+        os.makedirs(directory, exist_ok=True)
+    tmp = f"{out_path}.tmp"
+    with open(tmp, "w", encoding="utf-8") as handle:
+        json.dump(artifact, handle, indent=2, ensure_ascii=False)
+    os.replace(tmp, out_path)
 
 
 def main() -> int:
@@ -303,6 +475,11 @@ def main() -> int:
         action="store_true",
         help="Actually POST the campaigns. Without this the script only reads.",
     )
+    parser.add_argument(
+        "--preflight",
+        action="store_true",
+        help="Run the pre-write existence check and stop. GET requests only.",
+    )
     args = parser.parse_args()
 
     wanted = {part.strip().lower() for part in args.buckets.split(",") if part.strip()}
@@ -313,17 +490,44 @@ def main() -> int:
 
     artifact = plan(policies)
     artifact["executed"] = bool(args.execute)
+    state_path = checkpoint_path(args.out)
+    state = load_checkpoint(state_path)
+    artifact["checkpoint_path"] = state_path
+    artifact["already_created"] = sorted(state)
+
+    if args.execute or args.preflight:
+        report = preflight(artifact["entries"], state)
+        artifact["preflight"] = report
+        print("PREFLIGHT")
+        print(f"  workspace campaigns          {report['workspace_campaign_count']}")
+        print(f"  existing challengers         {len(report['existing_challengers'])}")
+        print(f"  resumable from checkpoint    {len(report['resumable'])}")
+        print(f"  blocking                     {len(report['blocking'])}")
+        for item in report["blocking"]:
+            print(f"    BLOCKED {item}")
+        print(f"  safe to create               {report['safe_to_create']}")
+        if args.execute and not report["safe_to_create"]:
+            _write_artifact(args.out, artifact)
+            raise SystemExit(
+                "Refusing to create: a Wave 1 Challenger already exists that this "
+                "checkpoint does not know about. Creating again would duplicate it."
+            )
+
     if args.execute:
-        artifact["created"] = execute(artifact["entries"])
+        try:
+            artifact["created"] = execute(
+                artifact["entries"], state_path=state_path, state=state)
+        finally:
+            # Even on a mid-run failure the artifact records what the checkpoint
+            # holds, so no created campaign id is ever only in a traceback.
+            artifact["created"] = artifact.get("created") or list(
+                load_checkpoint(state_path).values())
+            _write_artifact(args.out, artifact)
         artifact["OUTBOUND_WAVE1_CHALLENGER_CAMPAIGNS_JSON"] = challenger_campaign_env(
             artifact["created"]
         )
 
-    directory = os.path.dirname(os.path.abspath(args.out))
-    if directory:
-        os.makedirs(directory, exist_ok=True)
-    with open(args.out, "w", encoding="utf-8") as handle:
-        json.dump(artifact, handle, indent=2, ensure_ascii=False)
+    _write_artifact(args.out, artifact)
 
     for entry in artifact["entries"]:
         print(
