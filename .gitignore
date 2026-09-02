@@ -57,5 +57,11 @@ data/orchestrator_*/
 # contact PII and are deliberately kept local, matching existing practice.
 reports/apify_batch_*/
 
+# Generated weekly reports. Output of run_weekly_report.py, one pair of files
+# per ISO week, regenerable from the run artifacts at any time -- committing
+# them would churn the tree weekly and duplicate what production writes to the
+# volume. Scoped deliberately: other reports/ audit artifacts stay trackable.
+reports/weekly/
+
 # Local recovery snapshots.
 recovery_*/
