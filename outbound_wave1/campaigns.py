@@ -88,11 +88,6 @@ VALID_OFFER_NOUNS = frozenset({
     "what we carry on the employment side",
 })
 
-#: Nouns that take a plural verb. The frozen E3 sentence is
-#: "<noun> is still there if you want it first", which disagrees with a plural
-#: noun, so agreement is selected mechanically. No word choice changes.
-PLURAL_OFFER_NOUNS = frozenset({"the numbers for this role"})
-
 OFFER_CLASS_BY_TYPE: Dict[str, str] = {
     OFFER_TESTING_OVERVIEW: OFFER_CLASS_PROCESS,
     OFFER_REMOTE_READINESS_OVERVIEW: OFFER_CLASS_PROCESS,
@@ -190,8 +185,7 @@ OPERATIONS = CampaignPolicy(
     offer_nouns={OFFER_TESTING_OVERVIEW: "how we test for a scope like this"},
     proof_texts={
         PROOF_TESTING_MECHANICS: (
-            "So we test candidates on the specific work a role covers before we "
-            "put them in front of you."
+            "We test candidates on the actual work before they get to you."
         )
     },
 )
@@ -213,20 +207,20 @@ FINANCE = CampaignPolicy(
     fallback_offer=OFFER_EMPLOYMENT_ADMIN_OVERVIEW,
     t1_min_evidence=2,
     scope_facets=_facets(
-        ("transactional accounting", (
+        ("day-to-day accounting", (
             "accounts payable", "accounts receivable", "invoice", "invoicing", "billing",
             "collections", "payroll", "bookkeeping", "reconciliation", "reconciliations",
             "month-end", "month end", "close", "expense",
         )),
-        ("reporting and analysis", (
+        ("reporting", (
             "reporting", "financial reporting", "analysis", "analytics", "variance",
             "forecast", "forecasting", "budget", "budgeting", "modeling", "modelling",
             "fp&a", "planning",
         )),
-        ("controls and compliance", (
+        ("compliance", (
             "compliance", "controls", "audit", "gaap", "tax", "policy", "sox",
         )),
-        ("systems and process", (
+        ("systems", (
             "erp", "netsuite", "quickbooks", "systems", "automation",
             "process improvement", "workflow",
         )),
@@ -266,8 +260,8 @@ ECOMMERCE = CampaignPolicy(
     offer_nouns={OFFER_TESTING_OVERVIEW: "how our testing works"},
     proof_texts={
         PROOF_TESTING_MECHANICS: (
-            "So we test candidates on the specific work a role covers rather than "
-            "reading it off the title."
+            "We test candidates on the actual work instead of going off the "
+            "title."
         )
     },
 )
@@ -290,7 +284,7 @@ CUSTOMER_EXPERIENCE = CampaignPolicy(
     offer_nouns={OFFER_TESTING_OVERVIEW: "what the testing covers"},
     proof_texts={
         PROOF_TESTING_MECHANICS: (
-            "So we test them on the work itself before you meet anyone."
+            "We test people on the work itself before you meet them."
         )
     },
     # Support and Success are different jobs. Rendering "support roles" at a
@@ -320,9 +314,8 @@ MARKETING_CREATIVE = CampaignPolicy(
     offer_nouns={OFFER_HEADCOUNT_OVERVIEW: "how an embedded hire works"},
     proof_texts={
         PROOF_HEADCOUNT_MODEL: (
-            "Ours join your team full-time without going onto your official "
-            "headcount, so covering the rest of the scope does not need another "
-            "line."
+            "People we place join your team full-time but don't go on your "
+            "headcount, so the rest of that scope doesn't need another req."
         )
     },
     scope_facets=_facets(
@@ -366,8 +359,7 @@ GTM_SYSTEMS = CampaignPolicy(
     offer_nouns={OFFER_TESTING_OVERVIEW: "how we test the combination"},
     proof_texts={
         PROOF_TESTING_MECHANICS: (
-            "So we test candidates on the combination rather than on any one "
-            "piece of it."
+            "We test for the combination, not just the individual pieces."
         )
     },
     scope_facets=_facets(
@@ -375,11 +367,11 @@ GTM_SYSTEMS = CampaignPolicy(
             "crm", "salesforce", "hubspot", "crm automation", "crm administration",
             "system administration",
         )),
-        ("data and enrichment", (
+        ("data hygiene", (
             "enrichment", "data hygiene", "data orchestration", "data quality",
             "lead enrichment", "clay", "apollo", "data operations",
         )),
-        ("routing and lifecycle automation", (
+        ("routing", (
             "routing", "lead routing", "lifecycle automation", "workflow automation",
             "territory", "round-robin", "process automation",
         )),
@@ -412,8 +404,7 @@ AI_TECHNICAL = CampaignPolicy(
     # years-of-experience on a CV carries almost no signal in this category.
     proof_texts={
         PROOF_TESTING_MECHANICS: (
-            "So we have candidates work against what the role actually asks for "
-            "instead."
+            "We test candidates on the actual work instead."
         )
     },
 )

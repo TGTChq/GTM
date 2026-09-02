@@ -20,7 +20,6 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
 from .campaigns import (
-    PLURAL_OFFER_NOUNS,
     OFFER_EMPLOYMENT_ADMIN_OVERVIEW,
     OFFER_HEADCOUNT_OVERVIEW,
     OFFER_REMOTE_READINESS_OVERVIEW,
@@ -113,11 +112,6 @@ class RenderedSequence:
     e1_segments: Dict[str, str] = field(default_factory=dict)
 
 
-def _cap(text: str) -> str:
-    """Capitalise a sentence-initial noun phrase without touching the rest."""
-    return text[:1].upper() + text[1:] if text else text
-
-
 def _paragraphs(*parts: str) -> str:
     return "\n\n".join(part.strip() for part in parts if part and part.strip())
 
@@ -167,36 +161,55 @@ def html_to_text(markup: str) -> str:
 # Signal lines
 # ---------------------------------------------------------------------------
 
+#: Small counts read as words in a sentence; a numeral at the start of one is a
+#: mail-merge tell. Anything larger stays a numeral, which is how people write.
+_NUMBER_WORDS = {
+    2: "two", 3: "three", 4: "four", 5: "five", 6: "six",
+    7: "seven", 8: "eight", 9: "nine", 10: "ten",
+}
+
+
+def rendered_count(value: int) -> str:
+    """How a count appears in the copy. A QA gate uses this to prove the rendered
+    number is the record's own, so the renderer and the gate cannot disagree."""
+    return _NUMBER_WORDS.get(int(value or 0), str(value))
+
+
+_count = rendered_count
+
+
 def _signal_line(
     policy: CampaignPolicy, signal_type: str, data: RenderInputs
 ) -> str:
+    """The one factual sentence: the real hiring event, read off the record.
+
+    It deliberately does NOT say "the <role> opening at <their own company>".
+    Naming someone's employer back at them is the most recognisable mail-merge
+    shape there is, and "your <role> opening" is both shorter and what a person
+    would actually type. The company name is kept only where the company itself
+    is the subject of the observation.
+    """
     if signal_type == SIGNAL_MULTI_OPENING:
         # The count is ALWAYS the record's real opening count -- never a
         # hard-coded "two".
         noun = data.audience or _campaign_role_noun(policy)
-        return f"{data.opening_count} {noun} roles open at {data.company} at once."
+        return (
+            f"{data.company} has {_count(data.opening_count)} {noun} roles open "
+            "right now."
+        )
     if signal_type == SIGNAL_MULTI_OPENING_CROSS_BUCKET:
         return (
-            f"{data.company} has {data.cross_function_openings} openings across "
-            f"{data.cross_function_count} functions."
+            f"{data.company} has {_count(data.cross_function_openings)} roles open "
+            f"across {_count(data.cross_function_count)} teams right now."
         )
     if signal_type == SIGNAL_ROLE_FOCUS_MATCH:
-        return (
-            f"The {data.role} opening at {data.company} reads like it covers "
-            f"{data.evidence_list}."
-        )
+        return f"Your {data.role} opening reads like it covers {data.evidence_list}."
     if signal_type == SIGNAL_SCOPE_COMBINATION:
-        return (
-            f"The {data.role} opening at {data.company} looks like it combines "
-            f"{data.scope_list}."
-        )
+        return f"Your {data.role} opening looks like it combines {data.scope_list}."
     if signal_type == SIGNAL_JOB_AGE:
-        return (
-            f"The {data.role} opening at {data.company} has been up for about "
-            f"{data.job_age_days} days."
-        )
+        return f"Your {data.role} opening has been up about {data.job_age_days} days."
     if signal_type == SIGNAL_ACTIVE_REQ:
-        return f"Saw {data.company} is hiring for {data.role}."
+        return f"Saw you're hiring for {data.role}."
     return ""  # pragma: no cover - signal table is closed
 
 
@@ -227,56 +240,54 @@ _FRICTION_BY_CAMPAIGN: Dict[str, Tuple[str, str]] = {
     # Approvals, not candidate supply, are what hold a multi-req product team up.
     "product": (
         FRICTION_APPROVAL_SEQUENCING,
-        "Getting several approved at the same time can be the harder half of it.",
+        "Getting several approved at once is usually the harder part.",
     ),
     # An ops title is a container for whatever the company piled into it.
     "operations": (
         FRICTION_TITLE_VS_SCOPE,
-        "An ops title on its own may not say much about whether someone has run "
-        "that particular mix.",
+        "The title on its own may not tell you much about who has actually run "
+        "that mix.",
     ),
     # A controller reads a hire as an administrative and compliance obligation.
     "finance": (
         FRICTION_EMPLOYMENT_OBLIGATION,
-        "Whoever fills it is also a payroll, tax and benefits obligation that "
-        "someone has to administer.",
+        "A hire like that also comes with employment admin.",
     ),
     "people_hr": (
         FRICTION_CROSS_FUNCTION_SCREENING,
-        "Hiring across that many functions usually concentrates the screening load, "
-        "wherever that sits.",
+        "That's a lot of very different hires to run at the same time.",
     ),
     # The closest to OPERATIONS, and knowingly so -- see the ECOMMERCE policy.
     "ecommerce": (
         FRICTION_TITLE_INFLATION,
-        "Ecommerce titles can cover very different work depending on the size of "
-        "the store behind them.",
+        "Ecommerce titles can mean very different work depending on the size of "
+        "the store.",
     ),
     # The one reason only CX can use: the interview is the least diagnostic
     # signal precisely because talking to people is the job.
     "customer_experience": (
         FRICTION_INTERVIEW_WEAK_SIGNAL,
-        "People who are good at these roles are often good in an interview too, "
-        "which can make the interview itself a weaker signal than usual.",
+        "People who are good at these roles usually interview well. That makes "
+        "the interview itself hard to read.",
     ),
     # A very wide marketing scope usually means one approved line covering several
     # jobs -- a budget shape, not a hiring preference.
     "marketing_creative": (
         FRICTION_SCOPE_COMPRESSION,
-        "A scope that wide can mean one approved line is being asked to cover "
-        "several jobs.",
+        "A scope that wide often means one headcount covering what's really a "
+        "few different jobs.",
     ),
     # In RevOps the parts are common and the join is rare.
     "gtm_systems": (
         FRICTION_RARE_INTERSECTION,
-        "Each of those is common on its own. It is the combination that tends to "
-        "be rarer, and the part a CV is least likely to evidence.",
+        "Plenty of people do one of those. Fewer do the whole mix, and that's "
+        "the part a CV struggles to show.",
     ),
     # Nothing in this category is old enough for tenure to mean anything.
     "ai_technical": (
         FRICTION_NO_TRACK_RECORD_YET,
-        "Tooling this new has not been around long enough for track records in it "
-        "to be long, so years of experience on a CV may say less than usual here.",
+        "The tooling is new enough that years on a CV may not tell you much "
+        "here.",
     ),
 }
 
@@ -288,15 +299,32 @@ _ECONOMICS_FRICTION = (
 
 _T2_FRICTION = (
     FRICTION_TIME_OPEN,
-    "That usually means the shortlist has not produced the right fit yet, rather "
-    "than that the search stopped.",
+    "That usually means the right person hasn't turned up yet, not that the "
+    "search stopped.",
 )
 
 _T3_FRICTION = (
     FRICTION_PARALLEL_POOL,
-    "If the shortlist has not produced the right fit yet, a second pool running "
-    "alongside it is usually the cheapest way to keep moving.",
+    "If the shortlist hasn't worked out yet, running a second search alongside "
+    "it is usually the cheapest way to keep moving.",
 )
+
+#: Campaign proof phrasings that refer back to the signal. MARKETING says "the
+#: rest of that scope", GTM says "the combination" and AI ends on a bare
+#: "instead" -- each only makes sense when that campaign's own T1 signal fired.
+#: Campaigns absent from this map phrase their proof self-containedly and may use
+#: it at any tier.
+_PROOF_TEXT_REQUIRES_SIGNAL: Dict[str, frozenset] = {
+    "marketing_creative": frozenset({SIGNAL_SCOPE_COMBINATION}),
+    "gtm_systems": frozenset({SIGNAL_SCOPE_COMBINATION}),
+    "ai_technical": frozenset({SIGNAL_ROLE_FOCUS_MATCH}),
+}
+
+
+def _campaign_proof_text_applies(policy: CampaignPolicy, signal_type: str) -> bool:
+    allowed = _PROOF_TEXT_REQUIRES_SIGNAL.get(policy.key)
+    return allowed is None or signal_type in allowed
+
 
 #: Frictions whose wording depends on the signal that fired. PRODUCT's approval
 #: line reads off a multi-opening count and PEOPLE & HR's off a cross-bucket
@@ -356,15 +384,14 @@ SAFE_TESTING_MECHANICS = (
 #: official headcount. A verified fact about the offer, stated plainly and with
 #: no implied speed, price or quality claim.
 HEADCOUNT_MODEL_PROOF = (
-    "Ours join your team full-time without going onto your official headcount."
+    "People we place join your team full-time but don't go on your headcount."
 )
 
 #: TGTC carries payroll, taxes, benefits, compliance and HR administration. Also
 #: verified, and deliberately worded as what WE carry rather than what the reader
 #: saves, so it states a fact and not an outcome.
 EMPLOYMENT_ADMIN_PROOF = (
-    "With ours that sits with us: payroll, taxes, benefits, and the compliance "
-    "and HR administration around them."
+    "We handle payroll, taxes, benefits and compliance."
 )
 
 
@@ -381,10 +408,8 @@ def _proof_line(proof_type: str, data: RenderInputs) -> str:
             "economics look like for this exact scope."
         )
     if proof_type == PROOF_REMOTE_READINESS:
-        return (
-            f"Every candidate clears a {data.verified_claim_text} before we send "
-            "them."
-        )
+        # The claim text itself is verbatim from the verified registry entry.
+        return f"Everyone we send has been through a {data.verified_claim_text}."
     if proof_type == PROOF_HEADCOUNT_MODEL:
         return HEADCOUNT_MODEL_PROOF
     if proof_type == PROOF_EMPLOYMENT_ADMIN:
@@ -427,11 +452,17 @@ def render_email_1(
     # only the sentence carrying it differs, so the proof follows this campaign's
     # argument instead of reading as one template used nine times. A verified
     # registry claim still wins, because it carries its own source.
+    #
+    # Some of those phrasings point back at the signal ("the rest of that scope",
+    # "the combination", a bare "instead"). Behind a degraded signal there is
+    # nothing for them to point at, so they fall back to the shared wording
+    # rather than referring to something the reader was never shown.
     proof = _proof_line(proof_type, data)
-    if proof_type == PROOF_TESTING_MECHANICS and not data.strong_claim_text:
-        proof = policy.proof_text(proof_type) or proof
-    elif proof_type in (PROOF_HEADCOUNT_MODEL, PROOF_EMPLOYMENT_ADMIN):
-        proof = policy.proof_text(proof_type) or proof
+    if _campaign_proof_text_applies(policy, signal_type):
+        if proof_type == PROOF_TESTING_MECHANICS and not data.strong_claim_text:
+            proof = policy.proof_text(proof_type) or proof
+        elif proof_type in (PROOF_HEADCOUNT_MODEL, PROOF_EMPLOYMENT_ADMIN):
+            proof = policy.proof_text(proof_type) or proof
     offer = offer_question(noun or offer_noun(policy, offer_type))
     greeting = f"Hi {data.first_name},"
     body = _paragraphs(greeting, signal, friction, proof, offer)
@@ -450,31 +481,33 @@ def render_email_1(
 
 
 def render_email_2(noun: str) -> str:
+    # "Bumping this" is what people actually type; "in case it slipped past" was
+    # filler that made it read as a sequence step rather than a nudge.
     return _paragraphs(
-        "Bumping this in case it slipped past.",
-        f"Still happy to send {noun} if it's useful.",
+        "Just bumping this one.",
+        f"Happy to send {noun} if it's useful.",
     )
 
 
 def render_email_3(noun: str) -> str:
-    # The frozen sentence is "<noun> is still there if you want it first". A plural
-    # noun ("the numbers for this role") disagrees with it, so the verb and the
-    # pronoun are selected mechanically. Word choice is untouched.
-    plural = noun in PLURAL_OFFER_NOUNS
-    verb = "are" if plural else "is"
-    pronoun = "them" if plural else "it"
+    # E3 introduces the commercial terms -- the two verified facts deliberately
+    # held back from E1 -- and re-offers. "you owe nothing" restated "you don't
+    # pay anything", so it went; the re-offer no longer needs plural agreement
+    # because nothing is described as being "still there".
     return _paragraphs(
         "One thing I left out.",
         "You don't pay anything until you've picked someone. If nobody on the "
-        "shortlist clears your bar, you owe nothing and we keep looking.",
-        f"{_cap(noun)} {verb} still there if you want {pronoun} first.",
+        "shortlist works, we keep looking.",
+        f"Happy to send {noun} whenever.",
     )
 
 
 def render_email_4(noun: str, role: str) -> str:
+    # "Closing this out" is a recognisable sequence marker. "Last one from me" is
+    # the same message and is what a person says.
     return _paragraphs(
-        "Closing this out.",
-        f"If the {role} search is handled, tell me and I'll stop.",
+        "Last one from me.",
+        f"If the {role} search is already handled, tell me and I'll stop.",
         f"If it's still open, say the word and I'll send {noun} today.",
     )
 

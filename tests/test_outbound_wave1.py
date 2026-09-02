@@ -251,7 +251,9 @@ def test_t1_multi_opening_uses_the_records_actual_count():
     resolution = resolve_challenger(fields, experiment_id=EXPERIMENT, registry=empty_registry())
     assert resolution.signal_tier == "T1"
     assert resolution.opening_count == 3
-    assert "3 product roles open at Acme at once." in resolution.rendered_email_1
+    # The count renders as a word: a sentence opening with a digit is a
+    # mail-merge tell. It is still the record's own count, not a hard-coded one.
+    assert "Acme has three product roles open right now." in resolution.rendered_email_1
     assert "two product roles" not in resolution.rendered_email_1.lower()
 
 
@@ -421,7 +423,7 @@ def test_cross_bucket_signal_needs_a_company_index():
     hr = next(r for r in resolutions + previews if r.role_bucket == "people_hr")
     assert hr.signal_tier == "T1"
     assert hr.signal_type == "multi_opening_cross_bucket"
-    assert "2 functions" in hr.rendered_email_1
+    assert "across two teams" in hr.rendered_email_1
 
 
 def test_reposted_and_first_hire_signals_are_not_implemented():
@@ -539,14 +541,17 @@ def test_gtm_uses_safe_wording_without_a_verified_claim():
         "Matched Role": "Revenue Operations Manager",
         "Outbound Role": "Revenue Operations Manager",
     })
+    # GTM's own phrasing points at "the combination", so it needs its T1 scope
+    # signal to have fired.
+    fields["Focus Evidence"] = "hubspot administration | lead routing | pipeline reporting"
     registry = load_claim_registry(config.OUTBOUND_WAVE1_CLAIM_REGISTRY_PATH)
     resolution = resolve_challenger(fields, experiment_id=EXPERIMENT, registry=registry)
     # The campaign phrases the SAME verified testing claim in its own words. It
     # must never reach for the unverified "we test that exact combination
     # directly" wording the registry deliberately leaves unusable.
     assert (
-        "So we test candidates on the combination rather than on any one piece "
-        "of it." in resolution.rendered_email_1
+        "We test for the combination, not just the individual pieces."
+        in resolution.rendered_email_1
     )
     assert resolution.proof_type == PROOF_TESTING_MECHANICS
     assert "directly" not in resolution.rendered_email_1.lower()
@@ -612,19 +617,23 @@ def test_offer_noun_is_inherited_by_every_follow_up():
 
 def test_frozen_follow_up_copy_is_rendered_verbatim():
     resolution = resolve_challenger(_fields(), experiment_id=EXPERIMENT, registry=empty_registry())
-    assert resolution.rendered_email_2.startswith("Bumping this in case it slipped past.")
+    assert resolution.rendered_email_2.startswith("Just bumping this one.")
     assert (
-        "Still happy to send what we carry on the employment side if it's useful."
+        "Happy to send what we carry on the employment side if it's useful."
         in resolution.rendered_email_2
     )
     assert resolution.rendered_email_3.startswith("One thing I left out.")
+    # E3 carries the two verified commercial facts held back from E1.
     assert (
         "You don't pay anything until you've picked someone. If nobody on the "
-        "shortlist clears your bar, you owe nothing and we keep looking."
+        "shortlist works, we keep looking."
         in resolution.rendered_email_3
     )
-    assert resolution.rendered_email_4.startswith("Closing this out.")
-    assert "If the Financial Analyst search is handled, tell me and I'll stop." in resolution.rendered_email_4
+    assert resolution.rendered_email_4.startswith("Last one from me.")
+    assert (
+        "If the Financial Analyst search is already handled, tell me and I'll stop."
+        in resolution.rendered_email_4
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -932,7 +941,7 @@ def test_an_offer_noun_swapped_mid_thread_fails_qa():
         _fields(), experiment_id=EXPERIMENT, registry=empty_registry()
     ).to_dict()
     resolution["rendered_email_3"] = resolution["rendered_email_3"].replace(
-        "What we carry on the employment side", "The numbers for this role"
+        "what we carry on the employment side", "the numbers for this role"
     )
     passed, reasons = run_qa_gates(resolution, policy=campaign_for_bucket("finance"))
     assert not passed

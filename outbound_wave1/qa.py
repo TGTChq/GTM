@@ -50,6 +50,7 @@ from .render import (
     FRICTION_TITLE_VS_SCOPE,
     html_to_text,
     offer_question,
+    rendered_count,
     to_html,
 )
 
@@ -115,6 +116,25 @@ BANNED_PATTERNS: Tuple[Tuple[str, str], ...] = (
     (r"\$\s?3[.,]5\s?k\b", "banned_universal_price_claim"),
     (r"\$\s?4\s?k\b", "banned_universal_price_claim"),
     (r"\$\s?3,?500\b", "banned_universal_price_claim"),
+    # Landing-page vocabulary. This list is deliberately SHORT: it catches words
+    # that are always wrong in this voice, not an attempt to encode "sounds
+    # human" as a phrase list. Naturalness is an editorial judgement and stays
+    # one -- these are just words no draft of this copy should ever contain.
+    (r"\bsolutions?\b", "buzzword_solution"),
+    (r"\bplatform\b", "buzzword_platform"),
+    (r"\btransform", "buzzword_transform"),
+    (r"\bunlock\b", "buzzword_unlock"),
+    (r"\bleverage\b", "buzzword_leverage"),
+    (r"\bstreamlin", "buzzword_streamline"),
+    (r"\brevolutioni", "buzzword_revolutionize"),
+    (r"\bsynerg", "buzzword_synergy"),
+    (r"\bbest[- ]in[- ]class\b", "buzzword_best_in_class"),
+    (r"\bgame[- ]chang", "buzzword_game_changer"),
+    (r"\bcutting[- ]edge\b", "buzzword_cutting_edge"),
+    (r"\bseamless", "buzzword_seamless"),
+    (r"\bsupercharge", "buzzword_supercharge"),
+    (r"\broi\b", "hype_roi"),
+    (r"\b10x\b", "hype_10x"),
 )
 
 #: Link / image / attachment markers.
@@ -136,6 +156,23 @@ def _find_banned(text: str) -> List[str]:
         if re.search(pattern, lowered):
             hits.append(label)
     return sorted(set(hits))
+
+
+def authored_text(text: str, *values: str) -> str:
+    """``text`` with the record's own values removed.
+
+    The banned-language gates judge what WE wrote, not what the prospect is
+    called. A real company named "CBX Solutions, LLC" or a posting titled
+    "... Platform Operations Specialist" would otherwise trip the buzzword
+    list, and a company named "Top Talent Inc" would trip the older one --
+    suppressing a perfectly good record over a name we did not choose.
+    """
+    out = text
+    for value in values:
+        cleaned = str(value or "").strip()
+        if len(cleaned) > 2:
+            out = re.sub(re.escape(cleaned), " ", out, flags=re.I)
+    return out
 
 
 #: A send-safe role display is a short noun phrase. Anything that still reads as a
@@ -266,12 +303,17 @@ def run_qa_gates(resolution: Dict, *, policy: CampaignPolicy) -> Tuple[bool, Lis
         reasons.append("unsupported_claim_rendered")
 
     # --- Product must use the record's real opening count -------------------
+    # The count renders as a word ("two product roles") rather than a numeral,
+    # because a sentence opening with a digit is a mail-merge tell. The guarantee
+    # is unchanged: the rendered count must be THIS record's, so the gate asks the
+    # renderer which form it used and still rejects a hard-coded "two".
     if policy.key == "product" and str(resolution.get("signal_type") or "") == SIGNAL_MULTI_OPENING:
         count = int(resolution.get("opening_count") or 0)
         signal_line = str((resolution.get("e1_segments") or {}).get("signal") or "")
+        spoken = re.escape(rendered_count(count))
         if count < 2:
             reasons.append("product_multi_opening_without_two_openings")
-        elif not re.match(rf"^{count}\s", signal_line):
+        elif not re.search(rf"\b(?:{count}|{spoken})\s+\S+\s+roles\b", signal_line, re.I):
             reasons.append("product_opening_count_not_rendered_from_record")
         if count != 2 and re.search(r"\b(?:two|2)\s+product roles\b", signal_line, re.I):
             reasons.append("product_hardcoded_opening_count")
@@ -328,7 +370,12 @@ def run_qa_gates(resolution: Dict, *, policy: CampaignPolicy) -> Tuple[bool, Lis
                 break
 
     # --- banned challenger language ----------------------------------------
-    for label in _find_banned(all_text):
+    # Judged over what we authored: the record's own company and role strings
+    # are removed first so a prospect's name can never fail our copy gate.
+    for label in _find_banned(authored_text(
+        all_text, resolution.get("company") or "", resolution.get("role") or "",
+        resolution.get("canonical_role") or "",
+    )):
         reasons.append(label)
 
     # --- the HTML body must be a faithful transport of the plain text -------

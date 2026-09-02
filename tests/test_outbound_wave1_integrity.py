@@ -357,22 +357,22 @@ def test_economics_offer_noun_is_the_numbers_for_this_role_everywhere():
     noun = "the numbers for this role"
     assert resolution.offer_noun == noun
     assert f"Want me to send {noun}?" in resolution.rendered_email_1
-    assert f"Still happy to send {noun} if it" in resolution.rendered_email_2
-    # Plural agreement is selected mechanically; no word choice changes.
-    assert (
-        "The numbers for this role are still there if you want them first."
-        in resolution.rendered_email_3
-    )
+    assert f"Happy to send {noun} if it" in resolution.rendered_email_2
+    # The re-offer needs no plural agreement, so a plural noun reads naturally
+    # without any word choice changing.
+    assert f"Happy to send {noun} whenever." in resolution.rendered_email_3
     assert f"send {noun} today." in resolution.rendered_email_4
 
 
-def test_singular_offer_noun_keeps_the_frozen_singular_sentence():
+def test_the_re_offer_reads_the_same_for_any_noun():
+    """The E3 re-offer is agreement-free, so it reads naturally whether the noun
+    is singular or plural."""
     resolution = resolve_challenger(
         _campaign_fields("operations", "Operations Analyst"),
         experiment_id=EXPERIMENT, registry=empty_registry(),
     )
     assert (
-        "How we test for a scope like this is still there if you want it first."
+        "Happy to send how we test for a scope like this whenever."
         in resolution.rendered_email_3
     )
 
@@ -397,7 +397,7 @@ def test_a_swapped_noun_mid_thread_fails_qa():
         _fields(), experiment_id=EXPERIMENT, registry=empty_registry()
     ).to_dict()
     resolution["rendered_email_3"] = resolution["rendered_email_3"].replace(
-        "What we carry on the employment side", "The numbers for this role"
+        "what we carry on the employment side", "the numbers for this role"
     )
     passed, reasons = run_qa_gates(resolution, policy=campaign_for_bucket("finance"))
     assert not passed
@@ -588,3 +588,93 @@ def test_the_signal_line_stays_factual_and_unhedged():
         assert signal
         for weasel in ("might be", "may be", "could be", "possibly", "perhaps"):
             assert weasel not in signal.lower(), (resolution.campaign, signal)
+
+
+def test_no_campaign_uses_landing_page_vocabulary():
+    """A short, hard list of words that are always wrong in this voice.
+
+    This is NOT an attempt to encode "sounds human" as a phrase list -- that is
+    an editorial judgement and stays one. It catches the handful of words that
+    would make the copy read as marketing no matter how they were arranged.
+    """
+    from outbound_wave1.qa import _find_banned
+    for resolution in _differentiation_resolutions():
+        thread = " ".join([
+            resolution.rendered_subject, resolution.rendered_email_1,
+            resolution.rendered_email_2, resolution.rendered_email_3,
+            resolution.rendered_email_4,
+        ])
+        assert _find_banned(thread) == [], (resolution.campaign, _find_banned(thread))
+
+
+def test_email_1_stays_short_enough_to_read_on_a_phone():
+    """Under ~100 words, which is where a cold first email stops being read."""
+    import re
+    for resolution in _differentiation_resolutions():
+        count = len(re.findall(r"[A-Za-z0-9'/-]+", resolution.rendered_email_1))
+        assert count <= 100, (resolution.campaign, count)
+
+
+def test_every_email_asks_for_exactly_one_thing():
+    """One CTA per email. A second question turns a low-friction offer into a
+    decision the reader has to sort out."""
+    for resolution in _differentiation_resolutions():
+        for index in (1, 2, 3, 4):
+            body = getattr(resolution, f"rendered_email_{index}")
+            assert body.count("?") <= 1, (resolution.campaign, index, body)
+
+
+def test_a_proof_never_points_back_at_a_signal_that_did_not_fire():
+    """MARKETING's proof says "the rest of that scope", GTM's says "the
+    combination", AI's ends on a bare "instead". Behind a degraded signal there
+    is nothing for those to refer to, so the shared wording is used instead."""
+    for bucket, role, dangling in (
+        ("marketing", "Marketing Manager", "that scope"),
+        ("gtm_revenue", "Revenue Operations Manager", "the combination, not just"),
+        ("engineering", "AI Automation Engineer", "actual work instead."),
+    ):
+        fields = _campaign_fields(bucket, role)
+        fields.update({"Role Focus": "", "Focus Evidence": "", "Outbound Roles": role})
+        resolution = resolve_challenger(
+            fields, experiment_id=EXPERIMENT, registry=empty_registry())
+        assert resolution.signal_tier == "T3", (bucket, resolution.signal_tier)
+        assert dangling not in resolution.rendered_email_1, (bucket, dangling)
+        assert resolution.qa_pass, (bucket, resolution.qa_reasons)
+
+
+def test_the_campaign_phrasing_is_still_used_when_its_signal_does_fire():
+    fields = _campaign_fields("gtm_revenue", "Revenue Operations Manager")
+    fields["Focus Evidence"] = "hubspot administration | lead routing | pipeline reporting"
+    resolution = resolve_challenger(
+        fields, experiment_id=EXPERIMENT, registry=empty_registry())
+    assert resolution.signal_tier == "T1"
+    assert "We test for the combination, not just the individual pieces." in (
+        resolution.rendered_email_1)
+
+
+def test_a_prospects_own_name_never_fails_our_copy_gate():
+    """The banned-language gates judge what WE wrote.
+
+    A real company called "CBX Solutions, LLC" tripped the buzzword list in a
+    dry run, and a company called "Top Talent Inc" would trip the older one.
+    Suppressing a good record over a name we did not choose is a defect, not a
+    safeguard.
+    """
+    fields = _campaign_fields("people_hr", "Talent Acquisition Specialist")
+    fields.update({
+        "Outbound Company": "CBX Solutions, LLC",
+        "Company": "CBX Solutions, LLC",
+        "Outbound Roles": "Talent Acquisition Specialist",
+    })
+    resolution = resolve_challenger(
+        fields, experiment_id=EXPERIMENT, registry=empty_registry())
+    assert "buzzword_solution" not in resolution.qa_reasons, resolution.qa_reasons
+    assert resolution.qa_pass, resolution.qa_reasons
+
+
+def test_a_banned_word_we_actually_wrote_still_fails():
+    """The redaction removes the record's values, not our sentences."""
+    from outbound_wave1.qa import _find_banned, authored_text
+    text = "Acme Solutions has two roles open. Our platform will transform hiring."
+    assert _find_banned(authored_text(text, "Acme Solutions")) == [
+        "buzzword_platform", "buzzword_transform"]

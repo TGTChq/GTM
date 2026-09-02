@@ -118,6 +118,22 @@ them — so `tests/test_outbound_wave1_integrity.py` now gates the differentiati
 directly: nine distinct CTAs, nine distinct frictions, and no single proof
 sentence on more than four campaigns.
 
+### Voice
+
+The copy is written to read like a person typing, not like a sequence. Email 1
+is 40-60 words, three or four thoughts, one CTA, contractions throughout. It does
+not name the reader's own employer back at them -- "your Operations Manager
+opening", never "the Operations Manager opening at <their company>", which is the
+most recognisable mail-merge shape there is. Counts render as words ("two product
+roles"), because a sentence opening with a digit reads as a merge field.
+
+Only the genuinely dangerous patterns are encoded as gates: banned claims,
+unsupported absolutes, and a short list of landing-page words. Everything else
+about naturalness is editorial judgement and stays that way -- there is no
+attempt to express "sounds human" as a phrase list. The gates judge what WE
+wrote: the record's own company and role are removed before matching, so a
+prospect called "CBX Solutions, LLC" can never fail our buzzword gate.
+
 The three slots carry different burdens of proof, and a QA gate holds each to
 its own: the **signal** is the real hiring event read off the record and stays
 factual and unhedged; the **friction** is a hypothesis the reader can accept or
