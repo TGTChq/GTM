@@ -69,3 +69,7 @@ recovery_*/
 # Outbound Wave 1 dry-run review artifacts. They carry company names and
 # hiring-manager first names, so they stay local like the other run reports.
 reports/wave1_dryrun*.json
+
+# Outbound Wave 1 Challenger campaign plan. It embeds the live sender mailbox
+# addresses read back from the Control campaigns, so it stays local too.
+reports/wave1_challenger_plan*.json
