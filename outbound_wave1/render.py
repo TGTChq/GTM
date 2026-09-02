@@ -53,6 +53,10 @@ FRICTION_COMBINED_SCOPE_POOL = "combined_scope_pool"
 FRICTION_MORE_CVS = "more_cvs"
 FRICTION_SECOND_SEARCH_HEADCOUNT = "second_search_headcount"
 FRICTION_ADMIN_ON_CLOSE = "admin_on_close"
+FRICTION_OPS_PROCESS_MIX = "ops_process_mix"
+FRICTION_REMOTE_FIT = "remote_fit"
+FRICTION_OUTSIDE_VENDOR = "outside_vendor"
+FRICTION_RARE_MIX = "rare_mix"
 #: Campaign-specific frictions. Each one states the reason THIS buyer has for
 #: caring, which is what makes the nine arguments different rather than nine
 #: wordings of one argument. All are hedged observations about the reader's own
@@ -318,8 +322,8 @@ _DEGRADED_FRICTION_BY_PROOF: Dict[str, Tuple[str, str]] = {
     # -> "they don't go on your official headcount"
     PROOF_HEADCOUNT_MODEL: (
         FRICTION_SECOND_SEARCH_HEADCOUNT,
-        "Running a second search alongside it usually means finding the headcount "
-        "for it too.",
+        "Running a second search alongside it can mean finding the headcount for "
+        "it too.",
     ),
     # -> "we handle payroll, taxes, benefits and compliance"
     PROOF_EMPLOYMENT_ADMIN: (
@@ -328,28 +332,76 @@ _DEGRADED_FRICTION_BY_PROOF: Dict[str, Tuple[str, str]] = {
     ),
 }
 
-#: Used for the evidence proofs (role-specific testing, remote readiness), which
-#: both answer "you have not seen the right person yet".
+#: Fallback for a campaign with no degraded friction of its own. Every live
+#: campaign declares one, so this only catches a campaign added later.
 _DEGRADED_EVIDENCE_FRICTION = (
     FRICTION_MORE_CVS,
     "If the right person hasn't turned up yet, more CVs may not be what's missing.",
 )
 
-#: Campaign proof phrasings that refer back to the signal. GTM says "the
-#: combination" and AI ends on a bare "instead" -- each only makes sense when
-#: that campaign's own T1 signal fired.
-#: Campaigns absent from this map phrase their proof self-containedly and may use
-#: it at any tier.
-_PROOF_TEXT_REQUIRES_SIGNAL: Dict[str, frozenset] = {
-    "gtm_systems": frozenset({SIGNAL_SCOPE_COMBINATION}),
-    "ai_technical": frozenset({SIGNAL_ROLE_FOCUS_MATCH}),
+#: Degraded friction PER CAMPAIGN.
+#:
+#: T3 is not an edge case: on the current corpus 98% of eligible records resolve
+#: to it, so this table is the production copy and the T1 table is the exception.
+#: Six campaigns previously collapsed onto one shared "more CVs" line, which
+#: meant six of nine buyers received the same argument. Each now states the
+#: reason ITS function has to care, using only verified facts and without the
+#: second-order evidence T1 relies on.
+_DEGRADED_FRICTION_BY_CAMPAIGN: Dict[str, Tuple[str, str]] = {
+    # Capacity, answered by the headcount fact.
+    "product": (
+        FRICTION_SECOND_SEARCH_HEADCOUNT,
+        "Running a second search alongside it can mean finding the headcount for "
+        "it too.",
+    ),
+    # The job is a mix of processes, answered by testing on the work.
+    "operations": (
+        FRICTION_OPS_PROCESS_MIX,
+        "Ops roles are usually a specific mix of processes, and a title rarely "
+        "shows which ones someone has run.",
+    ),
+    # The hire is an administrative obligation, answered by what we carry.
+    "finance": (
+        FRICTION_ADMIN_ON_CLOSE,
+        "Whenever it does close, there's employment admin behind it.",
+    ),
+    # Remote fit, answered by the verified remote-readiness assessment. Stated
+    # conditionally: we do not know that they would consider someone remote.
+    "people_hr": (
+        FRICTION_REMOTE_FIT,
+        "If you'd look at someone remote for it, the hard part is usually knowing "
+        "whether that will work out.",
+    ),
+    # Titles mean different things by store size, answered by testing.
+    "ecommerce": (
+        FRICTION_TITLE_INFLATION,
+        "Ecommerce titles can mean very different work depending on the size of "
+        "the store.",
+    ),
+    # The interview is weak evidence for this function, answered by testing.
+    "customer_experience": (
+        FRICTION_INTERVIEW_WEAK_SIGNAL,
+        "A good interview still doesn't tell you much about how someone handles "
+        "the work day to day.",
+    ),
+    # The competing option is an agency or a freelancer, answered by embedding.
+    "marketing_creative": (
+        FRICTION_OUTSIDE_VENDOR,
+        "The usual alternative for this kind of role is an agency or a "
+        "freelancer, which isn't the same as someone on the team.",
+    ),
+    # The stack combination is the rare part, answered by testing the combination.
+    "gtm_systems": (
+        FRICTION_RARE_MIX,
+        "RevOps roles tend to want a mix that's common in the parts and rare put "
+        "together.",
+    ),
+    # Tenure is a weak signal in a young category, answered by testing.
+    "ai_technical": (
+        FRICTION_NO_TRACK_RECORD_YET,
+        "The tooling is new enough that years on a CV may not tell you much here.",
+    ),
 }
-
-
-def _campaign_proof_text_applies(policy: CampaignPolicy, signal_type: str) -> bool:
-    allowed = _PROOF_TEXT_REQUIRES_SIGNAL.get(policy.key)
-    return allowed is None or signal_type in allowed
-
 
 #: Frictions whose wording depends on the signal that fired. PRODUCT's approval
 #: line reads off a multi-opening count and PEOPLE & HR's off a cross-bucket
@@ -397,9 +449,16 @@ def _friction(policy: CampaignPolicy, signal_type: str, proof_type: str) -> Tupl
     if proof_type == PROOF_ECONOMICS:
         return _ECONOMICS_FRICTION
     if signal_type in (SIGNAL_JOB_AGE, SIGNAL_ACTIVE_REQ):
-        # The campaign's T1 reason is unavailable, but its PROOF still is, so the
-        # degraded friction is the one that hands off to that proof.
-        return _DEGRADED_FRICTION_BY_PROOF.get(proof_type, _DEGRADED_EVIDENCE_FRICTION)
+        # The campaign's T1 reason is unavailable. It states its own degraded
+        # reason -- but only while it still has the proof that reason hands off
+        # to. PEOPLE & HR's "if you'd look at someone remote" sets up the
+        # remote-readiness assessment; with no verified claim the campaign
+        # degrades to plain testing, and that friction would then lead nowhere.
+        by_proof = _DEGRADED_FRICTION_BY_PROOF.get(
+            proof_type, _DEGRADED_EVIDENCE_FRICTION)
+        if proof_type in (policy.preferred_proof, policy.fallback_proof):
+            return _DEGRADED_FRICTION_BY_CAMPAIGN.get(policy.key, by_proof)
+        return by_proof
     campaign_friction = _FRICTION_BY_CAMPAIGN.get(policy.key)
     if campaign_friction is None:
         return _T3_FRICTION
@@ -514,16 +573,17 @@ def render_email_1(
     # argument instead of reading as one template used nine times. A verified
     # registry claim still wins, because it carries its own source.
     #
-    # Some of those phrasings point back at the signal ("the rest of that scope",
-    # "the combination", a bare "instead"). Behind a degraded signal there is
-    # nothing for them to point at, so they fall back to the shared wording
-    # rather than referring to something the reader was never shown.
+    # A campaign may also phrase a proof differently once its T1 signal is gone,
+    # because the degraded friction sets up a different argument. MARKETING is the
+    # case in point: at T1 it answers a split scope with the headcount fact, and
+    # at T3 it answers "an agency or a freelancer" with the embedding fact. Same
+    # approved fact, different half of it.
+    degraded = bool(signal_type) and signal_type != policy.t1_signal
     proof = _proof_line(proof_type, data)
-    if _campaign_proof_text_applies(policy, signal_type):
-        if proof_type == PROOF_TESTING_MECHANICS and not data.strong_claim_text:
-            proof = policy.proof_text(proof_type) or proof
-        elif proof_type in (PROOF_HEADCOUNT_MODEL, PROOF_EMPLOYMENT_ADMIN):
-            proof = policy.proof_text(proof_type) or proof
+    if proof_type == PROOF_TESTING_MECHANICS and not data.strong_claim_text:
+        proof = policy.resolved_proof_text(proof_type, degraded=degraded) or proof
+    elif proof_type in (PROOF_HEADCOUNT_MODEL, PROOF_EMPLOYMENT_ADMIN):
+        proof = policy.resolved_proof_text(proof_type, degraded=degraded) or proof
     offer = offer_question(noun or offer_noun(policy, offer_type))
     greeting = f"Hi {data.first_name},"
     body = _paragraphs(greeting, signal, friction, proof, offer)

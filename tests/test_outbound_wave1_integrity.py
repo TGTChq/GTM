@@ -633,8 +633,10 @@ def test_a_proof_never_points_back_at_a_signal_that_did_not_fire():
     Behind a degraded signal there is nothing for those to refer to, so the
     shared wording is used instead."""
     for bucket, role, dangling in (
-        ("gtm_revenue", "Revenue Operations Manager", "the combination, not just"),
-        ("engineering", "AI Automation Engineer", "actual work instead."),
+        # GTM and AI now establish their own referent in the degraded friction
+        # ("a mix that's common in the parts", "years on a CV"), so only a proof
+        # with no degraded setup at all is checked here.
+        ("ecommerce", "Ecommerce Manager", "wait for the next budget cycle"),
     ):
         fields = _campaign_fields(bucket, role)
         fields.update({"Role Focus": "", "Focus Evidence": "", "Outbound Roles": role})
@@ -714,13 +716,20 @@ def _degraded_resolution(bucket, role, tier):
         fields, experiment_id=EXPERIMENT, registry=registry, as_of=now)
 
 
-#: Which degraded friction each proof is allowed to answer. This is the whole
-#: point of the fix: they are not interchangeable.
-_EXPECTED_DEGRADED_FRICTION = {
-    "headcount_model": "second_search_headcount",
-    "employment_admin": "admin_on_close",
-    "testing_mechanics": "more_cvs",
-    "remote_readiness": "more_cvs",
+#: The degraded friction each campaign states, and the proof it hands off to.
+#: T3 carries ~98% of eligible volume, so this table -- not the T1 one -- is what
+#: production actually sends. Six campaigns once shared "more CVs"; each now
+#: argues its own function's reason.
+_EXPECTED_DEGRADED = {
+    "product": ("second_search_headcount", "headcount_model"),
+    "operations": ("ops_process_mix", "testing_mechanics"),
+    "finance": ("admin_on_close", "employment_admin"),
+    "people_hr": ("remote_fit", "remote_readiness"),
+    "ecommerce": ("title_inflation", "testing_mechanics"),
+    "customer_success": ("interview_weak_signal", "testing_mechanics"),
+    "marketing": ("outside_vendor", "headcount_model"),
+    "gtm_revenue": ("rare_mix", "testing_mechanics"),
+    "engineering": ("no_track_record_yet", "testing_mechanics"),
 }
 
 
@@ -739,9 +748,10 @@ def test_degraded_friction_hands_off_to_that_campaigns_proof(bucket, role):
     for tier, _extra in _DEGRADED_TIERS:
         resolution = _degraded_resolution(bucket, role, tier)
         assert resolution.signal_tier == tier, (bucket, tier, resolution.signal_tier)
-        expected = _EXPECTED_DEGRADED_FRICTION[resolution.proof_type]
-        assert resolution.friction_angle == expected, (
-            bucket, tier, resolution.proof_type, resolution.friction_angle)
+        friction, proof = _EXPECTED_DEGRADED[bucket]
+        assert resolution.friction_angle == friction, (
+            bucket, tier, resolution.friction_angle)
+        assert resolution.proof_type == proof, (bucket, tier, resolution.proof_type)
         assert resolution.qa_pass, (bucket, tier, resolution.qa_reasons)
 
 
@@ -757,24 +767,25 @@ def test_degraded_friction_hands_off_to_that_campaigns_proof(bucket, role):
     ("engineering", "AI Automation Engineer"),
 ])
 def test_no_degraded_cta_points_at_something_the_email_never_described(bucket, role):
-    """OPERATIONS asks for "a scope like this" and GTM for "the combination".
-    Neither is described behind a degraded signal, so both fall back to a
-    tier-safe noun."""
+    """A CTA may only name something the email actually described.
+
+    OPERATIONS asks for "a scope like this", which nothing at T2/T3 sets up, so
+    it falls back to a tier-safe noun. GTM asks for "the combination", and its
+    degraded friction does establish one ("a mix that's common in the parts and
+    rare put together"), so it keeps its own noun.
+    """
     for tier, _extra in _DEGRADED_TIERS:
         resolution = _degraded_resolution(bucket, role, tier)
         body = resolution.rendered_email_1.lower()
         noun = resolution.offer_noun.lower()
-        for pointer, described in (
-            ("a scope like this", "combines"),
-            ("the combination", "combines"),
-        ):
-            if pointer in noun:
-                assert described in body, (bucket, tier, noun)
+        if "a scope like this" in noun:
+            assert "combines" in body or "scope" in body, (bucket, tier, noun)
+        if "the combination" in noun:
+            assert "combines" in body or "mix" in body, (bucket, tier, noun)
 
 
 @pytest.mark.parametrize("bucket,role", [
     ("operations", "Operations Manager"),
-    ("gtm_revenue", "Revenue Operations Manager"),
 ])
 def test_one_leads_thread_keeps_one_noun_even_when_it_is_the_tier_safe_one(bucket, role):
     """The noun may differ ACROSS tiers, never within one lead's four emails."""
@@ -805,3 +816,84 @@ def test_no_degraded_friction_makes_an_economics_or_shortlist_claim():
             friction = _degraded_resolution(bucket, role, tier).e1_segments["friction"]
             for phrase in banned:
                 assert phrase not in friction.lower(), (bucket, tier, phrase, friction)
+
+
+def test_t3_differentiation_matches_t1_because_t3_is_the_production_copy():
+    """T3 carries ~98% of eligible volume, so it is held to the same standard.
+
+    Six campaigns once shared one "more CVs" friction and the generic testing
+    proof, which meant six of nine buyers received the same argument in the case
+    that actually happens.
+    """
+    frictions, nouns, proofs = [], [], []
+    for bucket, role in (
+        ("product", "Product Manager"), ("operations", "Operations Manager"),
+        ("finance", "Financial Analyst"),
+        ("people_hr", "Talent Acquisition Specialist"),
+        ("ecommerce", "Ecommerce Manager"),
+        ("customer_success", "Customer Success Manager"),
+        ("marketing", "Marketing Manager"),
+        ("gtm_revenue", "Revenue Operations Manager"),
+        ("engineering", "AI Automation Engineer"),
+    ):
+        resolution = _degraded_resolution(bucket, role, "T3")
+        frictions.append(resolution.e1_segments["friction"])
+        proofs.append(resolution.e1_segments["proof"])
+        nouns.append(resolution.offer_noun)
+    assert len(set(frictions)) == 9, sorted(frictions)
+    assert len(set(nouns)) == 9, sorted(nouns)
+    # Five campaigns legitimately share the verified testing fact, each for a
+    # different reason. Their PROOF SENTENCES still differ, and nothing may be
+    # on more than five of the nine.
+    assert len(set(proofs)) >= 7, sorted(set(proofs))
+    assert max(collections.Counter(proofs).values()) <= 2, collections.Counter(proofs)
+
+
+def test_the_degraded_copy_makes_no_claim_outside_the_verified_set():
+    unverified = (
+        "time zone", "timezone", "your hours", "business hours", "overlap",
+        "work sample", "sample exercise", "take-home", "trial task",
+        "your system", "your stack", "your instance", "your backlog",
+        "seasonal", "peak season", "cheapest", "cheaper", "fastest",
+    )
+    for bucket, role in (
+        ("product", "Product Manager"), ("operations", "Operations Manager"),
+        ("finance", "Financial Analyst"),
+        ("people_hr", "Talent Acquisition Specialist"),
+        ("ecommerce", "Ecommerce Manager"),
+        ("customer_success", "Customer Success Manager"),
+        ("marketing", "Marketing Manager"),
+        ("gtm_revenue", "Revenue Operations Manager"),
+        ("engineering", "AI Automation Engineer"),
+    ):
+        for tier, _extra in _DEGRADED_TIERS:
+            resolution = _degraded_resolution(bucket, role, tier)
+            thread = " ".join([
+                resolution.rendered_email_1, resolution.rendered_email_2,
+                resolution.rendered_email_3, resolution.rendered_email_4,
+            ]).lower()
+            for phrase in unverified:
+                assert phrase not in thread, (bucket, tier, phrase)
+
+
+def test_email_3_still_introduces_something_email_1_did_not_say():
+    """E3 opens "One thing I left out" and carries the two commercial facts. No
+    E1 -- at any tier -- may use them, or that line becomes false."""
+    held_back = ("don't pay", "do not pay", "owe nothing", "keep looking",
+                 "until you've picked", "keep sourcing")
+    for bucket, role in (
+        ("product", "Product Manager"), ("operations", "Operations Manager"),
+        ("finance", "Financial Analyst"),
+        ("people_hr", "Talent Acquisition Specialist"),
+        ("ecommerce", "Ecommerce Manager"),
+        ("customer_success", "Customer Success Manager"),
+        ("marketing", "Marketing Manager"),
+        ("gtm_revenue", "Revenue Operations Manager"),
+        ("engineering", "AI Automation Engineer"),
+    ):
+        for tier, _extra in _DEGRADED_TIERS:
+            resolution = _degraded_resolution(bucket, role, tier)
+            body = resolution.rendered_email_1.lower()
+            for phrase in held_back:
+                assert phrase not in body, (bucket, tier, phrase)
+            assert "One thing I left out." in resolution.rendered_email_3

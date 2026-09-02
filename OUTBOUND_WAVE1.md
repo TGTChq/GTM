@@ -174,11 +174,25 @@ could not do it: followed by "we handle payroll" it left the reader a hiring
 problem and a bookkeeping answer. `render._DEGRADED_FRICTION_BY_PROOF` therefore
 picks the degraded friction by proof, not by tier:
 
-| proof | degraded friction |
-| --- | --- |
-| headcount model | running a second search usually means finding the headcount for it too |
-| employment administration | whenever it does close, there's employment admin behind it |
-| testing / remote readiness | if the right person hasn't turned up yet, more CVs may not be what's missing |
+`render._DEGRADED_FRICTION_BY_CAMPAIGN` is the production copy table. T1's is the
+exception: on the current corpus 98% of eligible records resolve to T3.
+
+| campaign | degraded reason | proof it hands to |
+| --- | --- | --- |
+| PRODUCT | a second search can mean finding the headcount for it too | headcount |
+| OPERATIONS | ops roles are a mix of processes a title rarely shows | testing |
+| FINANCE | whenever it closes, there's employment admin behind it | employment admin |
+| PEOPLE & HR | if you'd look at someone remote, knowing it will work out is the hard part | remote readiness |
+| ECOMMERCE | ecommerce titles mean different work by store size | testing |
+| CUSTOMER EXPERIENCE | a good interview says little about the day-to-day work | testing |
+| MARKETING & CREATIVE | the usual alternative is an agency or a freelancer | embedding |
+| GTM SYSTEMS | a mix that's common in the parts and rare put together | testing |
+| AI & TECHNICAL | the tooling is too new for CV tenure to say much | testing |
+
+A campaign only uses its own degraded reason while it still holds the proof that
+reason hands off to. PEOPLE & HR's line sets up the remote-readiness assessment;
+with no verified claim the campaign degrades to plain testing, and the
+proof-keyed map (`_DEGRADED_FRICTION_BY_PROOF`) takes over.
 
 Job age is a FACT and the signal states it. Every reading of what that age means
 is conditional, because a posting open for 50 days does not prove a shortlist

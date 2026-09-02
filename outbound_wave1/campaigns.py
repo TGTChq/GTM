@@ -131,6 +131,10 @@ class CampaignPolicy:
     #: Offer noun for records whose T1 signal did NOT fire. Set only where the
     #: campaign's own noun names something the degraded email never describes.
     degraded_offer_nouns: Dict[str, str] = field(default_factory=dict)
+    #: Proof phrasing used only when the campaign's T1 signal did NOT fire. The
+    #: degraded friction sets up a different argument, so the same approved fact
+    #: is stated from the angle that argument needs.
+    degraded_proof_texts: Dict[str, str] = field(default_factory=dict)
     #: Per-campaign phrasing of a proof line, keyed by proof type. The CLAIM is
     #: identical -- only the sentence that carries it changes, so it follows this
     #: campaign's own argument instead of reading as one template reused nine
@@ -150,6 +154,14 @@ class CampaignPolicy:
 
     def proof_text(self, proof_type: str) -> str:
         """This campaign's phrasing of ``proof_type``, or "" for the shared one."""
+        return self.proof_texts.get(proof_type, "")
+
+    def resolved_proof_text(self, proof_type: str, *, degraded: bool = False) -> str:
+        """Phrasing for ``proof_type``, preferring the degraded one when asked."""
+        if degraded:
+            text = self.degraded_proof_texts.get(proof_type, "")
+            if text:
+                return text
         return self.proof_texts.get(proof_type, "")
 
 
@@ -322,7 +334,14 @@ MARKETING_CREATIVE = CampaignPolicy(
     fallback_offer=OFFER_HEADCOUNT_OVERVIEW,
     t1_min_evidence=2,
     offer_nouns={OFFER_HEADCOUNT_OVERVIEW: "how an embedded hire works"},
-    # No proof override. The friction now carries the "a second hire needs no
+    # At T3 the friction is "an agency or a freelancer", so the proof states the
+    # EMBEDDING half of the same approved fact rather than the headcount half.
+    degraded_proof_texts={
+        PROOF_HEADCOUNT_MODEL: (
+            "People we place work on your team full-time, not from the outside."
+        )
+    },
+    # No T1 proof override. The friction now carries the "a second hire needs no
     # extra slot" idea, so a proof repeating it would say the same thing twice in
     # consecutive sentences. The shared headcount sentence is the right close.
     scope_facets=_facets(
@@ -364,8 +383,6 @@ GTM_SYSTEMS = CampaignPolicy(
     t1_min_evidence=2,
     strong_claim_id="gtm_combination_directly_tested",
     offer_nouns={OFFER_TESTING_OVERVIEW: "how we test the combination"},
-    # Behind a degraded signal no combination is described.
-    degraded_offer_nouns={OFFER_TESTING_OVERVIEW: "how we test for this role"},
     proof_texts={
         PROOF_TESTING_MECHANICS: (
             "We test for the combination, not just the individual pieces."
