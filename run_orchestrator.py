@@ -707,6 +707,12 @@ def _print_run_summary(ctx, mode, result, state) -> None:
         if govd:
             line("governor_budget", f"{govd.get('run_budget')} reason={govd.get('reason')} "
                                     f"remaining={govd.get('remaining_credits')} reserve={govd.get('reserve_credits')}")
+        qr = (result.get("governor") or {}).get("quota_refresh") or {}
+        if qr.get("attempted"):
+            line("governor_quota_refresh",
+                 f"refreshed={qr.get('refreshed')} reason={qr.get('reason')} "
+                 f"requests={qr.get('requests_made')} "
+                 f"budget {qr.get('budget_before')} -> {qr.get('budget_after')}")
     print("---- Brett's daily metrics ----")
     line("JOBS_ANALYZED", raw)
     line("QUALIFIED", funnel.get("target_role_eligible", funnel.get("icp_eligible_companies")))

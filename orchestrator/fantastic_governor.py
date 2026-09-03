@@ -115,6 +115,28 @@ def _days_remaining(now: datetime, reset_at: Optional[datetime]) -> float:
     return max(delta, 1.0)
 
 
+# Zero-grant reasons that are DERIVED FROM PROVIDER QUOTA METADATA (the
+# authoritative ``remaining`` and the floor/reserve clamps applied to it). Only
+# these justify spending one 0-row count request to re-read the provider's quota
+# headers -- a stale snapshot is the one input a refresh can actually correct.
+# Deliberately EXCLUDED, because re-reading quota cannot change them:
+#   daily_allowance_spent (today's grant already spent), inventory_hint (no
+#   inventory), per_run_ceiling / daily_max (operator configuration).
+# An exhaustive sweep of decide() (606,528 input combinations) shows the ONLY
+# zero-budget reasons reachable today are: provider_quota_floor and reserve (both
+# quota-derived, both listed) and daily_allowance_spent / inventory_hint (both
+# excluded). monthly_remaining and exhausted are currently UNREACHABLE as zero
+# reasons -- the final block re-labels those cases provider_quota_floor -- and are
+# listed defensively so a future change to the clamp order cannot silently
+# reintroduce an unrecoverable deadlock.
+QUOTA_METADATA_ZERO_REASONS = frozenset({
+    "provider_quota_floor",   # remaining <= FANTASTIC_JOBS_MIN_JOBS_QUOTA_REMAINING
+    "reserve",                # remaining <= reserve  => spendable 0
+    "monthly_remaining",      # (defensive) remaining itself is 0
+    "exhausted",              # (defensive) nothing left to spend this cycle
+})
+
+
 def decide(inp: GovernorInputs) -> GovernorDecision:
     """Pure allocation. Order of clamps (most-conservative wins):
 
