@@ -18,6 +18,7 @@ import logging
 import os
 import random
 import re
+import tempfile
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -181,6 +182,34 @@ HttpGet = Callable[..., Any]
 def _http_get(url: str, headers: Dict[str, str], params: Dict[str, Any], timeout: int):
     """Thin wrapper so tests can inject a fake; real path uses requests.get."""
     return requests.get(url, headers=headers, params=params, timeout=timeout)
+
+
+# Count endpoint: returns a COUNT, never job rows. Used by the watermark
+# visibility audit and by refresh_quota_snapshot().
+_COUNT_ENDPOINT = "/v1/active-jb-count"
+
+
+def _iso_z(dt: datetime) -> str:
+    return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _valid_billing_date(raw: Any) -> str:
+    """Return ``raw`` only when it parses the way the governor will parse it.
+
+    Mirrors ``fantastic_governor._parse_iso`` exactly. An unparseable date is
+    persisted as "" rather than stored verbatim: a garbage value would otherwise
+    become a NEW ledger cycle key on every run, repeatedly rolling the cycle (and
+    zeroing the local spend counter that the ledger-authoritative path relies on).
+    Blank simply means "unknown reset", which the governor already treats as a
+    conservative 30-day horizon.
+    """
+    if not raw:
+        return ""
+    try:
+        datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        return ""
+    return str(raw).strip()
 
 
 def _is_pii(key: str) -> bool:
@@ -908,27 +937,186 @@ def build_ats_params(title_advanced_expr: str) -> Dict[str, Any]:
 # provider; downstream company x function grouping handles enrichment dedupe.
 
 
+def _fsync_dir(directory: str) -> None:
+    """Best-effort fsync of a DIRECTORY so a completed rename survives power loss.
+
+    POSIX only: Windows cannot open a directory handle for fsync, and the local
+    dev/test environment does not need the guarantee (production is Linux).
+    Never fatal -- if the platform or filesystem refuses, the snapshot content is
+    already fsynced and the rename is still atomic; only durability of the rename
+    across an abrupt power loss is weakened, never correctness.
+    """
+    if os.name != "posix":
+        return
+    fd = None
+    try:
+        fd = os.open(directory, os.O_RDONLY)
+        os.fsync(fd)
+    except Exception:  # noqa: BLE001 - strictly best-effort; must never propagate
+        pass           # (it runs AFTER a successful publish, so raising here would
+                       #  wrongly report failure for a snapshot that IS on disk)
+    finally:
+        if fd is not None:
+            try:
+                os.close(fd)
+            except Exception:  # noqa: BLE001
+                pass
+
+
+def _write_quota_snapshot(*, jobs_remaining: Optional[int], requests_remaining: Optional[int],
+                          next_billing_date: Any, jobs_limit: Optional[int] = None,
+                          requests_limit: Optional[int] = None) -> bool:
+    """Atomically persist ONE quota snapshot in the single `fantastic-quota-snapshot/1`
+    format. Returns True only when the file was actually replaced.
+
+    The optional ``*_limit`` fields are appended ONLY when supplied, so the
+    acquisition path (which tracks no limits) keeps writing exactly the historical
+    key set and no second/incompatible snapshot format is introduced.
+    """
+    path = str(getattr(config, "FANTASTIC_QUOTA_SNAPSHOT_PATH", "") or "")
+    if not path or jobs_remaining is None:
+        return False
+    snap: Dict[str, Any] = {"schema": "fantastic-quota-snapshot/1",
+                            "jobs_remaining": jobs_remaining,
+                            "requests_remaining": requests_remaining,
+                            "next_billing_date": next_billing_date,
+                            "captured_at": datetime.now(timezone.utc).isoformat()}
+    if jobs_limit is not None:
+        snap["jobs_limit"] = jobs_limit
+    if requests_limit is not None:
+        snap["requests_limit"] = requests_limit
+    directory = os.path.dirname(path) or "."
+    tmp_path = ""
+    try:
+        os.makedirs(directory, exist_ok=True)
+        # UNIQUE temp file in the DESTINATION directory: same filesystem (so the
+        # replace is a true atomic rename) and no fixed name, so two concurrent
+        # writers can never share -- or delete -- each other's temp file.
+        handle, tmp_path = tempfile.mkstemp(dir=directory, prefix=".quota-snapshot-",
+                                            suffix=".tmp")
+        with os.fdopen(handle, "w", encoding="utf-8") as fh:
+            json.dump(snap, fh)
+            fh.flush()
+            os.fsync(fh.fileno())       # CONTENT durable before it is published
+        os.replace(tmp_path, path)      # atomic publish; readers see old or new
+        tmp_path = ""                   # ownership transferred; nothing to clean
+    except (OSError, ValueError, TypeError) as exc:
+        logger.warning("quota snapshot not persisted: %s", type(exc).__name__)
+        return False
+    finally:
+        # Remove ONLY our own temp file, and only when the publish did not happen.
+        if tmp_path:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+    # PUBLISHED. Making the RENAME durable is strictly best-effort and lives
+    # OUTSIDE the try: it must never turn an already-published snapshot into a
+    # reported failure (which would block acquisition on a snapshot that is on disk).
+    try:
+        _fsync_dir(directory)
+    except Exception:  # noqa: BLE001 - belt-and-braces around a best-effort helper
+        pass
+    return True
+
+
 def _save_quota_snapshot(quota: "_QuotaState", metrics: Dict[str, Any]) -> None:
     """Persist the last-known provider quota headers so the NEXT run's governor can
     read remaining credits / reset date without a row-producing call. Best-effort."""
-    path = str(getattr(config, "FANTASTIC_QUOTA_SNAPSHOT_PATH", "") or "")
-    if not path or quota.jobs_remaining is None:
-        return
-    snap = {"schema": "fantastic-quota-snapshot/1",
-            "jobs_remaining": quota.jobs_remaining,
-            "requests_remaining": quota.requests_remaining,
-            "next_billing_date": metrics.get("next_billing_date", ""),
-            "captured_at": datetime.now(timezone.utc).isoformat()}
+    _write_quota_snapshot(jobs_remaining=quota.jobs_remaining,
+                          requests_remaining=quota.requests_remaining,
+                          next_billing_date=metrics.get("next_billing_date", ""))
+
+
+def refresh_quota_snapshot(http_get: Optional[HttpGet] = None) -> Dict[str, Any]:
+    """Refresh the persisted provider quota snapshot with EXACTLY ONE count request.
+
+    Why this exists: ``_save_quota_snapshot`` is only reachable from inside
+    :func:`acquire`, so once the governor grants 0 the snapshot that caused the 0
+    can never be rewritten -- the zero-budget state survives even a real provider
+    quota reset. This is the only 0-row path that can break that deadlock.
+
+    Contract:
+      * ONE request to the count endpoint. No retry, no pagination, no job rows.
+      * FAIL CLOSED. Any failure (exception, timeout, non-200, missing or
+        malformed quota metadata, unwritable snapshot) leaves the persisted
+        snapshot untouched and reports ``refreshed=False``. Unknown provider state
+        is NEVER converted into permission to spend credits.
+
+    Returns a dict describing the attempt; never raises.
+    """
+    out: Dict[str, Any] = {"refreshed": False, "reason": "", "http_status": None,
+                           "requests_made": 0, "jobs_remaining": None,
+                           "jobs_limit": None, "next_billing_date": None,
+                           "endpoint": _COUNT_ENDPOINT}
     try:
-        d = os.path.dirname(path)
-        if d:
-            os.makedirs(d, exist_ok=True)
-        tmp = f"{path}.tmp"
-        with open(tmp, "w", encoding="utf-8") as fh:
-            json.dump(snap, fh)
-        os.replace(tmp, path)
-    except OSError as exc:
-        logger.warning("quota snapshot not persisted: %s", type(exc).__name__)
+        key = str(getattr(config, "FANTASTIC_JOBS_API_KEY", "") or "")
+        if not key:
+            out["reason"] = "no_api_key"
+            return out
+        base = str(getattr(config, "FANTASTIC_JOBS_BASE_URL", "") or "").rstrip("/")
+        if not base:
+            out["reason"] = "no_base_url"
+            return out
+        getter = http_get or _http_get
+        # Narrowest useful window: the count VALUE is incidental, the response
+        # HEADERS are the payload. date_created_gte/lt are proven-honored filters.
+        now = datetime.now(timezone.utc).replace(microsecond=0)
+        params = {"source": "linkedin", "exclude_ats_duplicate": "true",
+                  "date_created_gte": _iso_z(now - timedelta(hours=1)),
+                  "date_created_lt": _iso_z(now)}
+        out["requests_made"] = 1  # counted as ATTEMPTED: an exception below is still one call
+        resp = getter(f"{base}{_COUNT_ENDPOINT}",
+                      headers={"Authorization": f"Bearer {key}"},
+                      params=params,
+                      timeout=int(getattr(config, "FANTASTIC_JOBS_REQUEST_TIMEOUT_SECONDS", 30) or 30))
+        status = getattr(resp, "status_code", None)
+        out["http_status"] = status
+        if status != 200:
+            out["reason"] = f"http_{status}"
+            return out
+        quota = _read_quota(getattr(resp, "headers", {}) or {})
+        jobs_remaining = quota.get("jobs_remaining")
+        # REQUIRED field. `_read_quota` already yields None for absent/unparseable
+        # headers, so this rejects missing AND malformed values. Every other quota
+        # header is OPTIONAL metadata (see the module docstring of the test suite).
+        if not isinstance(jobs_remaining, int) or isinstance(jobs_remaining, bool):
+            out["reason"] = "missing_quota_metadata"
+            return out
+        jobs_limit = quota.get("jobs_limit")
+        clamps: List[str] = []
+        # Negative remaining means EXHAUSTED, matching the governor's own header
+        # convention (Gate-A BUG 3) -- one interpretation across the codebase.
+        if jobs_remaining < 0:
+            jobs_remaining = 0
+            clamps.append("negative_to_zero")
+        # Incoherent metadata (remaining > limit) is clamped DOWN to the limit:
+        # conservative, and still breaks the deadlock. Rejecting outright would let
+        # one odd provider response deadlock acquisition permanently.
+        if isinstance(jobs_limit, int) and not isinstance(jobs_limit, bool) \
+                and jobs_limit > 0 and jobs_remaining > jobs_limit:
+            jobs_remaining = jobs_limit
+            clamps.append("remaining_gt_limit")
+        nbd = _valid_billing_date(quota.get("next_billing_date"))
+        if not _write_quota_snapshot(jobs_remaining=jobs_remaining,
+                                     requests_remaining=quota.get("requests_remaining"),
+                                     next_billing_date=nbd,
+                                     jobs_limit=jobs_limit,
+                                     requests_limit=quota.get("requests_limit")):
+            out["reason"] = "snapshot_not_persisted"
+            return out
+        if clamps:
+            logger.warning("quota headers clamped before persisting: %s", ",".join(clamps))
+        out.update({"refreshed": True, "reason": "ok", "jobs_remaining": jobs_remaining,
+                    "jobs_limit": jobs_limit, "next_billing_date": nbd,
+                    "requests_remaining": quota.get("requests_remaining"),
+                    "clamps": clamps})
+        return out
+    except Exception as exc:  # noqa: BLE001 - fail closed on ANY provider/IO failure
+        out["reason"] = f"error:{type(exc).__name__}"
+        logger.warning("quota refresh failed (%s); keeping the existing zero-budget decision",
+                       type(exc).__name__)
+        return out
 
 
 def load_quota_snapshot() -> Dict[str, Any]:
@@ -1020,7 +1208,7 @@ class DateCreatedWatermarkEngine:
 
     @staticmethod
     def _iso(dt: datetime) -> str:
-        return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        return _iso_z(dt)
 
     # -- window ------------------------------------------------------------------
     def open(self) -> None:
@@ -1158,7 +1346,7 @@ def audit_closed_windows(http_get: HttpGet, base_params: Dict[str, Any],
         params["date_created_gte"] = target["lower"]
         params["date_created_lt"] = target["upper"]
         params.pop("limit", None); params.pop("offset", None)
-        url = f"{config.FANTASTIC_JOBS_BASE_URL.rstrip('/')}/v1/active-jb-count"
+        url = f"{config.FANTASTIC_JOBS_BASE_URL.rstrip('/')}{_COUNT_ENDPOINT}"
         headers = {"Authorization": f"Bearer {config.FANTASTIC_JOBS_API_KEY}"}
         resp = http_get(url, headers=headers, params=params,
                         timeout=config.FANTASTIC_JOBS_REQUEST_TIMEOUT_SECONDS)

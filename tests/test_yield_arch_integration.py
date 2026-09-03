@@ -240,7 +240,13 @@ class GovernorTopupWiringTests(unittest.TestCase):
                     FANTASTIC_GOVERNOR_AUTO_ARM=False,
                                  FANTASTIC_BILLING_RESET_AT="", FANTASTIC_GOVERNOR_LEDGER_PATH=state_files["ledger"],
                                  FANTASTIC_QUOTA_SNAPSHOT_PATH=state_files["snap"], YIELD_LEDGER_ENABLED=True,
-                                 YIELD_LEDGER_PATH=state_files["yl"], FANTASTIC_DATE_CREATED_WATERMARK_ENABLED=False):
+                                 YIELD_LEDGER_PATH=state_files["yl"], FANTASTIC_DATE_CREATED_WATERMARK_ENABLED=False,
+                                 # This harness drives a FAKE lane runner, so the real
+                                 # adapter must stay disabled -- otherwise the zero-budget
+                                 # case would enter quota recovery and (in an environment
+                                 # that happens to export a real key) issue a live count
+                                 # request from the test suite.
+                                 FANTASTIC_JOBS_ENABLED=False):
             with mock.patch.object(Orchestrator, "_count_net_new_send_safe", staticmethod(lambda l, d: 0)):
                 res = Orchestrator(ctx, st, RequestBudget(limit=10_000)).run(plan)
         return res, state_files

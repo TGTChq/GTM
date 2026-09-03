@@ -388,6 +388,16 @@ class Orchestrator:
         # raise this cap. Inputs are the LAST KNOWN provider headers (0-credit quota
         # snapshot) -- never a row-producing call. Flag OFF => cap unchanged (6000).
         gov = self._build_governor()
+        # ZERO-BUDGET QUOTA RECOVERY: the quota snapshot the governor reads is only
+        # written from INSIDE acquire(), so a zero grant freezes the very input that
+        # caused it -- the run then stops before acquisition, nothing rewrites the
+        # snapshot, and the zero survives even a real provider quota reset. When (and
+        # only when) the zero was derived from provider-quota metadata, spend ONE
+        # 0-row count request to re-read the provider's quota headers and rebuild the
+        # governor ONCE. Deliberately placed BEFORE run_cap/controller are derived so
+        # a recovered budget flows through the normal path with no recompute. Fail
+        # closed: the original decision stands unless the refresh actually succeeded.
+        gov, quota_refresh = self._maybe_refresh_quota(gov)
         run_cap = int(config.FANTASTIC_JOBS_MAX_JOBS_PER_RUN)
         budget_source = "per_run_ceiling"
         if gov.run_budget is not None and gov.run_budget < run_cap:
@@ -648,7 +658,7 @@ class Orchestrator:
             "run": self.ctx.to_dict(),
             "lanes": {lane: r.to_dict() for lane, r in lane_results.items()},
             "acquisition": acquisition_block,
-            "governor": gov.to_dict(),
+            "governor": {**gov.to_dict(), "quota_refresh": quota_refresh},
             "yield_ledger": ledger.summary(),
             "emails": emails_block,
             "waterfall": report.to_dict(),
@@ -696,6 +706,80 @@ class Orchestrator:
                 spendable_credits=0, reserve_credits=0, base_daily_allowance=0,
                 carry_forward_applied=0, days_remaining=0.0, inventory_capped=False,
                 provider_authoritative=False))
+
+    def _maybe_refresh_quota(self, gov):
+        """At most ONE provider quota refresh per run, then at most ONE rebuild.
+
+        Returns ``(governor_context, info)``. The context returned is the ORIGINAL
+        one unless a refresh genuinely succeeded, so every failure mode (disabled,
+        non-quota reason, transport error, non-200, missing/malformed headers,
+        unwritable snapshot) preserves today's zero-budget behaviour exactly.
+        Never raises: recovery must not be able to break a run.
+        """
+        info: Dict[str, Any] = {"attempted": False, "refreshed": False, "reason": "",
+                                "requests_made": 0, "budget_before": None,
+                                "budget_after": None}
+        try:
+            from orchestrator import fantastic_governor as G
+            info["budget_before"] = gov.run_budget
+            if gov.run_budget is None or gov.decision is None:
+                info["reason"] = "governor_not_governing"
+                return gov, info
+            if gov.run_budget > 0:
+                info["reason"] = "budget_positive"
+                return gov, info
+            # Only a zero DERIVED FROM QUOTA METADATA can be corrected by re-reading
+            # quota; every other zero reason is left untouched.
+            if gov.decision.reason not in G.QUOTA_METADATA_ZERO_REASONS:
+                info["reason"] = f"not_quota_metadata:{gov.decision.reason}"
+                return gov, info
+            if not bool(getattr(config, "FANTASTIC_JOBS_ENABLED", False)):
+                info["reason"] = "fantastic_disabled"
+                return gov, info
+            # PROVIDER-HEADERS-OFF INVARIANT. With FANTASTIC_GOVERNOR_USE_PROVIDER_HEADERS
+            # disabled, build_context() forces provider_reset_at to None and passes
+            # provider_jobs_remaining=None, so `remaining` comes from the LOCAL ledger
+            # and BOTH snapshot fields are ignored -- a refresh cannot change this
+            # run's decision (verified: identical budget/reason for snapshot 236 vs
+            # 100000). Spend no request rather than buy information we may not act on,
+            # and leave the ledger-authoritative policy exactly as it is.
+            if not bool(getattr(config, "FANTASTIC_GOVERNOR_USE_PROVIDER_HEADERS", True)):
+                info["reason"] = "provider_headers_disabled"
+                return gov, info
+
+            import fantastic_jobs_adapter as _fja
+            info["attempted"] = True
+            res = _fja.refresh_quota_snapshot()
+            info["requests_made"] = int(res.get("requests_made", 0) or 0)
+            info["reason"] = str(res.get("reason", "") or "")
+            info["http_status"] = res.get("http_status")
+            if not res.get("refreshed"):
+                info["budget_after"] = gov.run_budget      # unchanged (fail closed)
+                print(f"[governor] quota refresh did not yield provider truth "
+                      f"({info['reason']}); keeping the zero-budget decision")
+                return gov, info
+            info["refreshed"] = True
+            info["jobs_remaining"] = res.get("jobs_remaining")
+            info["next_billing_date"] = res.get("next_billing_date")
+            # Rebuild EXACTLY once. This method runs once per run, so no second
+            # refresh and no recursion is reachable from here. A rebuild failure is
+            # named distinctly (the snapshot IS repaired, but this run keeps its
+            # original zero) so observability never shows a bare "ok" with no budget.
+            try:
+                new_gov = self._build_governor()
+            except Exception as exc:  # noqa: BLE001
+                info["reason"] = f"rebuild_failed:{type(exc).__name__}"
+                info["budget_after"] = gov.run_budget
+                return gov, info
+            info["budget_after"] = new_gov.run_budget
+            print(f"[governor] quota snapshot refreshed (0 job rows, 1 request): "
+                  f"budget {info['budget_before']} -> {info['budget_after']}")
+            return new_gov, info
+        except Exception as exc:  # noqa: BLE001 - recovery must never break a run
+            info["reason"] = info["reason"] or f"error:{type(exc).__name__}"
+            print(f"[governor] quota refresh skipped ({type(exc).__name__}); "
+                  f"keeping the zero-budget decision")
+            return gov, info
 
     def _commit_governor(self, gov, *, billed: int) -> None:
         try:
