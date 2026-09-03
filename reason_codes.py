@@ -33,6 +33,15 @@ class ReasonCode(str, Enum):
     REJECT_MULTI_JOB_ROUNDUP = "REJECT_MULTI_JOB_ROUNDUP"
     REJECT_EMPLOYER_POSTING_MISMATCH = "REJECT_EMPLOYER_POSTING_MISMATCH"
     REJECT_MALFORMED_TITLE = "REJECT_MALFORMED_TITLE"
+    #: A local quality-guard rejection with no more specific mapping. Previously
+    #: these fell through to REJECT_UNRESOLVABLE_POSTING, which reads as "we could
+    #: not resolve the posting" -- so 704 of 4,231 records in one measured corpus
+    #: were reported as source-resolution failures when every one was a business
+    #: rule firing (seniority 310, employer identity 332, staffing/RPO 25). The
+    #: true source-resolution surface in that corpus was 4 records. A run report
+    #: that misnames its largest rejection cluster sends the next investigation at
+    #: the wrong target, which is exactly what happened.
+    REJECT_QUALITY_GUARD_OTHER = "REJECT_QUALITY_GUARD_OTHER"
     UNVERIFIED_OFFICIAL_SOURCE = "UNVERIFIED_OFFICIAL_SOURCE"
     UNVERIFIED_SOURCE_TIMEOUT = "UNVERIFIED_SOURCE_TIMEOUT"
     UNVERIFIED_SOURCE_CONFLICT = "UNVERIFIED_SOURCE_CONFLICT"
