@@ -1,0 +1,1092 @@
+{
+  "schema": "tgtc-outbound-wave1-claims/1",
+  "note": "STATIC registry. Outbound Wave 1 performs NO runtime web lookup. A claim that is not registered here cannot render. Economics entries ship unpopulated on purpose: no TGTC public role page or published price exists in this repository, so nothing may be quoted until an operator fills in the exact published URL and number for that exact canonical role.",
+  "how_to_populate": {
+    "role_pages": "Set url to the live TGTC public role/team page for THAT canonical role. Set economics_available true and claim_source to the same published URL only when that page publishes a monthly cost for that exact role; put the published figure in monthly_cost_usd. Set local_comparison_published true only when the page also publishes the typical local cost comparison.",
+    "claims": "Set verified true and claim_source to the public URL that backs the wording. An unverified claim is never rendered; the campaign uses its safe wording."
+  },
+  "claims": {
+    "remote_readiness_1000_hires": {
+      "text": "remote-readiness assessment built from 1,000+ hires",
+      "verified": true,
+      "claim_source": "wave1_frozen_spec:people_hr_remote_readiness",
+      "note": "Wording frozen by the Wave 1 specification as verified. Replace claim_source with the public URL when one is published."
+    },
+    "gtm_combination_directly_tested": {
+      "text": "",
+      "verified": false,
+      "claim_source": "",
+      "note": "Would license 'we test this exact combination directly' in GTM SYSTEMS. Unverified, so the campaign renders the safe role-specific-work wording."
+    },
+    "ai_live_llm_evaluation": {
+      "text": "",
+      "verified": false,
+      "claim_source": "",
+      "note": "Would license the live-LLM evaluation claim in AI & TECHNICAL AUTOMATION. Unverified, so the campaign renders the safe role-specific-work wording."
+    }
+  },
+  "role_pages": {
+    "AI Automation Engineer": {
+      "canonical_role": "AI Automation Engineer",
+      "function_bucket": "engineering",
+      "url": "",
+      "economics_available": false,
+      "monthly_cost_usd": null,
+      "local_comparison_published": false,
+      "claim_source": ""
+    },
+    "AI Content Specialist": {
+      "canonical_role": "AI Content Specialist",
+      "function_bucket": "marketing",
+      "url": "",
+      "economics_available": false,
+      "monthly_cost_usd": null,
+      "local_comparison_published": false,
+      "claim_source": ""
+    },
+    "AI Data Annotator": {
+      "canonical_role": "AI Data Annotator",
+      "function_bucket": "engineering",
+      "url": "",
+      "economics_available": false,
+      "monthly_cost_usd": null,
+      "local_comparison_published": false,
+      "claim_source": ""
+    },
+    "AI Engineer": {
+      "canonical_role": "AI Engineer",
+      "function_bucket": "engineering",
+      "url": "",
+      "economics_available": false,
+      "monthly_cost_usd": null,
+      "local_comparison_published": false,
+      "claim_source": ""
+    },
+    "AI Operations Specialist": {
+      "canonical_role": "AI Operations Specialist",
+      "function_bucket": "operations",
+      "url": "",
+      "economics_available": false,
+      "monthly_cost_usd": null,
+      "local_comparison_published": false,
+      "claim_source": ""
+    },
+    "AP Specialist": {
+      "canonical_role": "AP Specialist",
+      "function_bucket": "finance",
+      "url": "",
+      "economics_available": false,
+      "monthly_cost_usd": null,
+      "local_comparison_published": false,
+      "claim_source": ""
+    },
+    "AR Specialist": {
+      "canonical_role": "AR Specialist",
+      "function_bucket": "finance",
+      "url": "",
+      "economics_available": false,
+      "monthly_cost_usd": null,
+      "local_comparison_published": false,
+      "claim_source": ""
+    },
+    "Account Executive": {
+      "canonical_role": "Account Executive",
+      "function_bucket": "gtm_revenue",
+      "url": "",
+      "economics_available": false,
+      "monthly_cost_usd": null,
+      "local_comparison_published": false,
+      "claim_source": ""
+    },
+    "Account Manager": {
+      "canonical_role": "Account Manager",
+      "function_bucket": "gtm_revenue",
+      "url": "",
+      "economics_available": false,
+      "monthly_cost_usd": null,
+      "local_comparison_published": false,
+      "claim_source": ""
+    },
+    "Accountant": {
+      "canonical_role": "Accountant",
+      "function_bucket": "finance",
+      "url": "",
+      "economics_available": false,
+      "monthly_cost_usd": null,
+      "local_comparison_published": false,
+      "claim_source": ""
+    },
+    "Administrative Assistant": {
+      "canonical_role": "Administrative Assistant",
+      "function_bucket": "operations",
+      "url": "",
+      "economics_available": false,
+      "monthly_cost_usd": null,
+      "local_comparison_published": false,
+      "claim_source": ""
+    },
+    "Amazon Marketplace Specialist": {
+      "canonical_role": "Amazon Marketplace Specialist",
+      "function_bucket": "ecommerce",
+      "url": "",
+      "economics_available": false,
+      "monthly_cost_usd": null,
+      "local_comparison_published": false,
+      "claim_source": ""
+    },
+    "Automation Specialist": {
+      "canonical_role": "Automation Specialist",
+      "function_bucket": "engineering",
+      "url": "",
+      "economics_available": false,
+      "monthly_cost_usd": null,
+      "local_comparison_published": false,
+      "claim_source": ""
+    },
+    "Backend Developer": {
+      "canonical_role": "Backend Developer",
+      "function_bucket": "engineering",
+      "url": "",
+      "economics_available": false,
+      "monthly_cost_usd": null,
+      "local_comparison_published": false,
+      "claim_source": ""
+    },
+    "Benefits Administrator": {
+      "canonical_role": "Benefits Administrator",
+      "function_bucket": "people_hr",
+      "url": "",
+      "economics_available": false,
+      "monthly_cost_usd": null,
+      "local_comparison_published": false,
+      "claim_source": ""
+    },
+    "Bilingual Customer Support Representative": {
+      "canonical_role": "Bilingual Customer Support Representative",
+      "function_bucket": "customer_support",
+      "url": "",
+      "economics_available": false,
+      "monthly_cost_usd": null,
+      "local_comparison_published": false,
+      "claim_source": ""
+    },
+    "Billing Specialist": {
+      "canonical_role": "Billing Specialist",
+      "function_bucket": "finance",
+      "url": "",
+      "economics_available": false,
+      "monthly_cost_usd": null,
+      "local_comparison_published": false,
+      "claim_source": ""
+    },
+    "Bookkeeper": {
+      "canonical_role": "Bookkeeper",
+      "function_bucket": "finance",
+      "url": "",
+      "economics_available": false,
+      "monthly_cost_usd": null,
+      "local_comparison_published": false,
+      "claim_source": ""
+    },
+    "Brand Manager": {
+      "canonical_role": "Brand Manager",
+      "function_bucket": "marketing",
+      "url": "",
+      "economics_available": false,
+      "monthly_cost_usd": null,
+      "local_comparison_published": false,
+      "claim_source": ""
+    },
+    "Business Development Representative": {
+      "canonical_role": "Business Development Representative",
+      "function_bucket": "gtm_revenue",
+      "url": "",
+      "economics_available": false,
+      "monthly_cost_usd": null,
+      "local_comparison_published": false,
+      "claim_source": ""
+    },
+    "Business Intelligence Analyst": {
+      "canonical_role": "Business Intelligence Analyst",
+      "function_bucket": "engineering",
+      "url": "",
+      "economics_available": false,
+      "monthly_cost_usd": null,
+      "local_comparison_published": false,
+      "claim_source": ""
+    },
+    "Business Operations Specialist": {
+      "canonical_role": "Business Operations Specialist",
+      "function_bucket": "operations",
+      "url": "",
+      "economics_available": false,
+      "monthly_cost_usd": null,
+      "local_comparison_published": false,
+      "claim_source": ""
+    },
+    "CRM Administrator": {
+      "canonical_role": "CRM Administrator",
+      "function_bucket": "gtm_revenue",
+      "url": "",
+      "economics_available": false,
+      "monthly_cost_usd": null,
+      "local_comparison_published": false,
+      "claim_source": ""
+    },
+    "CRM Marketing Specialist": {
+      "canonical_role": "CRM Marketing Specialist",
+      "function_bucket": "marketing",
+      "url": "",
+      "economics_available": false,
+      "monthly_cost_usd": null,
+      "local_comparison_published": false,
+      "claim_source": ""
+    },
+    "Catalog Specialist": {
+      "canonical_role": "Catalog Specialist",
+      "function_bucket": "ecommerce",
+      "url": "",
+      "economics_available": false,
+      "monthly_cost_usd": null,
+      "local_comparison_published": false,
+      "claim_source": ""
+    },
+    "Chatbot Specialist": {
+      "canonical_role": "Chatbot Specialist",
+      "function_bucket": "engineering",
+      "url": "",
+      "economics_available": false,
+      "monthly_cost_usd": null,
+      "local_comparison_published": false,
+      "claim_source": ""
+    },
+    "Cloud Engineer": {
+      "canonical_role": "Cloud Engineer",
+      "function_bucket": "engineering",
+      "url": "",
+      "economics_available": false,
+      "monthly_cost_usd": null,
+      "local_comparison_published": false,
+      "claim_source": ""
+    },
+    "Collections Specialist": {
+      "canonical_role": "Collections Specialist",
+      "function_bucket": "finance",
+      "url": "",
+      "economics_available": false,
+      "monthly_cost_usd": null,
+      "local_comparison_published": false,
+      "claim_source": ""
+    },
+    "Community Manager": {
+      "canonical_role": "Community Manager",
+      "function_bucket": "customer_support",
+      "url": "",
+      "economics_available": false,
+      "monthly_cost_usd": null,
+      "local_comparison_published": false,
+      "claim_source": ""
+    },
+    "Compensation Analyst": {
+      "canonical_role": "Compensation Analyst",
+      "function_bucket": "people_hr",
+      "url": "",
+      "economics_available": false,
+      "monthly_cost_usd": null,
+      "local_comparison_published": false,
+      "claim_source": ""
+    },
+    "Content Marketing Specialist": {
+      "canonical_role": "Content Marketing Specialist",
+      "function_bucket": "marketing",
+      "url": "",
+      "economics_available": false,
+      "monthly_cost_usd": null,
+      "local_comparison_published": false,
+      "claim_source": ""
+    },
+    "Content Writer": {
+      "canonical_role": "Content Writer",
+      "function_bucket": "marketing",
+      "url": "",
+      "economics_available": false,
+      "monthly_cost_usd": null,
+      "local_comparison_published": false,
+      "claim_source": ""
+    },
+    "Conversational AI Specialist": {
+      "canonical_role": "Conversational AI Specialist",
+      "function_bucket": "engineering",
+      "url": "",
+      "economics_available": false,
+      "monthly_cost_usd": null,
+      "local_comparison_published": false,
+      "claim_source": ""
+    },
+    "Copywriter": {
+      "canonical_role": "Copywriter",
+      "function_bucket": "marketing",
+      "url": "",
+      "economics_available": false,
+      "monthly_cost_usd": null,
+      "local_comparison_published": false,
+      "claim_source": ""
+    },
+    "Customer Experience Specialist": {
+      "canonical_role": "Customer Experience Specialist",
+      "function_bucket": "customer_support",
+      "url": "",
+      "economics_available": false,
+      "monthly_cost_usd": null,
+      "local_comparison_published": false,
+      "claim_source": ""
+    },
+    "Customer Onboarding Specialist": {
+      "canonical_role": "Customer Onboarding Specialist",
+      "function_bucket": "customer_success",
+      "url": "",
+      "economics_available": false,
+      "monthly_cost_usd": null,
+      "local_comparison_published": false,
+      "claim_source": ""
+    },
+    "Customer Operations Specialist": {
+      "canonical_role": "Customer Operations Specialist",
+      "function_bucket": "operations",
+      "url": "",
+      "economics_available": false,
+      "monthly_cost_usd": null,
+      "local_comparison_published": false,
+      "claim_source": ""
+    },
+    "Customer Retention Specialist": {
+      "canonical_role": "Customer Retention Specialist",
+      "function_bucket": "customer_success",
+      "url": "",
+      "economics_available": false,
+      "monthly_cost_usd": null,
+      "local_comparison_published": false,
+      "claim_source": ""
+    },
+    "Customer Success Associate": {
+      "canonical_role": "Customer Success Associate",
+      "function_bucket": "customer_success",
+      "url": "",
+      "economics_available": false,
+      "monthly_cost_usd": null,
+      "local_comparison_published": false,
+      "claim_source": ""
+    },
+    "Customer Success Manager": {
+      "canonical_role": "Customer Success Manager",
+      "function_bucket": "customer_success",
+      "url": "",
+      "economics_available": false,
+      "monthly_cost_usd": null,
+      "local_comparison_published": false,
+      "claim_source": ""
+    },
+    "Customer Support": {
+      "canonical_role": "Customer Support",
+      "function_bucket": "customer_support",
+      "url": "",
+      "economics_available": false,
+      "monthly_cost_usd": null,
+      "local_comparison_published": false,
+      "claim_source": ""
+    },
+    "Customer Support Representative": {
+      "canonical_role": "Customer Support Representative",
+      "function_bucket": "customer_support",
+      "url": "",
+      "economics_available": false,
+      "monthly_cost_usd": null,
+      "local_comparison_published": false,
+      "claim_source": ""
+    },
+    "Data Analyst": {
+      "canonical_role": "Data Analyst",
+      "function_bucket": "engineering",
+      "url": "",
+      "economics_available": false,
+      "monthly_cost_usd": null,
+      "local_comparison_published": false,
+      "claim_source": ""
+    },
+    "Data Engineer": {
+      "canonical_role": "Data Engineer",
+      "function_bucket": "engineering",
+      "url": "",
+      "economics_available": false,
+      "monthly_cost_usd": null,
+      "local_comparison_published": false,
+      "claim_source": ""
+    },
+    "Data Entry Specialist": {
+      "canonical_role": "Data Entry Specialist",
+      "function_bucket": "operations",
+      "url": "",
+      "economics_available": false,
+      "monthly_cost_usd": null,
+      "local_comparison_published": false,
+      "claim_source": ""
+    },
+    "Data Labeling Specialist": {
+      "canonical_role": "Data Labeling Specialist",
+      "function_bucket": "engineering",
+      "url": "",
+      "economics_available": false,
+      "monthly_cost_usd": null,
+      "local_comparison_published": false,
+      "claim_source": ""
+    },
+    "Data Scientist": {
+      "canonical_role": "Data Scientist",
+      "function_bucket": "engineering",
+      "url": "",
+      "economics_available": false,
+      "monthly_cost_usd": null,
+      "local_comparison_published": false,
+      "claim_source": ""
+    },
+    "Database Administrator": {
+      "canonical_role": "Database Administrator",
+      "function_bucket": "engineering",
+      "url": "",
+      "economics_available": false,
+      "monthly_cost_usd": null,
+      "local_comparison_published": false,
+      "claim_source": ""
+    },
+    "Deal Desk Analyst": {
+      "canonical_role": "Deal Desk Analyst",
+      "function_bucket": "gtm_revenue",
+      "url": "",
+      "economics_available": false,
+      "monthly_cost_usd": null,
+      "local_comparison_published": false,
+      "claim_source": ""
+    },
+    "DevOps Engineer": {
+      "canonical_role": "DevOps Engineer",
+      "function_bucket": "engineering",
+      "url": "",
+      "economics_available": false,
+      "monthly_cost_usd": null,
+      "local_comparison_published": false,
+      "claim_source": ""
+    },
+    "Digital Marketing Specialist": {
+      "canonical_role": "Digital Marketing Specialist",
+      "function_bucket": "marketing",
+      "url": "",
+      "economics_available": false,
+      "monthly_cost_usd": null,
+      "local_comparison_published": false,
+      "claim_source": ""
+    },
+    "E-commerce Manager": {
+      "canonical_role": "E-commerce Manager",
+      "function_bucket": "ecommerce",
+      "url": "",
+      "economics_available": false,
+      "monthly_cost_usd": null,
+      "local_comparison_published": false,
+      "claim_source": ""
+    },
+    "Email Marketing Specialist": {
+      "canonical_role": "Email Marketing Specialist",
+      "function_bucket": "marketing",
+      "url": "",
+      "economics_available": false,
+      "monthly_cost_usd": null,
+      "local_comparison_published": false,
+      "claim_source": ""
+    },
+    "Executive Assistant": {
+      "canonical_role": "Executive Assistant",
+      "function_bucket": "operations",
+      "url": "",
+      "economics_available": false,
+      "monthly_cost_usd": null,
+      "local_comparison_published": false,
+      "claim_source": ""
+    },
+    "FP&A Analyst": {
+      "canonical_role": "FP&A Analyst",
+      "function_bucket": "finance",
+      "url": "",
+      "economics_available": false,
+      "monthly_cost_usd": null,
+      "local_comparison_published": false,
+      "claim_source": ""
+    },
+    "Financial Analyst": {
+      "canonical_role": "Financial Analyst",
+      "function_bucket": "finance",
+      "url": "",
+      "economics_available": false,
+      "monthly_cost_usd": null,
+      "local_comparison_published": false,
+      "claim_source": ""
+    },
+    "Frontend Developer": {
+      "canonical_role": "Frontend Developer",
+      "function_bucket": "engineering",
+      "url": "",
+      "economics_available": false,
+      "monthly_cost_usd": null,
+      "local_comparison_published": false,
+      "claim_source": ""
+    },
+    "Full Stack Developer": {
+      "canonical_role": "Full Stack Developer",
+      "function_bucket": "engineering",
+      "url": "",
+      "economics_available": false,
+      "monthly_cost_usd": null,
+      "local_comparison_published": false,
+      "claim_source": ""
+    },
+    "GTM Engineer": {
+      "canonical_role": "GTM Engineer",
+      "function_bucket": "gtm_revenue",
+      "url": "",
+      "economics_available": false,
+      "monthly_cost_usd": null,
+      "local_comparison_published": false,
+      "claim_source": ""
+    },
+    "Graphic Designer": {
+      "canonical_role": "Graphic Designer",
+      "function_bucket": "marketing",
+      "url": "",
+      "economics_available": false,
+      "monthly_cost_usd": null,
+      "local_comparison_published": false,
+      "claim_source": ""
+    },
+    "Growth Marketing Specialist": {
+      "canonical_role": "Growth Marketing Specialist",
+      "function_bucket": "marketing",
+      "url": "",
+      "economics_available": false,
+      "monthly_cost_usd": null,
+      "local_comparison_published": false,
+      "claim_source": ""
+    },
+    "HR Administrator": {
+      "canonical_role": "HR Administrator",
+      "function_bucket": "people_hr",
+      "url": "",
+      "economics_available": false,
+      "monthly_cost_usd": null,
+      "local_comparison_published": false,
+      "claim_source": ""
+    },
+    "HR Analyst": {
+      "canonical_role": "HR Analyst",
+      "function_bucket": "people_hr",
+      "url": "",
+      "economics_available": false,
+      "monthly_cost_usd": null,
+      "local_comparison_published": false,
+      "claim_source": ""
+    },
+    "HR Generalist": {
+      "canonical_role": "HR Generalist",
+      "function_bucket": "people_hr",
+      "url": "",
+      "economics_available": false,
+      "monthly_cost_usd": null,
+      "local_comparison_published": false,
+      "claim_source": ""
+    },
+    "HR Operations Specialist": {
+      "canonical_role": "HR Operations Specialist",
+      "function_bucket": "people_hr",
+      "url": "",
+      "economics_available": false,
+      "monthly_cost_usd": null,
+      "local_comparison_published": false,
+      "claim_source": ""
+    },
+    "Implementation Specialist": {
+      "canonical_role": "Implementation Specialist",
+      "function_bucket": "customer_success",
+      "url": "",
+      "economics_available": false,
+      "monthly_cost_usd": null,
+      "local_comparison_published": false,
+      "claim_source": ""
+    },
+    "Inside Sales Representative": {
+      "canonical_role": "Inside Sales Representative",
+      "function_bucket": "gtm_revenue",
+      "url": "",
+      "economics_available": false,
+      "monthly_cost_usd": null,
+      "local_comparison_published": false,
+      "claim_source": ""
+    },
+    "Lead Generation Specialist": {
+      "canonical_role": "Lead Generation Specialist",
+      "function_bucket": "gtm_revenue",
+      "url": "",
+      "economics_available": false,
+      "monthly_cost_usd": null,
+      "local_comparison_published": false,
+      "claim_source": ""
+    },
+    "Learning & Development Specialist": {
+      "canonical_role": "Learning & Development Specialist",
+      "function_bucket": "people_hr",
+      "url": "",
+      "economics_available": false,
+      "monthly_cost_usd": null,
+      "local_comparison_published": false,
+      "claim_source": ""
+    },
+    "Lifecycle Marketing Specialist": {
+      "canonical_role": "Lifecycle Marketing Specialist",
+      "function_bucket": "marketing",
+      "url": "",
+      "economics_available": false,
+      "monthly_cost_usd": null,
+      "local_comparison_published": false,
+      "claim_source": ""
+    },
+    "Listings Specialist": {
+      "canonical_role": "Listings Specialist",
+      "function_bucket": "ecommerce",
+      "url": "",
+      "economics_available": false,
+      "monthly_cost_usd": null,
+      "local_comparison_published": false,
+      "claim_source": ""
+    },
+    "Machine Learning Engineer": {
+      "canonical_role": "Machine Learning Engineer",
+      "function_bucket": "engineering",
+      "url": "",
+      "economics_available": false,
+      "monthly_cost_usd": null,
+      "local_comparison_published": false,
+      "claim_source": ""
+    },
+    "Marketing Analyst": {
+      "canonical_role": "Marketing Analyst",
+      "function_bucket": "marketing",
+      "url": "",
+      "economics_available": false,
+      "monthly_cost_usd": null,
+      "local_comparison_published": false,
+      "claim_source": ""
+    },
+    "Marketing Automation Specialist": {
+      "canonical_role": "Marketing Automation Specialist",
+      "function_bucket": "marketing",
+      "url": "",
+      "economics_available": false,
+      "monthly_cost_usd": null,
+      "local_comparison_published": false,
+      "claim_source": ""
+    },
+    "Marketing Coordinator": {
+      "canonical_role": "Marketing Coordinator",
+      "function_bucket": "marketing",
+      "url": "",
+      "economics_available": false,
+      "monthly_cost_usd": null,
+      "local_comparison_published": false,
+      "claim_source": ""
+    },
+    "Motion Designer": {
+      "canonical_role": "Motion Designer",
+      "function_bucket": "marketing",
+      "url": "",
+      "economics_available": false,
+      "monthly_cost_usd": null,
+      "local_comparison_published": false,
+      "claim_source": ""
+    },
+    "Operations Analyst": {
+      "canonical_role": "Operations Analyst",
+      "function_bucket": "operations",
+      "url": "",
+      "economics_available": false,
+      "monthly_cost_usd": null,
+      "local_comparison_published": false,
+      "claim_source": ""
+    },
+    "PPC Specialist": {
+      "canonical_role": "PPC Specialist",
+      "function_bucket": "marketing",
+      "url": "",
+      "economics_available": false,
+      "monthly_cost_usd": null,
+      "local_comparison_published": false,
+      "claim_source": ""
+    },
+    "Paid Media Specialist": {
+      "canonical_role": "Paid Media Specialist",
+      "function_bucket": "marketing",
+      "url": "",
+      "economics_available": false,
+      "monthly_cost_usd": null,
+      "local_comparison_published": false,
+      "claim_source": ""
+    },
+    "Partnerships Manager": {
+      "canonical_role": "Partnerships Manager",
+      "function_bucket": "gtm_revenue",
+      "url": "",
+      "economics_available": false,
+      "monthly_cost_usd": null,
+      "local_comparison_published": false,
+      "claim_source": ""
+    },
+    "Payroll Specialist": {
+      "canonical_role": "Payroll Specialist",
+      "function_bucket": "finance",
+      "url": "",
+      "economics_available": false,
+      "monthly_cost_usd": null,
+      "local_comparison_published": false,
+      "claim_source": ""
+    },
+    "People Operations Specialist": {
+      "canonical_role": "People Operations Specialist",
+      "function_bucket": "people_hr",
+      "url": "",
+      "economics_available": false,
+      "monthly_cost_usd": null,
+      "local_comparison_published": false,
+      "claim_source": ""
+    },
+    "Performance Marketing Manager": {
+      "canonical_role": "Performance Marketing Manager",
+      "function_bucket": "marketing",
+      "url": "",
+      "economics_available": false,
+      "monthly_cost_usd": null,
+      "local_comparison_published": false,
+      "claim_source": ""
+    },
+    "Performance Marketing Specialist": {
+      "canonical_role": "Performance Marketing Specialist",
+      "function_bucket": "marketing",
+      "url": "",
+      "economics_available": false,
+      "monthly_cost_usd": null,
+      "local_comparison_published": false,
+      "claim_source": ""
+    },
+    "Podcast Editor": {
+      "canonical_role": "Podcast Editor",
+      "function_bucket": "marketing",
+      "url": "",
+      "economics_available": false,
+      "monthly_cost_usd": null,
+      "local_comparison_published": false,
+      "claim_source": ""
+    },
+    "Podcast Producer": {
+      "canonical_role": "Podcast Producer",
+      "function_bucket": "marketing",
+      "url": "",
+      "economics_available": false,
+      "monthly_cost_usd": null,
+      "local_comparison_published": false,
+      "claim_source": ""
+    },
+    "Product Analyst": {
+      "canonical_role": "Product Analyst",
+      "function_bucket": "product",
+      "url": "",
+      "economics_available": false,
+      "monthly_cost_usd": null,
+      "local_comparison_published": false,
+      "claim_source": ""
+    },
+    "Product Designer": {
+      "canonical_role": "Product Designer",
+      "function_bucket": "product",
+      "url": "",
+      "economics_available": false,
+      "monthly_cost_usd": null,
+      "local_comparison_published": false,
+      "claim_source": ""
+    },
+    "Product Marketing Specialist": {
+      "canonical_role": "Product Marketing Specialist",
+      "function_bucket": "marketing",
+      "url": "",
+      "economics_available": false,
+      "monthly_cost_usd": null,
+      "local_comparison_published": false,
+      "claim_source": ""
+    },
+    "Product Support Specialist": {
+      "canonical_role": "Product Support Specialist",
+      "function_bucket": "product",
+      "url": "",
+      "economics_available": false,
+      "monthly_cost_usd": null,
+      "local_comparison_published": false,
+      "claim_source": ""
+    },
+    "Project Coordinator": {
+      "canonical_role": "Project Coordinator",
+      "function_bucket": "operations",
+      "url": "",
+      "economics_available": false,
+      "monthly_cost_usd": null,
+      "local_comparison_published": false,
+      "claim_source": ""
+    },
+    "Prompt Engineer": {
+      "canonical_role": "Prompt Engineer",
+      "function_bucket": "engineering",
+      "url": "",
+      "economics_available": false,
+      "monthly_cost_usd": null,
+      "local_comparison_published": false,
+      "claim_source": ""
+    },
+    "QA Analyst": {
+      "canonical_role": "QA Analyst",
+      "function_bucket": "engineering",
+      "url": "",
+      "economics_available": false,
+      "monthly_cost_usd": null,
+      "local_comparison_published": false,
+      "claim_source": ""
+    },
+    "QA Engineer": {
+      "canonical_role": "QA Engineer",
+      "function_bucket": "engineering",
+      "url": "",
+      "economics_available": false,
+      "monthly_cost_usd": null,
+      "local_comparison_published": false,
+      "claim_source": ""
+    },
+    "Recruiter": {
+      "canonical_role": "Recruiter",
+      "function_bucket": "people_hr",
+      "url": "",
+      "economics_available": false,
+      "monthly_cost_usd": null,
+      "local_comparison_published": false,
+      "claim_source": ""
+    },
+    "Recruiting Coordinator": {
+      "canonical_role": "Recruiting Coordinator",
+      "function_bucket": "people_hr",
+      "url": "",
+      "economics_available": false,
+      "monthly_cost_usd": null,
+      "local_comparison_published": false,
+      "claim_source": ""
+    },
+    "Revenue Accountant": {
+      "canonical_role": "Revenue Accountant",
+      "function_bucket": "finance",
+      "url": "",
+      "economics_available": false,
+      "monthly_cost_usd": null,
+      "local_comparison_published": false,
+      "claim_source": ""
+    },
+    "Revenue Operations Analyst": {
+      "canonical_role": "Revenue Operations Analyst",
+      "function_bucket": "gtm_revenue",
+      "url": "",
+      "economics_available": false,
+      "monthly_cost_usd": null,
+      "local_comparison_published": false,
+      "claim_source": ""
+    },
+    "SEO Specialist": {
+      "canonical_role": "SEO Specialist",
+      "function_bucket": "marketing",
+      "url": "",
+      "economics_available": false,
+      "monthly_cost_usd": null,
+      "local_comparison_published": false,
+      "claim_source": ""
+    },
+    "Sales Development Representative": {
+      "canonical_role": "Sales Development Representative",
+      "function_bucket": "gtm_revenue",
+      "url": "",
+      "economics_available": false,
+      "monthly_cost_usd": null,
+      "local_comparison_published": false,
+      "claim_source": ""
+    },
+    "Sales Enablement Specialist": {
+      "canonical_role": "Sales Enablement Specialist",
+      "function_bucket": "gtm_revenue",
+      "url": "",
+      "economics_available": false,
+      "monthly_cost_usd": null,
+      "local_comparison_published": false,
+      "claim_source": ""
+    },
+    "Sales Operations Analyst": {
+      "canonical_role": "Sales Operations Analyst",
+      "function_bucket": "gtm_revenue",
+      "url": "",
+      "economics_available": false,
+      "monthly_cost_usd": null,
+      "local_comparison_published": false,
+      "claim_source": ""
+    },
+    "Shopify Developer": {
+      "canonical_role": "Shopify Developer",
+      "function_bucket": "ecommerce",
+      "url": "",
+      "economics_available": false,
+      "monthly_cost_usd": null,
+      "local_comparison_published": false,
+      "claim_source": ""
+    },
+    "Shopify Specialist": {
+      "canonical_role": "Shopify Specialist",
+      "function_bucket": "ecommerce",
+      "url": "",
+      "economics_available": false,
+      "monthly_cost_usd": null,
+      "local_comparison_published": false,
+      "claim_source": ""
+    },
+    "Social Media Manager": {
+      "canonical_role": "Social Media Manager",
+      "function_bucket": "marketing",
+      "url": "",
+      "economics_available": false,
+      "monthly_cost_usd": null,
+      "local_comparison_published": false,
+      "claim_source": ""
+    },
+    "Software Engineer": {
+      "canonical_role": "Software Engineer",
+      "function_bucket": "engineering",
+      "url": "",
+      "economics_available": false,
+      "monthly_cost_usd": null,
+      "local_comparison_published": false,
+      "claim_source": ""
+    },
+    "Staff Accountant": {
+      "canonical_role": "Staff Accountant",
+      "function_bucket": "finance",
+      "url": "",
+      "economics_available": false,
+      "monthly_cost_usd": null,
+      "local_comparison_published": false,
+      "claim_source": ""
+    },
+    "Systems Administrator": {
+      "canonical_role": "Systems Administrator",
+      "function_bucket": "engineering",
+      "url": "",
+      "economics_available": false,
+      "monthly_cost_usd": null,
+      "local_comparison_published": false,
+      "claim_source": ""
+    },
+    "Talent Acquisition Specialist": {
+      "canonical_role": "Talent Acquisition Specialist",
+      "function_bucket": "people_hr",
+      "url": "",
+      "economics_available": false,
+      "monthly_cost_usd": null,
+      "local_comparison_published": false,
+      "claim_source": ""
+    },
+    "Tax Accountant": {
+      "canonical_role": "Tax Accountant",
+      "function_bucket": "finance",
+      "url": "",
+      "economics_available": false,
+      "monthly_cost_usd": null,
+      "local_comparison_published": false,
+      "claim_source": ""
+    },
+    "Technical Recruiter": {
+      "canonical_role": "Technical Recruiter",
+      "function_bucket": "people_hr",
+      "url": "",
+      "economics_available": false,
+      "monthly_cost_usd": null,
+      "local_comparison_published": false,
+      "claim_source": ""
+    },
+    "Technical Support Specialist": {
+      "canonical_role": "Technical Support Specialist",
+      "function_bucket": "customer_support",
+      "url": "",
+      "economics_available": false,
+      "monthly_cost_usd": null,
+      "local_comparison_published": false,
+      "claim_source": ""
+    },
+    "Technical Writer": {
+      "canonical_role": "Technical Writer",
+      "function_bucket": "product",
+      "url": "",
+      "economics_available": false,
+      "monthly_cost_usd": null,
+      "local_comparison_published": false,
+      "claim_source": ""
+    },
+    "UX/UI Designer": {
+      "canonical_role": "UX/UI Designer",
+      "function_bucket": "product",
+      "url": "",
+      "economics_available": false,
+      "monthly_cost_usd": null,
+      "local_comparison_published": false,
+      "claim_source": ""
+    },
+    "Video Editor": {
+      "canonical_role": "Video Editor",
+      "function_bucket": "marketing",
+      "url": "",
+      "economics_available": false,
+      "monthly_cost_usd": null,
+      "local_comparison_published": false,
+      "claim_source": ""
+    },
+    "Video Producer": {
+      "canonical_role": "Video Producer",
+      "function_bucket": "marketing",
+      "url": "",
+      "economics_available": false,
+      "monthly_cost_usd": null,
+      "local_comparison_published": false,
+      "claim_source": ""
+    },
+    "Virtual Assistant": {
+      "canonical_role": "Virtual Assistant",
+      "function_bucket": "operations",
+      "url": "",
+      "economics_available": false,
+      "monthly_cost_usd": null,
+      "local_comparison_published": false,
+      "claim_source": ""
+    },
+    "Web Designer": {
+      "canonical_role": "Web Designer",
+      "function_bucket": "marketing",
+      "url": "",
+      "economics_available": false,
+      "monthly_cost_usd": null,
+      "local_comparison_published": false,
+      "claim_source": ""
+    }
+  }
+}

@@ -182,6 +182,93 @@ def _flat(value):
     return str(value)
 
 
+def wave1_enrollment_overlay(record: Dict) -> tuple[str, Dict[str, str]]:
+    """Outbound Wave 1 overlay for one approved record.
+
+    Returns ``(challenger_campaign_id, custom_variables)``. Both are empty for a
+    Control A record, so the enrollment payload stays byte-identical to what
+    production sends today.
+
+    Eligibility is decided BEFORE randomisation, so there is no such thing here as
+    "a B record whose copy failed QA". A record that cannot render safely is
+    suppressed from the experiment (``wave1_eligible=False``, arm ``NONE``,
+    ``suppression_reason`` set) and never enters either arm. It keeps whatever the
+    pipeline did before Wave 1 existed -- that is the absence of an experiment, not
+    a reassignment to the control group, and it is excluded from both denominators
+    by ``outbound_wave1.measurement``.
+
+    Four conditions must hold for the challenger to apply:
+
+    1. ``OUTBOUND_WAVE1_ENABLED`` is set;
+    2. ``OUTBOUND_WAVE1_MIN_RECORD_CREATED_AT`` parses -- the experiment start
+       watermark, which keeps Wave 1 to leads created after it began. It is
+       REQUIRED, not optional: with no watermark there is nothing separating a
+       new lead from an Approved row created months ago for a person the live
+       Control campaigns may already have emailed, so the overlay fails closed
+       and everything stays on Control A;
+    3. the record is Wave 1 eligible AND its account hashes into arm B -- which
+       now includes the segmentation gates, so a record that predates the
+       watermark, or whose bucket has no Challenger campaign, is suppressed
+       rather than assigned;
+    4. a challenger campaign id is configured for that role bucket (kept as
+       defence in depth behind the same map the resolver was given).
+
+    The whole overlay is wrapped: a failure inside the experiment must never be
+    able to break, or silently alter, an enrollment.
+    """
+    if not getattr(config, "OUTBOUND_WAVE1_ENABLED", False):
+        return "", {}
+    try:
+        from outbound_wave1 import resolve_wave1
+        from outbound_wave1.assignment import ARM_B
+        from outbound_wave1.claims import load_claim_registry
+        from outbound_wave1.resolver import parse_instant
+
+        min_created_at = parse_instant(
+            getattr(config, "OUTBOUND_WAVE1_MIN_RECORD_CREATED_AT", "")
+        )
+        if min_created_at is None:
+            logger.warning(
+                "Wave 1 enabled without a usable OUTBOUND_WAVE1_MIN_RECORD_CREATED_AT; "
+                "every record stays on Control A"
+            )
+            return "", {}
+
+        fields = record.get("fields") or {}
+        resolution = resolve_wave1(
+            fields,
+            experiment_id=config.OUTBOUND_WAVE1_EXPERIMENT_ID,
+            b_split_pct=config.OUTBOUND_WAVE1_B_SPLIT_PCT,
+            salt=config.OUTBOUND_WAVE1_ASSIGNMENT_SALT,
+            registry=load_claim_registry(config.OUTBOUND_WAVE1_CLAIM_REGISTRY_PATH),
+            record_id=str(record.get("id") or ""),
+            # Airtable stamps createdTime on the RECORD, alongside id/fields.
+            record_created_at=str(record.get("createdTime") or ""),
+            min_created_at=min_created_at,
+            configured_buckets=config.wave1_configured_challenger_buckets(),
+        )
+        if not resolution.wave1_eligible:
+            # Suppressed by the shared pre-randomisation gate. Logged explicitly so
+            # it is never a silent outcome, and deliberately NOT relabelled as
+            # control traffic.
+            logger.info(
+                "Wave 1 suppressed (not reassigned to control) for %s: %s",
+                resolution.record_id, resolution.suppression_reason[:200],
+            )
+            return "", {}
+        if resolution.experiment_arm != ARM_B:
+            return "", {}
+        challenger_campaign = config.resolve_wave1_challenger_campaign_id(
+            resolution.role_bucket
+        )
+        if not challenger_campaign:
+            return "", {}
+        return challenger_campaign, resolution.to_custom_variables()
+    except Exception as exc:  # noqa: BLE001 - the experiment never breaks delivery
+        logger.warning("Wave 1 overlay skipped: %s", str(exc)[:200])
+        return "", {}
+
+
 def airtable_record_to_lead(record: Dict, *, probe: bool = True) -> Dict:
     fields = record.get("fields") or {}
 
@@ -246,6 +333,11 @@ def airtable_record_to_lead(record: Dict, *, probe: bool = True) -> Dict:
     custom_variables = {
         key: _flat(value) for key, value in custom_variables.items() if value not in (None, "")
     }
+
+    wave1_campaign, wave1_variables = wave1_enrollment_overlay(record)
+    if wave1_campaign:
+        campaign_id = wave1_campaign
+    custom_variables.update(wave1_variables)
 
     return {
         "campaign": campaign_id,

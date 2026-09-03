@@ -65,3 +65,31 @@ reports/weekly/
 
 # Local recovery snapshots.
 recovery_*/
+
+# Outbound Wave 1 evidence artifacts.
+#
+# DENY BY DEFAULT, not file-by-file. Every artifact this workstream produces is
+# read back from the live workspace, and several families embed material that
+# must not enter the repository:
+#
+#   * the 33 live sender mailbox addresses, copied verbatim from the Control
+#     campaigns into any captured campaign object (baselines, create/probe
+#     responses, deregistration evidence);
+#   * company names and hiring-manager first names, in the dry-run reviews.
+#
+# A one-file-at-a-time allowlist has already been outgrown once. The rule below
+# covers the whole family, so a NEW artifact is ignored the moment it is
+# written rather than the moment someone remembers to add it. No reports/wave1_*
+# file is tracked today, so nothing is being un-tracked by this.
+#
+# To version a specific Wave 1 artifact deliberately, add an explicit negation
+# BELOW this line and confirm first that the file carries no mailbox address,
+# no lead email and no company/contact name:
+#     !reports/wave1_<name>.json
+reports/wave1_*
+
+# Control reactivation evidence from the same workstream. These carry no mailbox
+# address today -- only campaign ids, statuses, metrics and lead ids -- but they
+# are generated run evidence, not source, and the naming does not start with
+# wave1_ so the rule above would miss them.
+reports/*control_activation*

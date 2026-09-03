@@ -1,0 +1,391 @@
+# Outbound Wave 1 — Control A vs Challenger B
+
+Wave 1 is an account-level A/B test across the nine live Instantly campaigns.
+
+* **Control A** is the live Instantly campaign copy. Nothing in this repository
+  renders, rewrites or normalises it. A record assigned to A produces the exact
+  enrollment payload production sends today.
+* **Challenger B** is a deterministic messaging policy resolved from the
+  opportunity record: signal → scope → proof → offer → render → QA. It is
+  rendered locally, so the Instantly Challenger campaign step body is just
+  `{{rendered_email_N_html}}` plus the account signature — the `_html` variant,
+  never the plain one (see "The body, and the one-letter trap").
+
+## Where it plugs in
+
+The outbound path is unchanged:
+
+```
+run_approved.py
+  -> airtable_client.select_eligible_approved()
+  -> instantly_client.enroll_record(record)
+       -> instantly_client.airtable_record_to_lead(record, probe=False)
+            -> instantly_client.wave1_enrollment_overlay(record)   <-- the only new hook
+       -> POST /leads
+```
+
+`wave1_enrollment_overlay` returns `("", {})` — i.e. changes nothing — unless
+**all four** of these hold:
+
+1. `OUTBOUND_WAVE1_ENABLED` is on;
+2. `OUTBOUND_WAVE1_MIN_RECORD_CREATED_AT` parses as an instant;
+3. the record is Wave 1 eligible AND its account hashes into arm B;
+4. a Challenger campaign id is configured for that role bucket.
+
+Any exception inside the overlay is swallowed and the enrollment is unchanged.
+
+## Segmentation: new leads only, configured buckets only
+
+Two gates run in the same pre-randomisation phase as every other eligibility
+check, so a record either of them stops is arm `NONE` — not arm A.
+
+**`OUTBOUND_WAVE1_MIN_RECORD_CREATED_AT`** is the experiment start watermark and
+is **required**. Only Airtable rows whose `record.createdTime` is at or after it
+may take part. Without it there is nothing separating a genuinely new lead from
+an Approved row created months ago for a person the live Control campaigns may
+already have emailed — delivering that person into a Challenger campaign would
+both double-touch them and contaminate the comparison. A blank or unparseable
+watermark is a misconfiguration, not "no restriction": the overlay logs and
+leaves every record on Control A. A row with no `createdTime` at all is
+suppressed too, because an unknown creation instant cannot be proven to be new.
+
+**`OUTBOUND_WAVE1_CHALLENGER_CAMPAIGNS_JSON`** doubles as the rollout scope. A
+record whose bucket has no Challenger campaign is delivered on Control A no
+matter what its hash says, so labelling it `B` would put a control-delivered row
+in the treatment arm. It is suppressed instead, which keeps the delivered payload
+and the measurement frame in agreement. Starting small therefore means mapping
+one or two buckets at a 50/50 split — never lowering the split.
+
+Both gates are opt-in at the resolver level (`min_created_at`,
+`configured_buckets` default to `None`), so `run_wave1_dryrun.py` still previews
+the whole population unless it is asked not to.
+
+## Eligibility comes before randomisation
+
+A record that cannot render the challenger safely is **suppressed from the
+experiment**, not moved to Control A:
+
+```
+wave1_eligible   = false
+experiment_arm   = NONE          <- never A
+qa_pass          = false
+suppression_reason = "<gate>;<gate>"
+```
+
+The order matters. `resolve_wave1` renders and QA-checks the challenger FIRST,
+without reference to any arm, and only then randomises the records that passed.
+So a copy failure can never enrich the control group, and the two arms are drawn
+from one identical eligible population. `outbound_wave1.measurement` excludes
+suppressed rows from both denominators.
+
+A suppressed record keeps whatever the pipeline did before Wave 1 existed. That
+is the absence of an experiment, not a reassignment, and it is logged as such.
+
+## Modules
+
+| File | Responsibility |
+| --- | --- |
+| `outbound_wave1/campaigns.py` | The nine campaigns and their frozen policy |
+| `outbound_wave1/assignment.py` | Global, account-level, campaign-blind A/B |
+| `outbound_wave1/evidence.py` | Reading Role Focus / Focus Evidence safely |
+| `outbound_wave1/scope.py` | Deterministic `scope_combination` |
+| `outbound_wave1/signals.py` | T1 → T2 → T3 resolution |
+| `outbound_wave1/claims.py` | Static claim / role-page registry (no runtime lookup) |
+| `outbound_wave1/render.py` | E1 per campaign/tier; E2–E4 frozen verbatim |
+| `outbound_wave1/qa.py` | The hard gates |
+| `outbound_wave1/timing.py` | Day 1 / 4 / 8 / 13, business days only |
+| `outbound_wave1/measurement.py` | Randomisation frame and the primary metric |
+| `outbound_wave1/resolver.py` | Orchestrates the above |
+| `data/wave1_claims.json` | The static registry (economics unpopulated) |
+| `run_wave1_dryrun.py` | Zero-write dry run over real stored opportunities |
+
+## Assignment
+
+`company_assignment_key` is taken from `Outbound Company Identity`, then
+`Website`'s domain, then a normalised company name. The arm is
+`sha256(experiment_id | salt | key) % 100 < B_SPLIT_PCT`.
+
+The campaign is deliberately **not** an input, so one company can never be A in
+one campaign and B in another. A record with no resolvable key is not
+randomisable, so it is suppressed (arm `NONE`) rather than counted as control.
+
+## One argument per campaign, not one argument nine times
+
+There is no universal Challenger framework. Each campaign sells the reason ITS
+buyer has to care, built on a VERIFIED fact about the TGTC offer. An earlier
+revision drifted into a single argument with nine wordings — 8 of 9 campaigns
+shipped the identical proof sentence and the nine CTAs used three nouns between
+them — so `tests/test_outbound_wave1_integrity.py` now gates the differentiation
+directly: nine distinct CTAs, nine distinct frictions, and no single proof
+sentence on more than four campaigns.
+
+### Voice
+
+The copy is written to read like a person typing, not like a sequence. Email 1
+is 40-60 words, three or four thoughts, one CTA, contractions throughout. It does
+not name the reader's own employer back at them -- "your Operations Manager
+opening", never "the Operations Manager opening at <their company>", which is the
+most recognisable mail-merge shape there is. Counts render as words ("two product
+roles"), because a sentence opening with a digit reads as a merge field.
+
+Only the genuinely dangerous patterns are encoded as gates: banned claims,
+unsupported absolutes, and a short list of landing-page words. Everything else
+about naturalness is editorial judgement and stays that way -- there is no
+attempt to express "sounds human" as a phrase list. The gates judge what WE
+wrote: the record's own company and role are removed before matching, so a
+prospect called "CBX Solutions, LLC" can never fail our buzzword gate.
+
+The three slots carry different burdens of proof, and a QA gate holds each to
+its own: the **signal** is the real hiring event read off the record and stays
+factual and unhedged; the **friction** is a hypothesis the reader can accept or
+reject, so it is hedged (`can`, `may`, `often`, `usually`, `tends to`) or else
+true of any hire rather than of this reader, and may never state a flat absolute
+or assert something about the reader's own process; the **proof** is an approved
+TGTC fact and nothing else.
+
+| campaign | buyer's reason to care (friction) | verified fact sold (proof) | asks for |
+| --- | --- | --- | --- |
+| PRODUCT | several open searches could land as several hires at once | headcount model | how the headcount side works |
+| OPERATIONS | an ops title on its own may not say much about the actual mix | role-specific testing | how we test for a scope like this |
+| FINANCE | a hire is also a payroll/tax/benefits obligation to administer | employment administration | what we carry on the employment side |
+| PEOPLE & HR | hiring across functions concentrates the screening load | remote-readiness assessment | how we assess remote readiness |
+| ECOMMERCE | ecommerce titles can cover very different work by store size | role-specific testing | how our testing works |
+| CUSTOMER EXPERIENCE | an interview says little about the day-to-day work | role-specific testing | what the testing covers |
+| MARKETING & CREATIVE | if that scope gets split, a second hire needs no extra slot | headcount model | how an embedded hire works |
+| GTM SYSTEMS | the parts are common; the combination tends to be rarer | role-specific testing | how we test the combination |
+| AI & TECHNICAL | tooling this new has not existed long enough for long track records | role-specific testing | how the assessment works |
+
+**ECOMMERCE is knowingly the weakest.** Every ecommerce-specific idea worth
+selling — seasonal capacity, platform-specific proof — needs a capability that is
+not on the verified list, and inventing one is what this whole design forbids. It
+therefore shares the testing proof with an ecommerce-specific reason, and is
+flagged rather than forced. Its live Control is `completed`, so it is out of
+Pilot 1 anyway.
+
+Two verified facts are deliberately NOT used in E1: *no payment until you select
+someone* and *we keep sourcing if the shortlist is not right*. They are E3's
+frozen payload, introduced there as "One thing I left out" — putting them in E1
+would falsify that line.
+
+### Degraded tiers carry the argument, not just the grammar
+
+T2 and T3 keep the campaign's PROOF but lose its T1 reason, so they need a
+friction that hands off to that proof. One shared "the search has stalled" line
+could not do it: followed by "we handle payroll" it left the reader a hiring
+problem and a bookkeeping answer. `render._DEGRADED_FRICTION_BY_PROOF` therefore
+picks the degraded friction by proof, not by tier:
+
+`render._DEGRADED_FRICTION_BY_CAMPAIGN` is the production copy table. T1's is the
+exception: on the current corpus 98% of eligible records resolve to T3.
+
+| campaign | degraded reason | proof it hands to |
+| --- | --- | --- |
+| PRODUCT | a second search can mean finding the headcount for it too | headcount |
+| OPERATIONS | ops roles are a mix of processes a title rarely shows | testing |
+| FINANCE | whenever it closes, there's employment admin behind it | employment admin |
+| PEOPLE & HR | if you'd look at someone remote, knowing it will work out is the hard part | remote readiness |
+| ECOMMERCE | ecommerce titles mean different work by store size | testing |
+| CUSTOMER EXPERIENCE | a good interview says little about the day-to-day work | testing |
+| MARKETING & CREATIVE | the usual alternative is an agency or a freelancer | embedding |
+| GTM SYSTEMS | a mix that's common in the parts and rare put together | testing |
+| AI & TECHNICAL | the tooling is too new for CV tenure to say much | testing |
+
+A campaign only uses its own degraded reason while it still holds the proof that
+reason hands off to. PEOPLE & HR's line sets up the remote-readiness assessment;
+with no verified claim the campaign degrades to plain testing, and the
+proof-keyed map (`_DEGRADED_FRICTION_BY_PROOF`) takes over.
+
+Job age is a FACT and the signal states it. Every reading of what that age means
+is conditional, because a posting open for 50 days does not prove a shortlist
+failed or that one exists. The old T2 line asserted exactly that, and the old T3
+line called a parallel search "usually the cheapest way to keep moving" -- an
+economics claim nothing here supports. Both are gone.
+
+A campaign whose offer noun names its own signal (OPERATIONS' "a scope like
+this", GTM's "the combination") declares a tier-safe noun for records where that
+signal did not fire, so no CTA points at something the email never described.
+The noun is still resolved once per record and reused verbatim in E1-E4: it
+varies across TIERS, never within one lead's thread.
+
+**This matters more than the T1 copy does.** Over the whole local corpus of 2,405
+stored opportunities, 98% of eligible rows resolve to T3 and only 2% to T1. The
+degraded copy is what production will actually send.
+
+## Fallback coherence
+
+A degrade moves the whole triple. When a campaign cannot support economics it
+does not merely swap the proof and the offer — the cost-framed friction goes
+with them:
+
+| | friction | proof | offer | offer noun |
+| --- | --- | --- | --- | --- |
+| economics available | `cost_comparison` | `economics` | `role_economics` | the numbers for this role |
+| degraded (FINANCE) | `employment_obligation` | `employment_admin` | `employment_admin_overview` | what we carry on the employment side |
+
+`qa.COHERENT_FRICTIONS` is the hard gate. `cost_comparison` may appear only with
+`(economics, role_economics)`. Beyond that it enforces the shape of each
+argument: a headcount proof answers an APPROVAL friction and an employment-admin
+proof answers an ADMINISTRATIVE friction, so neither can be paired with an
+evidence friction — "a CV cannot show you that" followed by "they are not on your
+headcount" answers a question the reader did not ask.
+
+FINANCE is the only campaign still on the economics path, kept for the day a
+published number exists. CUSTOMER EXPERIENCE and MARKETING & CREATIVE were moved
+off it: each has a verified angle stronger for its buyer than a price, so an
+unreachable economics preference bought them nothing.
+
+A friction whose wording reads off a signal is not rendered behind a different
+one (`render._FRICTION_REQUIRES_SIGNAL`). PRODUCT's "getting them all approved"
+needs a multi-opening count, so a single-opening record degrades to the generic
+friction rather than asserting something the record does not support.
+
+## Offer wording
+
+The offer noun is resolved once, per campaign, and is the literal text the reader
+sees in all four emails — E1 asks `Want me to send <noun>?` and E2/E3/E4 repeat
+the same words. The nine nouns are in the table above and must stay distinct: a
+QA gate fails any thread that contains another campaign's noun.
+
+E3's frozen sentence is `<noun> is still there if you want it first`. A plural
+noun takes `are`/`them`; the verb and pronoun are selected mechanically and no
+word choice changes.
+
+
+## Dry run
+
+```bash
+python run_wave1_dryrun.py --limit 108 --out reports/wave1_dryrun.json
+```
+
+Reads local run artifacts only — no Airtable, no Instantly, no provider calls,
+no writes. The artifact carries explicit `denominators`, a `denominator_of` map
+saying which population each breakdown is counted over, and a `reconciliation`
+block; the script exits non-zero if any count fails to add up.
+
+`--as-of <ISO date>` re-derives job age so the 45-60 day T2 window can be
+exercised against the same real records. Such a run is stamped
+`clock.mode = "simulated_future_date"` and its counts are test evidence, **not**
+current production state. `--claims <path>` previews the economics path against
+an alternate registry.
+
+## How the Challenger campaigns are built
+
+All nine Challengers exist and passed a full read-only audit on 2026-09-03:
+9/9 Draft, 9/9 carrying all 24 Wave 1 variable names, 36/36 step bodies correct,
+zero synthetic validation leads, all nine Controls unchanged. What follows is the
+architecture that audit proved, written down because three of its properties are
+counter-intuitive enough that someone will otherwise re-derive them the hard way.
+
+**Custom variables are LEAD-scoped, not campaign-scoped.** A campaign learns a
+variable NAME from a lead that carries it. Declaring the names in
+`POST /campaigns` registers nothing — all nine were created with the full 24 and
+eight still read zero afterwards — and `PATCH /campaigns/{id}` with a
+`custom_variables` body returns HTTP 500 and applies nothing. The only mechanism
+that works is enrolling one lead that carries every name.
+
+**Registered names SURVIVE deleting the lead that taught them.** So registration
+is a short cycle — POST a synthetic lead, verify 24/24, DELETE it immediately,
+verify again — and no synthetic address ever has to outlive its own
+registration. That matters: the synthetic address is an `@example.invalid`
+hard-bounce sitting in a campaign whose sender pool is *identical* to a live
+Control's, so a lead left behind is a production deliverability risk, not untidy
+housekeeping.
+
+**The step bodies cannot be written through the API.** `POST /campaigns` and
+`PATCH /campaigns/{id}` both strip `{{rendered_*}}` tokens out of a sequence
+body — even after the campaign has registered the name — while
+`{{accountSignature}}` survives the same write, so the sanitiser keeps core
+variables and drops custom ones. The token has to be inserted with the Instantly
+editor's variable picker, which only offers names the campaign already knows.
+Hence the fixed order: **register the names → insert the tokens in the UI →
+verify by GET.**
+
+### The body, and the one-letter trap
+
+Every one of the 36 step bodies is the same shape, with N matching the step:
+
+```
+{{rendered_email_N_html}}
+
+{{accountSignature}}
+```
+
+**Use the `_html` variant. Never the plain `{{rendered_email_N}}`.** Both names
+are registered on every Challenger and the picker lists them one line apart. A
+campaign body is HTML — every live body in this workspace is `<div>…</div>` even
+though `text_only=true`, which is why `render.to_html` exists — so the plain
+value, which carries no markup, collapses every paragraph break and sends as one
+run-on block. No error, no warning. This reached two live step bodies before a
+check caught it.
+
+Verify with a **token-set comparison per step**: extract every `{{...}}` in the
+stored body and require the set to be exactly `{{rendered_email_N_html}}` plus
+`{{accountSignature}}`. A substring test is not sufficient — it passes on the
+wrong variable, which is precisely how the mis-pick above survived a first look.
+The verification tooling lives outside the repository with the rest of the
+one-off Wave 1 operator scripts; only the check itself is normative.
+
+Two more behaviours worth knowing before editing bodies:
+
+* **Instantly persists sequence edits asynchronously.** A read taken too soon
+  shows a step as empty while the save is still landing. Re-read once before
+  calling it a failure, and never re-edit on a first read — a second insert
+  stacks on one that is about to commit.
+* Where an insert genuinely did not take, **clear the body completely and
+  re-insert.** That worked both times it was needed.
+
+Render-time behaviour is confirmed: a registered, UI-inserted token resolves and
+its HTML is interpreted as markup, not escaped.
+
+## Going live
+
+1. **Build the campaigns** — done, per the section above. Nothing further is
+   needed in Instantly except activation.
+2. Set `OUTBOUND_WAVE1_CHALLENGER_CAMPAIGNS_JSON` on **GTM Approved Sync** —
+   `run_approved.py` is the only production caller of
+   `airtable_record_to_lead`, so that is the only service the overlay runs in.
+   Setting it on `GTM` does nothing.
+
+   **The map is keyed by ROLE BUCKET, not by campaign or policy name.**
+   `config.resolve_wave1_challenger_campaign_id` looks up
+   `role_bucket.strip().lower()`, so a key like `MARKETING_CREATIVE` resolves to
+   `""` and the bucket is silently suppressed. There are **ten keys for nine
+   campaigns**, because CUSTOMER EXPERIENCE serves two buckets:
+
+   | role bucket | Challenger |
+   | --- | --- |
+   | `product` | PRODUCT |
+   | `operations` | OPERATIONS |
+   | `finance` | FINANCE |
+   | `people_hr` | PEOPLE & HR |
+   | `ecommerce` | ECOMMERCE |
+   | `customer_success` | CUSTOMER EXPERIENCE |
+   | `customer_support` | CUSTOMER EXPERIENCE |
+   | `marketing` | MARKETING & CREATIVE |
+   | `gtm_revenue` | GTM SYSTEMS & REVENUE AUTOMATION |
+   | `engineering` | AI & TECHNICAL AUTOMATION |
+
+   A bucket left out of the map is **suppressed**, not delivered as Control A —
+   otherwise a control-delivered row would sit in the treatment arm.
+3. Populate `data/wave1_claims.json` for any role whose economics you want to
+   quote, or leave it as shipped and run Wave 1 without economics.
+4. Confirm every Control is in a sending state. A Control at status `3`
+   (Completed) has finished its sequence for every lead it holds; the arm-A half
+   of its bucket cannot be measured until it is Active again.
+5. Set `OUTBOUND_WAVE1_MIN_RECORD_CREATED_AT` to the **wall-clock instant of
+   cutover**, not a rounded date — every existing Approved row predates it and
+   is therefore excluded. It is REQUIRED: blank or unparseable makes the overlay
+   fail closed and everything stays on Control A. Then
+   `OUTBOUND_WAVE1_B_SPLIT_PCT=50` and `OUTBOUND_WAVE1_ENABLED=1` last.
+6. Deploy pinned to the intended commit, then activate the Challengers.
+   `railway redeploy` re-deploys the OLD snapshot and will not pick up a new
+   commit or a settings change — use `serviceInstanceDeployV2` with the SHA, and
+   confirm `latestDeployment.meta.commitHash` before continuing.
+
+Steps 2, 4, 5 and 6 are production environment/deploy actions and are
+deliberately not performed by this branch.
+
+**Rollback.** `OUTBOUND_WAVE1_ENABLED=0` and deploy: every subsequent enrollment
+reverts to Control A with a byte-identical payload, no code change and no
+campaign change. Setting the map to `{}` has the same effect through
+suppression. Pausing the Challengers stops follow-ups to leads already enrolled.
