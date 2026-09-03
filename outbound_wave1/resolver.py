@@ -223,9 +223,17 @@ class Wave1Resolution:
     def to_custom_variables(self) -> Dict[str, str]:
         """Instantly custom variables for a Challenger enrolment.
 
-        The rendered bodies are final text: the Challenger campaign template is
-        ``{{rendered_email_N}}`` plus the account signature, so Instantly performs
-        no second rendering pass over anything this package produced.
+        The rendered bodies are final: the Challenger campaign step body is
+        ``{{rendered_email_N_html}}`` plus the account signature, so Instantly
+        performs no second rendering pass over anything this package produced.
+
+        It is the ``_html`` variant, never the plain ``{{rendered_email_N}}``.
+        Both names are registered on every Challenger and Instantly's variable
+        picker lists them one line apart, but a campaign body is HTML: the plain
+        value carries no markup, so inserting it collapses every paragraph break
+        and the email sends as one run-on block with no error anywhere. That
+        exact mistake reached two live step bodies before a token-set check
+        caught it.
         """
         payload = {
             "experiment_id": self.experiment_id,

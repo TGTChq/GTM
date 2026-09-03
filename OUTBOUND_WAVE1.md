@@ -7,8 +7,9 @@ Wave 1 is an account-level A/B test across the nine live Instantly campaigns.
   enrollment payload production sends today.
 * **Challenger B** is a deterministic messaging policy resolved from the
   opportunity record: signal → scope → proof → offer → render → QA. It is
-  rendered locally, so the Instantly Challenger campaign template is just
-  `{{rendered_email_N}}` plus the account signature.
+  rendered locally, so the Instantly Challenger campaign step body is just
+  `{{rendered_email_N_html}}` plus the account signature — the `_html` variant,
+  never the plain one (see "The body, and the one-letter trap").
 
 ## Where it plugs in
 
@@ -267,20 +268,124 @@ exercised against the same real records. Such a run is stamped
 current production state. `--claims <path>` previews the economics path against
 an alternate registry.
 
+## How the Challenger campaigns are built
+
+All nine Challengers exist and passed a full read-only audit on 2026-09-03:
+9/9 Draft, 9/9 carrying all 24 Wave 1 variable names, 36/36 step bodies correct,
+zero synthetic validation leads, all nine Controls unchanged. What follows is the
+architecture that audit proved, written down because three of its properties are
+counter-intuitive enough that someone will otherwise re-derive them the hard way.
+
+**Custom variables are LEAD-scoped, not campaign-scoped.** A campaign learns a
+variable NAME from a lead that carries it. Declaring the names in
+`POST /campaigns` registers nothing — all nine were created with the full 24 and
+eight still read zero afterwards — and `PATCH /campaigns/{id}` with a
+`custom_variables` body returns HTTP 500 and applies nothing. The only mechanism
+that works is enrolling one lead that carries every name.
+
+**Registered names SURVIVE deleting the lead that taught them.** So registration
+is a short cycle — POST a synthetic lead, verify 24/24, DELETE it immediately,
+verify again — and no synthetic address ever has to outlive its own
+registration. That matters: the synthetic address is an `@example.invalid`
+hard-bounce sitting in a campaign whose sender pool is *identical* to a live
+Control's, so a lead left behind is a production deliverability risk, not untidy
+housekeeping.
+
+**The step bodies cannot be written through the API.** `POST /campaigns` and
+`PATCH /campaigns/{id}` both strip `{{rendered_*}}` tokens out of a sequence
+body — even after the campaign has registered the name — while
+`{{accountSignature}}` survives the same write, so the sanitiser keeps core
+variables and drops custom ones. The token has to be inserted with the Instantly
+editor's variable picker, which only offers names the campaign already knows.
+Hence the fixed order: **register the names → insert the tokens in the UI →
+verify by GET.**
+
+### The body, and the one-letter trap
+
+Every one of the 36 step bodies is the same shape, with N matching the step:
+
+```
+{{rendered_email_N_html}}
+
+{{accountSignature}}
+```
+
+**Use the `_html` variant. Never the plain `{{rendered_email_N}}`.** Both names
+are registered on every Challenger and the picker lists them one line apart. A
+campaign body is HTML — every live body in this workspace is `<div>…</div>` even
+though `text_only=true`, which is why `render.to_html` exists — so the plain
+value, which carries no markup, collapses every paragraph break and sends as one
+run-on block. No error, no warning. This reached two live step bodies before a
+check caught it.
+
+Verify with a **token-set comparison per step**: extract every `{{...}}` in the
+stored body and require the set to be exactly `{{rendered_email_N_html}}` plus
+`{{accountSignature}}`. A substring test is not sufficient — it passes on the
+wrong variable, which is precisely how the mis-pick above survived a first look.
+The verification tooling lives outside the repository with the rest of the
+one-off Wave 1 operator scripts; only the check itself is normative.
+
+Two more behaviours worth knowing before editing bodies:
+
+* **Instantly persists sequence edits asynchronously.** A read taken too soon
+  shows a step as empty while the save is still landing. Re-read once before
+  calling it a failure, and never re-edit on a first read — a second insert
+  stacks on one that is about to commit.
+* Where an insert genuinely did not take, **clear the body completely and
+  re-insert.** That worked both times it was needed.
+
+Render-time behaviour is confirmed: a registered, UI-inserted token resolves and
+its HTML is interpreted as markup, not escaped.
+
 ## Going live
 
-1. Create the nine Challenger campaigns in Instantly. Each step body is
-   `{{rendered_email_N}}` + `{{accountSignature}}`; E1 carries the subject,
-   E2–E4 reply on the same thread with an empty subject. Sequence delays are
-   3 / 4 / 5 days (Day 1 → 4 → 8 → 13) on the existing business-day schedule.
-2. Set `OUTBOUND_WAVE1_CHALLENGER_CAMPAIGNS_JSON` to the bucket → campaign map,
-   on **GTM Approved Sync** — `run_approved.py` is the only production caller of
+1. **Build the campaigns** — done, per the section above. Nothing further is
+   needed in Instantly except activation.
+2. Set `OUTBOUND_WAVE1_CHALLENGER_CAMPAIGNS_JSON` on **GTM Approved Sync** —
+   `run_approved.py` is the only production caller of
    `airtable_record_to_lead`, so that is the only service the overlay runs in.
+   Setting it on `GTM` does nothing.
+
+   **The map is keyed by ROLE BUCKET, not by campaign or policy name.**
+   `config.resolve_wave1_challenger_campaign_id` looks up
+   `role_bucket.strip().lower()`, so a key like `MARKETING_CREATIVE` resolves to
+   `""` and the bucket is silently suppressed. There are **ten keys for nine
+   campaigns**, because CUSTOMER EXPERIENCE serves two buckets:
+
+   | role bucket | Challenger |
+   | --- | --- |
+   | `product` | PRODUCT |
+   | `operations` | OPERATIONS |
+   | `finance` | FINANCE |
+   | `people_hr` | PEOPLE & HR |
+   | `ecommerce` | ECOMMERCE |
+   | `customer_success` | CUSTOMER EXPERIENCE |
+   | `customer_support` | CUSTOMER EXPERIENCE |
+   | `marketing` | MARKETING & CREATIVE |
+   | `gtm_revenue` | GTM SYSTEMS & REVENUE AUTOMATION |
+   | `engineering` | AI & TECHNICAL AUTOMATION |
+
+   A bucket left out of the map is **suppressed**, not delivered as Control A —
+   otherwise a control-delivered row would sit in the treatment arm.
 3. Populate `data/wave1_claims.json` for any role whose economics you want to
    quote, or leave it as shipped and run Wave 1 without economics.
-4. Set `OUTBOUND_WAVE1_MIN_RECORD_CREATED_AT` to the moment the pilot starts,
-   then `OUTBOUND_WAVE1_ENABLED=1` and `OUTBOUND_WAVE1_B_SPLIT_PCT=50`.
-5. Deploy, then activate the Challenger campaigns.
+4. Confirm every Control is in a sending state. A Control at status `3`
+   (Completed) has finished its sequence for every lead it holds; the arm-A half
+   of its bucket cannot be measured until it is Active again.
+5. Set `OUTBOUND_WAVE1_MIN_RECORD_CREATED_AT` to the **wall-clock instant of
+   cutover**, not a rounded date — every existing Approved row predates it and
+   is therefore excluded. It is REQUIRED: blank or unparseable makes the overlay
+   fail closed and everything stays on Control A. Then
+   `OUTBOUND_WAVE1_B_SPLIT_PCT=50` and `OUTBOUND_WAVE1_ENABLED=1` last.
+6. Deploy pinned to the intended commit, then activate the Challengers.
+   `railway redeploy` re-deploys the OLD snapshot and will not pick up a new
+   commit or a settings change — use `serviceInstanceDeployV2` with the SHA, and
+   confirm `latestDeployment.meta.commitHash` before continuing.
 
-Steps 2, 4 and 5 are production environment/deploy actions and are deliberately
-not performed by this branch.
+Steps 2, 4, 5 and 6 are production environment/deploy actions and are
+deliberately not performed by this branch.
+
+**Rollback.** `OUTBOUND_WAVE1_ENABLED=0` and deploy: every subsequent enrollment
+reverts to Control A with a byte-identical payload, no code change and no
+campaign change. Setting the map to `{}` has the same effect through
+suppression. Pausing the Challengers stops follow-ups to leads already enrolled.
