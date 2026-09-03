@@ -513,6 +513,119 @@ def assess_posting_integrity(job: Dict) -> QualityAssessment:
     return QualityAssessment(True)
 
 
+# ---------------------------------------------------------------------------
+# Senior individual-contributor policy (config.ROLE_ALLOW_SENIOR_IC)
+# ---------------------------------------------------------------------------
+# `role_gate.py` has always honoured ROLE_ALLOW_SENIOR_IC, but this guard runs
+# FIRST and did not, so an operator who set the flag to admit Senior ICs still
+# lost them here. On a 4,231-record corpus that was 179 records; 141 of them were
+# confirmed by human review to be genuine Senior ICs.
+#
+# The flag may relax "Senior"/"Sr." and nothing else. Two protections stand in
+# front of it, because a naive flag gate leaks both:
+#
+#   TITLE LEVEL   Staff / Principal / Lead / Head / Director / VP / Chief stay
+#                 excluded even when the title also says "Senior"
+#                 ("Senior Staff Accountant"). A dual-level posting
+#                 ("X Manager / Senior X Analyst") does not say which role is
+#                 being filled, so it cannot be cleared either.
+#
+#   PEOPLE        Authority is recognised only when the HIRE IS THE SUBJECT of a
+#   AUTHORITY     verb whose OBJECT IS PEOPLE. The object is what matters:
+#                 managing projects, accounts, campaigns, vendors, priorities,
+#                 deadlines or SSRS reports is not authority, and neither is
+#                 "performance management" of infrastructure or of an HR
+#                 programme the role administers.
+#
+# Four signals are deliberately NOT evidence on their own, because each fires
+# overwhelmingly on text unrelated to authority: hiring language (employer
+# boilerplate, anti-fraud email notices, and the duties of a recruiter, who hires
+# for others), headcount (an FP&A analyst's subject matter), "building our team"
+# (employer boilerplate), and bare "performance management".
+#
+# `supervis*` cannot be used as a bare token either: it appears in 12 of the 141
+# confirmed ICs meaning the opposite -- "requires limited supervision", "under
+# the supervision of the Controller" -- so passive constructions are skipped.
+
+#: Title levels the Senior/Sr allowance may never override.
+_EXCLUDED_TITLE_LEVEL = re.compile(
+    r"\b(?:staff|principal|director|vice\s+president|vp|chief|c[-\s]?level|"
+    r"head\s+of|head\s*,)\b"
+    r"|\blead\b(?!\s*(?:generation|gen\b|s\b))",
+    re.I)
+_SENIOR_TOKEN = re.compile(r"\b(?:senior|sr\.?)\b", re.I)
+#: "X Manager / Senior X Analyst" -- the level being filled is undetermined.
+_DUAL_LEVEL_TITLE = re.compile(
+    r"\b(?:manager|director|lead|head|principal|staff)\b[^/]{0,24}/"
+    r"|/[^/]{0,24}\b(?:manager|director|lead|head|principal|staff)\b", re.I)
+
+_PEOPLE_NOUN = (r"(?:direct\s+reports?|reports|staff|employees|personnel|"
+                r"engineers|analysts|accountants|developers|designers|specialists|"
+                r"associates|representatives|technicians|coordinators|"
+                r"team\s+members?|people)")
+
+#: The hire is BEING supervised, not supervising. Skips the clause entirely.
+_PASSIVE_SUPERVISION = re.compile(
+    r"(?:under\s+(?:the\s+)?(?:direct\s+|close\s+|general\s+|moderate\s+)?supervision|"
+    r"requires?\s+(?:limited|minimal|little|general|close)\s+supervision|"
+    r"with\s+(?:guidance\s+and\s+)?supervision|is\s+supervised\s+by|"
+    r"subject\s+to\s+\w+\s+(?:direct\s+)?supervision|works?\s+under)", re.I)
+
+_PEOPLE_AUTHORITY = [re.compile(p, re.I) for p in (
+    r"\b(?:oversee|manage|supervis|lead|coach|develop|mentor)\w*\s+"
+    r"(?:\w+\s+){0,3}\bdirect\s+reports?\b",
+    r"\b\d+\s+direct\s+reports?\b",
+    r"\b(?:will\s+have|has|with)\s+(?:\w+\s+){0,2}direct\s+reports?\b",
+    # Compound tokens are common in team names ("our AR/AP specialists",
+    # "the R&D engineers"), so the gap must admit / & and hyphens.
+    r"\bsupervis(?:e|es|ing)\b\s+(?:[\w/&-]+\s+){0,3}" + _PEOPLE_NOUN,
+    r"\bsupervisory\s+(?:scope|responsibilit\w+)\b",
+    r"\b(?:manag|lead)\w*\s+(?:and\s+\w+ing\s+)?(?:a|the|our|your)?\s*teams?\s+of\s+"
+    r"(?:[\w-]+\s+){0,5}" + _PEOPLE_NOUN,
+    r"\b(?:manag|lead)\w*\s+(?:a|the|our|your)\s+(?:high[-\s]performing\s+)?team\s+of\b",
+    r"\bperformance\s+(?:review|appraisal)\w*\s+(?:of|for)\s+(?:\w+\s+){0,2}" + _PEOPLE_NOUN,
+    r"\b(?:conduct|deliver|write|complete)\w*\s+(?:\w+\s+){0,2}performance\s+"
+    r"(?:review|appraisal)\w*",
+    r"\bpeople\s+(?:manager|management|leadership)\s+(?:responsibilit|experience|role)",
+    r"\bhire\s+and\s+(?:manage|lead|develop|retain)\b",
+    r"\b(?:develop|set|communicate|establish|define)\w*\s+(?:and\s+\w+\s+)?"
+    r"(?:clear\s+|individual\s+)?performance\s+expectations?\b",
+)]
+
+_CLAUSE_SPLIT = re.compile(r"(?:(?<=[.;!?])\s+|\n+|•|\r)")
+
+
+def has_people_authority(description: str) -> bool:
+    """True when the hire holds authority over people.
+
+    Clause-scoped: a passive-supervision phrase in one sentence must not suppress
+    a genuine authority statement in another.
+    """
+    for clause in (c.strip() for c in _CLAUSE_SPLIT.split(description or "") if c.strip()):
+        if _PASSIVE_SUPERVISION.search(clause):
+            continue
+        if any(pattern.search(clause) for pattern in _PEOPLE_AUTHORITY):
+            return True
+    return False
+
+
+def senior_ic_permitted(job: Dict) -> bool:
+    """True when ROLE_ALLOW_SENIOR_IC should spare this posting.
+
+    Fail-closed: any missing signal, excluded title level, ambiguous dual-level
+    title, or people-authority evidence returns False and the existing rejection
+    stands.
+    """
+    if not getattr(config, "ROLE_ALLOW_SENIOR_IC", False):
+        return False
+    title = str(job.get("job_title") or "")
+    if not _SENIOR_TOKEN.search(title):
+        return False
+    if _EXCLUDED_TITLE_LEVEL.search(title) or _DUAL_LEVEL_TITLE.search(title):
+        return False
+    return not has_people_authority(str(job.get("job_description") or ""))
+
+
 def assess_restricted_work(job: Dict) -> QualityAssessment:
     text = _text(job)
 
@@ -581,7 +694,7 @@ def assess_restricted_work(job: Dict) -> QualityAssessment:
             rf"\b(?:the|role\s*:|position\s*:)\s+senior\s+{role_pattern}\b",
             description_head,
             re.I,
-        ):
+        ) and not senior_ic_permitted(job):
             return QualityAssessment(False, "excluded_restricted_role", "hidden_senior_role")
 
     clearance_patterns = {
