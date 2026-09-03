@@ -223,6 +223,21 @@ def _cross_source_minor_check(job: Dict, source: ResolvedJobSource) -> bool:
 
 
 def _map_local_reason(reason: str):
+    """Map a local quality-guard reason to a ReasonCode.
+
+    The fallback is deliberately NOT ``REJECT_UNRESOLVABLE_POSTING``. The quality
+    guard runs BEFORE any source resolution, so nothing reaching this function has
+    had its posting looked up -- labelling an unmapped business-rule rejection as
+    "unresolvable posting" states something the pipeline never tested.
+
+    That mislabel was not cosmetic. In a 4,231-record Fantastic corpus it put 704
+    rejections under REJECT_UNRESOLVABLE_POSTING when the true reasons were
+    seniority (310), employer-identity integrity (332), staffing/RPO (25) and
+    clearance; the genuine source-resolution surface was 4 records. Two separate
+    investigations were aimed at source resolution on the strength of that name.
+    The specific reason is still carried in ``metadata.local_reason`` either way --
+    this only stops the summary code from asserting a cause that was never checked.
+    """
     lower = str(reason or "").lower()
     if "multi_job" in lower or "multi_role" in lower:
         return ReasonCode.REJECT_MULTI_JOB_ROUNDUP
@@ -232,7 +247,7 @@ def _map_local_reason(reason: str):
         return ReasonCode.REJECT_INTERNSHIP
     if "clearance" in lower or "federal" in lower or "government" in lower:
         return ReasonCode.REJECT_SECURITY_CLEARANCE_REQUIRED
-    return ReasonCode.REJECT_UNRESOLVABLE_POSTING
+    return ReasonCode.REJECT_QUALITY_GUARD_OTHER
 
 
 def _reject(reason, bundle, source, secondary=None):
