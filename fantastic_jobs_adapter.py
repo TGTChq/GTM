@@ -828,35 +828,64 @@ class _SourceBudgetAllocator:
         self.budget = max(0, int(budget))
         self.policy = policy if policy in ("sequential", "fair_share") else "sequential"
         self.segments = list(segments)
-        n = len(self.segments)
-        if self.policy == "fair_share" and n:
-            base = self.budget // n
-            self.alloc: Dict[str, int] = {s.key: min(max(0, s.limit), base) for s in self.segments}
-            self.pool = self.budget - sum(self.alloc.values())
-        else:
-            self.alloc = {s.key: self.budget for s in self.segments}
-            self.pool = 0
         self.grants: Dict[str, int] = {}
         self.spent: Dict[str, int] = {}
+        self.rounds = 0
+        self.alloc: Dict[str, int] = {}
+        self.pool = 0
+        self.open_round(self.segments)
+
+    def billed_total(self) -> int:
+        return sum(self.spent.values())
+
+    def open_round(self, active: List[_SourceSegment]) -> int:
+        """Re-share the REMAINING budget across the segments that can still consume.
+
+        Within one round, an unspent reservation cascades FORWARD to later segments.
+        That alone strands budget whenever a sparse source sits late in the plan: its
+        reservation is released only after the sources that could have used it have
+        already run. Re-opening a round hands that budget BACK to the segments still
+        able to spend it, so source ORDER can no longer decide whether the run budget
+        gets used -- while every enabled source still receives its equal floor in
+        round 1, before any recycling happens.
+        """
+        self.rounds += 1
+        active = list(active)
+        remaining = max(0, self.budget - self.billed_total())
+        n = len(active)
+        if self.policy == "fair_share" and n:
+            base = remaining // n
+            self.alloc = {s.key: min(max(0, int(s.limit) - self.spent.get(s.key, 0)), base)
+                          for s in active}
+            self.pool = remaining - sum(self.alloc.values())
+        else:
+            self.alloc = {s.key: remaining for s in active}
+            self.pool = 0
+        return n
 
     def grant(self, seg: _SourceSegment, billed_total: int) -> int:
         """Jobs this segment may cause the provider to BILL. Never exceeds the
-        segment's configured limit, its allocation, or the unspent run budget."""
+        segment's configured limit, its allocation, or the unspent run budget.
+
+        The per-source limit is CUMULATIVE across rounds: a segment granted budget
+        again in a later round may still only reach its configured total.
+        """
         remaining = self.budget - max(0, int(billed_total))
-        if remaining <= 0 or seg.limit <= 0:
-            self.grants[seg.key] = 0
+        headroom = int(seg.limit) - self.spent.get(seg.key, 0)
+        if remaining <= 0 or headroom <= 0:
+            self.grants.setdefault(seg.key, 0)
             return 0
-        room = min(int(seg.limit), remaining)
+        room = min(headroom, remaining)
         if self.policy == "fair_share":
             room = min(room, self.alloc.get(seg.key, 0) + self.pool)
         room = max(0, int(room))
-        self.grants[seg.key] = room
+        self.grants[seg.key] = self.grants.get(seg.key, 0) + room
         return room
 
     def settle(self, seg: _SourceSegment, billed: int) -> None:
         """Return a segment's UNUSED reservation to the shared pool."""
         billed = max(0, int(billed))
-        self.spent[seg.key] = billed
+        self.spent[seg.key] = self.spent.get(seg.key, 0) + billed
         if self.policy != "fair_share":
             return
         reserved = self.alloc.get(seg.key, 0)
@@ -873,7 +902,7 @@ class _SourceBudgetAllocator:
         collapsed into one ``total``."""
         granted_total = sum(self.grants.values())
         billed_total = sum(self.spent.values())
-        return {"policy": self.policy, "budget": self.budget,
+        return {"policy": self.policy, "budget": self.budget, "rounds": self.rounds,
                 "segments": [s.key for s in self.segments],
                 "granted": dict(self.grants), "billed": dict(self.spent),
                 "granted_total": granted_total, "billed_total": billed_total,
@@ -915,6 +944,51 @@ def build_source_plan(*, title_advanced_active: bool, used_title_families: bool)
             plan.append(_SourceSegment(key=key, label=label, endpoint="/v1/active-jb",
                                        limit=limit, accept=accept))
     return plan
+
+
+#: Server-side predicates that EXCLUDE NULLS. ``organization_headcount_gte/lt`` is a
+#: ">=" / "<" comparison and ``exclude_organization_industry`` is a NOT-IN, so a row
+#: whose firmographics the provider never populated is dropped by EACH of them --
+#: silently, as an empty page rather than an error.
+_NULL_EXCLUDING_FIRMOGRAPHIC_PARAMS = ("organization_headcount_gte",
+                                       "organization_headcount_lt",
+                                       "exclude_organization_industry")
+
+
+def source_supports_provider_firmographics(source_key: str) -> bool:
+    """False for sources whose rows carry no provider firmographics (Wellfound, Y
+    Combinator). Configuration, never a guess: the incompatible set was measured
+    with 0-credit count probes (see config.FANTASTIC_FIRMOGRAPHIC_INCOMPATIBLE_SOURCES)."""
+    bad = {str(s).strip().lower() for s in
+           (getattr(config, "FANTASTIC_FIRMOGRAPHIC_INCOMPATIBLE_SOURCES", []) or [])}
+    return str(source_key or "").strip().lower() not in bad
+
+
+def build_jb_params(source_key: str, *, title_advanced_expr: str = "") -> Dict[str, Any]:
+    """``/v1/active-jb`` request for ONE source segment.
+
+    Identical to the previous inline construction for every firmographics-carrying
+    source, with two deliberate differences for the others:
+
+      * the NULL-EXCLUDING firmographic predicates are omitted, because they drop
+        100% of that source's rows rather than filtering them (ICP is then enforced
+        downstream on Apollo facts, which is already authoritative for PASS);
+      * role targeting is APPLIED. The plan loop previously sent no
+        ``title_advanced`` at all, so a plan-dispatched source would have returned
+        its whole unfiltered feed -- 542 Wellfound rows instead of the 159 that are
+        on-portfolio. Filtering the ROLE server-side is what makes a sparse source
+        worth its credits.
+    """
+    params: Dict[str, Any] = {"time_frame": config.FANTASTIC_JOBS_TIME_FRAME,
+                              "exclude_ats_duplicate": "true", "source": source_key}
+    params.update(_jb_filter_params())
+    _apply_server_industry_exclusions(params)
+    if title_advanced_expr:
+        params["title_advanced"] = title_advanced_expr
+    if not source_supports_provider_firmographics(source_key):
+        for key in _NULL_EXCLUDING_FIRMOGRAPHIC_PARAMS:
+            params.pop(key, None)
+    return params
 
 
 def candidate_title_expression() -> str:
@@ -1498,7 +1572,8 @@ class DateCreatedWatermarkEngine:
             "lag_minutes": lag, "overlap_minutes": overlap, "empty_interval": (self.lower == self.upper)}
 
     def run_stream(self, endpoint: str, base_params: Dict[str, Any], label: str,
-                   cap_limit: int, accept: Optional[Tuple[str, ...]]) -> None:
+                   cap_limit: int, accept: Optional[Tuple[str, ...]],
+                   start_offset: int = 0) -> None:
         """One pass over [lower, upper) for a source; shares billing/dedupe with the
         head/deep engine via ``_fetch_segment``."""
         if not self.opened or self.lower == self.upper:
@@ -1520,7 +1595,8 @@ class DateCreatedWatermarkEngine:
         params["date_created_gte"] = self.lower
         params["date_created_lt"] = self.upper
         got = _fetch_segment(endpoint, params, label, room, self.quota, self.http_get,
-                             self.seen_ids, self.metrics, accept_source=accept)
+                             self.seen_ids, self.metrics, accept_source=accept,
+                             start_offset=start_offset)
         self.acquired.extend(got)
         self.result.jobs.extend(got)
         self.metrics["watermark"]["acquired"] = self.metrics["watermark"].get("acquired", 0) + len(got)
@@ -2131,6 +2207,10 @@ def run_fantastic_jobs_acquisition(http_get: HttpGet = _http_get, *,
 
     allocator: Optional[_SourceBudgetAllocator] = None
     source_plan: List[_SourceSegment] = []
+    # How to RESUME each segment if unspent budget is recycled to it. Only segments
+    # paged by OFFSET can resume; the head/deep date-cursor stream and the
+    # per-family loop own their own cursors, so they run once and are left out.
+    seg_resume: Dict[str, Dict[str, Any]] = {}
     try:
         # Segment priority: ATS first, then Wellfound, Y Combinator, LinkedIn.
         # active-ats is the complementary, NON-overlapping first-party dataset
@@ -2172,6 +2252,8 @@ def run_fantastic_jobs_acquisition(http_get: HttpGet = _http_get, *,
         if ats_seg is not None:
             ats_params = build_ats_params(title_advanced_expr)
             metrics["ats_source"]["params"] = sorted(k for k in ats_params if k != "title_advanced")
+            seg_resume[ATS_SOURCE] = {"seg": ats_seg, "endpoint": "/v1/active-ats",
+                                      "params": ats_params, "accept": None, "resumable": True}
             # ATS budget shares the SINGLE combined run cap with every other source:
             # the governor controls them together and no source can claim an
             # independent allowance.
@@ -2229,6 +2311,13 @@ def run_fantastic_jobs_acquisition(http_get: HttpGet = _http_get, *,
             # never funded). Under "sequential" the grant equals the remaining budget,
             # so production behaviour is unchanged.
             li_seg = next((s for s in source_plan if s.key == "linkedin"), None)
+            if li_seg is not None:
+                # Resumable ONLY under the watermark engine: that path pages the window
+                # by offset. Without it the stream is driven by head/deep date cursors,
+                # which a second pass would replay rather than continue.
+                seg_resume[li_seg.label] = {
+                    "seg": li_seg, "endpoint": "/v1/active-jb", "params": jb_params,
+                    "accept": ("linkedin",), "resumable": watermark_engine is not None}
             li_room = (allocator.grant(li_seg, quota.jobs_consumed) if li_seg is not None
                        else int(config.FANTASTIC_JOBS_LINKEDIN_LIMIT))
             li_before = quota.jobs_consumed
@@ -2339,10 +2428,13 @@ def run_fantastic_jobs_acquisition(http_get: HttpGet = _http_get, *,
                     "stop_reason", "no_run_budget")
                 allocator.settle(seg, 0)
                 continue
-            jb_params = {"time_frame": config.FANTASTIC_JOBS_TIME_FRAME,
-                         "exclude_ats_duplicate": "true", "source": seg.key}
-            jb_params.update(_jb_filter_params())
-            _apply_server_industry_exclusions(jb_params)
+            # SOURCE-AWARE: omits the null-excluding firmographic predicates for a
+            # source that carries no provider firmographics, and applies role
+            # targeting -- which this loop never used to send at all.
+            jb_params = build_jb_params(seg.key, title_advanced_expr=title_advanced_expr)
+            seg_resume[seg.label] = {"seg": seg, "endpoint": seg.endpoint,
+                                     "params": jb_params, "accept": seg.accept,
+                                     "resumable": not seg.feeds_cursor}
             before_billed = quota.jobs_consumed
             if seg.feeds_cursor:
                 # Plain LinkedIn stream (no title mode): keeps the single-stream
@@ -2355,6 +2447,77 @@ def run_fantastic_jobs_acquisition(http_get: HttpGet = _http_get, *,
                                      http_get, seen_ids, metrics, accept_source=seg.accept)
                 result.jobs.extend(got)
             allocator.settle(seg, quota.jobs_consumed - before_billed)
+        # ---- BACKWARD RECLAMATION -------------------------------------------------
+        # Round 1 above gave every enabled source its equal floor. A sparse source
+        # that could not consume its floor releases it only AFTER the sources able to
+        # spend it have already run, so with two empty sources HALF the run budget was
+        # stranded (measured live: 1582 of 3164). Re-offer the unspent remainder to the
+        # segments that still have inventory, so source ORDER can never decide whether
+        # the run budget gets used.
+        #
+        # ONLY a segment that stopped on "cap_reached" is asked again: that is the one
+        # stop reason meaning "I filled my grant and there may be more". empty_page /
+        # short_page / no_new_ids mean exhausted, and an error_code means the segment
+        # failed -- neither is re-dispatched, so a dead source is never re-polled.
+        # Each resumed pass continues at the offset the segment already reached, so no
+        # page is billed twice. sequential is left byte-identical: it has nothing to
+        # reclaim (the first segment may already draw the whole remaining budget).
+        if (allocator is not None and allocator.policy == "fair_share" and seg_resume
+                and not quota.stop_reason):
+            def _resumable_now() -> List[Dict[str, Any]]:
+                out = []
+                for lbl, rec in seg_resume.items():
+                    if not rec.get("resumable"):
+                        continue
+                    s = (metrics["segments"].get(lbl) or {})
+                    if s.get("error_code"):
+                        continue
+                    if str(s.get("stop_reason") or "") != "cap_reached":
+                        continue
+                    out.append(rec)
+                return out
+
+            _max_rounds = int(getattr(config, "FANTASTIC_SOURCE_MAX_ALLOCATION_ROUNDS", 4) or 0)
+            for _ in range(max(0, _max_rounds - 1)):
+                _active = _resumable_now()
+                if not _active or quota.stop_reason:
+                    break
+                if allocator.budget - quota.jobs_consumed <= 0:
+                    break
+                allocator.open_round([r["seg"] for r in _active])
+                _round_billed = 0
+                for _rec in _active:
+                    if quota.stop_reason:
+                        break
+                    _rseg = _rec["seg"]
+                    _room = allocator.grant(_rseg, quota.jobs_consumed)
+                    if _room <= 0:
+                        continue
+                    _sm = metrics["segments"].setdefault(_rseg.label, {})
+                    # Rows already billed for this label ARE the offset to resume at:
+                    # paging is contiguous, so the next unseen row is exactly there.
+                    _start = int(_sm.get("returned", 0) or 0)
+                    # The LAST pass decides how the segment finished; otherwise a
+                    # round-1 "cap_reached" would mask a later genuine drain and the
+                    # canonical watermark could never advance.
+                    _sm["stop_reason"] = ""
+                    _b4 = quota.jobs_consumed
+                    if watermark_engine is not None:
+                        watermark_engine.run_stream(_rec["endpoint"], _rec["params"],
+                                                    _rseg.label, _room, _rec["accept"],
+                                                    start_offset=_start)
+                    else:
+                        _got = _fetch_segment(_rec["endpoint"], _rec["params"], _rseg.label,
+                                              _room, quota, http_get, seen_ids, metrics,
+                                              accept_source=_rec["accept"],
+                                              start_offset=_start)
+                        result.jobs.extend(_got)
+                    _delta = quota.jobs_consumed - _b4
+                    allocator.settle(_rseg, _delta)
+                    _round_billed += _delta
+                if _round_billed <= 0:
+                    break            # nothing left to win: stop rather than re-poll
+
         # (moved here from the checkpoint section: it BILLS, so it must run
         #  before metrics/quota aggregation or the run would under-report spend)
         if watermark_engine is not None:
@@ -2384,15 +2547,13 @@ def run_fantastic_jobs_acquisition(http_get: HttpGet = _http_get, *,
                     if _boot_room <= 0:
                         _boot_alloc.settle(_seg, 0)
                         continue
-                    _bp = {"time_frame": config.FANTASTIC_JOBS_TIME_FRAME,
-                           "exclude_ats_duplicate": "true", "source": _seg.key}
                     if _seg.key == "ats":
                         _bp = build_ats_params(title_advanced_expr)
                     else:
-                        _bp.update(_jb_filter_params())
-                        _apply_server_industry_exclusions(_bp)
-                        if _seg.dispatch == "title_advanced" and title_advanced_expr:
-                            _bp["title_advanced"] = title_advanced_expr
+                        # Same source-aware shape as steady state, so a backfill and
+                        # the live window ask the provider the SAME question.
+                        _bp = build_jb_params(_seg.key,
+                                              title_advanced_expr=title_advanced_expr)
                     _b4 = quota.jobs_consumed
                     watermark_engine.run_bootstrap(_seg.endpoint, _bp, _seg.label,
                                                    _boot_room, _seg.accept)
