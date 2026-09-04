@@ -904,6 +904,32 @@ FANTASTIC_YCOMBINATOR_SOURCE_ENABLED = _env_bool("FANTASTIC_YCOMBINATOR_SOURCE_E
 # Experiment arms set fair_share explicitly (level field for comparison), and
 # enabling a 3rd/4th source in production should set it explicitly too.
 FANTASTIC_SOURCE_ALLOCATION = os.getenv("FANTASTIC_SOURCE_ALLOCATION", "sequential").strip().lower()
+# ROUND-BASED RECLAMATION (fair_share only). Round 1 gives every enabled source its
+# equal floor; a later round re-shares whatever the sparse sources did not consume
+# among the sources that can still spend it. Without this, a source that returns
+# nothing still holds its reservation until AFTER the productive sources have run,
+# so enabling two sparse sources stranded HALF the run budget (measured: 1582 of
+# 3164). Bounded and deterministic: the loop also stops as soon as a round bills
+# nothing, so this is a ceiling, not a target.
+FANTASTIC_SOURCE_MAX_ALLOCATION_ROUNDS = _env_int("FANTASTIC_SOURCE_MAX_ALLOCATION_ROUNDS", 4)
+
+# --- Source-aware server-side firmographics ------------------------------------
+# PROVEN LIVE 2026-09-04 with 0-credit /v1/active-jb-count probes: Fantastic
+# populates NO organization headcount and NO industry on Wellfound or Y Combinator
+# rows. `organization_headcount_gte` and `exclude_organization_industry` are a >=
+# and a NOT-IN predicate, so each DROPS NULLS -- and each independently took both
+# sources from real inventory to exactly zero:
+#     wellfound US 542 -> headcount_gte=1 -> 0 ;  industry exclusions -> 0
+#     ycombinator  182 -> headcount_gte=1 -> 0 ;  industry exclusions -> 0
+#     linkedin  717915 -> headcount_gte=1 -> 701230 (compatible)
+# gte=1 -- not 25 -- proves the FIELD IS ABSENT rather than the companies small.
+# For these sources the firmographic predicates are omitted and ICP is enforced
+# downstream by account_gate on APOLLO facts, which is already authoritative for
+# PASS (a missing employee count or industry yields NEEDS_CHECK, never PASS).
+# Filters PROVEN compatible are still sent: source token, US location, window,
+# ai_employment_type (542->502, 182->174) and title targeting (542->159, 182->41).
+FANTASTIC_FIRMOGRAPHIC_INCOMPATIBLE_SOURCES = _env_json(
+    "FANTASTIC_FIRMOGRAPHIC_INCOMPATIBLE_SOURCES_JSON", ["wellfound", "ycombinator"])
 
 # --- First-enablement bootstrap ------------------------------------------------
 # A source enabled for the first time has never inspected inventory OLDER than the
