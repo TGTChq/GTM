@@ -222,3 +222,71 @@ def test_a_genuinely_clean_week_is_not_described_as_a_loss(tmp_path):
     # With stages still unmeasured the plan is evidence-gap chores, which is the
     # correct answer for a clean-but-incompletely-instrumented week.
     assert all(a.basis.startswith("evidence gap on") for a in report.actions)
+
+
+# --------------------------------------------------------------------------
+# captured vs reviewed must be comparable populations
+# --------------------------------------------------------------------------
+
+
+def test_reviewing_every_net_new_posting_is_a_100_percent_review_rate(tmp_path):
+    """The populations must be comparable, or the rate is meaningless.
+
+    Production 2026-09-04 returned 6,205 provider rows and reviewed 2,410. The
+    report called that a 61% "review boundary" loss. Most of the gap was rows a
+    previous run had already processed -- an acquisition cost, not work anyone
+    dropped. Counting them as captured invented a bottleneck.
+    """
+    root = tmp_path / "orchestrator_v2"
+    write_ledger_run(root, "20260905T130000Z-aaaaaaaa", started="2026-09-05T13:00:00Z",
+                     finished="2026-09-05T16:00:00Z",
+                     metrics={"net_new_jobs_captured": 2410,
+                              "provider_jobs_returned": 6205,
+                              "historical_duplicates": 3795,
+                              "jobs_reviewed": 2410})
+
+    report = build_report(_september_window(), artifact_roots=[root])
+
+    assert report.metrics["jobs_captured"].value == 2410, "captured is NET-NEW"
+    assert report.metrics["jobs_reviewed"].value == 2410
+    assert report.metrics["review_rate_pct"].value == 100.0
+    # The provider duplication is still visible, just not as a funnel loss.
+    assert report.metrics["provider_jobs_returned"].value == 6205
+    assert report.metrics["historical_duplicates"].value == 3795
+
+
+def test_the_review_boundary_is_no_longer_the_invented_bottleneck(tmp_path):
+    """With comparable populations, nothing is lost at review."""
+    root = tmp_path / "orchestrator_v2"
+    write_ledger_run(root, "20260905T130000Z-aaaaaaaa", started="2026-09-05T13:00:00Z",
+                     finished="2026-09-05T16:00:00Z",
+                     metrics={"net_new_jobs_captured": 2410, "jobs_reviewed": 2410,
+                              "qualified_opportunities": 1698, "contacts_found": 1048,
+                              "sent_to_airtable": 781})
+
+    report = build_report(_september_window(), artifact_roots=[root])
+
+    assert report.bottleneck.boundary != "review", (
+        "a fully reviewed batch must not be reported as the biggest loss"
+    )
+    # With comparable populations the biggest real drop is the ICP decision
+    # (2410 -> 1698 = 712), just ahead of contact discovery (1698 -> 1048 = 650).
+    assert report.bottleneck.boundary == "qualification"
+    assert report.bottleneck.entered == 2410 and report.bottleneck.advanced == 1698
+    assert report.bottleneck.lost == 712
+
+
+def test_provider_duplication_never_counts_as_captured(tmp_path):
+    """A re-bought posting is acquisition cost, and must not inflate throughput."""
+    root = tmp_path / "orchestrator_v2"
+    write_ledger_run(root, "20260905T130000Z-aaaaaaaa", started="2026-09-05T13:00:00Z",
+                     finished="2026-09-05T16:00:00Z",
+                     metrics={"net_new_jobs_captured": 0, "provider_jobs_returned": 6000,
+                              "historical_duplicates": 6000, "jobs_reviewed": 0})
+
+    report = build_report(_september_window(), artifact_roots=[root])
+
+    assert report.metrics["jobs_captured"].value == 0, (
+        "a run that bought 6000 rows it already had captured nothing"
+    )
+    assert report.metrics["provider_jobs_returned"].value == 6000

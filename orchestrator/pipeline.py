@@ -319,7 +319,15 @@ class Orchestrator:
         acquisition_requests = sum(int(r.physical_requests or 0) for r in lane_results.values())
         self.ledger.record(
             STAGE_ACQUISITION,
-            {"jobs_captured": len(postings), "unique_opportunities": len(opportunities)},
+            {
+                # Net-new is the stakeholder population; provider duplication is
+                # acquisition efficiency, recorded separately.
+                "jobs_captured": len(opportunities),
+                "net_new_jobs_captured": len(opportunities),
+                "provider_jobs_returned": len(postings),
+                "historical_duplicates": max(0, len(postings) - len(opportunities)),
+                "unique_opportunities": len(opportunities),
+            },
             acquisition_entered=bool(acquisition_requests),
             physical_requests=acquisition_requests,
             source_counts={lane: len(r.jobs) for lane, r in lane_results.items()},
@@ -535,8 +543,19 @@ class Orchestrator:
         requests = int(acq_cum.get("physical_requests") or 0)
         self.ledger.record(
             STAGE_ACQUISITION,
-            {"jobs_captured": acq_cum.get("jobs_unique_kept"),
-             "unique_opportunities": len(leads)},
+            {
+                # What the stakeholder funnel counts as captured: postings that are
+                # NEW work. Provider duplication stays visible below as acquisition
+                # efficiency, where it belongs.
+                "jobs_captured": acq_cum.get("net_new_jobs_captured"),
+                "net_new_jobs_captured": acq_cum.get("net_new_jobs_captured"),
+                "provider_jobs_returned": acq_cum.get("jobs_returned_billed"),
+                "provider_jobs_billed": acq_cum.get("jobs_quota_consumed"),
+                "historical_duplicates": acq_cum.get("historical_duplicates"),
+                "cross_query_duplicates": acq_cum.get("cross_query_duplicates"),
+                "cross_source_duplicates": acq_cum.get("cross_source_duplicates"),
+                "unique_opportunities": len(leads),
+            },
             acquisition_entered=bool(requests),
             physical_requests=requests,
             source_counts={str(src): dict(vals)
@@ -603,7 +622,13 @@ class Orchestrator:
         # unique-kept jobs, returned/billed rows, and provider quota consumed.
         acq_cum: Dict[str, Any] = {
             "jobs_unique_kept": 0, "jobs_returned_billed": 0, "jobs_quota_consumed": 0,
-            "physical_requests": 0, "cross_query_duplicates": 0, "per_source": {},
+            "physical_requests": 0, "cross_query_duplicates": 0,
+            "cross_source_duplicates": 0, "per_source": {},
+            # NET-NEW is the population that actually becomes this week's work.
+            # A posting the provider returns for the second time is acquisition
+            # inefficiency, NOT a review-stage loss, and conflating the two made
+            # Brett's funnel read as a 61% "review" drop that no one had lost.
+            "historical_duplicates": 0, "net_new_jobs_captured": 0,
             "last_jobs_quota_remaining": None}
         acq_iters: List[Dict[str, Any]] = []
         # The top-up loop enriches once per SLICE, and the run report is assembled
@@ -688,6 +713,8 @@ class Orchestrator:
                 billed = rb if rb > 0 else kept
                 acq_cum["jobs_quota_consumed"] += int(fl.attribution.get("jobs_quota_consumed") or 0)
                 acq_cum["cross_query_duplicates"] += int(fl.attribution.get("cross_query_duplicates") or 0)
+                acq_cum["cross_source_duplicates"] += int(
+                    fl.attribution.get("cross_source_duplicates") or 0)
                 for src, s in (fl.attribution.get("per_source") or {}).items():
                     agg_src = acq_cum["per_source"].setdefault(src, {"jobs": 0, "returned_billed": 0, "requests": 0})
                     for k in agg_src:
@@ -703,6 +730,11 @@ class Orchestrator:
 
             opportunities, dedup_stage = self._dedup(iter_postings, supp.seen_postings())
             report.add(dedup_stage)
+            # Postings this run bought that a PREVIOUS run had already processed to
+            # completion. They are not reviewable work and must never be counted as
+            # a funnel loss; they are the cost of the acquisition overlap.
+            acq_cum["historical_duplicates"] += max(0, kept - len(opportunities))
+            acq_cum["net_new_jobs_captured"] += len(opportunities)
             # Ledger: postings that exit at dedupe never become leads.
             passed_ids = {str(o.get("posting_id") or o.get("job_id")) for o in opportunities}
             for j in iter_postings:
