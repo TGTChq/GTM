@@ -71,6 +71,17 @@ ARTIFACT_FILES = (
 #: A run directory must contain at least one of these to be a run at all.
 _MARKER_FILES = ("run_status.json", "run_manifest.json", "orchestrator_result.json")
 
+#: Sibling stores under an artifact root that are NOT runs. When a root has no
+#: ``run_artifacts/`` subdirectory yet, the root itself is scanned for run folders,
+#: and without this list every one of these would be reported as an unfinalized
+#: run -- a false alarm in exactly the "ledger written, nothing else yet" state.
+_NON_RUN_DIRS = frozenset({
+    LEDGER_STORE, "weekly_reports", "checkpoints", "checkpoints_ats",
+    "seen_suppression", "provider_cache", "scheduler_state", "delivery_state",
+    "run_lock_audit", "logs", "raw", "filtered", "enriched", "evidence",
+    "exports", "shadow", "source_cache", "organization_cache", "lost+found",
+})
+
 ATTR_FINISHED = "run_manifest.finished_at"
 ATTR_STARTED = "run_manifest.started_at"
 ATTR_RUN_ID = "run_id_prefix"
@@ -447,7 +458,8 @@ def discover_runs(roots: Sequence[str | os.PathLike]) -> Tuple[List[RunRecord], 
                 # manifest). If the ledger already knows the run it is reported from
                 # there; otherwise it must at least be DECLARED. Returning silently,
                 # as this did, is how a real run became invisible.
-                if child.is_dir() and child.name not in runs:
+                if (child.is_dir() and child.name not in runs
+                        and child.name not in _NON_RUN_DIRS):
                     try:
                         non_empty = any(child.iterdir())
                     except OSError:

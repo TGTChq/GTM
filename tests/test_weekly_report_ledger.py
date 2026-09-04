@@ -566,3 +566,24 @@ def test_the_stronger_clock_wins_when_both_stores_describe_one_run(tmp_path):
     assert record.finished_at is not None
     inside, _ = select_window(runs, _week_window())
     assert [r.run_id for r in inside] == [run_id]
+
+
+def test_sibling_stores_are_not_mistaken_for_unfinalized_runs(tmp_path):
+    """A ledger-only root has no run_artifacts/ yet, so the ROOT gets scanned.
+
+    Without an exclusion list every sibling store there -- reporting_ledger and
+    weekly_reports included -- would be reported as an unfinalized run.
+    """
+    root = tmp_path / "orchestrator_v2"
+    write_ledger_run(root, "20260901T130000Z-aaaaaaaa", started="2026-09-01T13:00:00Z",
+                     finished="2026-09-01T13:05:00Z", metrics={"jobs_captured": 5})
+    (root / "weekly_reports").mkdir(parents=True, exist_ok=True)
+    (root / "weekly_reports" / "weekly_report_2026-W36.json").write_text("{}", encoding="utf-8")
+    (root / "checkpoints").mkdir(parents=True, exist_ok=True)
+    (root / "checkpoints" / "x.json").write_text("{}", encoding="utf-8")
+    assert not (root / "run_artifacts").exists()
+
+    runs, problems = discover_runs([root])
+
+    assert [r.run_id for r in runs] == ["20260901T130000Z-aaaaaaaa"]
+    assert problems == [], f"sibling stores must not be reported as runs: {problems}"
