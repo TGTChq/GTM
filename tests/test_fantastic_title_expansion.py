@@ -94,6 +94,48 @@ class CatalogAlignmentTest(unittest.TestCase):
         self.assertEqual(len(rc._ROLE_DEFINITIONS), 118 + len(EXPANSION))
 
 
+class ExpressionLengthTest(unittest.TestCase):
+    """The query-length budget, measured on the shape PRODUCTION actually sends.
+
+    The pre-existing length assertion runs with local defaults, where alias and
+    functional-role expansion are OFF, so it only ever saw the bare catalog union
+    (3283 chars). GTM runs with FANTASTIC_TITLE_ALIASES_ENABLED=1 and
+    FANTASTIC_FUNCTIONAL_ROLE_EXPANSION_ENABLED=1, which is materially longer --
+    3905 chars before this change and 4222 after. Nothing tested that shape, so a
+    catalog addition could have pushed the live query past what the API accepts
+    with every test still green.
+
+    4222 was verified live on 2026-09-04 against /v1/active-jb-count (0 job
+    credits): HTTP 200, 5,518 matching postings vs 5,216 for the pre-change
+    expression, and "platform engineer" alone returned 32 -- so the added terms
+    are honoured, not silently dropped. The ceiling below leaves headroom above
+    that proven-good size while still catching runaway growth.
+    """
+
+    #: Proven accepted by the provider; see the class docstring.
+    VERIFIED_PRODUCTION_CHARS = 4222
+    CEILING = 4800
+
+    def _production_shaped(self):
+        from unittest import mock
+        with mock.patch.multiple(config,
+                                 FANTASTIC_TITLE_ALIASES_ENABLED=True,
+                                 FANTASTIC_FUNCTIONAL_ROLE_EXPANSION_ENABLED=True):
+            return fja.build_title_query_plan()
+
+    def test_production_shaped_expression_stays_within_the_query_budget(self):
+        plan = self._production_shaped()
+        self.assertLess(len(plan["expression"]), self.CEILING,
+                        f"live title_advanced grew to {len(plan['expression'])} chars; "
+                        "re-verify against /v1/active-jb-count before raising this")
+
+    def test_alias_and_expansion_flags_only_ever_add(self):
+        """A longer expression must never come at the cost of a base clause."""
+        base = {c["role"] for c in fja.build_title_query_plan()["clauses"]}
+        grown = {c["role"] for c in self._production_shaped()["clauses"]}
+        self.assertTrue(base <= grown, f"lost base clauses: {sorted(base - grown)}")
+
+
 class RoutingTest(unittest.TestCase):
     def test_each_new_family_routes_to_the_declared_buckets(self):
         for title, (fn, hm) in EXPANSION.items():
