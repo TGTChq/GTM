@@ -587,3 +587,76 @@ def test_sibling_stores_are_not_mistaken_for_unfinalized_runs(tmp_path):
 
     assert [r.run_id for r in runs] == ["20260901T130000Z-aaaaaaaa"]
     assert problems == [], f"sibling stores must not be reported as runs: {problems}"
+
+
+# --------------------------------------------------------------------------
+# backfill across the deploy boundary
+# --------------------------------------------------------------------------
+
+
+def test_runs_written_before_the_ledger_existed_are_backfilled(tmp_path):
+    """The deploy boundary: today's productive run predates the ledger.
+
+    Its heavy artifacts survive for a few days, so its counters are lifted into
+    the durable store before retention deletes them. Without this the first
+    productive run would vanish from the very report the ledger exists to fix.
+    """
+    from orchestrator.run_ledger import backfill_from_artifacts
+
+    root = tmp_path / "orchestrator_v2"
+    write_run(root, "20260904T130130Z-13b44a0c", finished="2026-09-04T16:00:00Z",
+              started="2026-09-04T13:01:30Z", postings=6205, reviewed=None,
+              qualified=None, contacts=1048, created=90)
+
+    result = backfill_from_artifacts(root)
+
+    assert result["written"] == ["20260904T130130Z-13b44a0c"]
+    entries, problems = read_entries(root)
+    assert problems == []
+    entry = entries[0]
+    assert entry["state"] == STATE_COMPLETE
+    assert entry["backfilled_from_artifacts"] is True
+    assert entry["started_at"] == "2026-09-04T13:01:30Z"
+    assert entry["finished_at"] == "2026-09-04T16:00:00Z", "the run's own clock, not now()"
+    assert entry["metrics"]["jobs_captured"] == 6205
+    assert entry["metrics"]["contacts_found"] == 1048
+    assert entry["metrics"]["sent_to_airtable"] == 90
+    assert "jobs_reviewed" not in entry["metrics"], "an absent funnel stays absent"
+    assert entry["metric_sources"]["jobs_captured"] == "pipeline:backfill_from_artifacts"
+
+
+def test_backfill_is_idempotent_and_never_overwrites_a_live_entry(tmp_path):
+    from orchestrator.run_ledger import backfill_from_artifacts
+
+    root = tmp_path / "orchestrator_v2"
+    run_id = "20260904T130130Z-13b44a0c"
+    write_ledger_run(root, run_id, started="2026-09-04T13:01:30Z",
+                     finished="2026-09-04T16:00:00Z", metrics={"jobs_captured": 6205})
+    write_run(root, run_id, finished="2026-09-04T16:00:00Z", postings=999,
+              reviewed=None, qualified=None, contacts=None, created=None)
+
+    first = backfill_from_artifacts(root)
+    second = backfill_from_artifacts(root)
+
+    assert first["written"] == [] and second["written"] == []
+    entry = read_entries(root)[0][0]
+    assert entry["metrics"]["jobs_captured"] == 6205, "the live entry wins over the artifacts"
+    assert "backfilled_from_artifacts" not in entry
+
+
+def test_a_backfilled_week_reports_exactly_like_a_native_one(tmp_path):
+    from orchestrator.run_ledger import backfill_from_artifacts
+
+    root = tmp_path / "orchestrator_v2"
+    for offset in range(3):
+        day = datetime(2026, 9, 1, 13, 1, tzinfo=UTC) + timedelta(days=offset)
+        write_run(root, day.strftime("%Y%m%dT%H%M%SZ") + f"-{offset:08x}",
+                  finished=day.strftime("%Y-%m-%dT%H:%M:%SZ"), postings=100,
+                  reviewed=None, qualified=None, contacts=12, created=10)
+    backfill_from_artifacts(root)
+
+    report = build_report(_week_window(), artifact_roots=[root])
+    assert report.metrics["jobs_captured"].value == 300
+    assert len(report.runs) == 3
+    # Both stores describe these runs, so they are not "ledger only".
+    assert report.to_dict()["provenance"]["runs_reported_from_ledger_only"] == []

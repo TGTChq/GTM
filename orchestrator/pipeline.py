@@ -34,6 +34,7 @@ from orchestrator.run_ledger import (
     STATE_FAILED,
     STATE_INCOMPLETE,
     RunLedger,
+    backfill_from_artifacts,
     prune_ledger,
 )
 from orchestrator.runcontrol import RunContext, RunStatus
@@ -246,6 +247,14 @@ class Orchestrator:
             except Exception:  # noqa: BLE001 - reporting must never mask the outcome
                 pass
             lock.release()
+            # Lift any run that predates the ledger into it BEFORE retention
+            # deletes its evidence. Without this the last runs written by the
+            # previous build would vanish from the very report the ledger exists
+            # to fix. Idempotent, so it is a no-op once every run has an entry.
+            try:
+                backfill_from_artifacts(self.state.root)
+            except Exception:  # noqa: BLE001
+                pass
             try:
                 self.state.prune(keep=int(retention_keep), max_bytes=RETENTION_MAX_BYTES,
                                  protect={self.ctx.run_id})
