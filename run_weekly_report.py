@@ -26,12 +26,14 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import List, Optional, Sequence
 
+from weekly_report import anchor as anchor_mod
 from weekly_report import slack
 from weekly_report.external import CollectorResult, collect_airtable, collect_instantly, disabled
 from weekly_report.render import render_summary
 from weekly_report.report import HEADLINE_ORDER, build_report
 from weekly_report.timewindow import (
     PACIFIC_TZ_NAME,
+    anchored_window,
     ReportingWindow,
     explicit_window,
     resolve_timezone,
@@ -79,8 +81,23 @@ def _parse_date(text: str) -> date:
         raise argparse.ArgumentTypeError(f"expected YYYY-MM-DD, got {text!r}") from exc
 
 
-def build_window(args: argparse.Namespace, now: datetime) -> ReportingWindow:
-    """The window this invocation reports on."""
+def build_window(args: argparse.Namespace, now: datetime,
+                 anchor_start: Optional[datetime] = None) -> ReportingWindow:
+    """The window this invocation reports on.
+
+    ``--anchored`` ends the window at THIS generation instant and starts it at the
+    previously persisted one, so the run that just finished is inside it and the
+    next window starts exactly where this one ends. Without a stored anchor (first
+    ever anchored report) it falls back to the fixed weekly boundary, so the very
+    first window is still a sane week rather than "all of history".
+    """
+    if getattr(args, "anchored", False) and not (args.start or args.end):
+        if anchor_start is not None:
+            return anchored_window(anchor_start, now, tz_name=args.timezone)
+        seed = weekly_window(
+            now, boundary_weekday=WEEKDAYS[args.boundary_day],
+            boundary_hour=args.boundary_hour, weeks=args.weeks, tz_name=args.timezone)
+        return anchored_window(seed.start_utc, now, tz_name=args.timezone)
     if args.start and args.end:
         return explicit_window(
             args.start, args.end, boundary_hour=args.boundary_hour, tz_name=args.timezone
@@ -278,6 +295,22 @@ def build_parser() -> argparse.ArgumentParser:
         help="Regenerate even when --once-per-window would skip.",
     )
     parser.add_argument(
+        "--anchored",
+        action="store_true",
+        help="End this window at the generation instant and start it at the previously "
+        "persisted one (weekly_report_anchor.json beside the reports). Makes the run "
+        "that just finished part of THIS report, with no gap or overlap against the "
+        "next. Requires acquisition to run BEFORE the report.",
+    )
+    parser.add_argument(
+        "--require-completed-run",
+        action="store_true",
+        help="Write and send nothing unless at least one COMPLETED pipeline run is "
+        "attributed to the window. Stops a failed Friday acquisition from producing a "
+        "report that implies the week finished; the anchor does not advance, so those "
+        "runs are picked up by the next report instead of being lost.",
+    )
+    parser.add_argument(
         "--slack",
         action="store_true",
         help=f"POST the human summary to the Slack incoming webhook in ${slack.ENV_WEBHOOK}. "
@@ -315,8 +348,26 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             print(f"weekly report not due today (waiting for {args.if_due}); nothing written")
         return 0
 
-    window = build_window(args, now)
     roots = args.artifact_root or _default_artifact_roots()
+    anchor_start = None
+    anchor_file = None
+    if args.anchored:
+        probe_dir = (Path(args.out_dir) if args.out_dir
+                     else Path(roots[0]) / _DEFAULT_SUBDIR)
+        anchor_file = anchor_mod.anchor_path_for(probe_dir)
+        anchor_start = anchor_mod.read_anchor(anchor_file)
+        # A second invocation at (or before) the stored boundary has nothing new to
+        # cover. Exit cleanly rather than constructing an empty-or-inverted window:
+        # this is the normal shape of a restart, a double cron firing, or a clock
+        # that stepped backwards, and none of those is an error.
+        if anchor_start is not None and now <= anchor_start:
+            if not args.quiet:
+                print(
+                    f"weekly report: nothing new since the last anchored window ended at "
+                    f"{anchor_start.isoformat()}; nothing written, boundary unchanged"
+                )
+            return 0
+    window = build_window(args, now, anchor_start)
     json_path, summary_path = _output_paths(args, window, roots)
 
     # Idempotence gate, deliberately BEFORE the collectors: a container restart or a
@@ -346,6 +397,34 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         now=now,
         include_simulated=args.include_simulated,
     )
+    # FAIL-SAFE: a Friday whose acquisition did not complete must not produce a
+    # report that implies the week finished. Nothing is written and the anchor does
+    # NOT advance, so those runs simply belong to the next report rather than being
+    # lost -- the window widens instead of a week going missing.
+    if args.require_completed_run:
+        completed = [r for r in report.runs
+                     if str(r.get("status", "")).lower() == "complete"]
+        if not completed:
+            # The deferred span must stay covered. With no anchor yet, the window
+            # was seeded from the fixed weekly boundary; if that seed is not
+            # persisted, the NEXT report re-seeds from a later boundary and the
+            # skipped span is silently jumped over. Pinning the window START (which
+            # is exactly "where the next window begins") makes the fail-safe defer
+            # rather than discard. Where an anchor already exists it equals this
+            # value, so the write is a no-op.
+            if args.anchored and anchor_file is not None and not args.no_write:
+                anchor_mod.write_anchor(anchor_file, window.start_utc,
+                                        window=window.to_dict())
+            if not args.quiet:
+                print(
+                    f"weekly report for {window.iso_week}: no COMPLETED run is attributed "
+                    f"to {window.start_utc.isoformat()} -> {window.end_utc.isoformat()}; "
+                    "writing nothing and holding the reporting boundary at "
+                    f"{window.start_utc.isoformat()} so those runs land in the next "
+                    "report (--require-completed-run)"
+                )
+            return 0
+
     document = report.to_dict()
     summary = render_summary(report)
 
@@ -356,6 +435,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if not args.no_write:
         written.append(_write(json_path, json.dumps(document, indent=2, sort_keys=False)))
         written.append(_write(summary_path, summary))
+        # The boundary advances HERE -- once the artifact is durably on disk and
+        # before Slack is attempted. A delivery failure then retries against this
+        # same closed window (guarded by the receipt) instead of holding the window
+        # open and merging next week into it. See weekly_report/anchor.py.
+        if args.anchored and anchor_file is not None:
+            written.append(anchor_mod.write_anchor(
+                anchor_file, window.end_utc, window=window.to_dict(),
+                report_path=json_path))
         if not args.quiet:
             print()
             for path in written:
