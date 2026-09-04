@@ -59,6 +59,7 @@ def write_run(
     allow_enrollment: bool = False,
     posted_at: str = "2020-01-01T00:00:00Z",
     reasons: Optional[Dict[str, int]] = None,
+    stop_reason: Optional[str] = None,
 ) -> Path:
     """Write one run directory in the exact shape ``orchestrator/pipeline.py`` writes."""
     run_dir = root / "run_artifacts" / run_id
@@ -72,6 +73,8 @@ def write_run(
         # A job's own publication date lives in the run, and must never drive attribution.
         "notes": [{"posted_at": posted_at}],
     }
+    if stop_reason:
+        manifest["stop_reason"] = stop_reason
     if started:
         manifest["started_at"] = started
     if finished:
@@ -572,6 +575,63 @@ def test_a_week_with_no_runs_names_execution_not_a_funnel_stage(artifact_root, p
     assert report.bottleneck.kind == "no_pipeline_activity"
     assert "scheduling" in report.actions[0].action
     assert any(gap.metric == "pipeline_activity" for gap in report.gaps)
+
+
+def test_zero_capture_names_acquisition_not_clean_throughput(artifact_root, pacific_week):
+    """The defect this replaces: with every counter 0 no boundary shows a loss, so
+    the report said "no funnel boundary could be shown to lose records" -- a total
+    acquisition outage read as clean throughput. Shape copied from the real week of
+    2026-08-28: four runs blocked by the credit governor, one that reached the
+    provider and still captured nothing."""
+    for i in range(4):
+        write_run(artifact_root, f"zero{i}", finished=f"2026-08-2{2+i%1}T13:00:00Z",
+                  postings=0, reviewed=0, qualified=0, contacts=0, created=0,
+                  stop_reason="governor_zero_budget")
+    write_run(artifact_root, "reached", finished="2026-08-22T14:00:00Z",
+              postings=0, reviewed=0, qualified=0, contacts=0, created=0,
+              stop_reason="max_iterations_guard")
+    report = build_report(pacific_week, artifact_roots=[artifact_root])
+    assert report.bottleneck.kind == "acquisition_entry"
+    assert report.bottleneck.boundary == "acquisition"
+    assert "captured 0 jobs across 5 runs" in report.bottleneck.statement
+    assert "granted zero budget on 4" in report.bottleneck.statement
+    assert "1 run had budget and reached the provider" in report.bottleneck.statement
+    # The old wording must never appear for a zero-capture week.
+    assert "clean end to end" not in report.bottleneck.statement
+
+
+def test_zero_capture_plan_leads_with_acquisition_not_instrumentation_chores(
+        artifact_root, pacific_week):
+    for i in range(3):
+        write_run(artifact_root, f"z{i}", finished="2026-08-22T13:00:00Z",
+                  postings=0, reviewed=0, qualified=0, contacts=0, created=0,
+                  stop_reason="governor_zero_budget")
+    report = build_report(pacific_week, artifact_roots=[artifact_root])
+    assert report.actions[0].basis.startswith("jobs_captured = 0")
+    assert "acquisition entry" in report.actions[0].action
+    assert any("quota snapshot" in a.action for a in report.actions)
+    # Evidence-gap chores must not bury a concrete production problem.
+    assert not any("evidence gap" in a.basis for a in report.actions)
+
+
+def test_positive_acquisition_still_selects_the_largest_funnel_boundary(
+        artifact_root, pacific_week):
+    """The zero-capture guard must not shadow the normal boundary search."""
+    write_run(artifact_root, "ok", finished="2026-08-22T13:00:00Z",
+              postings=100, reviewed=95, qualified=90, contacts=10, created=9)
+    report = build_report(pacific_week, artifact_roots=[artifact_root])
+    assert report.bottleneck.kind == "funnel_boundary"
+    assert report.bottleneck.boundary == "contact_discovery"
+
+
+def test_zero_capture_with_no_recorded_stop_reason_says_so(artifact_root, pacific_week):
+    write_run(artifact_root, "u", finished="2026-08-22T13:00:00Z",
+              postings=0, reviewed=0, qualified=0, contacts=0, created=0)
+    report = build_report(pacific_week, artifact_roots=[artifact_root])
+    assert report.bottleneck.kind == "acquisition_entry"
+    # "unrecorded" is counted as a run that reached the provider only if it is not a
+    # governor stop; either way the wording must never claim a cause it cannot show.
+    assert "governor" not in report.bottleneck.statement
 
 
 def test_a_failed_acquisition_lane_outranks_any_funnel_boundary(artifact_root, pacific_week):

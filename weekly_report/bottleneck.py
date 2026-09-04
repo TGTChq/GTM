@@ -15,6 +15,7 @@ it says so, and the plan says what to instrument instead.
 
 from __future__ import annotations
 
+import collections
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Sequence
 
@@ -85,7 +86,33 @@ REASON_ACTIONS = {
 }
 
 #: Stage -> the action to take when that boundary is the largest loss.
+#: Stop reasons that mean the run never reached the provider at all, mapped to the
+#: work that clears them. Keyed on the substring the orchestrator actually writes.
+ACQUISITION_STOP_ACTIONS = {
+    "governor_zero_budget": (
+        "The credit governor granted zero budget, so no provider request was made. Check "
+        "the persisted Fantastic quota snapshot against the provider's own "
+        "x-api-jobs-remaining: a stale snapshot below "
+        "FANTASTIC_JOBS_MIN_JOBS_QUOTA_REMAINING blocks every run until it is refreshed."
+    ),
+    "acquisition_failed": (
+        "An acquisition lane errored. Fix the lane before reading any downstream counter."
+    ),
+}
+
+#: Said of a run that DID reach the provider with budget and still captured nothing.
+ACQUISITION_REACHED_PROVIDER_ACTION = (
+    "Acquisition had budget and reached the provider but captured no jobs. Check the "
+    "date_created watermark: a window left in flight and older than "
+    "FANTASTIC_JOBS_TIME_FRAME can only return empty pages, because the provider "
+    "intersects the window with the time frame."
+)
+
 STAGE_ACTIONS = {
+    "acquisition": (
+        "Acquisition captured nothing this window, so no funnel stage had input. Fix "
+        "acquisition entry before reading or acting on any downstream number."
+    ),
     "review": (
         "Runs captured more postings than they reviewed. Check each run's stop_reason and "
         "topup.final_stop_reason to find out why the run did not finish the batch it "
@@ -166,6 +193,7 @@ def identify(
     run_count: int,
     reasons: Dict[str, int],
     acquisition_errors: Sequence[Dict[str, Any]] = (),
+    runs: Sequence[Any] = (),
 ) -> Bottleneck:
     """Find the largest measured loss, or explain why none could be measured."""
     if run_count == 0:
@@ -193,6 +221,42 @@ def identify(
 
     available = [(key, metrics[key]) for key in FUNNEL_ORDER if key in metrics and metrics[key].available]
     unmeasured = [key for key in FUNNEL_ORDER if key in metrics and not metrics[key].available]
+
+    # ZERO CAPTURE IS NOT "NO LOSS". The boundary search below skips every boundary
+    # where lost <= 0, so a window that captured nothing produced no loss anywhere
+    # and used to fall through to "no funnel boundary could be shown to lose
+    # records" -- i.e. a total acquisition outage was reported as clean throughput.
+    # Acquisition entry IS the bottleneck when nothing was captured, and the run
+    # stop reasons say which kind of failure it was.
+    captured = metrics.get("jobs_captured")
+    if captured is not None and captured.available and int(captured.value or 0) == 0:
+        stops = collections.Counter(
+            str(getattr(run, "stop_reason", "") or "unrecorded") for run in (runs or ()))
+        zero_budget = sum(n for reason, n in stops.items() if "governor_zero_budget" in reason)
+        reached = max(0, run_count - zero_budget)
+        parts = [f"Acquisition captured 0 jobs across {run_count} "
+                 f"run{'s' if run_count != 1 else ''}, so no funnel stage had input."]
+        if zero_budget:
+            parts.append(f"The credit governor granted zero budget on {zero_budget} of them "
+                         f"(stop_reason governor_zero_budget), so no provider request was made.")
+        if reached:
+            parts.append(f"{reached} run{'s' if reached != 1 else ''} had budget and reached "
+                         f"the provider but still captured nothing.")
+        if not stops:
+            parts.append("No run stop reason was recorded, so the failure mode cannot be "
+                         "narrowed from the artifacts in this window.")
+        return Bottleneck(
+            kind="acquisition_entry",
+            boundary="acquisition",
+            entered=0,
+            advanced=0,
+            lost=0,
+            statement=" ".join(parts),
+            evidence=sorted(set(captured.evidence)) + ["run_manifest.stop_reason"],
+            top_reasons=[{"reason": reason, "count": count}
+                         for reason, count in stops.most_common(5)],
+            unmeasured_boundaries=unmeasured,
+        )
 
     if len(available) < 2:
         return Bottleneck(
@@ -314,6 +378,23 @@ def action_plan(
             remedy = REASON_ACTIONS.get(str(entry.get("reason")))
             if remedy:
                 add(remedy, f"reason code {entry.get('reason')} = {entry.get('count')} this window")
+    elif bottleneck.kind == "acquisition_entry":
+        add(
+            STAGE_ACTIONS["acquisition"],
+            f"jobs_captured = 0 across {sum(int(e.get('count') or 0) for e in bottleneck.top_reasons)} "
+            "run(s) in this window",
+        )
+        reached_provider = True
+        for entry in bottleneck.top_reasons:
+            reason = str(entry.get("reason") or "")
+            remedy = next((text for key, text in ACQUISITION_STOP_ACTIONS.items()
+                           if key in reason), "")
+            if remedy:
+                reached_provider = False
+                add(remedy, f"stop_reason {reason} on {entry.get('count')} run(s)")
+        if reached_provider and bottleneck.top_reasons:
+            add(ACQUISITION_REACHED_PROVIDER_ACTION,
+                "runs had budget and reached the provider yet captured 0 jobs")
     elif bottleneck.kind == "insufficient_measurement":
         add(
             "Instrument the missing funnel stages before the next report; the week cannot "
@@ -321,11 +402,15 @@ def action_plan(
             "fewer than two consecutive stages measurable",
         )
 
-    for gap in gaps:
-        remedy = getattr(gap, "remedy", None)
-        metric = getattr(gap, "metric", "")
-        if remedy:
-            add(remedy, f"evidence gap on {metric}")
+    # Evidence-gap chores are appended ONLY when no concrete production problem was
+    # identified. Telling Brett to "instrument sent_to_instantly" while acquisition
+    # is down buries the finding that matters under housekeeping.
+    if bottleneck.kind not in ("acquisition_entry", "acquisition_failure", "funnel_boundary"):
+        for gap in gaps:
+            remedy = getattr(gap, "remedy", None)
+            metric = getattr(gap, "metric", "")
+            if remedy:
+                add(remedy, f"evidence gap on {metric}")
 
     if not actions:
         add(
