@@ -596,6 +596,13 @@ def _process_company_legacy(company_jobs: List[Dict]) -> Tuple[List[Dict], Dict]
             stats["missing_company_domain_buckets"] += 1
             continue
 
+        # An opportunity ENTERS contact discovery here, and only here: it cleared
+        # the job/role gates upstream, cleared the company/account ICP decision
+        # above, and has a resolvable search domain, so a people search is about
+        # to run for it. This is the counter the weekly report publishes as
+        # "qualified opportunities" -- emitted at the decision point rather than
+        # reconstructed afterwards by subtracting reason codes from a total.
+        stats["contact_discovery_entered"] += 1
         target_titles = get_target_titles_for_jobs(bucket_jobs, org.employee_count)
         people = apollo.search_people_at_company(search_domain, target_titles)
         time.sleep(config.APOLLO_RATE_LIMIT_DELAY)
@@ -1184,6 +1191,15 @@ def _process_company_strict(company_jobs: List[Dict]) -> Tuple[List[Dict], Dict]
         reroute_registry = RerouteRegistry()
         attempted_before = reroute_registry.attempted_ids(account_bucket_key)
 
+        # An opportunity ENTERS contact discovery here, and only here: the account
+        # gate passed, a search domain resolved, and a people search is about to
+        # run (or be replayed from the negative cache, which is still an entry).
+        # This is the counter the weekly report publishes as "qualified
+        # opportunities" -- emitted at the decision point rather than
+        # reconstructed afterwards by subtracting reason codes from a total.
+        # The strict path is the one production takes; the legacy path carries the
+        # same increment so the counter never depends on which body ran.
+        stats["contact_discovery_entered"] += 1
         company_had_people_search_call = True
         apollo_error = False
         # NEGATIVE people-search cache, VARIANT-SCOPED (Gate C): keyed by domain +

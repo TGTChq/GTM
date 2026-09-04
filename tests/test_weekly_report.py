@@ -117,6 +117,10 @@ def write_run(
     if reviewed is not None:
         funnel["qualification_input"] = reviewed
     if qualified is not None:
+        # "Qualified opportunities" is the contact-discovery entry counter, not
+        # the loose upstream role gate. Both are written so a run looks like a
+        # real one; only the first is what the metric reads.
+        funnel["contact_discovery_entered"] = qualified
         funnel["target_role_eligible"] = qualified
     (run_dir / "orchestrator_result.json").write_text(
         json.dumps(

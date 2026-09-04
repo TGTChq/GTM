@@ -368,17 +368,36 @@ def action_plan(
             "lanes.json reported lane errors",
         )
     elif bottleneck.kind == "funnel_boundary":
+        basis = (f"largest measured loss: {bottleneck.lost} records at the "
+                 f"{bottleneck.boundary} boundary ({bottleneck.loss_pct}%)")
         stage_action = STAGE_ACTIONS.get(bottleneck.boundary)
         if stage_action:
+            add(stage_action, basis)
+        else:
+            # A COLLAPSED boundary: the stages between these two could not be
+            # measured, so the pair is not adjacent in the canonical funnel and
+            # has no single owning stage. Dropping the stage-level action here
+            # (as this did) left the plan with reason codes only -- and with none
+            # of those, with nothing at all. Name the span instead of skipping it.
             add(
-                stage_action,
-                f"largest measured loss: {bottleneck.lost} records at the "
-                f"{bottleneck.boundary} boundary ({bottleneck.loss_pct}%)",
+                "This loss spans more than one stage, because the funnel stages "
+                "between the two measured ends were not recorded this window. "
+                "Instrument the intermediate stages before tuning any single one; "
+                "until then the loss cannot be attributed to a specific boundary.",
+                basis,
             )
         for entry in bottleneck.top_reasons:
             remedy = REASON_ACTIONS.get(str(entry.get("reason")))
             if remedy:
                 add(remedy, f"reason code {entry.get('reason')} = {entry.get('count')} this window")
+        if not bottleneck.top_reasons:
+            add(
+                "No loss reason codes survived for this window, so the size of the "
+                "drop is known but its root cause is not attributable. Check that the "
+                "runs in this window carry a reporting-ledger loss_reasons block.",
+                f"{bottleneck.lost} records lost at {bottleneck.boundary} with no "
+                "recorded reason codes",
+            )
     elif bottleneck.kind == "acquisition_entry":
         add(
             STAGE_ACTIONS["acquisition"],
@@ -414,9 +433,22 @@ def action_plan(
                 add(remedy, f"evidence gap on {metric}")
 
     if not actions:
-        add(
-            "Hold the current configuration and re-measure next week; no boundary lost "
-            "enough records this week to justify a change.",
-            "no measured loss at any funnel boundary",
-        )
+        # This text may ONLY be used when nothing was measured to be lost. Emitting
+        # it under a bottleneck that reports a positive loss produced a report whose
+        # two halves contradicted each other -- "lost 5157 of 6205 (83.1%)" directly
+        # above "no measured loss at any funnel boundary".
+        if (bottleneck.lost or 0) > 0:
+            add(
+                "The largest measured drop is known but its cause is not "
+                "attributable from this window's evidence; treat the number as a "
+                "measurement, not yet as a diagnosis.",
+                f"{bottleneck.lost} records lost at the {bottleneck.boundary} boundary "
+                f"({bottleneck.loss_pct}%), with no reason codes or stage mapping available",
+            )
+        else:
+            add(
+                "Hold the current configuration and re-measure next week; no boundary lost "
+                "enough records this week to justify a change.",
+                "no measured loss at any funnel boundary",
+            )
     return actions
