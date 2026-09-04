@@ -133,17 +133,26 @@ class FantasticContinuationTests(unittest.TestCase):
     def test_resume_sends_cursor_dedupes_boundary_and_never_overlaps(self):
         with tempfile.TemporaryDirectory() as tmp:
             sp = str(Path(tmp) / "cont.json")
-            r1, _ = _run(_feed(FEED), sp, cap=3, now=_FIXED_NOW)
-            first_ids = {j["_fantastic_internal_id"] for j in r1.jobs}          # {1020,1019,1018}
-            r2, captured2 = _run(_feed(FEED), sp, cap=3, now=_FIXED_NOW)
-            # resumed with date_posted_lt = cursor(:18) + 1s = :19
-            self.assertTrue(any(p.get("date_posted_lt") == D[19] for p in captured2))
+            # cap=8 (was 3): run-budget accounting is now BILLING-accurate, so the
+            # boundary rows the head pass re-fetches -- and the provider re-BILLS --
+            # are charged against the budget. At cap=3 they consumed all of it and the
+            # deep pass could not advance. Assertions below are derived from the run
+            # rather than hard-coded to a cap, so they pin the INVARIANTS, not a size.
+            r1, _ = _run(_feed(FEED), sp, cap=8, now=_FIXED_NOW)
+            first_ids = {j["_fantastic_internal_id"] for j in r1.jobs}
+            state1 = json.loads(Path(sp).read_text(encoding="utf-8"))
+            boundary = min(int(i) for i in first_ids)                            # oldest acquired id
+            r2, captured2 = _run(_feed(FEED), sp, cap=8, now=_FIXED_NOW)
+            # resumed with date_posted_lt = cursor + 1s
+            cursor1 = state1["cursor_date"]
+            bumped = cursor1[:-2] + f"{int(cursor1[-2:]) + 1:02d}"
+            self.assertTrue(any(p.get("date_posted_lt") == bumped for p in captured2))
             second_ids = {j["_fantastic_internal_id"] for j in r2.jobs}
             self.assertFalse(first_ids & second_ids)                            # no re-acquire (dedup+cursor)
-            self.assertNotIn("1018", second_ids)                               # boundary re-fetched but deduped
-            self.assertTrue(all(int(i) < 1018 for i in second_ids))            # strictly older
+            self.assertNotIn(str(boundary), second_ids)                         # boundary re-fetched but deduped
+            self.assertTrue(all(int(i) < boundary for i in second_ids))         # strictly older
             state2 = json.loads(Path(sp).read_text(encoding="utf-8"))
-            self.assertLess(state2["cursor_date"], D[18])                       # cursor advanced older
+            self.assertLess(state2["cursor_date"], cursor1)                     # cursor advanced older
             self.assertEqual(state2["high_water"], D[20])                       # high_water preserved
 
     def test_new_jobs_at_top_between_runs_are_discovered_by_head_pass(self):
@@ -292,16 +301,25 @@ class FantasticContinuationModeMatchTests(unittest.TestCase):
     def test_title_advanced_precedence_persists_single_stream_cursor(self):
         with tempfile.TemporaryDirectory() as tmp:
             sp = str(Path(tmp) / "cont.json")
-            r1 = self._run_both_flags(sp, cap=3)
+            # Budget raised from 3 to 8: run-budget accounting is now BILLING-accurate
+            # across passes/segments. The head pass re-fetches -- and the provider
+            # re-BILLS -- the boundary rows it then dedupes, so at cap=3 those re-bills
+            # consumed the entire budget and the deep pass got nothing. The old value
+            # only worked because duplicate re-bills were not charged against run_cap.
+            r1 = self._run_both_flags(sp, cap=8)
             state = json.loads(Path(sp).read_text(encoding="utf-8"))
             # Saved as a single-stream cursor (NOT an empty title_families state).
             self.assertNotEqual(state.get("mode"), "title_families")
-            self.assertEqual(state["cursor_date"], D[18])                    # oldest acquired
+            # Cursor == OLDEST acquired (asserted from the run, not a cap-coupled index).
+            self.assertEqual(state["cursor_date"],
+                             min(j["job_posted_at_datetime_utc"] for j in r1.jobs))
             self.assertFalse(r1.metadata["used_title_families"])             # single-stream ran
             # Resume actually advances (no re-bill of the acquired prefix).
-            r2 = self._run_both_flags(sp, cap=3)
-            self.assertTrue(any(int(i) < 1018 for i in
-                                {j["_fantastic_internal_id"] for j in r2.jobs}))
+            r2 = self._run_both_flags(sp, cap=8)
+            # Resume reaches strictly OLDER inventory than run 1 acquired.
+            oldest_r1 = min(int(j["_fantastic_internal_id"]) for j in r1.jobs)
+            self.assertTrue(any(int(j["_fantastic_internal_id"]) < oldest_r1 for j in r2.jobs),
+                            "resume must advance into older inventory")
             self.assertFalse({j["_fantastic_internal_id"] for j in r1.jobs}
                              & {j["_fantastic_internal_id"] for j in r2.jobs})
 
@@ -337,7 +355,10 @@ class FantasticContinuation7dWindowTests(unittest.TestCase):
             self.assertFalse(i1 & i2)                                            # no re-bill
             self.assertFalse(i1 & i3)
             self.assertFalse(i2 & i3)                                            # strictly deeper each run
-            self.assertGreaterEqual(len(i1 | i2 | i3), 20)                       # backlog actually draining
+            # Backlog actually drains. 18 (not the former 20) of a theoretical 24:
+            # each run's head pass re-bills the ~2 boundary rows it dedupes, and those
+            # re-bills are now correctly charged against the run budget.
+            self.assertGreaterEqual(len(i1 | i2 | i3), 18)                       # backlog actually draining
 
     def test_new_top_arrivals_discovered_by_head_pass(self):
         """FIX (formerly ..._deferred_not_lost): brand-new top-of-feed arrivals are

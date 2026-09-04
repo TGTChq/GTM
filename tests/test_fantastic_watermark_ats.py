@@ -246,18 +246,29 @@ class WatermarkEngineTests(unittest.TestCase):
         self.assertTrue(emitted.isdisjoint(band))
 
     def test_crash_before_commit_replays_same_window(self):
+        """Crash after checkpoint: the window is reused and the DRAINED source is
+        not re-billed.
+
+        Previously the replay re-fetched all 30 rows and discarded them as
+        duplicates -- functionally right, but it paid the provider for inventory it
+        already had. With per-source drain state the finished source is skipped, so
+        the outcome is identical (nothing re-emitted) at zero credits.
+        """
         rows = _recs(30, created_start=NOW - timedelta(hours=5))
         feed = _Feed(rows)
-        self._run(feed)                       # acquired, checkpointed, NOT committed (crash)
+        res1 = self._run(feed)                # acquired, checkpointed, NOT committed
+        self.assertTrue(res1.metadata["watermark"]["drained_sources"]["fantastic_jobs_linkedin"])
         feed2 = _Feed(rows)
         res2 = self._run(feed2, now=NOW + timedelta(hours=3))
-        p2 = feed2.calls[0][1]
         # Window reused verbatim (not re-derived from the new `now`).
-        self.assertEqual(p2["date_created_lt"], _iso(NOW - timedelta(minutes=180)))
         self.assertTrue(res2.metadata["watermark"]["window_reused"])
-        # Everything was already acquired -> all deduped, nothing re-emitted.
+        self.assertEqual(res2.metadata["watermark"]["lower"], res1.metadata["watermark"]["lower"])
+        self.assertEqual(res2.metadata["watermark"]["upper"], res1.metadata["watermark"]["upper"])
+        # Nothing re-emitted AND nothing re-billed.
         self.assertEqual(len(res2.jobs), 0)
-        self.assertEqual(res2.metadata["segments"]["fantastic_jobs_linkedin"]["duplicates"], 30)
+        self.assertEqual(feed2.calls, [], "a drained source must not be re-billed")
+        self.assertEqual(res2.metadata["segments"]["fantastic_jobs_linkedin"]["stop_reason"],
+                         "already_drained_this_window")
 
     def test_truncated_window_does_not_advance(self):
         # 300 rows, 1 min apart, starting 5h ago: ~120 fall inside [lower, now-3h).
