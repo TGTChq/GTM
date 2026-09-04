@@ -241,6 +241,46 @@ def explicit_window(
     )
 
 
+def anchored_window(
+    start_utc: datetime,
+    end_utc: datetime,
+    *,
+    tz_name: str = PACIFIC_TZ_NAME,
+    tz: Optional[tzinfo] = None,
+) -> ReportingWindow:
+    """A window bounded by two INSTANTS rather than two local midnights.
+
+    ``explicit_window`` snaps to local wall-clock boundaries, which is exactly what
+    a run-anchored window must not do: its edges are "when the last report was
+    generated" and "now", neither of which lands on a calendar boundary. Still
+    half-open, and still labelled in Pacific local time so the summary reads the
+    same way to a human.
+
+    ``iso_week`` is taken from the local date of the last instant INSIDE the window
+    (end minus one second), so a report generated a few hours into Friday is filed
+    under the week it actually covers rather than the next one.
+    """
+    tz_source = None
+    if tz is None:
+        tz, tz_source = resolve_timezone(tz_name)
+    if end_utc <= start_utc:
+        raise ValueError("window end must be after window start")
+    start_local = start_utc.astimezone(tz)
+    end_local = end_utc.astimezone(tz)
+    last_moment = (end_utc - timedelta(seconds=1)).astimezone(tz)
+    iso_year, iso_week, _ = last_moment.date().isocalendar()
+    return ReportingWindow(
+        start_utc=start_utc.astimezone(timezone.utc),
+        end_utc=end_utc.astimezone(timezone.utc),
+        start_local=start_local,
+        end_local=end_local,
+        timezone_name=tz_name,
+        timezone_source=tz_source or "caller_supplied",
+        label=_format_label(start_local, last_moment.date()),
+        iso_week=f"{iso_year}-W{iso_week:02d}",
+    )
+
+
 def local_date_key(moment: datetime, tz: tzinfo) -> str:
     """The local calendar date a UTC instant falls on -- the daily bucket key."""
     return moment.astimezone(tz).strftime("%Y-%m-%d")
