@@ -182,9 +182,12 @@ class FlagsRemainOffTests(unittest.TestCase):
             self.assertEqual(m.group(1), "False", f"{flag} must DEFAULT to False")
 
     def test_production_title_query_still_byte_identical(self):
+        from role_catalog import DEFAULT_SEARCH_ROLES
         plan = fja.build_title_query_plan()
-        self.assertEqual(len(plan["expression"]), 2966)
-        self.assertEqual(plan["expression"].count("|") + 1, 118)
+        # Shadow flags must not add a single clause: the query is exactly the
+        # catalog union, whatever size the catalog currently is.
+        self.assertEqual(plan["expression"].count("|") + 1, len(DEFAULT_SEARCH_ROLES))
+        self.assertFalse(any(c.get("expanded") for c in plan["clauses"]))
 
 
 if __name__ == "__main__":

@@ -991,16 +991,45 @@ def build_jb_params(source_key: str, *, title_advanced_expr: str = "") -> Dict[s
     return params
 
 
-def candidate_title_expression() -> str:
-    """CONTROL expression + candidate titles, for the experiment's title arm ONLY.
+def title_expansion_alignment() -> Tuple[List[str], List[str]]:
+    """``(aligned, unmapped)`` candidate title families.
 
-    Built by appending clauses to the production expression, never by rebuilding
-    it, so the control half stays byte-identical and any measured difference is
-    attributable to the added terms alone.
+    THE INVARIANT: a family may only enter the acquisition query if the role
+    catalog can resolve it to a ``RoleDefinition``. A query-only family spends
+    credits on postings the role gate must then mark
+    ``UNVERIFIED_ROLE_CLASSIFICATION`` -- recall bought and thrown away. Measured
+    2026-09-04: the 13 candidate titles were in the QUERY arm but not the catalog,
+    so every one of them classified UNVERIFIED even when handed its own title as
+    the matched role, while catalog titles reached ROLE_PASS on the same fixture.
+
+    The catalog is the single source of truth: ``build_title_query_plan`` already
+    generates the production expression FROM it, so adding a role definition
+    expands the query and teaches the classifier in one edit. This function is
+    what keeps a future candidate from re-opening the gap.
+    """
+    from role_catalog import get_role_definition
+    aligned: List[str] = []
+    unmapped: List[str] = []
+    for title in sorted(getattr(config, "FANTASTIC_CANDIDATE_TITLES", {}) or {}):
+        (aligned if get_role_definition(title) else unmapped).append(title)
+    return aligned, unmapped
+
+
+def candidate_title_expression() -> str:
+    """Production expression + any candidate family the CATALOG can classify.
+
+    Built by appending to the production expression, never by rebuilding it, so
+    the control half stays byte-identical. Families the catalog cannot resolve are
+    DROPPED rather than queried -- fail-safe, and
+    ``title_expansion_alignment()`` reports them so a test fails loudly instead of
+    production quietly buying rows it cannot qualify.
+
+    Once a family is added to the role catalog this returns the production
+    expression unchanged, because the catalog already carries it.
     """
     base = build_title_query_plan().get("expression", "")
-    extra = [_title_advanced_term(t)
-             for t in sorted(getattr(config, "FANTASTIC_CANDIDATE_TITLES", {}) or {})]
+    aligned, _unmapped = title_expansion_alignment()
+    extra = [_title_advanced_term(t) for t in aligned]
     extra = [e for e in extra if e and e not in base]
     return " | ".join([base] + extra) if base else " | ".join(extra)
 

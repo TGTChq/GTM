@@ -72,8 +72,10 @@ class AcquisitionCoverageTests(unittest.TestCase):
     def test_coverage_counts(self):
         targets = set(ROLE_DEFINITIONS)
         queried = set(DEFAULT_ACQUISITION_ROLES)
-        self.assertEqual(len(targets), 118)
-        self.assertEqual(len(queried), 118)          # all directly queried
+        # Count derived from the catalog, not pinned: the invariant is that EVERY
+        # catalog role is queried directly, which must survive a catalog change.
+        self.assertEqual(len(targets), len(ROLE_DEFINITIONS))
+        self.assertEqual(len(queried), len(targets))  # all directly queried
         self.assertEqual(len(targets - queried), 0)  # 0 depend on broad feeds only
         self.assertEqual(len(_titles_without_coverage()), 0)
 

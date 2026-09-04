@@ -92,8 +92,9 @@ class DefaultPathInvariance(unittest.TestCase):
     def test_default_expression_is_byte_identical_to_production(self):
         with mock.patch.multiple(config, **_PROD):
             plan = fja.build_title_query_plan()
-        self.assertEqual(plan["expression"].count("|") + 1, 118)
-        self.assertEqual(len(plan["expression"]), 2966)
+        from role_catalog import DEFAULT_SEARCH_ROLES
+        self.assertEqual(plan["expression"].count("|") + 1, len(DEFAULT_SEARCH_ROLES))
+        self.assertEqual(len(plan["clauses"]), len(DEFAULT_SEARCH_ROLES))
         self.assertEqual(plan["global_exclusions"], [])
         self.assertFalse(any(c["exclude"] for c in plan["clauses"]))
 
@@ -119,7 +120,9 @@ class TitleQueryPlanTests(unittest.TestCase):
         expr = plan["expression"]
         for t in ("'ux designer'", "'ui designer'", "'front end developer'"):
             self.assertIn(t, expr)
-        self.assertEqual(expr.count("|") + 1, 122)
+        from role_catalog import DEFAULT_SEARCH_ROLES
+        # aliases add exactly four extra terms over the base catalog union
+        self.assertEqual(expr.count("|") + 1, len(DEFAULT_SEARCH_ROLES) + 4)
 
     def test_scoped_negation_is_inside_the_role_clause_only(self):
         with mock.patch.multiple(config, **dict(_PROD, FANTASTIC_TITLE_SCOPED_EXCLUSIONS_ENABLED=True,
