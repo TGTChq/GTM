@@ -68,7 +68,17 @@ def configured_campaign_ids(cfg: Any) -> List[str]:
     """Distinct Instantly campaign ids reachable from configuration.
 
     Reads every ``INSTANTLY_CAMPAIGN_*`` env name the router knows about, plus any
-    size-band variant that is set, plus the default campaign. Order is stable.
+    size-band variant that is set, plus the default campaign, plus the Outbound
+    Wave 1 CHALLENGER campaigns.
+
+    The challenger arm is the reason this is not just ``CAMPAIGN_ENV_BY_BUCKET``.
+    Wave 1 routes a share of accounts into a separate campaign per role bucket
+    (``OUTBOUND_WAVE1_CHALLENGER_CAMPAIGNS_JSON``), and those ids are NOT in the
+    bucket map. With Wave 1 live at a 50% split, omitting them would report
+    roughly half of the week's deliveries as not having happened -- and the shape
+    of the miss (a clean-looking number that is simply too small) is the kind that
+    gets believed. Ids are deduplicated, so a bucket whose challenger and control
+    are the same campaign is counted once.
     """
     import os
 
@@ -84,6 +94,12 @@ def configured_campaign_ids(cfg: Any) -> List[str]:
     default = str(getattr(cfg, "INSTANTLY_CAMPAIGN_ID", "") or "").strip()
     if default and default not in ids:
         ids.append(default)
+    challengers = getattr(cfg, "OUTBOUND_WAVE1_CHALLENGER_CAMPAIGNS", None)
+    if isinstance(challengers, dict):
+        for value in challengers.values():
+            value = str(value or "").strip()
+            if value and value not in ids:
+                ids.append(value)
     return ids
 
 

@@ -54,6 +54,11 @@ WEEKDAYS = {
 #: so a history accumulates on the same volume the dashboard will later read.
 _DEFAULT_SUBDIR = "weekly_reports"
 
+#: Zone the ``--if-due`` weekday is compared in. UTC, because the gate exists to
+#: pick one firing out of a daily UTC cron -- a gate on a different calendar than
+#: the scheduler is a silent no-op waiting for a schedule change. See ``_is_due``.
+DUE_GATE_TZ_NAME = "UTC"
+
 
 def _default_artifact_roots() -> List[str]:
     """Roots to scan when the caller gives none: production config, then local data."""
@@ -113,22 +118,35 @@ def build_window(args: argparse.Namespace, now: datetime,
     )
 
 
-def _is_due(args: argparse.Namespace, now: datetime) -> bool:
+def _is_due(args: argparse.Namespace, now: datetime) -> tuple:
     """``--if-due`` gate: is today the day this report is meant to run?
 
-    Evaluated in ``--if-due-timezone``, which defaults to ``--timezone`` so existing
-    behaviour is unchanged. It is separable because the report now runs AFTER
-    acquisition, and the run duration varies (measured: 3.3 h expected, 6.7 h at
-    2x). With the cron at 03:00 UTC the Pacific weekday at report time flips
-    between Thursday and Friday depending on how long the run took, so a Pacific
-    gate would fire unpredictably; the UTC weekday stays Friday across the whole
-    range. The reporting WINDOW is unaffected -- it stays Pacific-labelled.
+    Returns ``(due, explanation)``; the explanation is printed on a skip so a gate
+    that never fires is visible in the log rather than silent.
+
+    Evaluated in ``--if-due-timezone``, which DEFAULTS TO UTC. The gate answers
+    "is this the cron firing I want", and Railway cron is UTC-only, so the two must
+    agree or the gate is comparing different calendars. It defaulted to
+    ``--timezone`` (Pacific), which was harmless while the cron was ``0 13 * * *``
+    -- 13:00 UTC Friday is 06:00 Friday Pacific -- and silently fatal the moment
+    the cron moved to ``0 3 * * *``: 03:00 UTC Friday is 20:00 THURSDAY Pacific, so
+    ``--if-due friday`` never matched and the report stopped firing entirely,
+    printing an ordinary "not due today" line every single day.
+
+    The reporting WINDOW is unaffected and stays Pacific-labelled; only the
+    weekday comparison moves. Pass ``--if-due-timezone`` explicitly to override.
     """
     if not args.if_due:
-        return True
-    zone = getattr(args, "if_due_timezone", "") or args.timezone
+        return True, ""
+    zone = getattr(args, "if_due_timezone", "") or DUE_GATE_TZ_NAME
     tz, _ = resolve_timezone(zone)
-    return now.astimezone(tz).weekday() == WEEKDAYS[args.if_due]
+    local = now.astimezone(tz)
+    due = local.weekday() == WEEKDAYS[args.if_due]
+    explanation = (
+        f"waiting for {args.if_due}; it is {local.strftime('%A')} "
+        f"({local.strftime('%Y-%m-%d %H:%M')}) in {zone}"
+    )
+    return due, explanation
 
 
 def _collectors(
@@ -313,9 +331,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--if-due-timezone",
         default="",
-        help="Zone the --if-due weekday is evaluated in. Defaults to --timezone. Set it "
-        "to UTC when the report runs after a variable-length acquisition, so the gate "
-        "cannot drift across local midnight.",
+        help=f"Zone the --if-due weekday is evaluated in. Defaults to {DUE_GATE_TZ_NAME}, "
+        "which is the zone Railway cron schedules in -- a gate on a different calendar "
+        "than the scheduler silently stops matching when the cron hour moves. The "
+        "reporting window is unaffected and stays on --timezone.",
     )
     parser.add_argument(
         "--anchored",
@@ -366,9 +385,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     else:
         now = datetime.now(timezone.utc)
 
-    if not _is_due(args, now):
+    due, why_not = _is_due(args, now)
+    if not due:
+        # State the zone and the weekday it actually saw. The previous message
+        # ("not due today") was indistinguishable whether the gate was working or
+        # comparing against the wrong calendar, and it printed daily either way.
         if not args.quiet:
-            print(f"weekly report not due today (waiting for {args.if_due}); nothing written")
+            print(f"weekly report not due today: {why_not}; nothing written")
         return 0
 
     roots = args.artifact_root or _default_artifact_roots()

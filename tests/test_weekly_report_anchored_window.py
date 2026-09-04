@@ -299,14 +299,51 @@ def test_due_gate_in_utc_is_stable_across_every_measured_run_length(root, hours)
     assert documents(root)[0]["included_run_ids"] == ["fri"]
 
 
-def test_due_gate_defaults_to_the_window_timezone(root):
-    """Unchanged behaviour when --if-due-timezone is not given."""
+def test_due_gate_defaults_to_utc(root):
+    """The default is UTC, the zone Railway cron schedules in."""
     write_run(root, "fri", "2026-09-04T06:30:00Z")
-    # 2026-09-04T07:00Z is Friday 00:00 PDT -> due under Pacific.
+    # 2026-09-04T07:00Z is Friday in UTC (and, coincidentally, Friday 00:00 PDT).
     rc = run_weekly_report.main([
         "--artifact-root", str(root), "--anchored", "--require-completed-run",
         "--if-due", "friday", "--now", "2026-09-04T07:00:00Z", "--quiet"])
     assert rc == 0 and documents(root)
+
+
+def test_the_0300_utc_cron_fires_the_friday_gate(root, capsys):
+    """The exact production shape, and the exact way it broke.
+
+    GTM's cron moved from ``0 13 * * *`` to ``0 3 * * *`` on 2026-09-04. 13:00 UTC
+    Friday is 06:00 Friday Pacific, so a Pacific-evaluated gate matched. 03:00 UTC
+    Friday is 20:00 THURSDAY Pacific, so it stopped matching -- and the only
+    symptom was an ordinary "not due today" line, printed every day, on a job
+    whose exit code was 0. The report simply never ran again.
+    """
+    write_run(root, "fri", "2026-09-11T02:30:00Z")
+    rc = run_weekly_report.main([
+        "--artifact-root", str(root), "--anchored", "--require-completed-run",
+        "--if-due", "friday", "--now", "2026-09-11T03:00:00Z"])
+    assert rc == 0
+    assert documents(root), "the 03:00 UTC Friday cron must produce a report"
+
+    # ...and the skip message on a genuinely wrong day names the zone it used, so
+    # a future mismatch is legible in the log instead of looking routine.
+    rc = run_weekly_report.main([
+        "--artifact-root", str(root), "--anchored", "--require-completed-run",
+        "--if-due", "friday", "--now", "2026-09-14T03:00:00Z"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "Monday" in out and "UTC" in out
+
+
+def test_the_pacific_gate_is_still_available_explicitly(root):
+    """Overriding is not removed -- only the silent default changed."""
+    write_run(root, "fri", "2026-09-11T02:30:00Z")
+    rc = run_weekly_report.main([
+        "--artifact-root", str(root), "--anchored", "--require-completed-run",
+        "--if-due", "friday", "--if-due-timezone", "America/Los_Angeles",
+        "--now", "2026-09-11T03:00:00Z", "--quiet"])
+    assert rc == 0
+    assert documents(root) == [], "03:00 UTC Friday is Thursday in Pacific"
 
 
 def test_due_gate_skips_non_matching_days_without_touching_the_boundary(root):
