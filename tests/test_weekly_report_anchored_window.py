@@ -277,3 +277,44 @@ def test_an_inverted_window_is_refused_rather_than_silently_empty(root):
         anchored_window(moment, moment - timedelta(hours=1))
     with pytest.raises(ValueError):
         anchored_window(moment, moment)
+
+
+# --------------------------------------------------------------------------
+# the --if-due gate must not drift across local midnight
+# --------------------------------------------------------------------------
+@pytest.mark.parametrize("hours", [3.3, 5.0, 6.7])
+def test_due_gate_in_utc_is_stable_across_every_measured_run_length(root, hours):
+    """With the cron at 03:00 UTC the Pacific weekday at report time flips between
+    Thursday and Friday depending on how long acquisition took. UTC does not."""
+    cron = datetime(2026, 9, 11, 3, 0, tzinfo=timezone.utc)
+    at = cron + timedelta(hours=hours)
+    write_run(root, "fri", (cron + timedelta(hours=hours - 0.5))
+              .strftime("%Y-%m-%dT%H:%M:%SZ"))
+    rc = run_weekly_report.main([
+        "--artifact-root", str(root), "--anchored", "--require-completed-run",
+        "--if-due", "friday", "--if-due-timezone", "UTC",
+        "--now", at.strftime("%Y-%m-%dT%H:%M:%SZ"), "--quiet"])
+    assert rc == 0
+    assert documents(root), f"report must fire at +{hours}h"
+    assert documents(root)[0]["included_run_ids"] == ["fri"]
+
+
+def test_due_gate_defaults_to_the_window_timezone(root):
+    """Unchanged behaviour when --if-due-timezone is not given."""
+    write_run(root, "fri", "2026-09-04T06:30:00Z")
+    # 2026-09-04T07:00Z is Friday 00:00 PDT -> due under Pacific.
+    rc = run_weekly_report.main([
+        "--artifact-root", str(root), "--anchored", "--require-completed-run",
+        "--if-due", "friday", "--now", "2026-09-04T07:00:00Z", "--quiet"])
+    assert rc == 0 and documents(root)
+
+
+def test_due_gate_skips_non_matching_days_without_touching_the_boundary(root):
+    write_run(root, "thu", "2026-09-10T06:30:00Z")
+    rc = run_weekly_report.main([
+        "--artifact-root", str(root), "--anchored", "--require-completed-run",
+        "--if-due", "friday", "--if-due-timezone", "UTC",
+        "--now", "2026-09-10T07:00:00Z", "--quiet"])
+    assert rc == 0
+    assert documents(root) == []
+    assert anchor_of(root) is None

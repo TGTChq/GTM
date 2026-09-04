@@ -114,10 +114,20 @@ def build_window(args: argparse.Namespace, now: datetime,
 
 
 def _is_due(args: argparse.Namespace, now: datetime) -> bool:
-    """``--if-due`` gate: is today the local day this report is meant to run?"""
+    """``--if-due`` gate: is today the day this report is meant to run?
+
+    Evaluated in ``--if-due-timezone``, which defaults to ``--timezone`` so existing
+    behaviour is unchanged. It is separable because the report now runs AFTER
+    acquisition, and the run duration varies (measured: 3.3 h expected, 6.7 h at
+    2x). With the cron at 03:00 UTC the Pacific weekday at report time flips
+    between Thursday and Friday depending on how long the run took, so a Pacific
+    gate would fire unpredictably; the UTC weekday stays Friday across the whole
+    range. The reporting WINDOW is unaffected -- it stays Pacific-labelled.
+    """
     if not args.if_due:
         return True
-    tz, _ = resolve_timezone(args.timezone)
+    zone = getattr(args, "if_due_timezone", "") or args.timezone
+    tz, _ = resolve_timezone(zone)
     return now.astimezone(tz).weekday() == WEEKDAYS[args.if_due]
 
 
@@ -293,6 +303,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--force",
         action="store_true",
         help="Regenerate even when --once-per-window would skip.",
+    )
+    parser.add_argument(
+        "--if-due-timezone",
+        default="",
+        help="Zone the --if-due weekday is evaluated in. Defaults to --timezone. Set it "
+        "to UTC when the report runs after a variable-length acquisition, so the gate "
+        "cannot drift across local midnight.",
     )
     parser.add_argument(
         "--anchored",
