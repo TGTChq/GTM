@@ -86,15 +86,24 @@ RUN_METRIC_SPECS: Tuple[MetricSpec, ...] = (
         label="Jobs captured",
         unit="posting",
         definition=(
-            "Raw job postings acquired by pipeline runs that completed inside the "
-            "reporting window. Counted per run at the acquisition boundary, not by "
-            "the posting's own publication date."
+            "NET-NEW job postings captured by runs in this window: rows the provider "
+            "returned minus the ones a previous run had already processed to "
+            "completion. This is the population that becomes this week's work, so it "
+            "is directly comparable with jobs reviewed. Provider rows bought a second "
+            "time are acquisition cost and are reported separately as "
+            "provider_jobs_returned / historical_duplicates -- counting them here "
+            "made a re-bought posting look like a review-stage loss."
         ),
         fields=(
+            ("ledger", "metrics.net_new_jobs_captured"),
             ("ledger", "metrics.jobs_captured"),
+            ("orchestrator_result", "acquisition.cumulative.net_new_jobs_captured"),
+            # LAST RESORT, and only for runs written before net-new was recorded:
+            # the raw provider count. ``Metric.evidence`` names the field that
+            # answered per run, so a window mixing the two says so rather than
+            # quietly presenting re-bought rows as new work.
             ("waterfall", "unit_totals.postings"),
             ("capacity_report", "raw_postings"),
-            ("orchestrator_result", "capacity.raw_postings"),
             ("orchestrator_result", "waterfall.unit_totals.postings"),
         ),
     ),
@@ -162,6 +171,54 @@ RUN_METRIC_SPECS: Tuple[MetricSpec, ...] = (
 #: Secondary counters: useful context on the report and for the dashboard, but
 #: not part of the headline funnel Brett asked for.
 SUPPORTING_METRIC_SPECS: Tuple[MetricSpec, ...] = (
+    MetricSpec(
+        key="provider_jobs_returned",
+        label="Provider rows returned",
+        unit="row",
+        definition=(
+            "Rows the provider returned and billed, before any of our deduplication. "
+            "Acquisition volume, not throughput."
+        ),
+        fields=(
+            ("ledger", "metrics.provider_jobs_returned"),
+            ("orchestrator_result", "acquisition.cumulative.jobs_returned_billed"),
+            ("waterfall", "unit_totals.postings"),
+        ),
+    ),
+    MetricSpec(
+        key="historical_duplicates",
+        label="Rows already processed in a previous run",
+        unit="row",
+        definition=(
+            "Provider rows dropped because an earlier run had already carried that "
+            "exact posting to a terminal outcome. The cost of the acquisition "
+            "overlap, and the number that tells us whether the window is draining."
+        ),
+        fields=(
+            ("ledger", "metrics.historical_duplicates"),
+            ("orchestrator_result", "acquisition.cumulative.historical_duplicates"),
+        ),
+    ),
+    MetricSpec(
+        key="cross_query_duplicates",
+        label="Rows returned twice by the provider",
+        unit="row",
+        definition="The same posting billed more than once within this run's queries.",
+        fields=(
+            ("ledger", "metrics.cross_query_duplicates"),
+            ("orchestrator_result", "acquisition.cumulative.cross_query_duplicates"),
+        ),
+    ),
+    MetricSpec(
+        key="cross_source_duplicates",
+        label="Rows seen from a second source",
+        unit="row",
+        definition="The same posting reaching us through more than one source.",
+        fields=(
+            ("ledger", "metrics.cross_source_duplicates"),
+            ("orchestrator_result", "acquisition.cumulative.cross_source_duplicates"),
+        ),
+    ),
     MetricSpec(
         key="unique_opportunities",
         label="Unique opportunities after dedupe",

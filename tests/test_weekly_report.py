@@ -127,6 +127,13 @@ def write_run(
             {
                 "run": {"run_id": run_id, "policy": {"allow_instantly_enrollment": allow_enrollment}},
                 "enrichment": {"funnel": funnel, "loss_census": {"hiring_manager_not_found": 20}},
+                # Net-new is what the stakeholder funnel counts; the raw provider
+                # rows sit beside it as acquisition cost.
+                "acquisition": {"cumulative": {
+                    "net_new_jobs_captured": postings,
+                    "jobs_returned_billed": postings,
+                    "historical_duplicates": 0,
+                }} if postings is not None else {},
                 "delivery": delivery,
                 "waterfall": waterfall,
             }

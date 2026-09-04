@@ -67,6 +67,14 @@ TERMINAL_STATES = (STATE_COMPLETE, STATE_INCOMPLETE, STATE_FAILED, STATE_INTERRU
 #: ``weekly_report.metrics`` spec keys exactly so there is no mapping layer.
 LEDGER_METRIC_KEYS = (
     "jobs_captured",
+    # Acquisition efficiency, kept separate from throughput. A posting the
+    # provider returns for the second time is an acquisition cost, not a funnel loss.
+    "provider_jobs_returned",
+    "provider_jobs_billed",
+    "historical_duplicates",
+    "cross_query_duplicates",
+    "cross_source_duplicates",
+    "net_new_jobs_captured",
     "unique_opportunities",
     "jobs_reviewed",
     "qualified_opportunities",
@@ -428,8 +436,23 @@ def prune_ledger(
 #: first. Mirrors ``weekly_report.metrics`` deliberately: the orchestrator must not
 #: import the reporting layer, so the field list is restated rather than shared.
 _BACKFILL_FIELDS = (
-    ("jobs_captured", (("waterfall", "unit_totals.postings"),
+    # Net-new first: a run written after 2026-09-05 records it directly. Older
+    # runs fall back to the raw posting count, which is the only thing they know.
+    ("jobs_captured", (("orchestrator_result", "acquisition.cumulative.net_new_jobs_captured"),
+                       ("waterfall", "unit_totals.postings"),
                        ("capacity_report", "raw_postings"))),
+    ("net_new_jobs_captured",
+     (("orchestrator_result", "acquisition.cumulative.net_new_jobs_captured"),)),
+    ("provider_jobs_returned",
+     (("orchestrator_result", "acquisition.cumulative.jobs_returned_billed"),)),
+    ("provider_jobs_billed",
+     (("orchestrator_result", "acquisition.cumulative.jobs_quota_consumed"),)),
+    ("historical_duplicates",
+     (("orchestrator_result", "acquisition.cumulative.historical_duplicates"),)),
+    ("cross_query_duplicates",
+     (("orchestrator_result", "acquisition.cumulative.cross_query_duplicates"),)),
+    ("cross_source_duplicates",
+     (("orchestrator_result", "acquisition.cumulative.cross_source_duplicates"),)),
     ("unique_opportunities", (("waterfall", "unit_totals.opportunities"),)),
     ("jobs_reviewed", (("orchestrator_result", "enrichment.funnel.qualification_input"),)),
     # Only the contact-discovery entry counter may answer "qualified

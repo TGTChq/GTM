@@ -239,6 +239,11 @@ def real_fantastic_runner():
                 "jobs_quota_consumed": int(metadata.get("jobs_quota_consumed", 0) or 0),
                 "raw_records": raw_records or int(metadata.get("raw_records", 0) or 0),
                 "cross_query_duplicates": int(metadata.get("cross_query_duplicates", 0) or 0),
+                # The SAME posting reaching us from a second source. Forwarded so
+                # the weekly report can separate provider duplication from work we
+                # had already done -- they are different problems with different
+                # fixes, and both used to arrive as one undifferentiated "dedupe".
+                "cross_source_duplicates": int(metadata.get("cross_source_duplicates", 0) or 0),
                 "per_source": dict(metadata.get("per_source") or {}),
                 "provider_filters": dict(metadata.get("provider_filters") or {}),
                 "next_billing_date": metadata.get("next_billing_date"),
