@@ -385,7 +385,10 @@ _REMEDIES = {
         "completed its acquisition stage."
     ),
     "qualified_opportunities": (
-        "Confirm enrichment ran; the counter lives in enrichment.funnel.target_role_eligible."
+        "Confirm enrichment ran; the counter lives in "
+        "enrichment.funnel.contact_discovery_entered, emitted by the hiring-manager "
+        "stage when an opportunity enters contact discovery. Runs written before "
+        "2026-09-05 do not carry it and cannot be backfilled with it."
     ),
     "contacts_found": "Confirm enrichment ran; the counter lives in waterfall unit_totals.contacts.",
     "sent_to_airtable": (

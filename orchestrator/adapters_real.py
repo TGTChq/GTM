@@ -555,6 +555,18 @@ class RealEnrichmentStage:
         qual_reasons = {k[len("reason__"):]: v
                         for k, v in (getattr(qual, "stats", {}) or {}).items()
                         if str(k).startswith("reason__")}
+        # "Qualified opportunities" as a stakeholder means it: job/role policy
+        # passed AND the company/account ICP decision passed AND the opportunity
+        # was actually able to enter contact discovery. Emitted by
+        # hiring_manager at the people-search decision point.
+        #
+        # ``target_role_eligible`` is deliberately NOT this number. It is the
+        # pre-contact role/source gate, which passed 92.6% of postings on the
+        # 2026-09-04 control run -- reporting it as "qualified" would show a
+        # stage that appears to do nothing while the real ICP decision, which
+        # rejected 606 opportunities that day, stayed invisible.
+        step3_stats = getattr(step3, "stats", {}) or {}
+        entered = step3_stats.get("contact_discovery_entered")
         funnel = {
             "qualification_input": int(getattr(qual, "input_jobs", 0) or 0),
             "target_role_eligible": int(getattr(qual, "contact_eligible_jobs", 0) or 0),
@@ -578,6 +590,11 @@ class RealEnrichmentStage:
             # readable straight from Railway logs (see hm_observability.py).
             "hm_observability": dict(getattr(step3, "hm_observability", {}) or {}),
         }
+        # Absent means unmeasured, never zero: a Step3Result that does not carry
+        # the counter (a stub, or a pre-2026-09-05 run) must not be reported as
+        # "0 qualified opportunities".
+        if entered is not None:
+            funnel["contact_discovery_entered"] = int(entered)
         return EnrichmentReport(
             leads=leads,
             stages=[stage],

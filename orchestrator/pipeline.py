@@ -30,12 +30,14 @@ from orchestrator.run_ledger import (
     STAGE_ACQUISITION,
     STAGE_DELIVERY,
     STAGE_ENRICHMENT,
+    STAGE_FINAL,
     STATE_COMPLETE,
     STATE_FAILED,
     STATE_INCOMPLETE,
     RunLedger,
     backfill_from_artifacts,
     prune_ledger,
+    reason_census_from_parts,
 )
 from orchestrator.runcontrol import RunContext, RunStatus
 from orchestrator.runlock import RunLock, RunLockHeld
@@ -69,10 +71,16 @@ _LEDGER_STATE_FOR_RUN_STATUS = {
 #: manufacture a zero for a stage it did not reach.
 _FUNNEL_TO_LEDGER = (
     ("jobs_reviewed", "qualification_input"),
-    ("qualified_opportunities", "target_role_eligible"),
+    # Brett's "qualified opportunities" = job/role policy passed AND company ICP
+    # passed AND the opportunity entered contact discovery. Deliberately NOT
+    # target_role_eligible, which is the pre-contact role gate and passed 92.6%
+    # of postings on the 2026-09-04 control run. There is no fallback to the
+    # looser counter: reporting the wrong stage under the right name is worse
+    # than reporting nothing.
+    ("qualified_opportunities", "contact_discovery_entered"),
+    ("role_qualified_postings", "target_role_eligible"),
     ("companies_considered", "companies_considered"),
 )
-
 
 def _accumulate_counts(into: Dict[str, Any], source: Any) -> Dict[str, Any]:
     """Sum one funnel/census mapping into a cumulative one, one level deep.
@@ -371,6 +379,14 @@ class Orchestrator:
                     "sent_to_instantly": (getattr(delivery, "enrolled", None)
                                           if self.ctx.policy.allow_instantly_enrollment else None),
                 },
+            )
+            self.ledger.record(
+                STAGE_FINAL,
+                loss_reasons=reason_census_from_parts(
+                    report.to_dict(), getattr(enrichment, "loss_census", {}) or {},
+                    delivery.to_dict() if hasattr(delivery, "to_dict") else {},
+                    qual_reasons=(getattr(enrichment, "funnel", {}) or {}).get(
+                        "qual_reason_counts")),
             )
 
             # Safe commit: only AFTER the stages completed do we mark postings
@@ -813,6 +829,12 @@ class Orchestrator:
         # is a MEASURED zero capture, not an absent counter.
         self._ledger_record_slice(acq_cum, funnel_cum, all_leads, agg)
         self.ledger.record(STAGE_ENRICHMENT, {"verified_emails": n_verified})
+        self.ledger.record(
+            STAGE_FINAL,
+            loss_reasons=reason_census_from_parts(
+                report.to_dict(), loss_cum, agg.to_dict(),
+                qual_reasons=funnel_cum.get("qual_reason_counts")),
+        )
 
         enrichment = EnrichmentReport(leads=all_leads, stages=[],
                                       funnel=funnel_cum, loss_census=loss_cum)

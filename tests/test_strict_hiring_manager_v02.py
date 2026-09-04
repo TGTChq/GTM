@@ -87,5 +87,53 @@ class StrictHiringManagerV02Tests(unittest.TestCase):
         self.assertEqual(leads[0]["_final_state"], "UNVERIFIED")
 
 
+    def test_entering_contact_discovery_is_counted_on_the_strict_path(self):
+        """The counter behind Brett's "qualified opportunities".
+
+        It must fire on the STRICT body, which is the one production runs. It was
+        first added only to the legacy body, where production would never have
+        reached it and the metric would have read "not measured" forever.
+        """
+        job = {
+            "job_id": "j1", "job_title": "Staff Accountant", "employer_name": "Acme",
+            "employer_website": "https://acme.com", "_matched_role": "Staff Accountant",
+            "_job_gate_state": "PASS", "_role_gate_state": "PASS",
+            "_job_gate_decision": GateDecision("job", GateState.PASS, "JOB_PASS").to_dict(),
+            "_role_gate_decision": GateDecision("role", GateState.PASS, "ROLE_PASS").to_dict(),
+        }
+        account = GateDecision("account", GateState.UNVERIFIED, "UNVERIFIED_EMPLOYEE_COUNT")
+        with (
+            patch.object(config, "APOLLO_RATE_LIMIT_DELAY", 0),
+            patch.object(hiring_manager.apollo, "enrich_organization",
+                         return_value=OrgEnrichment(found=False)),
+            patch.object(hiring_manager.AccountGate, "evaluate", return_value=account),
+            patch.object(hiring_manager.apollo, "search_people_at_company", return_value=[]),
+        ):
+            _leads, stats = hiring_manager.process_company([job])
+        self.assertEqual(stats.get("contact_discovery_entered"), 1)
+
+    def test_an_account_rejected_company_never_enters_contact_discovery(self):
+        """A rejected account is not a qualified opportunity, and is not counted."""
+        job = {
+            "job_id": "j1", "job_title": "Staff Accountant", "employer_name": "Acme",
+            "employer_website": "https://acme.com", "_matched_role": "Staff Accountant",
+            "_job_gate_state": "PASS", "_role_gate_state": "PASS",
+            "_job_gate_decision": GateDecision("job", GateState.PASS, "JOB_PASS").to_dict(),
+            "_role_gate_decision": GateDecision("role", GateState.PASS, "ROLE_PASS").to_dict(),
+        }
+        account = GateDecision("account", GateState.REJECT, "ACCOUNT_REJECT")
+        with (
+            patch.object(config, "APOLLO_RATE_LIMIT_DELAY", 0),
+            patch.object(hiring_manager.apollo, "enrich_organization",
+                         return_value=OrgEnrichment(found=False)),
+            patch.object(hiring_manager.AccountGate, "evaluate", return_value=account),
+            patch.object(hiring_manager.apollo, "search_people_at_company") as search_mock,
+        ):
+            _leads, stats = hiring_manager.process_company([job])
+        search_mock.assert_not_called()
+        self.assertEqual(stats.get("contact_discovery_entered", 0), 0)
+
+
+
 if __name__ == "__main__":
     unittest.main()

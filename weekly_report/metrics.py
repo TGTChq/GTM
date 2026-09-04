@@ -115,16 +115,17 @@ RUN_METRIC_SPECS: Tuple[MetricSpec, ...] = (
     MetricSpec(
         key="qualified_opportunities",
         label="Qualified opportunities",
-        unit="posting",
+        unit="opportunity",
         definition=(
-            "Reviewed postings that cleared role and ICP qualification and were "
-            "therefore eligible for contact discovery (the same counter the run "
-            "summary prints as QUALIFIED)."
+            "Opportunities that cleared job/role policy AND the company/account ICP "
+            "decision AND had a resolvable search domain, and therefore entered "
+            "contact discovery. Counted by the hiring-manager stage at the moment a "
+            "people search is issued -- never reconstructed by subtracting reason "
+            "codes from a total."
         ),
         fields=(
             ("ledger", "metrics.qualified_opportunities"),
-            ("orchestrator_result", "enrichment.funnel.target_role_eligible"),
-            ("orchestrator_result", "enrichment.funnel.icp_eligible_companies"),
+            ("orchestrator_result", "enrichment.funnel.contact_discovery_entered"),
         ),
     ),
     MetricSpec(
@@ -191,6 +192,20 @@ SUPPORTING_METRIC_SPECS: Tuple[MetricSpec, ...] = (
         fields=(
             ("ledger", "metrics.verified_emails"),
             ("orchestrator_result", "emails.verified"),
+        ),
+    ),
+    MetricSpec(
+        key="role_qualified_postings",
+        label="Postings passing the role/source gate",
+        unit="posting",
+        definition=(
+            "Postings the pre-contact JobGate and RoleGate did not reject. A loose "
+            "upstream filter -- 92.6% of postings passed it on the 2026-09-04 control "
+            "run -- kept as context, NOT as 'qualified opportunities'."
+        ),
+        fields=(
+            ("ledger", "metrics.role_qualified_postings"),
+            ("orchestrator_result", "enrichment.funnel.target_role_eligible"),
         ),
     ),
     MetricSpec(
@@ -312,6 +327,13 @@ def reason_census(runs: Sequence[RunRecord]) -> Dict[str, int]:
     Merges waterfall stage ``primary_reasons``, qualification reason counts, and
     the enrichment loss census -- the three places the orchestrator records *why*
     a record did not advance.
+
+    Per run the compact ledger's own copy wins when it exists, and the heavy
+    artifacts are then NOT read for that run. Reading both would double-count,
+    because the ledger copy is the same merge of the same three sources. This is
+    what lets the action plan stay specific after retention deletes the evidence:
+    before it, a pruned week lost every reason code and fell back to generic text
+    that contradicted the measured bottleneck.
     """
     census: Dict[str, int] = {}
 
@@ -325,6 +347,10 @@ def reason_census(runs: Sequence[RunRecord]) -> Dict[str, int]:
             census[str(reason)] = census.get(str(reason), 0) + value
 
     for run in runs:
+        from_ledger = dig(run.artifact(LEDGER_STEM), "loss_reasons")
+        if isinstance(from_ledger, dict):
+            _add(from_ledger)
+            continue
         waterfall = run.artifact("waterfall") or dig(run.artifact("orchestrator_result"), "waterfall") or {}
         for stage in (waterfall.get("stages") or []) if isinstance(waterfall, dict) else []:
             if isinstance(stage, dict):

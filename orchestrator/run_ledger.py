@@ -269,6 +269,44 @@ class RunLedger:
         return dict(self._payload)
 
 
+#: Loss reasons carried in the ledger, capped so the entry stays tiny. Counts
+#: only -- never a lead payload.
+_LEDGER_REASON_LIMIT = 12
+
+
+def reason_census_from_parts(waterfall: Any, loss_census: Any, delivery: Any,
+                          qual_reasons: Any = None) -> Dict[str, int]:
+    """The run's loss-reason counts, merged exactly as the weekly report merges them.
+
+    The report used to rebuild this from heavy artifacts, so once retention
+    deleted them the action plan lost every reason code and fell back to generic
+    text. Carrying a bounded copy here keeps next week's plan specific after the
+    evidence is gone. The three sources and their merge order match
+    ``weekly_report.metrics.reason_census`` so a ledger-only week and an
+    artifact-backed week produce identical totals.
+    """
+    census: Dict[str, int] = {}
+
+    def _add(mapping: Any) -> None:
+        if not isinstance(mapping, dict):
+            return
+        for reason, count in mapping.items():
+            if isinstance(count, bool) or not isinstance(count, (int, float)):
+                continue
+            census[str(reason)] = census.get(str(reason), 0) + int(count)
+
+    if isinstance(waterfall, dict):
+        for stage in waterfall.get("stages") or []:
+            if isinstance(stage, dict):
+                _add(stage.get("primary_reasons"))
+    _add(qual_reasons)
+    _add(loss_census)
+    if isinstance(delivery, dict):
+        _add(delivery.get("skip_breakdown"))
+    ranked = sorted(census.items(), key=lambda kv: (-kv[1], kv[0]))
+    return dict(ranked[:_LEDGER_REASON_LIMIT])
+
+
 # -- reading ---------------------------------------------------------------
 
 
@@ -394,7 +432,13 @@ _BACKFILL_FIELDS = (
                        ("capacity_report", "raw_postings"))),
     ("unique_opportunities", (("waterfall", "unit_totals.opportunities"),)),
     ("jobs_reviewed", (("orchestrator_result", "enrichment.funnel.qualification_input"),)),
+    # Only the contact-discovery entry counter may answer "qualified
+    # opportunities". A pre-2026-09-05 run does not carry it, and backfilling the
+    # looser target_role_eligible in its place would reintroduce exactly the
+    # semantics this change removed -- through the back door, and silently.
     ("qualified_opportunities",
+     (("orchestrator_result", "enrichment.funnel.contact_discovery_entered"),)),
+    ("role_qualified_postings",
      (("orchestrator_result", "enrichment.funnel.target_role_eligible"),)),
     ("companies_considered",
      (("orchestrator_result", "enrichment.funnel.companies_considered"),)),
@@ -503,6 +547,19 @@ def backfill_from_artifacts(
             # Provenance says "artifacts", not "pipeline": these counters were
             # lifted from the evidence after the fact, not observed as it ran.
             ledger.record(STAGE_BACKFILL, measured)
+
+        # Carry the loss reasons across too, or a backfilled run would still lose
+        # its action plan the moment its evidence is pruned -- the exact failure
+        # this store exists to prevent, just one week later.
+        result_block = artifacts.get("orchestrator_result") or {}
+        census = reason_census_from_parts(
+            artifacts.get("waterfall") or _dig(result_block, "waterfall"),
+            _dig(result_block, "enrichment.loss_census"),
+            artifacts.get("delivery") or _dig(result_block, "delivery"),
+            qual_reasons=_dig(result_block, "enrichment.funnel.qual_reason_counts"),
+        )
+        if census:
+            ledger._payload["loss_reasons"] = census
 
         if status:
             ledger.finalize(

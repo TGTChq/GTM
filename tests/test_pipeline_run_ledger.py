@@ -81,7 +81,9 @@ class _Engine:
             loss_census={"hiring_manager_not_found": 3},
             funnel={
                 "qualification_input": 10 * n,
-                "target_role_eligible": 4 * n,
+                # what the hiring-manager stage emits at the people-search call
+                "contact_discovery_entered": 4 * n,
+                "target_role_eligible": 9 * n,
                 "companies_considered": 2 * n,
             },
         )
@@ -184,7 +186,9 @@ class PipelineWritesTheReportingLedgerTests(unittest.TestCase):
         funnel = result["enrichment"]["funnel"]
 
         self.assertEqual(funnel.get("qualification_input"), 20)
-        self.assertEqual(funnel.get("target_role_eligible"), 8)
+        self.assertEqual(funnel.get("contact_discovery_entered"), 8)
+        self.assertEqual(funnel.get("target_role_eligible"), 18,
+                         "the loose role gate is still recorded, just not as 'qualified'")
         self.assertEqual(
             result["enrichment"]["loss_census"].get("hiring_manager_not_found"), 3,
             "the per-slice loss census is preserved too",
