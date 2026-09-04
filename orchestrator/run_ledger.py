@@ -85,6 +85,8 @@ STAGE_ACQUISITION = "acquisition"
 STAGE_ENRICHMENT = "enrichment"
 STAGE_DELIVERY = "delivery"
 STAGE_FINAL = "final"
+#: Counters lifted out of heavy artifacts after the fact (see ``backfill_from_artifacts``).
+STAGE_BACKFILL = "backfill_from_artifacts"
 
 #: Ledger retention. One entry per run per day is ~1.5 KB, so 180 days of daily
 #: runs is ~270 KB -- three orders of magnitude below one heavy run directory.
@@ -380,3 +382,145 @@ def prune_ledger(
         except OSError:
             pass
     return {"removed": removed, "kept": len(survivors), "total_bytes": total}
+
+
+# -- backfill --------------------------------------------------------------
+
+#: ledger metric key -> (artifact stem, dotted path) candidates, most authoritative
+#: first. Mirrors ``weekly_report.metrics`` deliberately: the orchestrator must not
+#: import the reporting layer, so the field list is restated rather than shared.
+_BACKFILL_FIELDS = (
+    ("jobs_captured", (("waterfall", "unit_totals.postings"),
+                       ("capacity_report", "raw_postings"))),
+    ("unique_opportunities", (("waterfall", "unit_totals.opportunities"),)),
+    ("jobs_reviewed", (("orchestrator_result", "enrichment.funnel.qualification_input"),)),
+    ("qualified_opportunities",
+     (("orchestrator_result", "enrichment.funnel.target_role_eligible"),)),
+    ("companies_considered",
+     (("orchestrator_result", "enrichment.funnel.companies_considered"),)),
+    ("contacts_found", (("waterfall", "unit_totals.contacts"),)),
+    ("final_pass_leads", (("waterfall", "final_pass_count"),)),
+    ("verified_emails", (("orchestrator_result", "emails.verified"),)),
+    ("sent_to_airtable", (("delivery", "created"),)),
+    ("airtable_suppressed", (("delivery", "skipped_existing"),)),
+)
+
+_BACKFILL_STATES = {
+    "complete": STATE_COMPLETE,
+    "incomplete": STATE_INCOMPLETE,
+    "failed": STATE_FAILED,
+    "resumed": STATE_INCOMPLETE,
+    "running": STATE_RUNNING,
+}
+
+
+def _dig(payload: Any, path: str) -> Any:
+    current = payload
+    for part in path.split("."):
+        if not isinstance(current, dict) or part not in current:
+            return None
+        current = current[part]
+    return current
+
+
+def backfill_from_artifacts(
+    root: str | os.PathLike, *, run_artifacts_dirname: str = "run_artifacts"
+) -> Dict[str, Any]:
+    """Write a ledger entry for any run directory that does not have one yet.
+
+    Bridges the deploy boundary: runs that completed before the ledger existed
+    still have their heavy artifacts on disk for a few days, and this lifts their
+    counters into the durable store BEFORE retention deletes the evidence. Without
+    it the first productive run would vanish from the very report this store was
+    built to fix.
+
+    Idempotent (an existing entry is never overwritten) and fail-open: a run that
+    cannot be read is skipped, never raised.
+    """
+    base = Path(root) / run_artifacts_dirname
+    written: List[str] = []
+    existence_only: List[str] = []
+    if not base.is_dir():
+        return {"written": written, "existence_only": existence_only}
+
+    existing = {entry.get("run_id") for entry in read_entries(root)[0]}
+    try:
+        children = sorted(d for d in base.iterdir() if d.is_dir())
+    except OSError:
+        return {"written": written, "existence_only": existence_only}
+
+    for run_dir in children:
+        run_id = run_dir.name
+        if run_id in existing:
+            continue
+        artifacts: Dict[str, Any] = {}
+        for name in ("run_manifest", "run_status", "waterfall", "delivery",
+                     "capacity_report", "lanes", "orchestrator_result"):
+            target = run_dir / f"{name}.json"
+            if not target.is_file():
+                continue
+            try:
+                artifacts[name] = json.loads(target.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+        if not artifacts:
+            # A run directory with no readable top-level artifact: an interrupted
+            # run whose counters live only in per-stage files. Record that it
+            # EXISTED -- that alone is more than the old reader managed.
+            existence_only.append(run_id)
+
+        manifest = artifacts.get("run_manifest") or {}
+        status = str(_dig(artifacts, "run_status.status")
+                     or manifest.get("status") or "").lower()
+        policy = manifest.get("policy") if isinstance(manifest.get("policy"), dict) else {}
+
+        ledger = RunLedger(root, run_id)
+        ledger._payload["started_at"] = manifest.get("started_at")
+        ledger._payload["mode"] = str(manifest.get("mode") or "")
+        ledger._payload["policy"] = {
+            "allow_network": policy.get("allow_network"),
+            "allow_enrichment": policy.get("allow_enrichment"),
+            "allow_instantly_enrollment": policy.get("allow_instantly_enrollment"),
+        }
+        lanes = artifacts.get("lanes") or _dig(artifacts, "orchestrator_result.lanes") or {}
+        ledger._payload["lane_names"] = sorted(str(n) for n in lanes) if isinstance(lanes, dict) else []
+        ledger._payload["artifact_dir"] = f"{run_artifacts_dirname}/{run_id}"
+        ledger._payload["backfilled_from_artifacts"] = True
+        ledger._mark_stage(STAGE_START)
+
+        measured: Dict[str, Any] = {}
+        for key, candidates in _BACKFILL_FIELDS:
+            for stem, path in candidates:
+                value = _as_count(_dig(artifacts.get(stem), path))
+                if value is not None:
+                    measured[key] = value
+                    break
+        if policy.get("allow_instantly_enrollment") is True:
+            enrolled = _as_count(_dig(artifacts.get("delivery"), "enrolled"))
+            if enrolled is not None:
+                measured["sent_to_instantly"] = enrolled
+        if measured:
+            # Provenance says "artifacts", not "pipeline": these counters were
+            # lifted from the evidence after the fact, not observed as it ran.
+            ledger.record(STAGE_BACKFILL, measured)
+
+        if status:
+            ledger.finalize(
+                state=_BACKFILL_STATES.get(status, STATE_INCOMPLETE),
+                status=status,
+                stop_reason=str(_dig(artifacts, "run_status.stop_reason")
+                                or manifest.get("stop_reason") or ""),
+                finished_at=None,
+                artifacts_written=bool(artifacts),
+            )
+            # finalize() stamps "now"; the run's own clock is the correct one.
+            if manifest.get("finished_at"):
+                ledger._payload["finished_at"] = manifest["finished_at"]
+                ledger._flush()
+        else:
+            # No status anywhere: the run never finalized. Leave it RUNNING so
+            # every reader renders it as interrupted.
+            ledger._flush()
+        written.append(run_id)
+
+    return {"written": written, "existence_only": existence_only}
