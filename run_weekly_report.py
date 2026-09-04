@@ -29,7 +29,7 @@ from typing import List, Optional, Sequence
 from weekly_report import anchor as anchor_mod
 from weekly_report import slack
 from weekly_report.external import CollectorResult, collect_airtable, collect_instantly, disabled
-from weekly_report.render import render_summary
+from weekly_report.render import render_stakeholder_summary, render_summary
 from weekly_report.report import HEADLINE_ORDER, build_report
 from weekly_report.timewindow import (
     PACIFIC_TZ_NAME,
@@ -176,18 +176,22 @@ def _write(path: Path, text: str) -> Path:
 
 def _output_paths(
     args: argparse.Namespace, window: ReportingWindow, roots: Sequence[str]
-) -> tuple[Path, Path]:
-    """Where this window's two files go. One deterministic pair per ISO week.
+) -> tuple[Path, Path, Path]:
+    """Where this window's three files go. One deterministic set per ISO week.
 
     Naming by ISO week is what makes a re-run idempotent: the same window always
-    resolves to the same pair, so a second run overwrites rather than accumulating
+    resolves to the same set, so a second run overwrites rather than accumulating
     a second copy of the same report.
+
+    The ``.slack.txt`` file is the message actually delivered. It is written
+    separately from the internal ``.txt`` so a delivery retry re-sends the
+    stakeholder format rather than the full evidence dump.
     """
     stem = f"weekly_report_{window.iso_week}"
     out_dir = Path(args.out_dir) if args.out_dir else Path(roots[0]) / _DEFAULT_SUBDIR
     json_path = Path(args.json_out) if args.json_out else out_dir / f"{stem}.json"
     summary_path = Path(args.summary_out) if args.summary_out else out_dir / f"{stem}.txt"
-    return json_path, summary_path
+    return json_path, summary_path, summary_path.with_suffix(".slack.txt")
 
 
 def _deliver_existing(
@@ -196,8 +200,10 @@ def _deliver_existing(
     """Retry Slack for a report already on disk, recomputing nothing.
 
     Reached when a previous invocation wrote the report but did not record a
-    delivery receipt. The summary text is read back rather than re-rendered, so no
-    metric is recalculated and no provider is contacted.
+    delivery receipt. The message text is read back rather than re-rendered, so no
+    metric is recalculated and no provider is contacted. ``summary_path`` is the
+    stakeholder ``.slack.txt``, so a retry delivers exactly what the first attempt
+    would have -- never the internal evidence dump.
     """
     if not summary_path.exists():
         return slack.SlackDelivery(
@@ -385,7 +391,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 )
             return 0
     window = build_window(args, now, anchor_start)
-    json_path, summary_path = _output_paths(args, window, roots)
+    json_path, summary_path, slack_path = _output_paths(args, window, roots)
 
     # Idempotence gate, deliberately BEFORE the collectors: a container restart or a
     # second cron firing on the same day must not re-scan Instantly or rewrite a
@@ -401,7 +407,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         # the summary already on disk, without rebuilding anything or re-reading
         # Instantly. If the receipt exists too, this is a no-op.
         if args.slack:
-            _report_slack(_deliver_existing(window, json_path, summary_path), args)
+            _report_slack(_deliver_existing(window, json_path, slack_path), args)
         return 0
 
     instantly, airtable = _collectors(args, window)
@@ -444,6 +450,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     document = report.to_dict()
     summary = render_summary(report)
+    # The stakeholder message is rendered from the SAME report object, so the two
+    # views can never disagree about a number -- one is simply shorter.
+    stakeholder = render_stakeholder_summary(report)
 
     if not args.quiet:
         print(summary)
@@ -452,6 +461,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if not args.no_write:
         written.append(_write(json_path, json.dumps(document, indent=2, sort_keys=False)))
         written.append(_write(summary_path, summary))
+        written.append(_write(slack_path, stakeholder))
         # The boundary advances HERE -- once the artifact is durably on disk and
         # before Slack is attempted. A delivery failure then retries against this
         # same closed window (guarded by the receipt) instead of holding the window
@@ -477,7 +487,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         else:
             _report_slack(
                 slack.deliver(
-                    summary,
+                    stakeholder,
                     report_id=window.iso_week,
                     report_path=json_path,
                     window=window.to_dict(),

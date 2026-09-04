@@ -26,6 +26,16 @@ from orchestrator.delivery import DeliveryManager
 from orchestrator.enrichment import EnrichmentEngine
 from orchestrator.lanes import LaneManager, LaneResult
 from orchestrator.reasons import ReasonCode, StageOutcome
+from orchestrator.run_ledger import (
+    STAGE_ACQUISITION,
+    STAGE_DELIVERY,
+    STAGE_ENRICHMENT,
+    STATE_COMPLETE,
+    STATE_FAILED,
+    STATE_INCOMPLETE,
+    RunLedger,
+    prune_ledger,
+)
 from orchestrator.runcontrol import RunContext, RunStatus
 from orchestrator.runlock import RunLock, RunLockHeld
 from orchestrator.state import StateManager
@@ -39,6 +49,72 @@ from orchestrator.waterfall import WaterfallReport, reconcile_stage
 #: headroom for one more complete run on the existing gtm-volume.
 RETENTION_KEEP_RUNS = 4
 RETENTION_MAX_BYTES = 600 * 1024 * 1024
+
+#: Heavy-artifact retention is a STORAGE policy and stays aggressive. Reporting
+#: reads the compact ledger instead, which this map closes out on every run.
+#: ``RESUMED``/``RUNNING`` reaching the finally means the body returned without a
+#: terminal verdict -- reported as incomplete, never as success.
+_LEDGER_STATE_FOR_RUN_STATUS = {
+    RunStatus.COMPLETE: STATE_COMPLETE,
+    RunStatus.FAILED: STATE_FAILED,
+    RunStatus.INCOMPLETE: STATE_INCOMPLETE,
+    RunStatus.RESUMED: STATE_INCOMPLETE,
+    RunStatus.RUNNING: STATE_INCOMPLETE,
+}
+
+
+#: ledger metric key -> enrichment funnel key. A funnel key that is absent stays
+#: absent in the ledger: an enrichment pass that never qualified anything must not
+#: manufacture a zero for a stage it did not reach.
+_FUNNEL_TO_LEDGER = (
+    ("jobs_reviewed", "qualification_input"),
+    ("qualified_opportunities", "target_role_eligible"),
+    ("companies_considered", "companies_considered"),
+)
+
+
+def _accumulate_counts(into: Dict[str, Any], source: Any) -> Dict[str, Any]:
+    """Sum one funnel/census mapping into a cumulative one, one level deep.
+
+    The top-up loop enriches once per slice, so the run's funnel is the SUM of its
+    slices. Nested mappings (``qual_reason_counts``, ``hm_observability``) are
+    merged key-wise; anything non-numeric is carried by last-writer, which is only
+    ever descriptive text.
+    """
+    if not isinstance(source, dict):
+        return into
+    for key, value in source.items():
+        if isinstance(value, bool):
+            into[key] = value
+        elif isinstance(value, (int, float)):
+            into[key] = into.get(key, 0) + value
+        elif isinstance(value, dict):
+            nested = into.get(key)
+            if not isinstance(nested, dict):
+                nested = {}
+            into[key] = _accumulate_counts(nested, value)
+        else:
+            into[key] = value
+    return into
+
+
+def _enrichment_ledger_metrics(funnel: Any, leads: Sequence[Any]) -> Dict[str, Any]:
+    """Compact reporting counters for the enrichment stage.
+
+    ``contacts_found`` is email PRESENCE on the resolved leads -- the same rule the
+    waterfall uses -- never a sum of disposition labels.
+    """
+    from orchestrator.enrichment import Disposition  # noqa: PLC0415 - avoids a cycle
+
+    counts: Dict[str, Any] = {
+        "contacts_found": len([l for l in leads if l.contact.get("email")]),
+        "final_pass_leads": len([l for l in leads if l.disposition is Disposition.FINAL_PASS]),
+    }
+    source = funnel if isinstance(funnel, dict) else {}
+    for ledger_key, funnel_key in _FUNNEL_TO_LEDGER:
+        if funnel_key in source:
+            counts[ledger_key] = source[funnel_key]
+    return counts
 
 
 @dataclass
@@ -61,6 +137,10 @@ class Orchestrator:
         self.ctx = ctx
         self.state = state
         self.budget = budget
+        #: Compact reporting entry for THIS run. Created in ``run()`` before any
+        #: work, updated as stages complete, finalized in the failure-safe
+        #: ``finally``. Heavy artifacts are pruned; this is not.
+        self.ledger = RunLedger(self.state.root, self.ctx.run_id)
 
     # -- acquisition -------------------------------------------------------
 
@@ -135,6 +215,16 @@ class Orchestrator:
         lock + prune retention in a failure-safe finally."""
         lock = RunLock(self.state.root / ".run.lock", self.ctx.run_id)
         lock.acquire()  # raises RunLockHeld if another run is active
+        # The reporting entry is created BEFORE any work and only once the lock is
+        # ours, so a run that is killed at any later point is still visible to the
+        # weekly report as an interrupted run rather than vanishing entirely.
+        self.ledger.begin(
+            mode=self.ctx.mode.value,
+            allow_network=self.ctx.policy.allow_network,
+            allow_enrichment=self.ctx.policy.allow_enrichment,
+            allow_instantly_enrollment=self.ctx.policy.allow_instantly_enrollment,
+            lanes=plan.lanes,
+        )
         try:
             return self._run_body(plan, resume=resume, lock=lock)
         except Exception as exc:  # noqa: BLE001 - failure-safe status still written
@@ -147,10 +237,24 @@ class Orchestrator:
                     "stop_reason": self.ctx.stop_reason, "run_lock": lock.to_dict()})
             except Exception:  # noqa: BLE001 - never mask the original outcome
                 pass
+            try:
+                self.ledger.finalize(
+                    state=_LEDGER_STATE_FOR_RUN_STATUS.get(self.ctx.status, STATE_INCOMPLETE),
+                    status=self.ctx.status.value,
+                    stop_reason=self.ctx.stop_reason,
+                )
+            except Exception:  # noqa: BLE001 - reporting must never mask the outcome
+                pass
             lock.release()
             try:
                 self.state.prune(keep=int(retention_keep), max_bytes=RETENTION_MAX_BYTES,
                                  protect={self.ctx.run_id})
+            except Exception:  # noqa: BLE001
+                pass
+            # Ledger retention is separate and far longer: the compact record must
+            # outlive the heavy evidence it summarises (that is the entire point).
+            try:
+                prune_ledger(self.state.root)
             except Exception:  # noqa: BLE001
                 pass
 
@@ -195,6 +299,14 @@ class Orchestrator:
         opportunities, dedup_stage = self._dedup(postings, seen_postings)
         report.add(dedup_stage)
         report.set_unit("opportunities", len(opportunities))
+        acquisition_requests = sum(int(r.physical_requests or 0) for r in lane_results.values())
+        self.ledger.record(
+            STAGE_ACQUISITION,
+            {"jobs_captured": len(postings), "unique_opportunities": len(opportunities)},
+            acquisition_entered=bool(acquisition_requests),
+            physical_requests=acquisition_requests,
+            source_counts={lane: len(r.jobs) for lane, r in lane_results.items()},
+        )
 
         # Enrichment (skipped if the mode forbids it, e.g. live_acquisition_only)
         enrichment = None
@@ -229,12 +341,28 @@ class Orchestrator:
             # pending verification) -- not merely a lead that carries a row.
             report.set_unit("contacts", len([l for l in enrichment.leads if l.contact.get("email")]))
             report.set_unit("final_pass_leads", len(enrichment.final_pass()))
+            self.ledger.record(
+                STAGE_ENRICHMENT,
+                _enrichment_ledger_metrics(getattr(enrichment, "funnel", {}), enrichment.leads),
+            )
 
             delivery = plan.delivery_manager.deliver(
                 enrichment.leads, run_id=self.ctx.run_id,
                 known_delivered=supp.delivered_leads(), **deliver_kwargs)
             report.set_unit("delivered_rows", delivery.created)
             report.set_unit("enrolled_contacts", delivery.enrolled)
+            self.ledger.record(
+                STAGE_DELIVERY,
+                {
+                    "sent_to_airtable": getattr(delivery, "created", None),
+                    "airtable_suppressed": getattr(delivery, "skipped_existing", None),
+                    # Only a run that was PERMITTED to enroll can answer this; every
+                    # other run leaves the key absent so the report reads it as
+                    # unavailable rather than as a measured zero.
+                    "sent_to_instantly": (getattr(delivery, "enrolled", None)
+                                          if self.ctx.policy.allow_instantly_enrollment else None),
+                },
+            )
 
             # Safe commit: only AFTER the stages completed do we mark postings
             # processed. Crucially, ONLY postings that reached a safe-terminal
@@ -371,6 +499,33 @@ class Orchestrator:
                 continue
         return n
 
+    def _ledger_record_slice(self, acq_cum: Dict[str, Any], funnel_cum: Dict[str, Any],
+                             leads: Sequence[Any], agg: Any) -> None:
+        """Persist CUMULATIVE top-up counters to the compact reporting ledger.
+
+        Called at every slice boundary so an interrupted run still reports the work
+        it completed. Values mirror the waterfall the run report is built from, so
+        the ledger and the heavy artifacts can never disagree.
+        """
+        requests = int(acq_cum.get("physical_requests") or 0)
+        self.ledger.record(
+            STAGE_ACQUISITION,
+            {"jobs_captured": acq_cum.get("jobs_unique_kept"),
+             "unique_opportunities": len(leads)},
+            acquisition_entered=bool(requests),
+            physical_requests=requests,
+            source_counts={str(src): dict(vals)
+                           for src, vals in (acq_cum.get("per_source") or {}).items()},
+        )
+        self.ledger.record(STAGE_ENRICHMENT, _enrichment_ledger_metrics(funnel_cum, leads))
+        self.ledger.record(
+            STAGE_DELIVERY,
+            {"sent_to_airtable": getattr(agg, "created", None),
+             "airtable_suppressed": getattr(agg, "skipped_existing", None),
+             "sent_to_instantly": (getattr(agg, "enrolled", None)
+                                   if self.ctx.policy.allow_instantly_enrollment else None)},
+        )
+
     def _run_body_topup(self, plan: OrchestratorPlan, *, resume: bool = False,
                         lock: Optional[RunLock] = None) -> Dict[str, Any]:
         from orchestrator.enrichment import Disposition, EnrichmentReport
@@ -426,6 +581,14 @@ class Orchestrator:
             "physical_requests": 0, "cross_query_duplicates": 0, "per_source": {},
             "last_jobs_quota_remaining": None}
         acq_iters: List[Dict[str, Any]] = []
+        # The top-up loop enriches once per SLICE, and the run report is assembled
+        # from the accumulation. Before 2026-09-04 the final EnrichmentReport was
+        # rebuilt as ``EnrichmentReport(leads=all_leads, stages=[])`` -- discarding
+        # every slice's funnel -- so ``enrichment.funnel`` was ALWAYS {} on the
+        # production path and jobs_reviewed / qualified_opportunities were
+        # permanently unreportable, however productive the run had been.
+        funnel_cum: Dict[str, Any] = {}
+        loss_cum: Dict[str, Any] = {}
 
         # Pre-Apollo dedupe: snapshot ONCE, then keep a live function-key set so a
         # company+function we CREATE in an earlier slice is not re-enriched in a
@@ -522,6 +685,19 @@ class Orchestrator:
                 if jid and jid not in passed_ids:
                     ledger.mark(jid, exit_stage="dedup_previously_seen", previously_seen=True)
 
+            # Checkpoint acquisition BEFORE enrichment and delivery run. Recording
+            # only at the end of the slice would lose these counters whenever a
+            # later stage crashed -- and "we acquired 6,206 jobs then died" is
+            # precisely the fact the weekly report needs to keep.
+            self.ledger.record(
+                STAGE_ACQUISITION,
+                {"jobs_captured": acq_cum["jobs_unique_kept"]},
+                acquisition_entered=bool(acq_cum["physical_requests"]),
+                physical_requests=int(acq_cum["physical_requests"]),
+                source_counts={str(src): dict(vals)
+                               for src, vals in (acq_cum.get("per_source") or {}).items()},
+            )
+
             enr_kwargs: Dict[str, Any] = {}
             deliver_kwargs: Dict[str, Any] = {}
             if snapshot is not None:
@@ -535,6 +711,8 @@ class Orchestrator:
             for st in enrichment.stages:
                 report.add(st)
             all_leads.extend(enrichment.leads)
+            _accumulate_counts(funnel_cum, getattr(enrichment, "funnel", {}) or {})
+            _accumulate_counts(loss_cum, getattr(enrichment, "loss_census", {}) or {})
 
             delivery = plan.delivery_manager.deliver(
                 enrichment.leads, run_id=self.ctx.run_id,
@@ -589,6 +767,10 @@ class Orchestrator:
                               "jobs_unique_kept": kept, "jobs_returned_billed": billed,
                               "physical_requests": sum(int(r.physical_requests or 0) for r in iter_lanes.values()),
                               "net_new_send_safe": net_new, "quota_remaining": last_quota})
+            # Checkpoint the compact reporting record at every slice boundary, with
+            # CUMULATIVE values. A run killed mid-loop then reports what it had
+            # actually achieved instead of disappearing from the week.
+            self._ledger_record_slice(acq_cum, funnel_cum, all_leads, agg)
 
         # Record this run's ACTUAL billed credits against the monthly ledger
         # (idempotent per run_id; no-op when the governor is disabled).
@@ -617,7 +799,14 @@ class Orchestrator:
         emails_block = {"with_email": len(with_email), "verified": n_verified,
                         "unverified": len(with_email) - n_verified}
 
-        enrichment = EnrichmentReport(leads=all_leads, stages=[])
+        # Final compact reporting record. Also covers the paths the slice loop never
+        # reached -- a zero governor grant stops before the first iteration, and that
+        # is a MEASURED zero capture, not an absent counter.
+        self._ledger_record_slice(acq_cum, funnel_cum, all_leads, agg)
+        self.ledger.record(STAGE_ENRICHMENT, {"verified_emails": n_verified})
+
+        enrichment = EnrichmentReport(leads=all_leads, stages=[],
+                                      funnel=funnel_cum, loss_census=loss_cum)
         capacity = build_capacity_report(
             raw_postings=postings_total, opportunities=len(all_leads),
             enrichment=enrichment, delivered_final_pass=agg.created,

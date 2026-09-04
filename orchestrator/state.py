@@ -5,6 +5,9 @@ acquisition and scattered writes across ``data/state``. The replacement owns its
 state, and names every store:
 
 * ``run_artifacts``   -- immutable, one directory per run_id, never rewritten;
+* ``reporting_ledger``-- compact per-run business counters, one small file per
+  run, deliberately OUTSIDE ``run_artifacts`` so heavy-artifact retention can
+  never delete the reporting record (see ``orchestrator/run_ledger.py``);
 * ``checkpoints``     -- resumable per-board / per-stage progress;
 * ``seen_suppression``-- seen + suppression snapshots (read-only unless prod);
 * ``provider_cache``  -- provider response cache;
@@ -38,6 +41,7 @@ from orchestrator.modes import ModePolicy
 
 STORES = (
     "run_artifacts",
+    "reporting_ledger",
     "checkpoints",
     "seen_suppression",
     "provider_cache",
@@ -174,8 +178,16 @@ class StateManager:
 
         Never removes: a protected run (e.g. the active run), the newest
         completed run, or the newest ``keep`` runs. Prunes oldest-first. Only
-        touches ``run_artifacts`` under the orchestrator root; legacy state and
-        the ``checkpoints``/``seen_suppression`` stores are never deleted here.
+        touches ``run_artifacts`` under the orchestrator root; legacy state,
+        ``reporting_ledger`` and the ``checkpoints``/``seen_suppression`` stores
+        are never deleted here.
+
+        ``max_bytes`` is measured against ``run_artifacts`` -- the only thing this
+        method can actually delete. Measuring the whole root instead (as it did
+        until 2026-09-04) let unprunable neighbours decide the budget: with
+        ``checkpoints`` alone at 166 MB against a 600 MB cap, the loop would delete
+        every non-keeper run and still be over, silently emptying the store it was
+        supposed to bound.
         """
         base = self._paths["run_artifacts"]
         keep = max(1, int(keep))
@@ -197,7 +209,7 @@ class StateManager:
             oldest_first = sorted((d for d in base.iterdir() if d.is_dir()),
                                   key=lambda d: d.name)
             i = 0
-            while self.dir_size() > int(max_bytes) and i < len(oldest_first):
+            while self.dir_size(base) > int(max_bytes) and i < len(oldest_first):
                 d = oldest_first[i]
                 i += 1
                 if d.name in keepers:
@@ -205,6 +217,7 @@ class StateManager:
                 shutil.rmtree(d, ignore_errors=True)
                 removed.append(d.name)
         return {"removed": removed, "total_bytes": self.dir_size(),
+                "run_artifacts_bytes": self.dir_size(base),
                 "free_bytes": self.free_bytes()}
 
     def to_dict(self) -> Dict[str, Any]:

@@ -22,7 +22,7 @@ import pytest
 import run_weekly_report
 from weekly_report.evidence import STATUS_MEASURED, STATUS_PARTIAL, STATUS_UNAVAILABLE, as_count
 from weekly_report.external import collect_airtable, collect_instantly
-from weekly_report.metrics import RUN_METRIC_SPECS, build_run_metrics
+from weekly_report.metrics import RUN_METRIC_SPECS, SOURCE_RUN_ARTIFACTS, build_run_metrics
 from weekly_report.render import render_summary
 from weekly_report.report import HEADLINE_ORDER, build_report
 from weekly_report.run_artifacts import discover_runs, load_run, select_window
@@ -373,7 +373,10 @@ def test_sent_to_instantly_uses_run_artifacts_when_the_run_actually_enrolled(
     report = build_report(pacific_week, artifact_roots=[artifact_root])
     metric = report.metrics["sent_to_instantly"]
     assert metric.value == 17
-    assert metric.source == "run_artifacts"
+    # The counter came from the run's own record, not from the Instantly collector.
+    # Compared against the constant so the label can evolve without silently
+    # breaking the "same source" guard in bottleneck.identify.
+    assert metric.source == SOURCE_RUN_ARTIFACTS
 
 
 def test_sent_to_instantly_prefers_the_instantly_collector(artifact_root, pacific_week):

@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Sequence
 
 from weekly_report.evidence import Metric
+from weekly_report.metrics import SOURCE_RUN_ARTIFACTS
 
 #: The ordered funnel the bottleneck search walks.
 FUNNEL_ORDER = (
@@ -276,7 +277,7 @@ def identify(
         # Two run-derived counters may have been summed over DIFFERENT run sets when
         # one of them is partial. Subtracting those is arithmetic on incomparable
         # populations, so the boundary is declared rather than measured.
-        if from_metric.source == to_metric.source == "run_artifacts":
+        if from_metric.source == to_metric.source == SOURCE_RUN_ARTIFACTS:
             from_runs = set(from_metric.contributing_run_ids)
             to_runs = set(to_metric.contributing_run_ids)
             if from_runs != to_runs:
