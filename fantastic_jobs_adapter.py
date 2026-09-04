@@ -1548,13 +1548,27 @@ class DateCreatedWatermarkEngine:
         if not bool(getattr(config, "FANTASTIC_SOURCE_BOOTSTRAP_ENABLED", True)):
             return
         boots = dict(self.state.get("source_bootstrap") or {})
-        if not self.state.get("last_successful_watermark"):
-            # First ever run: the canonical window already covers the lookback, so
-            # there is no history behind it. Record every source as complete so a
-            # later run cannot mistake them for newcomers.
+        # TWO cases record every enabled source as complete instead of granting it a
+        # backfill, and the PRESENCE of the key -- not its contents -- separates them
+        # from a genuine newcomer:
+        #
+        #   * FIRST EVER RUN -- the canonical window already covers the lookback, so
+        #     there is no history behind it;
+        #   * UPGRADE -- state written before this code existed has an advanced
+        #     watermark and NO ``source_bootstrap`` key at all. Every source enabled
+        #     at that moment has been running all along and owes no backfill.
+        #     Without this, the first run after deploying would hand each LIVE source
+        #     a full-lookback re-page of inventory it has already processed, and the
+        #     reserve would fund that re-page on every run from then on.
+        #
+        # Once the key exists, a label missing from it is a REAL first enablement.
+        if "source_bootstrap" not in self.state or not self.state.get("last_successful_watermark"):
+            reason = ("no_history_behind_first_window"
+                      if not self.state.get("last_successful_watermark")
+                      else "pre_existing_source_at_upgrade")
             for lbl in enabled_labels:
                 boots.setdefault(str(lbl), {"lower": self.lower, "upper": self.lower,
-                                            "drained": True, "reason": "no_history_behind_first_window"})
+                                            "drained": True, "reason": reason})
             self.state["source_bootstrap"] = boots
             return
         try:

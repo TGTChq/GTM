@@ -464,10 +464,47 @@ class BootstrapTest(unittest.TestCase):
         _orig = config.FANTASTIC_WATERMARK_STATE_PATH
         self.addCleanup(lambda: setattr(config, "FANTASTIC_WATERMARK_STATE_PATH", _orig))
 
-    def _advanced_engine(self):
+    def _advanced_engine(self, *, pre_existing=(LI, ATS)):
+        """A watermark that has been advancing, with ``pre_existing`` sources already
+        recorded as having no backfill debt -- i.e. the migration has happened and
+        anything NOT listed is a genuine first enablement."""
         e = _engine(self.sp, lower="2026-08-18T06:00:00Z", upper="2026-08-18T09:00:00Z")
         e.state["last_successful_watermark"] = "2026-08-18T06:00:00Z"
+        e.state["source_bootstrap"] = {
+            lbl: {"lower": e.lower, "upper": e.lower, "drained": True,
+                  "reason": "pre_existing_source_at_upgrade"} for lbl in pre_existing}
         return e
+
+    def test_upgrade_grants_no_backfill_to_already_live_sources(self):
+        """Regression: production state written before this code existed has an
+        advanced watermark and NO ``source_bootstrap`` key. Treating that as "these
+        sources are new" handed every LIVE source a full-lookback re-page of
+        inventory it had already processed -- funded by the reserve, on every run."""
+        with mock.patch.object(config, "FANTASTIC_JOBS_TIME_FRAME", "7d"):
+            e = _engine(self.sp, lower="2026-08-18T06:00:00Z", upper="2026-08-18T09:00:00Z")
+            e.state["last_successful_watermark"] = "2026-08-18T06:00:00Z"
+            self.assertNotIn("source_bootstrap", e.state)      # pre-upgrade shape
+            e.ensure_bootstraps((LI, ATS))
+            for lbl in (LI, ATS):
+                self.assertIsNone(e.bootstrap_pending(lbl),
+                                  f"{lbl} was already live and owes no backfill")
+                self.assertEqual(e.state["source_bootstrap"][lbl]["reason"],
+                                 "pre_existing_source_at_upgrade")
+
+    def test_source_enabled_after_the_upgrade_is_still_a_newcomer(self):
+        """The migration must not swallow REAL first enablements: once the key
+        exists, a label missing from it still earns its bounded backfill."""
+        with mock.patch.object(config, "FANTASTIC_JOBS_TIME_FRAME", "7d"):
+            e = _engine(self.sp, lower="2026-08-18T06:00:00Z", upper="2026-08-18T09:00:00Z")
+            e.state["last_successful_watermark"] = "2026-08-18T06:00:00Z"
+            e.ensure_bootstraps((LI, ATS))                     # the upgrade run
+            e.ensure_bootstraps((LI, ATS, WF))                 # Wellfound enabled later
+        self.assertIsNone(e.bootstrap_pending(LI))
+        self.assertIsNone(e.bootstrap_pending(ATS))
+        rec = e.bootstrap_pending(WF)
+        self.assertIsNotNone(rec, "a genuine first enablement still gets a backfill")
+        self.assertEqual(rec["upper"], "2026-08-18T06:00:00Z")
+        self.assertEqual(rec["lower"], "2026-08-11T09:00:00Z")
 
     def test_first_ever_run_records_no_backfill_debt(self):
         e = _engine(self.sp)              # no last_successful_watermark
