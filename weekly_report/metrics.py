@@ -186,17 +186,50 @@ SUPPORTING_METRIC_SPECS: Tuple[MetricSpec, ...] = (
         ),
     ),
     MetricSpec(
+        key="provider_jobs_billed",
+        label="Provider credits consumed",
+        unit="credit",
+        definition=(
+            "Jobs credits the provider actually charged this window. The denominator "
+            "of every yield-per-credit number."
+        ),
+        fields=(
+            ("ledger", "metrics.provider_jobs_billed"),
+            ("orchestrator_result", "acquisition.cumulative.jobs_quota_consumed"),
+        ),
+    ),
+    MetricSpec(
         key="historical_duplicates",
         label="Rows already processed in a previous run",
         unit="row",
         definition=(
             "Provider rows dropped because an earlier run had already carried that "
             "exact posting to a terminal outcome. The cost of the acquisition "
-            "overlap, and the number that tells us whether the window is draining."
+            "overlap, and the number that tells us whether the window is draining. "
+            "Counted at the dedupe decision point: it no longer absorbs rows this "
+            "run simply bought twice (see canonical_duplicates_in_run), which is a "
+            "different problem with a different fix."
         ),
         fields=(
+            ("ledger", "metrics.historical_previously_seen_duplicates"),
             ("ledger", "metrics.historical_duplicates"),
+            ("orchestrator_result",
+             "acquisition.cumulative.historical_previously_seen_duplicates"),
             ("orchestrator_result", "acquisition.cumulative.historical_duplicates"),
+        ),
+    ),
+    MetricSpec(
+        key="canonical_duplicates_in_run",
+        label="Rows bought twice within one run",
+        unit="row",
+        definition=(
+            "Postings whose canonical identity was already present EARLIER IN THE "
+            "SAME RUN. Pure acquisition waste: we paid for the row twice inside one "
+            "window. Distinct from a row a PREVIOUS run processed."
+        ),
+        fields=(
+            ("ledger", "metrics.canonical_duplicates_in_run"),
+            ("orchestrator_result", "acquisition.cumulative.canonical_duplicates_in_run"),
         ),
     ),
     MetricSpec(
@@ -276,6 +309,21 @@ SUPPORTING_METRIC_SPECS: Tuple[MetricSpec, ...] = (
         ),
     ),
     MetricSpec(
+        key="airtable_candidates",
+        label="Rows submitted to Airtable",
+        unit="row",
+        definition=(
+            "Send-safe leads handed to the Airtable writer. The row above it "
+            "(created) plus every suppression reason must account for all of these; "
+            "an unexplained gap is a measurement defect, not a business result."
+        ),
+        fields=(
+            ("ledger", "metrics.airtable_candidates"),
+            ("delivery", "reviewable_submitted"),
+            ("orchestrator_result", "delivery.reviewable_submitted"),
+        ),
+    ),
+    MetricSpec(
         key="airtable_suppressed",
         label="Airtable rows suppressed as existing",
         unit="row",
@@ -287,6 +335,17 @@ SUPPORTING_METRIC_SPECS: Tuple[MetricSpec, ...] = (
             ("ledger", "metrics.airtable_suppressed"),
             ("delivery", "skipped_existing"),
             ("orchestrator_result", "delivery.skipped_existing"),
+        ),
+    ),
+    MetricSpec(
+        key="airtable_write_failures",
+        label="Airtable writes that failed",
+        unit="row",
+        definition="Rows the Airtable writer accepted but could not create.",
+        fields=(
+            ("ledger", "metrics.airtable_write_failures"),
+            ("delivery", "failed"),
+            ("orchestrator_result", "delivery.failed"),
         ),
     ),
 )

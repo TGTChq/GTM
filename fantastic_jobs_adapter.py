@@ -1601,7 +1601,17 @@ class DateCreatedWatermarkEngine:
         self.metrics["watermark"] = {
             "enabled": True, "lower": self.lower, "upper": self.upper,
             "previous_watermark": prev, "window_reused": reused,
-            "lag_minutes": lag, "overlap_minutes": overlap, "empty_interval": (self.lower == self.upper)}
+            "lag_minutes": lag, "overlap_minutes": overlap, "empty_interval": (self.lower == self.upper),
+            # The cursor state as it stood BEFORE this run paged anything. Production
+            # acceptance of the persisted cursor is "the first offset we requested
+            # equals the offset the previous run left behind", and that is not
+            # answerable from the end state alone -- the run has already moved it.
+            "offsets_at_open": dict(self.window_offsets()),
+            "drained_at_open": dict(self.drained_sources()),
+            # Filled per source by ``run_stream``: where each pass started, where it
+            # ended, how many rows the provider billed to move it, and whether the
+            # source finished the window.
+            "window_cursors": {}}
 
     def run_stream(self, endpoint: str, base_params: Dict[str, Any], label: str,
                    cap_limit: int, accept: Optional[Tuple[str, ...]],
@@ -1616,6 +1626,13 @@ class DateCreatedWatermarkEngine:
             # inventory we already have.
             self.metrics["segments"].setdefault(label, {}).setdefault(
                 "stop_reason", "already_drained_this_window")
+            # A drained source must still be VISIBLE in the cursor table, otherwise
+            # "not repaged" and "never enabled" look identical in the artifacts.
+            base_off = int(self.window_offsets().get(str(label), 0) or 0)
+            self.metrics["watermark"].setdefault("window_cursors", {})[str(label)] = {
+                "offset_from": base_off, "offset_to": base_off, "billed": 0,
+                "passes": 0, "kept": 0, "drained": True,
+                "stop_reason": "already_drained_this_window"}
             return
         # PERSISTED CURSOR, and the single source of truth for where to resume.
         # The caller's ``start_offset`` is progress made in THIS run only (it reads
@@ -1647,11 +1664,26 @@ class DateCreatedWatermarkEngine:
         # Advance by every row the provider RETURNED for this label in this pass
         # (billed rows, not kept rows -- the next unseen row sits exactly after
         # them because paging is contiguous). Same accounting the bootstrap uses.
-        self.record_window_offset(label, base + (self.quota.jobs_consumed - before))
+        billed_this_pass = self.quota.jobs_consumed - before
+        self.record_window_offset(label, base + billed_this_pass)
         self.acquired.extend(got)
         self.result.jobs.extend(got)
         self.metrics["watermark"]["acquired"] = self.metrics["watermark"].get("acquired", 0) + len(got)
         self.mark_source_drained(label)
+        # CURSOR OBSERVABILITY. Without this the only evidence that the persisted
+        # cursor was honoured is a diff of two runs' saved state, which nobody has
+        # at report time. ``offset_from`` is pinned to the FIRST pass of this run
+        # (the resume point); ``offset_to`` and the billed total accumulate.
+        cursors = self.metrics["watermark"].setdefault("window_cursors", {})
+        cur = cursors.setdefault(str(label), {"offset_from": base, "offset_to": base,
+                                              "billed": 0, "passes": 0})
+        cur["offset_to"] = base + billed_this_pass
+        cur["billed"] = int(cur.get("billed", 0)) + billed_this_pass
+        cur["passes"] = int(cur.get("passes", 0)) + 1
+        cur["kept"] = int(cur.get("kept", 0)) + len(got)
+        seg = self.metrics.get("segments", {}).get(str(label)) or {}
+        cur["stop_reason"] = seg.get("stop_reason", "")
+        cur["drained"] = bool(self.drained_sources().get(str(label)))
 
     # Segment stop reasons that mean the window was NATURALLY exhausted. Anything
     # else (cap hit, quota reserve, page_cap, request error, rate limit) means the
@@ -1869,6 +1901,13 @@ class DateCreatedWatermarkEngine:
         self.metrics["watermark"]["drained"] = self.state["window_drained"]
         self.metrics["watermark"]["drained_sources"] = self.drained_sources()
         self.metrics["watermark"]["enabled_sources"] = list(enabled_labels or ())
+        # The offsets as PERSISTED for the next run, paired with the ones read at
+        # open. Together they are the whole cursor acceptance test: resumed-from,
+        # advanced-to, and which sources are still owed pages in this window.
+        self.metrics["watermark"]["offsets_at_close"] = dict(self.window_offsets())
+        self.metrics["watermark"]["undrained_sources"] = sorted(
+            str(lbl) for lbl in (enabled_labels or ())
+            if not bool(self.drained_sources().get(str(lbl))))
 
 
 def audit_closed_windows(http_get: HttpGet, base_params: Dict[str, Any],

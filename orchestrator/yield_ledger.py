@@ -240,7 +240,45 @@ class YieldLedger:
             "credits": sum(r.fantastic_credits for r in rows),
             "send_safe": sum(1 for r in rows if r.send_safe),
             "net_new_send_safe": sum(1 for r in rows if r.net_new_send_safe),
+            # PER SOURCE, for this run only. The whole business question is
+            # "net-new send-safe Airtable rows per provider credit", and it is only
+            # actionable per source -- a source can only be defunded once its own
+            # yield is known. Every input is already on the row; nothing here costs
+            # a request.
+            "by_source": self.by_source(),
         }
+
+    def by_source(self) -> Dict[str, Dict[str, Any]]:
+        """This run's credits and outcomes grouped by ``_acquisition_source``."""
+        out: Dict[str, Dict[str, Any]] = {}
+        for r in self.rows.values():
+            g = out.setdefault(str(r.source or "unattributed"), {
+                "credits": 0, "net_new": 0, "previously_seen": 0, "duplicate_in_run": 0,
+                "icp_pass": 0, "hm_found": 0, "send_safe": 0,
+                "airtable_created": 0, "net_new_send_safe": 0, "apollo_credits": 0,
+            })
+            g["credits"] += int(r.fantastic_credits or 0)
+            if r.exit_stage == "dedup_previously_seen":
+                g["previously_seen"] += 1
+            elif r.exit_stage == "dedup_in_run":
+                g["duplicate_in_run"] += 1
+            else:
+                g["net_new"] += 1
+            g["icp_pass"] += 1 if r.icp_outcome == "pass" else 0
+            g["hm_found"] += 1 if r.hm_outcome == "found" else 0
+            g["send_safe"] += 1 if r.send_safe else 0
+            g["airtable_created"] += 1 if r.airtable_created else 0
+            g["net_new_send_safe"] += 1 if r.net_new_send_safe else 0
+            g["apollo_credits"] += int(r.apollo_credits or 0)
+        for g in out.values():
+            credits = g["credits"]
+            g["net_new_per_1k_credits"] = (
+                round(1000.0 * g["net_new"] / credits, 1) if credits else None)
+            g["airtable_created_per_1k_credits"] = (
+                round(1000.0 * g["airtable_created"] / credits, 1) if credits else None)
+            g["net_new_send_safe_per_1k_credits"] = (
+                round(1000.0 * g["net_new_send_safe"] / credits, 1) if credits else None)
+        return out
 
 
 def aggregate_yield(path: str, *, by: str = "title_family") -> Dict[str, Dict[str, Any]]:

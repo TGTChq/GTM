@@ -71,7 +71,15 @@ LEDGER_METRIC_KEYS = (
     # provider returns for the second time is an acquisition cost, not a funnel loss.
     "provider_jobs_returned",
     "provider_jobs_billed",
+    # The three MUTUALLY EXCLUSIVE exits at the acquisition-dedupe boundary, each
+    # counted where the decision is taken. ``historical_duplicates`` is the
+    # long-standing name for the previously-seen count and is kept so an existing
+    # report reads the same key; the two below used to be folded into it by a
+    # ``kept - opportunities`` subtraction that could not tell them apart.
     "historical_duplicates",
+    "historical_previously_seen_duplicates",
+    "canonical_duplicates_in_run",
+    "postings_missing_identity",
     "cross_query_duplicates",
     "cross_source_duplicates",
     "net_new_jobs_captured",
@@ -82,8 +90,10 @@ LEDGER_METRIC_KEYS = (
     "contacts_found",
     "final_pass_leads",
     "verified_emails",
+    "airtable_candidates",
     "sent_to_airtable",
     "airtable_suppressed",
+    "airtable_write_failures",
     "sent_to_instantly",
 )
 
@@ -447,8 +457,21 @@ _BACKFILL_FIELDS = (
      (("orchestrator_result", "acquisition.cumulative.jobs_returned_billed"),)),
     ("provider_jobs_billed",
      (("orchestrator_result", "acquisition.cumulative.jobs_quota_consumed"),)),
+    # Pre-2026-09-05 runs wrote ``historical_duplicates`` as a broad subtraction
+    # that also absorbed in-run canonical duplicates, so it is backfilled from the
+    # narrow field FIRST and only falls back to the broad one for older runs --
+    # never the other way round, which would re-widen a corrected number.
     ("historical_duplicates",
-     (("orchestrator_result", "acquisition.cumulative.historical_duplicates"),)),
+     (("orchestrator_result",
+       "acquisition.cumulative.historical_previously_seen_duplicates"),
+      ("orchestrator_result", "acquisition.cumulative.historical_duplicates"))),
+    ("historical_previously_seen_duplicates",
+     (("orchestrator_result",
+       "acquisition.cumulative.historical_previously_seen_duplicates"),)),
+    ("canonical_duplicates_in_run",
+     (("orchestrator_result", "acquisition.cumulative.canonical_duplicates_in_run"),)),
+    ("postings_missing_identity",
+     (("orchestrator_result", "acquisition.cumulative.postings_missing_identity"),)),
     ("cross_query_duplicates",
      (("orchestrator_result", "acquisition.cumulative.cross_query_duplicates"),)),
     ("cross_source_duplicates",
@@ -468,8 +491,10 @@ _BACKFILL_FIELDS = (
     ("contacts_found", (("waterfall", "unit_totals.contacts"),)),
     ("final_pass_leads", (("waterfall", "final_pass_count"),)),
     ("verified_emails", (("orchestrator_result", "emails.verified"),)),
+    ("airtable_candidates", (("delivery", "reviewable_submitted"),)),
     ("sent_to_airtable", (("delivery", "created"),)),
     ("airtable_suppressed", (("delivery", "skipped_existing"),)),
+    ("airtable_write_failures", (("delivery", "failed"),)),
 )
 
 _BACKFILL_STATES = {

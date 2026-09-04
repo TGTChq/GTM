@@ -244,7 +244,19 @@ def real_fantastic_runner():
                 # had already done -- they are different problems with different
                 # fixes, and both used to arrive as one undifferentiated "dedupe".
                 "cross_source_duplicates": int(metadata.get("cross_source_duplicates", 0) or 0),
+                # The SHALLOW block (jobs / returned_billed / requests). Kept as-is
+                # for every existing consumer.
                 "per_source": dict(metadata.get("per_source") or {}),
+                # ...and the RICH one the adapter has always built beside it and
+                # nothing ever forwarded: unique-kept, intra/cross-source
+                # duplicates, schema rejects, provider-side filtering, per-source
+                # stop reason. Without it, "Wellfound returned 160 rows" could not
+                # be turned into "and how many of them were new, and why the rest
+                # were not" anywhere downstream.
+                "source_attribution": {
+                    k: (dict(v) if isinstance(v, dict) else v)
+                    for k, v in (metadata.get("source_attribution") or {}).items()
+                },
                 "provider_filters": dict(metadata.get("provider_filters") or {}),
                 "next_billing_date": metadata.get("next_billing_date"),
                 "watermark": dict(metadata.get("watermark") or {}),

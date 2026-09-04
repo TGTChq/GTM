@@ -107,6 +107,109 @@ def _accumulate_counts(into: Dict[str, Any], source: Any) -> Dict[str, Any]:
     return into
 
 
+#: Additive per-source acquisition counters. Every one of these is a count of
+#: PROVIDER ROWS at a named decision point, so summing them across top-up slices
+#: is meaningful. Anything not listed here (``stop_reason``, offsets, ``drained``)
+#: describes a state rather than a quantity and is carried by last-writer.
+_SOURCE_ADDITIVE_KEYS = (
+    "jobs",                    # unique-kept rows attributed to this source
+    "returned_billed",         # rows the provider returned AND billed
+    "unique_kept",             # rows that passed the provider-response schema
+    "requests",                # successful physical requests
+    "duplicates",              # same provider id seen again within this source
+    "cross_source_duplicates",  # same posting already claimed by another source
+    "schema_rejected",
+    "source_filtered_out",
+    # Filled from the pipeline's own dedupe decision point (see ``_dedup``).
+    "postings_in",
+    "net_new",
+    "canonical_duplicates_in_run",
+    "historical_previously_seen",
+    "missing_identity",
+)
+
+#: Carried, not summed: the LAST slice's value wins.
+_SOURCE_STATE_KEYS = ("stop_reason", "error_code", "offset_from", "offset_to", "drained")
+
+
+def _lane_billing_totals(lane_results: Any, kept_fallback: int) -> tuple:
+    """(rows the provider returned, rows the provider billed) across all lanes.
+
+    A lane that exposes no billing counter (the free/ATS lanes) contributes its
+    kept-row count, which is the best available truth for it. Never reports fewer
+    rows than were kept -- that would claim we got rows we did not pay for.
+    """
+    returned = 0
+    billed = 0
+    exposed = False
+    for r in (lane_results or {}).values():
+        attr = getattr(r, "attribution", None) or {}
+        raw = int(attr.get("raw_records") or 0)
+        consumed = int(attr.get("jobs_quota_consumed") or 0)
+        if raw or consumed:
+            exposed = True
+            returned += raw or len(getattr(r, "jobs", []) or [])
+            billed += consumed or raw
+        else:
+            n = len(getattr(r, "jobs", []) or [])
+            returned += n
+            billed += n
+    if not exposed:
+        return max(int(kept_fallback), returned), max(int(kept_fallback), billed)
+    return returned, billed
+
+
+def _merge_source_counts(into: Dict[str, Any], lane_results: Any,
+                         dedup_attr: Any = None) -> Dict[str, Any]:
+    """Fold one slice's per-source acquisition attribution into a cumulative map.
+
+    Prefers the provider's RICH ``source_attribution.per_source`` (returned/billed,
+    unique-kept, duplicates, cross-source duplicates, schema rejects, provider-side
+    filtering, stop reason and window cursor) over the shallow three-field
+    ``per_source`` block that used to be the only thing to reach the ledger. Both
+    are produced by the same adapter; only the shallow one was ever forwarded, so
+    per-source novelty and drain state were invisible downstream.
+    """
+    for r in (lane_results or {}).values():
+        attr = getattr(r, "attribution", None) or {}
+        shallow = attr.get("per_source") or {}
+        rich = ((attr.get("source_attribution") or {}).get("per_source")) or {}
+        cursors = ((attr.get("watermark") or {}).get("window_cursors")) or {}
+        drained = ((attr.get("watermark") or {}).get("drained_sources")) or {}
+        for label in set(shallow) | set(rich):
+            incoming = dict(rich.get(label) or {})
+            incoming.update({k: v for k, v in (shallow.get(label) or {}).items()
+                             if k not in incoming or k == "jobs"})
+            cur = cursors.get(label) or {}
+            if cur:
+                incoming.setdefault("offset_from", cur.get("offset_from"))
+                incoming["offset_to"] = cur.get("offset_to", incoming.get("offset_to"))
+            if label in drained:
+                incoming["drained"] = bool(drained.get(label))
+            bucket = into.setdefault(str(label), {})
+            for key in _SOURCE_ADDITIVE_KEYS:
+                if key in incoming:
+                    bucket[key] = int(bucket.get(key, 0) or 0) + int(incoming.get(key) or 0)
+            for key in _SOURCE_STATE_KEYS:
+                if incoming.get(key) is not None:
+                    # The FIRST requested offset of the run is the resume point, so
+                    # a later slice must not overwrite it; the ending offset is the
+                    # latest one. Everything else is last-writer-wins.
+                    if key == "offset_from" and "offset_from" in bucket:
+                        continue
+                    bucket[key] = incoming[key]
+    for label, counts in ((dedup_attr or {}).get("per_source") or {}).items():
+        bucket = into.setdefault(str(label), {})
+        for key, value in counts.items():
+            if key in _SOURCE_ADDITIVE_KEYS:
+                bucket[key] = int(bucket.get(key, 0) or 0) + int(value or 0)
+    for bucket in into.values():
+        returned = int(bucket.get("returned_billed") or 0)
+        if returned:
+            bucket["novelty_pct"] = round(100.0 * int(bucket.get("net_new") or 0) / returned, 2)
+    return into
+
+
 def _enrichment_ledger_metrics(funnel: Any, leads: Sequence[Any]) -> Dict[str, Any]:
     """Compact reporting counters for the enrichment stage.
 
@@ -194,27 +297,82 @@ class Orchestrator:
     # -- postings -> opportunities ----------------------------------------
 
     def _dedup(self, postings: List[Dict[str, Any]], seen) -> tuple:
+        """Split a slice of postings into net-new opportunities and its losses.
+
+        Returns ``(opportunities, stage, attribution)``. ``attribution`` records the
+        fate of every posting AT THE DECISION POINT, so the three losses stay
+        mutually exclusive and never have to be reconstructed by subtraction. The
+        difference matters commercially: a posting rejected as ``duplicate_in_run``
+        is provider duplication we paid for twice inside one run, while
+        ``previously_seen`` is inventory a PREVIOUS run already processed. Both used
+        to be summed into ``historical_duplicates``, which made an acquisition
+        overlap problem and a re-billing problem indistinguishable.
+
+        ``per_source`` carries the same partition per ``_acquisition_source`` label,
+        so novelty (net-new / returned) is answerable for ATS, LinkedIn, Wellfound
+        and Y Combinator separately rather than only for the run as a whole.
+        """
         dispo = []
         opportunities: List[Dict[str, Any]] = []
         run_keys: set = set()
+        per_source: Dict[str, Dict[str, int]] = {}
+        #: (job_id, exit_stage) for every posting that did NOT become an
+        #: opportunity, so the yield ledger can attribute the credit we spent on it
+        #: to the right exit instead of labelling every dedupe loss "previously seen".
+        exits: List[tuple] = []
+        totals = {"postings_in": 0, "net_new": 0, "canonical_duplicates_in_run": 0,
+                  "historical_previously_seen": 0, "missing_identity": 0}
+
+        def _bump(job: Dict[str, Any], field_name: str) -> None:
+            totals["postings_in"] += 1
+            totals[field_name] += 1
+            label = str(job.get("_acquisition_source") or "unattributed")
+            bucket = per_source.setdefault(label, {
+                "postings_in": 0, "net_new": 0, "canonical_duplicates_in_run": 0,
+                "historical_previously_seen": 0, "missing_identity": 0})
+            bucket["postings_in"] += 1
+            bucket[field_name] += 1
+
         for job in postings:
+            job_id = str(job.get("posting_id") or job.get("job_id") or "")
             strength, key = posting_identity(job)
             if not key or strength == "none":
+                _bump(job, "missing_identity")
+                if job_id:
+                    exits.append((job_id, "missing_identity"))
                 dispo.append((StageOutcome.ERRORED, ReasonCode.MISSING_JOB_ID, None))
                 continue
             if key in run_keys:
+                _bump(job, "canonical_duplicates_in_run")
+                if job_id:
+                    exits.append((job_id, "dedup_in_run"))
                 dispo.append((StageOutcome.REJECTED, ReasonCode.DUPLICATE_IN_RUN, None))
                 continue
             if seen is not None and key in seen:
+                _bump(job, "historical_previously_seen")
+                if job_id:
+                    exits.append((job_id, "dedup_previously_seen"))
                 dispo.append((StageOutcome.REJECTED, ReasonCode.PREVIOUSLY_SEEN, None))
                 continue
             run_keys.add(key)
             opp = dict(job)
             opp.setdefault("posting_id", key)
             opportunities.append(opp)
+            _bump(job, "net_new")
             dispo.append((StageOutcome.PASSED, ReasonCode.OK, None))
         stage = reconcile_stage("acquisition_dedup", "posting", dispo)
-        return opportunities, stage
+        attribution = dict(totals)
+        attribution["per_source"] = per_source
+        attribution["exits"] = exits
+        # The identity this whole split exists to make checkable. It holds by
+        # construction (each posting takes exactly one branch above); asserting it
+        # here means a future edit that breaks it is caught by the run itself.
+        attribution["reconciles"] = (
+            totals["postings_in"] == totals["net_new"]
+            + totals["canonical_duplicates_in_run"]
+            + totals["historical_previously_seen"]
+            + totals["missing_identity"])
+        return opportunities, stage, attribution
 
     # -- run ---------------------------------------------------------------
 
@@ -313,10 +471,15 @@ class Orchestrator:
         # blocked). Read before acquisition-dedup, delivery reads its own set.
         supp = SuppressionStore(self.state)
         seen_postings = supp.seen_postings()
-        opportunities, dedup_stage = self._dedup(postings, seen_postings)
+        opportunities, dedup_stage, dedup_attr = self._dedup(postings, seen_postings)
         report.add(dedup_stage)
         report.set_unit("opportunities", len(opportunities))
         acquisition_requests = sum(int(r.physical_requests or 0) for r in lane_results.values())
+        # BILLING-ACCURATE: the provider bills every row it RETURNED, including the
+        # ones its own schema/source filter then dropped, so ``len(postings)`` (the
+        # unique-KEPT lane output) understates what we paid for. Prefer the lane's
+        # billing counters and fall back to kept only for lanes that expose none.
+        provider_returned, provider_billed = _lane_billing_totals(lane_results, len(postings))
         self.ledger.record(
             STAGE_ACQUISITION,
             {
@@ -324,13 +487,18 @@ class Orchestrator:
                 # acquisition efficiency, recorded separately.
                 "jobs_captured": len(opportunities),
                 "net_new_jobs_captured": len(opportunities),
-                "provider_jobs_returned": len(postings),
-                "historical_duplicates": max(0, len(postings) - len(opportunities)),
+                "provider_jobs_returned": provider_returned,
+                "provider_jobs_billed": provider_billed,
+                # Decision-point counters: mutually exclusive, never subtracted.
+                "historical_duplicates": dedup_attr["historical_previously_seen"],
+                "historical_previously_seen_duplicates": dedup_attr["historical_previously_seen"],
+                "canonical_duplicates_in_run": dedup_attr["canonical_duplicates_in_run"],
+                "postings_missing_identity": dedup_attr["missing_identity"],
                 "unique_opportunities": len(opportunities),
             },
             acquisition_entered=bool(acquisition_requests),
             physical_requests=acquisition_requests,
-            source_counts={lane: len(r.jobs) for lane, r in lane_results.items()},
+            source_counts=_merge_source_counts({}, lane_results, dedup_attr),
         )
 
         # Enrichment (skipped if the mode forbids it, e.g. live_acquisition_only)
@@ -532,13 +700,15 @@ class Orchestrator:
                 continue
         return n
 
-    def _ledger_record_slice(self, acq_cum: Dict[str, Any], funnel_cum: Dict[str, Any],
-                             leads: Sequence[Any], agg: Any) -> None:
-        """Persist CUMULATIVE top-up counters to the compact reporting ledger.
+    def _ledger_record_acquisition(self, acq_cum: Dict[str, Any],
+                                   unique_opportunities: int) -> None:
+        """Persist the CUMULATIVE acquisition counters, and only those.
 
-        Called at every slice boundary so an interrupted run still reports the work
-        it completed. Values mirror the waterfall the run report is built from, so
-        the ledger and the heavy artifacts can never disagree.
+        Every caller records the same stakeholder definition of captured work --
+        ``jobs_captured = net_new_jobs_captured``. The mid-slice checkpoint used to
+        write ``jobs_unique_kept`` here and rely on a later snapshot to correct it,
+        so a run killed in between left the ledger permanently reporting provider
+        volume as delivered work.
         """
         requests = int(acq_cum.get("physical_requests") or 0)
         self.ledger.record(
@@ -551,23 +721,46 @@ class Orchestrator:
                 "net_new_jobs_captured": acq_cum.get("net_new_jobs_captured"),
                 "provider_jobs_returned": acq_cum.get("jobs_returned_billed"),
                 "provider_jobs_billed": acq_cum.get("jobs_quota_consumed"),
-                "historical_duplicates": acq_cum.get("historical_duplicates"),
+                # Three mutually exclusive dedupe exits, each counted where the
+                # decision is taken. ``historical_duplicates`` is retained as the
+                # historical name of the previously-seen count so an existing report
+                # keeps reading the same thing -- only more narrowly, and correctly.
+                "historical_duplicates": acq_cum.get("historical_previously_seen_duplicates"),
+                "historical_previously_seen_duplicates":
+                    acq_cum.get("historical_previously_seen_duplicates"),
+                "canonical_duplicates_in_run": acq_cum.get("canonical_duplicates_in_run"),
+                "postings_missing_identity": acq_cum.get("postings_missing_identity"),
                 "cross_query_duplicates": acq_cum.get("cross_query_duplicates"),
                 "cross_source_duplicates": acq_cum.get("cross_source_duplicates"),
-                "unique_opportunities": len(leads),
+                "unique_opportunities": unique_opportunities,
             },
             acquisition_entered=bool(requests),
             physical_requests=requests,
             source_counts={str(src): dict(vals)
                            for src, vals in (acq_cum.get("per_source") or {}).items()},
+            acquisition_reconciles=bool(acq_cum.get("dedupe_reconciles", True)),
         )
+
+    def _ledger_record_slice(self, acq_cum: Dict[str, Any], funnel_cum: Dict[str, Any],
+                             leads: Sequence[Any], agg: Any) -> None:
+        """Persist CUMULATIVE top-up counters to the compact reporting ledger.
+
+        Called at every slice boundary so an interrupted run still reports the work
+        it completed. Values mirror the waterfall the run report is built from, so
+        the ledger and the heavy artifacts can never disagree.
+        """
+        self._ledger_record_acquisition(acq_cum, len(leads))
         self.ledger.record(STAGE_ENRICHMENT, _enrichment_ledger_metrics(funnel_cum, leads))
         self.ledger.record(
             STAGE_DELIVERY,
             {"sent_to_airtable": getattr(agg, "created", None),
+             "airtable_candidates": getattr(agg, "reviewable_submitted", None),
              "airtable_suppressed": getattr(agg, "skipped_existing", None),
+             "airtable_write_failures": getattr(agg, "failed", None),
              "sent_to_instantly": (getattr(agg, "enrolled", None)
                                    if self.ctx.policy.allow_instantly_enrollment else None)},
+            delivery_skip_breakdown=(agg.skip_breakdown()
+                                     if hasattr(agg, "skip_breakdown") else None),
         )
 
     def _run_body_topup(self, plan: OrchestratorPlan, *, resume: bool = False,
@@ -628,7 +821,18 @@ class Orchestrator:
             # A posting the provider returns for the second time is acquisition
             # inefficiency, NOT a review-stage loss, and conflating the two made
             # Brett's funnel read as a 61% "review" drop that no one had lost.
-            "historical_duplicates": 0, "net_new_jobs_captured": 0,
+            #
+            # These three are MUTUALLY EXCLUSIVE and are counted where the decision
+            # is made, never derived by subtraction. ``historical_duplicates`` used
+            # to be ``kept - len(opportunities)``, which silently absorbed in-run
+            # canonical duplicates and identity-less rows as well: three different
+            # problems reported as one number.
+            "historical_duplicates": 0,
+            "historical_previously_seen_duplicates": 0,
+            "canonical_duplicates_in_run": 0,
+            "postings_missing_identity": 0,
+            "net_new_jobs_captured": 0,
+            "dedupe_reconciles": True,
             "last_jobs_quota_remaining": None}
         acq_iters: List[Dict[str, Any]] = []
         # The top-up loop enriches once per SLICE, and the run report is assembled
@@ -715,11 +919,11 @@ class Orchestrator:
                 acq_cum["cross_query_duplicates"] += int(fl.attribution.get("cross_query_duplicates") or 0)
                 acq_cum["cross_source_duplicates"] += int(
                     fl.attribution.get("cross_source_duplicates") or 0)
-                for src, s in (fl.attribution.get("per_source") or {}).items():
-                    agg_src = acq_cum["per_source"].setdefault(src, {"jobs": 0, "returned_billed": 0, "requests": 0})
-                    for k in agg_src:
-                        agg_src[k] += int(s.get(k, 0) or 0)
                 acq_cum["last_jobs_quota_remaining"] = last_quota
+            # RICH per-source attribution (returned/billed, unique-kept, duplicates,
+            # schema rejects, provider filtering, stop reason, window cursor and
+            # drain state) for EVERY lane, not just Fantastic's shallow three fields.
+            _merge_source_counts(acq_cum["per_source"], iter_lanes)
             acq_cum["jobs_unique_kept"] += kept
             acq_cum["jobs_returned_billed"] += billed
             acq_cum["physical_requests"] += sum(int(r.physical_requests or 0) for r in iter_lanes.values())
@@ -728,32 +932,41 @@ class Orchestrator:
                 j.setdefault("_acquisition_mode", slice_mode)
             ledger.record_acquired(iter_postings, mode=slice_mode)
 
-            opportunities, dedup_stage = self._dedup(iter_postings, supp.seen_postings())
+            opportunities, dedup_stage, dedup_attr = self._dedup(
+                iter_postings, supp.seen_postings())
             report.add(dedup_stage)
             # Postings this run bought that a PREVIOUS run had already processed to
             # completion. They are not reviewable work and must never be counted as
-            # a funnel loss; they are the cost of the acquisition overlap.
-            acq_cum["historical_duplicates"] += max(0, kept - len(opportunities))
+            # a funnel loss; they are the cost of the acquisition overlap. Counted
+            # at the decision point, so they can no longer absorb the two OTHER
+            # things that exit here: in-run canonical duplicates (the same posting
+            # bought twice inside one run) and rows with no usable identity.
+            acq_cum["historical_previously_seen_duplicates"] += dedup_attr["historical_previously_seen"]
+            acq_cum["historical_duplicates"] = acq_cum["historical_previously_seen_duplicates"]
+            acq_cum["canonical_duplicates_in_run"] += dedup_attr["canonical_duplicates_in_run"]
+            acq_cum["postings_missing_identity"] += dedup_attr["missing_identity"]
             acq_cum["net_new_jobs_captured"] += len(opportunities)
-            # Ledger: postings that exit at dedupe never become leads.
-            passed_ids = {str(o.get("posting_id") or o.get("job_id")) for o in opportunities}
-            for j in iter_postings:
-                jid = str(j.get("posting_id") or j.get("job_id") or "")
-                if jid and jid not in passed_ids:
-                    ledger.mark(jid, exit_stage="dedup_previously_seen", previously_seen=True)
+            acq_cum["dedupe_reconciles"] = bool(
+                acq_cum["dedupe_reconciles"] and dedup_attr["reconciles"])
+            _merge_source_counts(acq_cum["per_source"], {}, dedup_attr)
+            # Ledger: postings that exit at dedupe never become leads. The two exits
+            # are recorded distinctly -- ``previously_seen`` is inventory a prior run
+            # already worked, ``dedup_in_run`` is a row this run paid for twice.
+            for jid, exit_stage in dedup_attr["exits"]:
+                ledger.mark(jid, exit_stage=exit_stage,
+                            previously_seen=(exit_stage == "dedup_previously_seen"))
 
             # Checkpoint acquisition BEFORE enrichment and delivery run. Recording
             # only at the end of the slice would lose these counters whenever a
             # later stage crashed -- and "we acquired 6,206 jobs then died" is
             # precisely the fact the weekly report needs to keep.
-            self.ledger.record(
-                STAGE_ACQUISITION,
-                {"jobs_captured": acq_cum["jobs_unique_kept"]},
-                acquisition_entered=bool(acq_cum["physical_requests"]),
-                physical_requests=int(acq_cum["physical_requests"]),
-                source_counts={str(src): dict(vals)
-                               for src, vals in (acq_cum.get("per_source") or {}).items()},
-            )
+            #
+            # It records the SAME stakeholder definition the final snapshot uses.
+            # It previously wrote ``jobs_captured = jobs_unique_kept``, so a run
+            # killed between here and the slice-end snapshot left the ledger
+            # permanently reporting provider volume as captured work -- the exact
+            # conflation the net-new semantics exist to remove.
+            self._ledger_record_acquisition(acq_cum, len(all_leads))
 
             enr_kwargs: Dict[str, Any] = {}
             deliver_kwargs: Dict[str, Any] = {}
@@ -807,17 +1020,33 @@ class Orchestrator:
 
             # Accumulate delivery counters (each slice reconciles => the sum does).
             # getattr defaults keep this tolerant of any delivery-report shape.
-            agg.entered += int(getattr(delivery, "entered", 0) or 0)
-            agg.reviewable_submitted += int(getattr(delivery, "reviewable_submitted", 0) or 0)
-            agg.created += int(getattr(delivery, "created", 0) or 0)
-            agg.skipped += int(getattr(delivery, "skipped", 0) or 0)
-            agg.skipped_existing += int(getattr(delivery, "skipped_existing", 0) or 0)
-            agg.failed += int(getattr(delivery, "failed", 0) or 0)
-            agg.enrolled += int(getattr(delivery, "enrolled", 0) or 0)
-            agg.final_pass += int(getattr(delivery, "final_pass", 0) or 0)
-            agg.needs_check += int(getattr(delivery, "needs_check", 0) or 0)
-            agg.other_reviewable += int(getattr(delivery, "other_reviewable", 0) or 0)
+            # EVERY additive delivery counter, not a hand-picked subset. The skip
+            # breakdown fields were missing here, so the aggregate reported
+            # "1,681 submitted, 781 created" with every loss reason at zero: 900
+            # rows with no explanation, and ``reviewable_reconciles()`` silently
+            # false. Per-slice reports already carried the reasons; only the sum
+            # threw them away.
+            for _field in ("entered", "reviewable_submitted", "created", "skipped",
+                           "skipped_existing", "skipped_already_delivered",
+                           "updated_existing", "company_function_suppressed",
+                           "account_suppressed", "no_contact",
+                           "person_employer_duplicate", "other_unreconciled",
+                           "failed", "enrolled", "instantly_contacts",
+                           "final_pass", "needs_check", "other_reviewable"):
+                setattr(agg, _field,
+                        int(getattr(agg, _field, 0) or 0)
+                        + int(getattr(delivery, _field, 0) or 0))
             agg.delivered_lead_keys.extend(getattr(delivery, "delivered_lead_keys", []) or [])
+            agg.failed_rows.extend(getattr(delivery, "failed_rows", []) or [])
+            # ``withheld_before_submit`` is what ``reconciles()`` checks the entered
+            # set against, so the aggregate needs the sum of the slices' values --
+            # otherwise the fallback (entered - submitted) is used and the check
+            # becomes tautological.
+            _slice_detail = dict(getattr(delivery, "detail", {}) or {})
+            if "withheld_before_submit" in _slice_detail:
+                agg.detail["withheld_before_submit"] = (
+                    int(agg.detail.get("withheld_before_submit", 0) or 0)
+                    + int(_slice_detail.get("withheld_before_submit") or 0))
 
             controller.record(billed=billed, net_new_send_safe=net_new)
             acq_iters.append({"slice_index": controller.iterations, "slice_mode": slice_mode,

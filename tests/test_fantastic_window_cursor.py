@@ -144,6 +144,44 @@ class WindowCursorTests(unittest.TestCase):
         self.assertTrue(result.metadata["watermark"]["drained"])
         self.assertTrue(commit["committed"])
 
+    # -- cursor OBSERVABILITY ------------------------------------------------
+    #
+    # The cursor working and the cursor being PROVABLE are different things. The
+    # acceptance question is "did this run resume from the offset the last run
+    # left behind", and the run's own end state cannot answer it -- by the time
+    # anyone reads the artifacts, this run has already moved the cursor. So the
+    # run records where it found the cursor as well as where it left it.
+
+    def test_the_run_records_where_it_resumed_and_where_it_stopped(self):
+        first, _c, _o, _b = self._run(NOW)
+        wm1 = first.metadata["watermark"]
+        self.assertEqual(wm1["offsets_at_open"], {},
+                         "a brand new window is opened with no cursor at all")
+        self.assertEqual(wm1["offsets_at_close"]["fantastic_jobs_linkedin"], PER_RUN_CAP)
+        cur1 = wm1["window_cursors"]["fantastic_jobs_linkedin"]
+        self.assertEqual((cur1["offset_from"], cur1["offset_to"]), (0, PER_RUN_CAP))
+        self.assertEqual(cur1["billed"], PER_RUN_CAP)
+        self.assertFalse(cur1["drained"], "a capped source has not finished the window")
+
+        second, _c2, _o2, _b2 = self._run(NOW + timedelta(days=1))
+        wm2 = second.metadata["watermark"]
+        self.assertEqual(wm2["offsets_at_open"]["fantastic_jobs_linkedin"], PER_RUN_CAP,
+                         "the second run OPENS at the offset the first one saved")
+        cur2 = wm2["window_cursors"]["fantastic_jobs_linkedin"]
+        self.assertEqual(cur2["offset_from"], PER_RUN_CAP,
+                         "...and its first request starts exactly there")
+        self.assertEqual(cur2["offset_to"], 2 * PER_RUN_CAP)
+
+    def test_undrained_sources_are_named_so_the_backlog_is_countable(self):
+        result, _c, _o, _b = self._run(NOW)
+        wm = result.metadata["watermark"]
+        self.assertEqual(wm["undrained_sources"], ["fantastic_jobs_linkedin"])
+        self.assertFalse(wm["drained"])
+
+        self.rows = _recs(50, created_start=NOW - timedelta(hours=6), step_min=0)
+        done, _c2, _o2, _b2 = self._run(NOW + timedelta(days=1))
+        self.assertEqual(done.metadata["watermark"]["undrained_sources"], [])
+
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
