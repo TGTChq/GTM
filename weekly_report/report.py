@@ -522,6 +522,7 @@ def build_report(
         run_count=len(in_window),
         reasons=reasons,
         acquisition_errors=lane_failures,
+        runs=in_window,
     )
     actions = action_plan(found, metrics, gaps=gaps)
 
