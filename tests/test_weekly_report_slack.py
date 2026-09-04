@@ -502,9 +502,11 @@ def test_cli_retries_slack_when_the_report_exists_but_the_receipt_does_not(cli_e
     assert slack.receipt_path_for(json_path).exists()
     assert json_path.read_text(encoding="utf-8") == first_written, "the report was not regenerated"
     assert len(cli_env["calls"]) == failed_attempts + 1, "exactly one further POST, which succeeded"
+    # The retry re-sends the STAKEHOLDER message from disk, not the internal
+    # evidence dump: a delivery failure must not change what Brett receives.
     assert cli_env["calls"][-1]["payload"]["text"] == (
-        cli_env["out"] / "weekly_report_2026-W36.txt"
-    ).read_text(encoding="utf-8"), "it delivers the summary already on disk"
+        cli_env["out"] / "weekly_report_2026-W36.slack.txt"
+    ).read_text(encoding="utf-8"), "it delivers the message already on disk"
 
 
 def test_cli_retry_path_is_a_no_op_once_the_receipt_exists(cli_env):

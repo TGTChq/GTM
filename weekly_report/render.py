@@ -1,9 +1,17 @@
-"""The human-readable summary.
+"""The human-readable summaries.
 
-One screen, plain text, safe for a Railway log, an email body or a Slack paste.
-It is a *view* over the report document -- it computes nothing. Anything the
-renderer prints can be traced to a field in the JSON, and a metric the report
-could not measure prints as ``not measured`` with its reason, never as ``0``.
+Two views over the same report document, for two different readers. Both are
+*views*: they compute nothing, everything they print traces to a field in the
+JSON, and a metric the report could not measure prints as ``not measured`` with
+its reason -- never as ``0``.
+
+* ``render_summary`` -- the full internal record: provenance, per-run ids, gaps,
+  conversion rates, the declared NOT MEASURED block. This is what lands in the
+  ``.txt`` artifact beside the JSON and in the Railway log.
+* ``render_stakeholder_summary`` -- the five lines Brett asked for, plus the
+  bottleneck and next week's plan. No run ids, no field paths, no evidence
+  apparatus. A stakeholder asked "I have no idea what the numbers we are trying
+  to measure are from that", and the answer is a shorter report, not a longer one.
 """
 
 from __future__ import annotations
@@ -58,7 +66,7 @@ def _stage_change(report: WeeklyReport, from_key: str, to_key: str) -> Optional[
 
 
 def render_summary(report: WeeklyReport) -> str:
-    """The report Brett reads."""
+    """The full internal record. Brett gets ``render_stakeholder_summary``."""
     window = report.window
     lines: List[str] = []
     lines.append(_rule("="))
@@ -154,4 +162,72 @@ def render_summary(report: WeeklyReport) -> str:
         f"tz source: {window.timezone_source}  |  writes performed: none"
     )
     lines.append(_rule())
+    return "\n".join(lines)
+
+
+# -- the stakeholder view --------------------------------------------------
+
+#: Brett's format, in his order. ``jobs`` is rendered as one combined line.
+_STAKEHOLDER_ROWS = (
+    ("qualified_opportunities", "Qualified opportunities"),
+    ("contacts_found", "Contacts found"),
+    ("sent_to_instantly", "Sent to Instantly"),
+)
+
+
+def _count(metric: Optional[Metric]) -> str:
+    """A stakeholder-facing count. Never invents a zero for a missing measurement."""
+    if metric is None or metric.value is None:
+        return "not measured"
+    return f"{int(metric.value):,}"
+
+
+def _jobs_line(report: WeeklyReport) -> str:
+    """``Jobs: X captured / Y reviewed (Z%)``, degrading honestly.
+
+    The rate is printed only when both sides were measured over the same runs --
+    the report already refuses to divide otherwise, so this just follows it.
+    """
+    captured = report.metrics.get("jobs_captured")
+    reviewed = report.metrics.get("jobs_reviewed")
+    if captured is None or captured.value is None:
+        return "Jobs: not measured"
+    head = f"Jobs: {int(captured.value):,} captured"
+    if reviewed is None or reviewed.value is None:
+        return f"{head} / reviewed not measured"
+    rate = report.metrics.get("review_rate_pct")
+    tail = f" / {int(reviewed.value):,} reviewed"
+    if rate is not None and rate.value is not None:
+        tail += f" ({rate.value:.1f}%)"
+    return head + tail
+
+
+def render_stakeholder_summary(report: WeeklyReport) -> str:
+    """The weekly message Brett reads: the numbers, the bottleneck, the plan.
+
+    Deliberately short. Everything this omits -- run ids, artifact field paths,
+    provenance, the gap register -- stays in the JSON document and the internal
+    summary, which are written on every run regardless.
+    """
+    window = report.window
+    lines: List[str] = [
+        "TGTC Weekly Pipeline Report",
+        f"Week of {window.label}",
+        "",
+        _jobs_line(report),
+    ]
+    for key, label in _STAKEHOLDER_ROWS:
+        lines.append(f"{label}: {_count(report.metrics.get(key))}")
+
+    lines.append("")
+    lines.append("BIGGEST BOTTLENECK")
+    lines.extend(_wrap(report.bottleneck.statement or "not determined", indent=""))
+
+    if report.actions:
+        lines.append("")
+        lines.append("NEXT WEEK")
+        for action in report.actions:
+            lines.extend(
+                _wrap(f"{action.priority}. {action.action}", indent="", hanging="   ")
+            )
     return "\n".join(lines)

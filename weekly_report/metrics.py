@@ -1,9 +1,15 @@
 """Metric definitions: the authoritative source and timestamp for every number.
 
-Each headline metric names, in priority order, the artifact fields that may
-supply it. The first field a run actually carries is used, and the choice is
-recorded per run, so a report built from a mix of old and new artifact shapes
-still declares exactly which field produced each contribution.
+Each headline metric names, in priority order, the fields that may supply it. The
+first field a run actually carries is used, and the choice is recorded per run, so
+a report built from a mix of old and new shapes still declares exactly which field
+produced each contribution.
+
+The compact reporting ledger (``orchestrator/run_ledger.py``) is the FIRST
+candidate for every metric. Heavy run artifacts are pruned down to a few runs by
+storage retention -- reporting from them alone silently lost 3 of 7 runs in
+2026-W36 -- while the ledger is kept for months. The heavy fields stay in the list
+as fallbacks so runs written before the ledger existed still read unchanged.
 
 Aggregation rule across the runs in a window: **sum over the runs that reported
 the field**, and list the runs that did not. A run that is silent about a field is
@@ -29,9 +35,17 @@ from weekly_report.evidence import (
     dig,
     weakest,
 )
-from weekly_report.run_artifacts import RunRecord
+from weekly_report.run_artifacts import LEDGER_STEM, RunRecord
 
-SOURCE_RUN_ARTIFACTS = "run_artifacts"
+#: Every run-derived metric now reads the compact ledger first and the heavy
+#: artifacts second, so the label names both stores. ``Metric.evidence`` still
+#: records the exact field that answered, per run.
+SOURCE_RUN_ARTIFACTS = "run_ledger+run_artifacts"
+
+
+def _field_label(stem: str, path: str) -> str:
+    """Human-readable provenance for one candidate field."""
+    return f"reporting_ledger:{path}" if stem == LEDGER_STEM else f"{stem}.json:{path}"
 
 
 @dataclass(frozen=True)
@@ -45,13 +59,23 @@ class MetricSpec:
     #: ``(artifact_stem, dotted_path)`` candidates, most authoritative first.
     fields: Tuple[Tuple[str, str], ...]
 
+    def field_labels(self) -> Tuple[str, ...]:
+        """Every candidate this metric may be read from, most authoritative first."""
+        return tuple(_field_label(stem, path) for stem, path in self.fields)
+
     def read(self, run: RunRecord) -> Tuple[Optional[int], str]:
-        """First present candidate as ``(value, "stem.json:path")``."""
+        """First present candidate as ``(value, "stem.json:path")``.
+
+        The compact reporting ledger is listed first for every metric because it is
+        the only store guaranteed to still exist: heavy artifacts are pruned to a
+        handful of runs, the ledger is retained for months. The heavy fields remain
+        as fallbacks so pre-ledger runs still read exactly as they did.
+        """
         for stem, path in self.fields:
             raw = dig(run.artifact(stem), path)
             value = as_count(raw)
             if value is not None:
-                return value, f"{stem}.json:{path}"
+                return value, _field_label(stem, path)
         return None, ""
 
 
@@ -67,6 +91,7 @@ RUN_METRIC_SPECS: Tuple[MetricSpec, ...] = (
             "the posting's own publication date."
         ),
         fields=(
+            ("ledger", "metrics.jobs_captured"),
             ("waterfall", "unit_totals.postings"),
             ("capacity_report", "raw_postings"),
             ("orchestrator_result", "capacity.raw_postings"),
@@ -83,6 +108,7 @@ RUN_METRIC_SPECS: Tuple[MetricSpec, ...] = (
             "early, hit a provider limit, or deduped them away -- are excluded."
         ),
         fields=(
+            ("ledger", "metrics.jobs_reviewed"),
             ("orchestrator_result", "enrichment.funnel.qualification_input"),
         ),
     ),
@@ -96,6 +122,7 @@ RUN_METRIC_SPECS: Tuple[MetricSpec, ...] = (
             "summary prints as QUALIFIED)."
         ),
         fields=(
+            ("ledger", "metrics.qualified_opportunities"),
             ("orchestrator_result", "enrichment.funnel.target_role_eligible"),
             ("orchestrator_result", "enrichment.funnel.icp_eligible_companies"),
         ),
@@ -109,6 +136,7 @@ RUN_METRIC_SPECS: Tuple[MetricSpec, ...] = (
             "never a sum of disposition labels."
         ),
         fields=(
+            ("ledger", "metrics.contacts_found"),
             ("waterfall", "unit_totals.contacts"),
             ("orchestrator_result", "waterfall.unit_totals.contacts"),
             ("orchestrator_result", "enrichment.funnel.contactable_hiring_managers"),
@@ -123,6 +151,7 @@ RUN_METRIC_SPECS: Tuple[MetricSpec, ...] = (
             "duplicates or already-present are excluded."
         ),
         fields=(
+            ("ledger", "metrics.sent_to_airtable"),
             ("delivery", "created"),
             ("orchestrator_result", "delivery.created"),
         ),
@@ -138,6 +167,7 @@ SUPPORTING_METRIC_SPECS: Tuple[MetricSpec, ...] = (
         unit="opportunity",
         definition="Postings remaining after cross-run and in-run deduplication.",
         fields=(
+            ("ledger", "metrics.unique_opportunities"),
             ("waterfall", "unit_totals.opportunities"),
             ("orchestrator_result", "waterfall.unit_totals.opportunities"),
         ),
@@ -148,6 +178,7 @@ SUPPORTING_METRIC_SPECS: Tuple[MetricSpec, ...] = (
         unit="lead",
         definition="Leads whose validated disposition is FINAL_PASS (send-safe candidates).",
         fields=(
+            ("ledger", "metrics.final_pass_leads"),
             ("waterfall", "final_pass_count"),
             ("orchestrator_result", "waterfall.final_pass_count"),
         ),
@@ -157,14 +188,20 @@ SUPPORTING_METRIC_SPECS: Tuple[MetricSpec, ...] = (
         label="Apollo-verified emails",
         unit="contact",
         definition="Contacts whose Apollo email status is 'verified'.",
-        fields=(("orchestrator_result", "emails.verified"),),
+        fields=(
+            ("ledger", "metrics.verified_emails"),
+            ("orchestrator_result", "emails.verified"),
+        ),
     ),
     MetricSpec(
         key="companies_considered",
         label="Companies considered",
         unit="company",
         definition="Distinct companies evaluated against ICP criteria.",
-        fields=(("orchestrator_result", "enrichment.funnel.companies_considered"),),
+        fields=(
+            ("ledger", "metrics.companies_considered"),
+            ("orchestrator_result", "enrichment.funnel.companies_considered"),
+        ),
     ),
     MetricSpec(
         key="airtable_suppressed",
@@ -175,6 +212,7 @@ SUPPORTING_METRIC_SPECS: Tuple[MetricSpec, ...] = (
             "represented in Airtable."
         ),
         fields=(
+            ("ledger", "metrics.airtable_suppressed"),
             ("delivery", "skipped_existing"),
             ("orchestrator_result", "delivery.skipped_existing"),
         ),
@@ -212,9 +250,12 @@ def aggregate(spec: MetricSpec, runs: Sequence[RunRecord]) -> Metric:
     metric.evidence = evidence
     if not metric.contributing_run_ids:
         metric.status = STATUS_UNAVAILABLE
+        # Name EVERY candidate, not just the most authoritative one: the reader's
+        # next question is "where would this have come from?", and answering with
+        # only the ledger path hides the artifact field that actually instruments it.
         metric.reason = (
-            f"none of the {len(runs)} run artifact set(s) in this window carry "
-            f"{spec.fields[0][0]}.json:{spec.fields[0][1]}"
+            f"none of the {len(runs)} run(s) in this window carry any of: "
+            + ", ".join(spec.field_labels())
         )
         return metric
 

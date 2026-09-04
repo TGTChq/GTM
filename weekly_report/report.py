@@ -68,6 +68,7 @@ _ENROLLED_SPEC = MetricSpec(
     unit="lead",
     definition="Leads the orchestrator itself enrolled into Instantly during the run.",
     fields=(
+        ("ledger", "metrics.sent_to_instantly"),
         ("delivery", "enrolled"),
         ("orchestrator_result", "delivery.enrolled"),
         ("waterfall", "unit_totals.enrolled_contacts"),
@@ -93,6 +94,7 @@ _APPROVED_SYNC_REASON = (
 def _policy_allows_enrollment(run: RunRecord) -> Optional[bool]:
     """Whether this run was permitted to enroll, or ``None`` if unrecorded."""
     for stem, path in (
+        ("ledger", "policy.allow_instantly_enrollment"),
         ("run_manifest", "policy.allow_instantly_enrollment"),
         ("orchestrator_result", "run.policy.allow_instantly_enrollment"),
     ):
@@ -287,6 +289,29 @@ def _collect_gaps(
             )
         )
 
+    interrupted = [run for run in runs if run.interrupted]
+    if interrupted:
+        gaps.append(
+            Gap(
+                metric="interrupted_runs",
+                reason=(
+                    f"{len(interrupted)} run(s) started but never finalized "
+                    f"({', '.join(r.run_id for r in interrupted[:5])}); their reporting-ledger "
+                    "entry is still in state 'running'"
+                ),
+                impact=(
+                    "The counters those runs DID record are included. The stages they never "
+                    "reached report as unavailable, never as zero, so the week's totals are a "
+                    "floor for those runs rather than a final figure."
+                ),
+                remedy=(
+                    "A ledger entry left in 'running' means the process was killed outright "
+                    "(SIGKILL/OOM/container stop) -- an ordinary exception still finalizes as "
+                    "'failed'. Check the container's exit reason for those run ids."
+                ),
+            )
+        )
+
     if excluded_simulated:
         gaps.append(
             Gap(
@@ -460,6 +485,17 @@ class WeeklyReport:
             "unattributable_run_ids": list(self.unattributable_run_ids),
             "excluded_simulated_runs": list(self.excluded_simulated),
             "problems": list(self.problems),
+            # Runs reported entirely from the compact ledger because storage
+            # retention has already deleted their heavy evidence. This is the
+            # NORMAL steady state for any run older than a few days, and is
+            # recorded rather than flagged: the counters are unaffected.
+            "runs_reported_from_ledger_only": [
+                row["run_id"] for row in self.runs
+                if row.get("evidence_source") == "ledger"
+            ],
+            "runs_with_heavy_artifacts": [
+                row["run_id"] for row in self.runs if row.get("heavy_artifacts_present")
+            ],
             "writes_performed": "none (read-only report)",
         }
         return payload
