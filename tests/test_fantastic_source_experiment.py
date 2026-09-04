@@ -101,12 +101,24 @@ class DrainStateTest(unittest.TestCase):
 
     # -- E: empty + complete -> drained ---------------------------------------
     def test_e_natural_end_marks_drained(self):
-        for stop in ("", "empty_page", "short_page", "no_new_ids"):
+        for stop in ("", "empty_page", "short_page"):
             with self.subTest(stop=stop):
                 e = _engine(self.sp)
                 _seg(e, WF, stop)
                 e.mark_source_drained(WF)
                 self.assertTrue(e.source_already_drained(WF))
+
+    def test_e2_a_full_page_of_duplicates_is_not_a_natural_end(self):
+        """``no_new_ids`` means every row on a FULL page was already seen.
+
+        That says nothing about what lies deeper, so it must not drain the window:
+        treating it as exhaustion committed the watermark past inventory no
+        request had ever inspected.
+        """
+        e = _engine(self.sp)
+        _seg(e, WF, "no_new_ids")
+        e.mark_source_drained(WF)
+        self.assertFalse(e.source_already_drained(WF))
 
     # -- F: disabled source does not block ------------------------------------
     def test_f_disabled_source_does_not_block_advancement(self):

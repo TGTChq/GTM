@@ -286,12 +286,18 @@ class WatermarkEngineTests(unittest.TestCase):
             out = fja.commit_watermark(success=True)
         self.assertFalse(out["committed"])
         self.assertEqual(out["reason"], "window_truncated_replay_next_run")
-        # Next run replays the SAME window and skips the 10 already acquired.
+        # Next run RESUMES the same window at the persisted cursor. It used to
+        # re-page from offset 0 and dedupe the first 10 rows again -- correct
+        # output, but 10 rows re-billed, and with a real cap that replay never
+        # reached the tail at all.
         feed2 = _Feed(rows)
         res2 = self._run(feed2, now=NOW + timedelta(hours=2), FANTASTIC_JOBS_RUN_SLICE_CAP=0)
         self.assertTrue(res2.metadata["watermark"]["window_reused"])
         self.assertEqual(len(res2.jobs), in_window - 10)       # remainder, none re-emitted
-        self.assertEqual(res2.metadata["segments"]["fantastic_jobs_linkedin"]["duplicates"], 10)
+        self.assertEqual(int(feed2.calls[0][1].get("offset", 0)), 10,
+                         "the replay starts after the rows the first run already bought")
+        self.assertEqual(res2.metadata["segments"]["fantastic_jobs_linkedin"]["duplicates"], 0,
+                         "and therefore re-bills nothing")
 
     def test_empty_interval_is_valid_and_commits(self):
         feed = _Feed([])

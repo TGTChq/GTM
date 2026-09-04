@@ -1588,6 +1588,9 @@ class DateCreatedWatermarkEngine:
             # A NEW window starts with every source un-drained. Never carried over:
             # a source must earn "drained" for the window it actually paged.
             self.state["window_drained_sources"] = {}
+            # ... and at offset 0. A cursor is only meaningful for the window it
+            # was measured in; carrying it forward would skip the new window's head.
+            self.state["window_offsets"] = {}
         for key in ("boundary_ids", "overlap_band_ids", "window_acquired_ids"):
             self.seen_ids |= {f"fantastic_{i}" for i in (self.state.get(key) or [])}
         self.state.update({"window_start": self.lower, "window_end": self.upper,
@@ -1614,6 +1617,20 @@ class DateCreatedWatermarkEngine:
             self.metrics["segments"].setdefault(label, {}).setdefault(
                 "stop_reason", "already_drained_this_window")
             return
+        # PERSISTED CURSOR, and the single source of truth for where to resume.
+        # The caller's ``start_offset`` is progress made in THIS run only (it reads
+        # the in-memory segment metrics), so without a durable base every run
+        # re-paged a truncated window from offset 0: it re-billed the same prefix,
+        # deduped all of it, and never reached the tail. The bootstrap path has
+        # carried such an offset since it was written and its comment names the
+        # same livelock; the canonical window simply never got one.
+        #
+        # It is deliberately NOT added to ``start_offset``: this cursor is advanced
+        # after every pass, so by round 2 of the same run it already CONTAINS that
+        # run's progress, and adding the two would skip a page per round. Offset
+        # paging over a lag-bounded historical window is stable, which is what makes
+        # the saved cursor a valid resume point.
+        base = int(self.window_offsets().get(str(label), 0) or 0)
         # BILLED, not KEPT (see _fetch_segment's billing-accurate cap): the provider
         # bills every RETURNED row, so measuring cross-segment consumption by kept
         # jobs would let dup-heavy segments overspend the shared run budget.
@@ -1623,9 +1640,14 @@ class DateCreatedWatermarkEngine:
         params = dict(base_params)
         params["date_created_gte"] = self.lower
         params["date_created_lt"] = self.upper
+        before = self.quota.jobs_consumed
         got = _fetch_segment(endpoint, params, label, room, self.quota, self.http_get,
                              self.seen_ids, self.metrics, accept_source=accept,
-                             start_offset=start_offset)
+                             start_offset=base)
+        # Advance by every row the provider RETURNED for this label in this pass
+        # (billed rows, not kept rows -- the next unseen row sits exactly after
+        # them because paging is contiguous). Same accounting the bootstrap uses.
+        self.record_window_offset(label, base + (self.quota.jobs_consumed - before))
         self.acquired.extend(got)
         self.result.jobs.extend(got)
         self.metrics["watermark"]["acquired"] = self.metrics["watermark"].get("acquired", 0) + len(got)
@@ -1635,7 +1657,16 @@ class DateCreatedWatermarkEngine:
     # else (cap hit, quota reserve, page_cap, request error, rate limit) means the
     # window was TRUNCATED and the watermark must NOT advance (Gate-B 5A: a partial
     # window that commits loses every un-fetched in-window job permanently).
-    _DRAINED_STOPS = frozenset({"", "empty_page", "short_page", "no_new_ids"})
+    #
+    # ``no_new_ids`` is deliberately NOT here. It fires on a FULL page whose rows
+    # were all already seen -- the overlap band, a cross-source duplicate run, or a
+    # replayed prefix. A full page of duplicates says nothing about what lies
+    # deeper, so treating it as exhaustion committed the watermark past inventory
+    # no request ever inspected. Combined with the missing per-source offset that
+    # was exactly the observed failure: run 1 caps at 3000/1000-row window, run 2
+    # re-pages the same prefix, reports ``no_new_ids``, is called drained, and the
+    # remaining 700 rows are lost behind the advancing watermark forever.
+    _DRAINED_STOPS = frozenset({"", "empty_page", "short_page"})
 
     # -- first-enablement bootstrap ------------------------------------------------
     def ensure_bootstraps(self, enabled_labels: Tuple[str, ...]) -> None:
@@ -1758,6 +1789,18 @@ class DateCreatedWatermarkEngine:
     def drained_sources(self) -> Dict[str, bool]:
         m = self.state.get("window_drained_sources")
         return dict(m) if isinstance(m, dict) else {}
+
+    def window_offsets(self) -> Dict[str, int]:
+        """Rows already returned per source for the CURRENT window, across runs."""
+        m = self.state.get("window_offsets")
+        return {str(k): int(v or 0) for k, v in m.items()} if isinstance(m, dict) else {}
+
+    def record_window_offset(self, label: str, value: int) -> None:
+        """Persist the resume point. Never moves backwards: a later pass that
+        returned nothing must not rewind a cursor an earlier pass advanced."""
+        m = self.window_offsets()
+        m[str(label)] = max(int(m.get(str(label), 0) or 0), int(value or 0))
+        self.state["window_offsets"] = m
 
     def source_already_drained(self, label: str) -> bool:
         """True when THIS source already exhausted the CURRENT window.
