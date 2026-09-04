@@ -876,6 +876,57 @@ FANTASTIC_ATS_MAX_SCHEMA_REJECT_RATE = float(
 FANTASTIC_ATS_APPLY_TITLE_ADVANCED = _env_bool("FANTASTIC_ATS_APPLY_TITLE_ADVANCED", True)
 FANTASTIC_ATS_APPLY_ICP_FILTERS = _env_bool("FANTASTIC_ATS_APPLY_ICP_FILTERS", True)
 
+# --- Multi-source union (Category 2; Wellfound/YC DEFAULT OFF) -----------------
+# Wellfound and Y Combinator were previously reachable ONLY from the final `else`
+# of a mutually-exclusive if/elif/else, so with title_advanced active (production)
+# their segments were dead code regardless of their limits. They are now
+# INDEPENDENT segments, gated by an explicit source flag AND a non-zero limit --
+# exactly the two-key pattern the active-ats source already uses, so a code deploy
+# can never activate them.
+FANTASTIC_WELLFOUND_SOURCE_ENABLED = _env_bool("FANTASTIC_WELLFOUND_SOURCE_ENABLED", False)
+FANTASTIC_YCOMBINATOR_SOURCE_ENABLED = _env_bool("FANTASTIC_YCOMBINATOR_SOURCE_ENABLED", False)
+# How ONE governor run_cap is divided across the enabled source segments:
+#   "fair_share" -- every enabled segment is first reserved an equal
+#       floor (run_cap // n, capped at its own limit); whatever a segment does not
+#       spend cascades to later segments. Source mix then depends on configured
+#       limits and real inventory, never on dispatch ORDER.
+#   "sequential" (DEFAULT) -- each segment may draw the whole remaining budget in
+#       order. Retained for comparison/rollback only.
+# Both enforce the SAME hard invariant: sum(billed) <= run_cap.
+#
+# DEFAULT IS "sequential" ON PURPOSE. With ATS=6000, LinkedIn=6000 and a grant of
+# ~3164, sequential lets ATS consume the ENTIRE run and leave LinkedIn zero, so
+# fair_share would materially change the live ATS/LinkedIn MIX. We have not yet
+# measured which source yields better qualified leads per credit, so switching the
+# mix is an unvalidated product change and must not ride along with a credit-safety
+# fix. The credit OVERSPEND bug is fixed independently of this policy, so keeping
+# sequential is safe -- it is exactly today's behaviour.
+# Experiment arms set fair_share explicitly (level field for comparison), and
+# enabling a 3rd/4th source in production should set it explicitly too.
+FANTASTIC_SOURCE_ALLOCATION = os.getenv("FANTASTIC_SOURCE_ALLOCATION", "sequential").strip().lower()
+
+# --- First-enablement bootstrap ------------------------------------------------
+# A source enabled for the first time has never inspected inventory OLDER than the
+# canonical window that the already-live sources have advanced past. Without a
+# backfill its historical inventory would be invisible forever, which defeats the
+# point of a recall expansion.
+# The bootstrap is deliberately BOUNDED to the configured acquisition lookback
+# (FANTASTIC_JOBS_TIME_FRAME) -- never unlimited history -- has its OWN progress
+# state, spends the SAME run/provider budget, and can neither advance nor rewind
+# the production canonical watermark. Steady-state participation starts
+# immediately and independently, so no forward gap can open while it backfills.
+FANTASTIC_SOURCE_BOOTSTRAP_ENABLED = _env_bool("FANTASTIC_SOURCE_BOOTSTRAP_ENABLED", True)
+# GUARANTEED PROGRESS. Running the backfill purely on leftover budget starves it
+# forever whenever the steady-state sources can fill the whole run_cap -- the
+# historical window would then never be inspected. So while ANY bootstrap is
+# pending, a reserve is withheld from steady state and released to bootstrap.
+# The size is DERIVED from the allocator's existing fair-share semantics rather
+# than an invented percentage: bootstrap is treated as N additional claimants in
+# the split, i.e. reserve = run_cap * shares / (enabled_sources + shares).
+# 1 = bootstrap gets one source's worth of the run. 0 disables the reserve
+# (leftover-only, and therefore starvable).
+FANTASTIC_BOOTSTRAP_RESERVE_SHARES = _env_int("FANTASTIC_BOOTSTRAP_RESERVE_SHARES", 1)
+
 # --- JB-vs-ATS source experiment (Category 2; explicit opt-in only) --------------
 SOURCE_EXPERIMENT_ENABLED = _env_bool("SOURCE_EXPERIMENT_ENABLED", False)
 SOURCE_EXPERIMENT_MIN_PER_ARM = _env_int("SOURCE_EXPERIMENT_MIN_PER_ARM", 100)
@@ -883,6 +934,33 @@ SOURCE_EXPERIMENT_MAX_BUDGET = _env_int("SOURCE_EXPERIMENT_MAX_BUDGET", 600)
 SOURCE_EXPERIMENT_CONFIDENCE = float(os.getenv("SOURCE_EXPERIMENT_CONFIDENCE", "0.90") or 0.90)
 SOURCE_EXPERIMENT_ARTIFACT_DIR = os.getenv(
     "SOURCE_EXPERIMENT_ARTIFACT_DIR", str(Path(STATE_DIR) / "source_experiment"))
+
+# --- Candidate title expansion (EXPERIMENT ARM ONLY; never the production query) -
+# Adjacent IC titles absent from the 118-role catalog, each mapped to the function
+# bucket it would join. Production ``title_advanced`` is UNCHANGED and remains the
+# experiment's CONTROL; these are only compiled into the "title_expanded" arm.
+# DELIBERATELY EXCLUDED pending a role-policy ruling, because each is plausibly a
+# people-manager or out-of-ICP title and G2 exists precisely to keep those out:
+#   Controller, Product Manager, Technical Product Manager, Product Owner,
+#   Territory Manager, Renewals Manager, Demand Generation Manager.
+FANTASTIC_CANDIDATE_TITLES = _env_json("FANTASTIC_CANDIDATE_TITLES_JSON", {
+    # engineering
+    "Site Reliability Engineer": "engineering",
+    "Platform Engineer": "engineering",
+    "Security Engineer": "engineering",
+    "Analytics Engineer": "engineering",
+    "Data Platform Engineer": "engineering",
+    "Software Development Engineer": "engineering",
+    "Mobile Developer": "engineering",
+    "iOS Developer": "engineering",
+    "Android Developer": "engineering",
+    # gtm / revenue (individual contributor forms only)
+    "Sales Engineer": "gtm_revenue",
+    "Solutions Consultant": "gtm_revenue",
+    # customer success (IC forms only)
+    "Customer Success Engineer": "customer_success",
+    "Renewals Specialist": "customer_success",
+})
 
 # --- Provider-firmographic REJECT-only pre-gate (Apollo stays authoritative for PASS)
 # Historical equivalence: reject-side 90/96 matched Apollo with 6 false-rejects (0.6%).

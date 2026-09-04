@@ -138,7 +138,10 @@ class FamilyGrantWiringTests(unittest.TestCase):
         import inspect
         src = inspect.getsource(FJA.run_fantastic_jobs_acquisition)
         self.assertIn("_grants, _alloc_mode = _family_grants(families, global_cap, metrics)", src)
-        self.assertIn('cap = min(int(_grants.get(term, 1)), global_cap - len(result.jobs))', src)
+        # Budget accounting is BILLED (quota.jobs_consumed), not KEPT: the provider
+        # charges every returned row, so kept-based caps let dup-heavy families and
+        # sources overspend the shared run budget.
+        self.assertIn('cap = min(int(_grants.get(term, 1)),\n                          global_cap - (quota.jobs_consumed - _fam_before))', src)
 
 
 if __name__ == "__main__":

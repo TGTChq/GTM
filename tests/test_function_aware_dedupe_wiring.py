@@ -157,9 +157,14 @@ class RealExecutionWiringTests(unittest.TestCase):
         """One global run_cap shared across families -- no per-family budget."""
         src = self._src()
         # One global cap, split across families -- no family gets its own budget.
-        self.assertIn("global_cap = int(run_cap)", src)
-        self.assertIn("cap = min(int(_grants.get(term, 1)), global_cap - len(result.jobs))", src)
-        self.assertIn("if quota.stop_reason or len(result.jobs) >= global_cap:", src)
+        # Families now share the LinkedIn SEGMENT grant rather than the whole run
+        # budget, so per-family targeting cannot starve the other sources.
+        self.assertIn("global_cap = (allocator.grant(_li_seg, quota.jobs_consumed)", src)
+        # Budget accounting is BILLED (quota.jobs_consumed), not KEPT: the provider
+        # charges every returned row, so kept-based caps let dup-heavy families and
+        # sources overspend the shared run budget.
+        self.assertIn('cap = min(int(_grants.get(term, 1)),\n                          global_cap - (quota.jobs_consumed - _fam_before))', src)
+        self.assertIn('if quota.stop_reason or (quota.jobs_consumed - _fam_before) >= global_cap:', src)
 
 
 if __name__ == "__main__":
