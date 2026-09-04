@@ -220,7 +220,8 @@ class ExpansionCombinedTests(unittest.TestCase):
         base_off = {c["role"] for c in off["clauses"]}
         base_on = {c["role"] for c in on["clauses"] if not c["expanded"]}
         self.assertEqual(base_off, base_on)
-        self.assertEqual(on["base_clauses"], 118)
+        from role_catalog import DEFAULT_SEARCH_ROLES
+        self.assertEqual(on["base_clauses"], len(DEFAULT_SEARCH_ROLES))
         self.assertGreater(on["expanded_clauses"], 0)
 
     def test_no_naked_activity_word_is_purchased(self):
@@ -264,7 +265,11 @@ class FlagsOffInvarianceTests(unittest.TestCase):
         p = feed.calls[0][1]
         for k in ("exclude_organization_industry", "date_created_gte", "exclude_organization_slug"):
             self.assertNotIn(k, p)
-        self.assertEqual(len(p["title_advanced"]), 2966)
+        # Compares CONTENT, not a pinned byte count: the request must carry exactly
+        # the production expression, with no expansion clause added by any flag.
+        with mock.patch.multiple(config, **_PROD):
+            expected = fja.build_title_query_plan()["expression"]
+        self.assertEqual(p["title_advanced"], expected)
 
 
 if __name__ == "__main__":

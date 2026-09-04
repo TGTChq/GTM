@@ -88,8 +88,9 @@ class EmployerIdentityV12Tests(unittest.TestCase):
 
 class AdaptiveAcquisitionV12Tests(unittest.TestCase):
     def test_full_role_catalog_uses_bounded_page2_when_global_budget_is_zero(self):
+        from role_catalog import ROLE_DEFINITIONS
         roles = list(config.ROLES)
-        self.assertEqual(len(roles), 118)  # every target title queried directly
+        self.assertEqual(len(roles), len(ROLE_DEFINITIONS))  # every title queried directly
         productive = roles[0]
         calls = []
 
@@ -138,7 +139,13 @@ class AdaptiveAcquisitionV12Tests(unittest.TestCase):
                 )
 
         self.assertTrue(result.stats["adaptive_deepening_enabled"])
-        self.assertEqual(result.stats["base_estimated_request_units"], 118)
+        # One query unit per catalog role. Derived, and additionally bounded by the
+        # configured per-run ceiling -- so growing the catalog can never silently
+        # push the JSearch lane over budget.
+        from role_catalog import ROLE_DEFINITIONS
+        self.assertEqual(result.stats["base_estimated_request_units"], len(ROLE_DEFINITIONS))
+        self.assertLessEqual(result.stats["base_estimated_request_units"],
+                             config.JSEARCH_MAX_ESTIMATED_UNITS_PER_RUN)
         self.assertEqual(result.stats["adaptive_effective_extra_unit_cap"], 48)
         self.assertEqual(result.stats["adaptive_extra_queries"], 1)
         self.assertIn((productive, 2), calls)

@@ -961,10 +961,18 @@ SOURCE_EXPERIMENT_CONFIDENCE = float(os.getenv("SOURCE_EXPERIMENT_CONFIDENCE", "
 SOURCE_EXPERIMENT_ARTIFACT_DIR = os.getenv(
     "SOURCE_EXPERIMENT_ARTIFACT_DIR", str(Path(STATE_DIR) / "source_experiment"))
 
-# --- Candidate title expansion (EXPERIMENT ARM ONLY; never the production query) -
-# Adjacent IC titles absent from the 118-role catalog, each mapped to the function
-# bucket it would join. Production ``title_advanced`` is UNCHANGED and remains the
-# experiment's CONTROL; these are only compiled into the "title_expanded" arm.
+# --- Candidate title expansion (SHIPPED 2026-09-04; now carried by the catalog) --
+# Adjacent IC titles that were absent from the 118-role catalog. They are now REAL
+# role definitions in role_catalog.py, which is what generates the production
+# title_advanced expression -- so the acquisition query and the downstream
+# classifier move together and this dict is the declared set the alignment test
+# checks, not a second source of truth. fantastic_jobs_adapter.
+# title_expansion_alignment() DROPS any entry the catalog cannot resolve, because
+# a query-only family buys postings the role gate can only mark UNVERIFIED.
+#
+# NOTE: adding a title here does NOT relax any seniority or people-manager rule.
+# Staff/Principal/Lead variants stay rejected by job_quality.assess_restricted_work
+# and Director/VP/Chief by role_gate.HARD_SENIORITY_PATTERN.
 # DELIBERATELY EXCLUDED pending a role-policy ruling, because each is plausibly a
 # people-manager or out-of-ICP title and G2 exists precisely to keep those out:
 #   Controller, Product Manager, Technical Product Manager, Product Owner,

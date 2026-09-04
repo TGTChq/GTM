@@ -72,15 +72,16 @@ def _run(http_get, *, cap=50, advanced=True, targeting=False, expression="",
 
 
 class TitleAdvancedExpressionTests(unittest.TestCase):
-    def test_expression_covers_all_118_roles_exactly_once(self):
+    def test_expression_covers_every_catalog_role_exactly_once(self):
         roles = sorted({str(r).strip() for r in DEFAULT_ACQUISITION_ROLES if str(r).strip()})
-        self.assertEqual(len(roles), 118)
         expr = fja._title_advanced_expression()
-        # every catalog role contributes its own OR term -> 118/118 coverage
+        # every catalog role contributes its own OR term -> full coverage. Asserted
+        # against the catalog rather than a pinned count, so the invariant holds
+        # across catalog changes instead of going stale on each one.
         for r in roles:
             self.assertIn(fja._title_advanced_term(r), expr)
-        self.assertEqual(expr.count("|") + 1, 118)      # exactly 118 OR terms
-        self.assertLess(len(expr), 3500)                # fits API query-length budget
+        self.assertEqual(expr.count("|") + 1, len(roles))   # one term per role, no dupes
+        self.assertLess(len(expr), 3500)                    # fits API query-length budget
 
     def test_multiword_roles_are_single_quoted_phrases(self):
         self.assertEqual(fja._title_advanced_term("Account Executive"), "'account executive'")
@@ -105,8 +106,9 @@ class TitleAdvancedAcquisitionTests(unittest.TestCase):
         self.assertTrue(all("title_advanced" in c for c in calls))
         self.assertTrue(all("title" not in c for c in calls))
         self.assertTrue(all(c["source"] == "linkedin" for c in calls))
-        # the expression carries the full 118-term union
-        self.assertEqual(calls[0]["title_advanced"].count("|") + 1, 118)
+        # the expression carries the full catalog union
+        from role_catalog import DEFAULT_SEARCH_ROLES
+        self.assertEqual(calls[0]["title_advanced"].count("|") + 1, len(DEFAULT_SEARCH_ROLES))
         # ICP filters + acquisition-time headcount bounds preserved
         self.assertEqual(calls[0]["organization_headcount_gte"], 25)
         self.assertEqual(calls[0]["organization_headcount_lt"], 1000)

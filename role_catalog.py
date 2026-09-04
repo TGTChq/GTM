@@ -85,6 +85,11 @@ _ROLE_DEFINITIONS = [
     _role("Customer Support Representative", "customer_support", "customer_support", "customer support, ticket resolution, and service operations"),
     _role("Technical Support Specialist", "customer_support", "customer_support", "technical customer support, troubleshooting, and issue resolution"),
     _role("Implementation Specialist", "customer_success", "customer_success", "customer implementation, onboarding, and product adoption"),
+    # Title-expansion (2026-09-04): technical CS and renewal ICs. Same buyer and
+    # campaign as the existing customer_success roles; "Renewals Specialist" sits
+    # beside "Customer Retention Specialist", whose focus already names renewals.
+    _role("Customer Success Engineer", "customer_success", "customer_success", "technical customer success, integration support, and product adoption"),
+    _role("Renewals Specialist", "customer_success", "customer_success", "subscription renewals, retention outreach, and churn reduction"),
     _role(
         "Community Manager",
         "customer_support",
@@ -118,6 +123,28 @@ _ROLE_DEFINITIONS = [
     _role("Database Administrator", "engineering", "data", "database administration, performance, and data reliability", aliases=("DBA",)),
     _role("Business Intelligence Analyst", "engineering", "data", "business intelligence, dashboards, and decision support", aliases=("BI Analyst",)),
     _role("Systems Administrator", "engineering", "it", "systems administration, infrastructure reliability, and access management", aliases=("System Administrator",)),
+
+    # --- Title-expansion families (2026-09-04) -------------------------------
+    # Adjacent IC engineering titles the 118-role catalog did not carry, so a
+    # posting for one classified as UNVERIFIED_ROLE_CLASSIFICATION and could
+    # never qualify. They are added HERE, in the one catalog, so the acquisition
+    # query and the downstream classifier move together -- a query-only family
+    # buys credits it cannot convert.
+    #
+    # NO seniority policy changes accompany these. Staff/Principal/Lead variants
+    # stay rejected by job_quality.assess_restricted_work, Director/VP/Chief by
+    # role_gate.HARD_SENIORITY_PATTERN, and people-manager variants by the same
+    # authority evidence rules as every existing role. Recognising a FAMILY is
+    # not the same as admitting a LEVEL.
+    _role("Platform Engineer", "engineering", "engineering", "platform engineering, internal tooling, and infrastructure reliability"),
+    _role("Site Reliability Engineer", "engineering", "engineering", "service reliability, observability, and production operations", aliases=("SRE",)),
+    _role("Security Engineer", "engineering", "engineering", "application and infrastructure security, detection, and vulnerability remediation", aliases=("Application Security Engineer", "Information Security Engineer")),
+    _role("Software Development Engineer", "engineering", "engineering", "software development, system design, and production reliability", aliases=("SDE",)),
+    _role("Mobile Developer", "engineering", "engineering", "mobile application development, release engineering, and device performance", aliases=("Mobile Engineer", "Mobile Application Developer")),
+    _role("iOS Developer", "engineering", "engineering", "iOS application development, release engineering, and device performance", aliases=("iOS Engineer",)),
+    _role("Android Developer", "engineering", "engineering", "Android application development, release engineering, and device performance", aliases=("Android Engineer",)),
+    _role("Analytics Engineer", "engineering", "data", "analytics engineering, data modeling, and trusted reporting layers"),
+    _role("Data Platform Engineer", "engineering", "data", "data platform infrastructure, pipeline reliability, and warehouse operations"),
 
     # Finance & Accounting
     _role("Accountant", "finance", "finance", "accounting operations, reconciliations, and financial reporting"),
@@ -228,6 +255,11 @@ _ROLE_DEFINITIONS = [
     ),
     _role("AI Engineer", "engineering", "engineering", "AI systems, LLM integrations, and production automation"),
     _role("GTM Engineer", "gtm_revenue", "gtm_revenue", "GTM systems, workflow automation, and revenue operations"),
+    # Title-expansion (2026-09-04): pre-sales technical ICs. Revenue-function
+    # buyers, so they route to the SAME gtm_revenue bucket and campaign as the
+    # rest of sales -- not to engineering, whose buyer is a different person.
+    _role("Sales Engineer", "gtm_revenue", "gtm_revenue", "pre-sales technical discovery, solution design, and proof of value", aliases=("Solutions Engineer", "Pre-Sales Engineer")),
+    _role("Solutions Consultant", "gtm_revenue", "gtm_revenue", "pre-sales solution consulting, technical discovery, and proof of value"),
     _role("AI Content Specialist", "marketing", "marketing", "AI-assisted content production, editorial workflows, and content optimization"),
     _role("Prompt Engineer", "engineering", "engineering", "prompt systems, LLM evaluation, and AI workflow optimization"),
     _role("AI Operations Specialist", "operations", "operations", "AI operations, workflow implementation, and process optimization"),

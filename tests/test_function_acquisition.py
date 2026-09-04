@@ -190,9 +190,11 @@ class FlagDefaultsAndQueryInvarianceTests(unittest.TestCase):
         self.assertFalse(config.FANTASTIC_FUNCTIONAL_ROLE_EXPANSION_ENABLED)
 
     def test_flag_off_keeps_production_query_byte_identical(self):
+        from role_catalog import DEFAULT_SEARCH_ROLES
         plan = fja.build_title_query_plan()
-        self.assertEqual(len(plan["expression"]), 2966)
-        self.assertEqual(plan["expression"].count("|") + 1, 118)
+        # Flag OFF must yield exactly the catalog union -- no expansion clauses.
+        self.assertEqual(plan["expression"].count("|") + 1, len(DEFAULT_SEARCH_ROLES))
+        self.assertFalse(any(c.get("expanded") for c in plan["clauses"]))
 
 
 class LedgerAttributionTests(unittest.TestCase):

@@ -581,7 +581,7 @@ class ReadyV1BoundaryTests(unittest.TestCase):
         # Definitive high-volume config: every target title is queried directly,
         # so no role depends on incidental appearance in broad ATS/free feeds.
         from role_catalog import ROLE_DEFINITIONS
-        self.assertEqual(len(DEFAULT_ACQUISITION_ROLES), 118)
+        self.assertEqual(len(DEFAULT_ACQUISITION_ROLES), len(ROLE_DEFINITIONS))
         self.assertEqual(set(DEFAULT_ACQUISITION_ROLES), set(ROLE_DEFINITIONS))
         for role in (
             "Customer Success Associate",

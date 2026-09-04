@@ -367,12 +367,19 @@ class TitleArmTest(unittest.TestCase):
         self.assertTrue(cand.startswith(base_before),
                         "CONTROL is a strict prefix of the candidate expression")
 
-    def test_candidate_titles_add_only_new_terms(self):
-        base = fja.build_title_query_plan()["expression"]
-        cand = fja.candidate_title_expression()
-        added = [c for c in cand.split(" | ") if c not in base.split(" | ")]
-        self.assertEqual(len(added), len(config.FANTASTIC_CANDIDATE_TITLES))
+    def test_candidate_titles_never_duplicate_a_control_clause(self):
+        """The arm may only ever ADD terms, never restate one.
+
+        Since the candidate families were promoted into the role catalog (which is
+        what generates the production expression), `added` is now legitimately
+        EMPTY -- the query and the classifier having converged is the point of that
+        change, not a regression. What must still hold is that the arm never
+        duplicates a clause and never drops one."""
+        base = fja.build_title_query_plan()["expression"].split(" | ")
+        cand = fja.candidate_title_expression().split(" | ")
+        added = [c for c in cand if c not in base]
         self.assertEqual(len(set(added)), len(added), "no duplicate candidate clause")
+        self.assertEqual(cand[:len(base)], base, "no control clause may be lost")
 
     def test_policy_questionable_titles_are_excluded(self):
         for banned in ("Controller", "Product Manager", "Technical Product Manager",
@@ -388,16 +395,16 @@ class TitleArmTest(unittest.TestCase):
             with self.subTest(title=title):
                 self.assertIn(fam, buckets, f"{title} maps to unknown bucket {fam}")
 
-    def test_candidates_are_not_already_covered_by_control(self):
-        import re
-        base = fja.build_title_query_plan()["expression"]
-        terms = [t.strip().strip("'") for t in base.split(" | ")]
-        for title in config.FANTASTIC_CANDIDATE_TITLES:
-            with self.subTest(title=title):
-                n = re.sub(r"[^a-z0-9 ]", " ", title.lower())
-                n = re.sub(r"\s+", " ", n).strip()
-                self.assertFalse(any(t and t in n for t in terms),
-                                 f"{title} is already covered; it would add nothing")
+    def test_every_candidate_is_classifiable_downstream(self):
+        """Replaces the former "not already covered by control" assertion, which
+        pinned the DEFECT: the candidates were reachable by the query but had no
+        role-catalog entry, so every one of them classified as
+        UNVERIFIED_ROLE_CLASSIFICATION and could never convert. They are catalog
+        roles now, so being covered by control is the CORRECT state -- and the
+        invariant worth guarding is that none can drift back out of the catalog."""
+        aligned, unmapped = fja.title_expansion_alignment()
+        self.assertEqual(unmapped, [], "a query-only family can never be qualified")
+        self.assertEqual(sorted(aligned), sorted(config.FANTASTIC_CANDIDATE_TITLES))
 
 
 if __name__ == "__main__":
