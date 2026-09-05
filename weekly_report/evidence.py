@@ -164,6 +164,9 @@ def dig(payload: Any, path: str) -> Any:
             # means what a metric needs it to mean if the stage also declares the
             # unit that metric counts -- `reconcile_stage` takes the unit as an
             # argument, so the stage NAME alone does not fix the population.
+            take_all = selector.startswith("all:")
+            if take_all:
+                selector = selector[len("all:"):]
             conditions = [c.split("=", 1) for c in selector.split(",") if "=" in c]
             if not conditions:
                 return None
@@ -172,11 +175,26 @@ def dig(payload: Any, path: str) -> Any:
             items = current.get(name)
             if not isinstance(items, list):
                 return None
-            current = next((i for i in items
-                            if isinstance(i, dict)
-                            and all(str(i.get(k)) == v for k, v in conditions)), None)
-            if current is None:
+            matches = [i for i in items
+                       if isinstance(i, dict)
+                       and all(str(i.get(k)) == v for k, v in conditions)]
+            if not matches:
                 return None
+            # ``all:`` sums every match instead of taking the first. The
+            # acquisition-dedupe stage is recorded ONCE PER TOP-UP SLICE
+            # (``report.add`` appends), so a productive multi-slice run writes
+            # several of them and "the acquisition_dedup stage" means all of them
+            # together -- exactly as ``net_new_jobs_captured`` accumulates
+            # ``len(opportunities)`` per slice. Taking the first would report slice
+            # one's capture as the whole run's.
+            if take_all:
+                leaf = path.split(".")[-1]
+                values = [m.get(leaf) for m in matches]
+                if any(v is None or isinstance(v, bool)
+                       or not isinstance(v, (int, float)) for v in values):
+                    return None
+                return sum(values)
+            current = matches[0]
             continue
         if not isinstance(current, dict):
             return None
