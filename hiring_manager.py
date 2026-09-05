@@ -411,6 +411,51 @@ def _alternate_budget_available() -> bool:
     return cap > 0 and _ALTERNATE_BUDGET["used"] < cap
 
 
+#: RUN-LEVEL paid-enrichment accounting. Three attempts per BUCKET bounded a bucket;
+#: nothing bounded the run. Every paid `people/match` call passes through here, so
+#: the totals are the run's actual spend rather than an estimate of it.
+_PAID_MATCH_BUDGET = {"used": 0, "fallback_used": 0, "deferred_buckets": 0}
+
+
+def reset_paid_match_budget() -> None:
+    """Reset the run-level paid-match accounting. Called once per run."""
+    _PAID_MATCH_BUDGET.update({"used": 0, "fallback_used": 0, "deferred_buckets": 0})
+
+
+def paid_match_budget_state() -> dict:
+    """What this run has actually spent on paid person matches, and what it deferred."""
+    return dict(_PAID_MATCH_BUDGET)
+
+
+def _paid_match_allowed(from_org_id_fallback: bool) -> bool:
+    """Whether one more PAID ``people/match`` call may be made.
+
+    Two ceilings, and the distinction matters. The overall one bounds the run across
+    every path and is off by default -- it limits work that was already authorized,
+    so it is switched on deliberately rather than imposed here.
+
+    The fallback one bounds only the paid enrichment of buckets the org-id recovery
+    found, and defaults to ZERO. Those buckets had no people before the fallback
+    existed, so every paid call they make is spend that no prior authorization
+    covered. The recovery still runs and still finds the people; enriching them waits
+    for a budget.
+    """
+    overall = int(getattr(config, "APOLLO_MAX_PERSON_MATCH_CALLS_PER_RUN", 0) or 0)
+    if overall > 0 and _PAID_MATCH_BUDGET["used"] >= overall:
+        return False
+    if from_org_id_fallback:
+        cap = int(getattr(config, "APOLLO_ORG_ID_FALLBACK_MAX_PAID_MATCHES_PER_RUN", 0) or 0)
+        if _PAID_MATCH_BUDGET["fallback_used"] >= cap:
+            return False
+    return True
+
+
+def _record_paid_match(from_org_id_fallback: bool) -> None:
+    _PAID_MATCH_BUDGET["used"] += 1
+    if from_org_id_fallback:
+        _PAID_MATCH_BUDGET["fallback_used"] += 1
+
+
 def _person_level_unverified(person) -> bool:
     """True when THIS PERSON simply lacks a verified e-mail.
 
@@ -657,7 +702,21 @@ def _process_company_legacy(company_jobs: List[Dict]) -> Tuple[List[Dict], Dict]
                 terminal_reason = "founder_fallback_disallowed_for_company_size"
                 continue
 
+            # RUN-LEVEL BUDGET. The per-bucket cap above bounds this bucket; this
+            # bounds the RUN. A bucket recovered by the org-id fallback found zero
+            # people before that fallback existed, so its paid matches are additional
+            # spend and draw on a separate, default-zero budget.
+            _from_fallback = any(bool(j.get("_apollo_org_id_recovered")) for j in bucket_jobs)
+            if not _paid_match_allowed(_from_fallback):
+                # DEFERRED, not discarded. The bucket is left unprocessed and counted
+                # so a later run with budget can pick it up; marking it processed
+                # would turn a budget stop into permanent loss.
+                _PAID_MATCH_BUDGET["deferred_buckets"] += 1
+                stats["paid_match_budget_deferred"] += 1
+                terminal_reason = "paid_match_budget_exhausted"
+                break
             stats["person_match_attempts"] += 1
+            _record_paid_match(_from_fallback)
             person = apollo.match_person(candidate)
             time.sleep(config.APOLLO_RATE_LIMIT_DELAY)
             if not _person_belongs_to_company(person, company_domains, company_name):
@@ -1379,7 +1438,13 @@ def _process_company_strict(company_jobs: List[Dict]) -> Tuple[List[Dict], Dict]
             candidate_id = _candidate_identity_key(candidate)
             if candidate_id:
                 attempted_ids.append(candidate_id)
+            _from_fallback2 = any(bool(j.get("_apollo_org_id_recovered")) for j in bucket_jobs)
+            if not _paid_match_allowed(_from_fallback2):
+                _PAID_MATCH_BUDGET["deferred_buckets"] += 1
+                stats["paid_match_budget_deferred"] += 1
+                break
             stats["person_match_attempts"] += 1
+            _record_paid_match(_from_fallback2)
             try:
                 person = apollo.match_person(candidate)
             except apollo.GLOBAL_FATAL_ERRORS:
@@ -1896,6 +1961,7 @@ def run_hiring_manager_identification(
     # One alternate-enrichment budget per RUN, so a pathological batch cannot
     # multiply Apollo spend across companies.
     reset_alternate_contact_budget()
+    reset_paid_match_budget()
     input_path = input_path or config.STEP2_KEPT_FILE
     payload = json.loads(Path(input_path).read_text(encoding="utf-8"))
     jobs = payload.get("jobs", [])

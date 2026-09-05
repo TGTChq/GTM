@@ -940,39 +940,41 @@ _SUPPORTED_TIME_FRAMES = ("1h", "24h", "7d", "6m")
 # UNEVALUATED: it is implemented and reachable, and its incremental yield has not
 # been measured. `description_advanced` is also rejected on `time_frame=6m` (HTTP
 # 400), so this segment is only valid on 1h/24h/7d.
-# EVALUATED 2026-09-05 AND KEPT OFF. Not "untested and disabled" -- measured, on
-# 4,231 cached postings carrying real descriptions (median 4,510 chars), with no
-# provider request and no spend:
+# EVALUATED 2026-09-05, AND THE THREE CONCLUSIONS ARE DIFFERENT CLAIMS.
 #
-#   functional expression matched a description       418
-#     of which the title query already reaches        416   (99.5%)
-#     reachable ONLY by the functional query            2
-#       of those, mapping to a catalog role             0
+# 1. CLASSIFICATION/INTEGRATION BEHAVIOUR: TESTED.
+#    A functional row has no matched title family, so RoleGate had no target to
+#    verify against and every row it returned was UNVERIFIED by construction. That
+#    was an integration gap in this path -- not evidence about the postings -- and it
+#    is fixed: functional rows now run the same `_classify` step the external-batch
+#    path uses, which assigns a catalog role and a relevance assessment. A weak fit
+#    is rejected there and stays reviewable. Nothing is inferred from task keywords.
 #
-# Two findings, and both point the same way.
+# 2. OVERLAP WITH THE EXISTING QUERY: MEASURED, on 4,231 cached postings with real
+#    descriptions, no request and no spend:
 #
-# The overlap is 99.5%. A functional segment running beside the title query would
-# spend almost its whole grant re-buying rows the title query returns anyway, and
-# those rows are billed on arrival -- dedupe happens after the provider has charged.
+#      functional expression matched a description       418
+#        of which the title query already reaches        416   (99.5%)
+#        reachable ONLY by the functional query            2
 #
-# And its unique reach is unusable as it stands. RoleGate verifies a title against a
-# TARGET ROLE; a functional-only result has none by construction, so unless its title
-# maps to the catalog the posting is UNVERIFIED -- reviewable, never approved. Both
-# unique hits here were "Lifecycle Marketing Manager", which the catalog does not
-# define. Turning this on would buy reviewable uncertainty, not approved leads.
+#    Both unique hits were "Lifecycle Marketing Manager", and both are ROLE-RELEVANT
+#    once classified (status `review`, 1-2 points) -- reviewable, not rejected and
+#    not approved-quality. An earlier note here called them unusable; that was an
+#    artifact of testing for a verbatim catalog title instead of running the
+#    classifier, and it was wrong. Worth recording: the catalog defines "Performance
+#    Marketing Manager" AND "Performance Marketing Specialist" but only "Lifecycle
+#    Marketing Specialist", so the Manager variant of that one family is a catalog
+#    gap rather than a deliberate exclusion -- no seniority rule excludes it.
 #
-# WHAT THIS EVIDENCE CANNOT DO is prove the wild population looks like this corpus.
-# The corpus came from an acquisition that itself used title targeting -- 4,125 of
-# 4,231 titles match the deployed expression -- so postings outside the title filter
-# are largely absent from it BY CONSTRUCTION, and the measured B is a floor, not an
-# estimate. What it does establish is that the gain is bounded by the CATALOG, not by
-# the query: reach without a catalog role cannot become an approved lead. Expanding
-# the catalog is what would unlock this, and that is the work already done for the 13
-# aligned title families -- not a description query.
+# 3. LIVE INCREMENTAL ACQUISITION YIELD: UNMEASURED, and this corpus cannot measure
+#    it. It came from an acquisition that itself used title targeting -- 4,125 of
+#    4,231 titles match the deployed expression -- so postings outside the title
+#    filter are largely absent BY CONSTRUCTION. The measured 2 is a FLOOR on a
+#    title-selected sample, not an estimate of unseen inventory.
 #
-# So: implemented, reachable, funded when enabled, and deliberately off on evidence.
-# Revisit when the catalog covers roles the title expression cannot express, which is
-# the only condition under which the unique reach becomes deliverable.
+# Kept OFF pending evidence that does not exist yet. What the overlap does establish
+# is a cost: a segment run beside the title query would spend most of its grant
+# re-buying rows the title query returns anyway, and those are billed on arrival.
 FANTASTIC_FUNCTIONAL_DISCOVERY_ENABLED = _env_bool(
     "FANTASTIC_FUNCTIONAL_DISCOVERY_ENABLED", False)
 FANTASTIC_JOBS_FUNCTIONAL_LIMIT = _env_int("FANTASTIC_JOBS_FUNCTIONAL_LIMIT", 0)
@@ -1451,6 +1453,63 @@ ALTERNATE_CONTACT_MAX_ENRICHMENTS_PER_RUN = _env_int(
 APOLLO_MAX_PERSON_MATCH_ATTEMPTS_PER_BUCKET = _env_int(
     "APOLLO_MAX_PERSON_MATCH_ATTEMPTS_PER_BUCKET", 3
 )
+
+# --- RUN-LEVEL paid-enrichment budget -----------------------------------------
+# Three attempts per BUCKET is not a run-level budget. Nothing bounded the total
+# number of paid `people/match` calls a run could make, which was tolerable only
+# while every paid attempt belonged to a bucket that had already found people.
+#
+# The org-id zero-people fallback breaks that assumption by design: it fires ONLY on
+# buckets that found zero people, so every paid match it enables is ADDITIONAL. On a
+# run with ~150 such buckets that is up to ~450 paid calls that no prior authorization
+# covered. The 0-credit People Search is genuinely free; what it feeds is not.
+#
+# So the fallback gets its OWN budget, and it defaults to ZERO: the recovery runs,
+# the people are found, and the paid enrichment of buckets it recovered does not
+# happen until someone grants a number. Existing spend is unchanged by enabling the
+# fallback, which is the property that had to hold.
+#
+# Buckets past the budget are DEFERRED, never discarded: they are left unprocessed
+# and counted, so a later run with budget picks them up. Marking them processed would
+# turn a budget stop into permanent data loss.
+# --- bounded historical recovery (cursor mode, 6m) ----------------------------
+# The steady-state engine pages a `date_created` window by OFFSET, which is the
+# method the provider documents for 1h/24h/7d. It cannot cover an interruption
+# longer than the frame: once the floor rises past a gap, those postings are
+# unreachable by any windowed request.
+#
+# The documented way back is the other pagination mode: `time_frame=6m` with
+# `cursor` set to the last `id` returned, which orders by `id` ASCENDING instead of
+# `date_posted` descending. The provider warns explicitly against resuming an offset
+# run with a cursor or the reverse, so this is a SEPARATE mechanism with a SEPARATE
+# state file -- it never reads or writes the windowed engine's offsets, and the two
+# can never be mistaken for each other.
+#
+# Bounded by construction: it is off by default, needs an explicit row budget, and
+# persists its cursor after every page so an interrupted recovery resumes where it
+# stopped instead of restarting. `description_advanced` is rejected on this frame
+# (HTTP 400), so functional discovery cannot ride along.
+FANTASTIC_HISTORICAL_RECOVERY_ENABLED = _env_bool(
+    "FANTASTIC_HISTORICAL_RECOVERY_ENABLED", False)
+#: Hard ceiling on rows this recovery may bill per run. 0 disables it outright --
+#: there is no implicit budget, and an unbounded historical backfill is exactly what
+#: must not be launchable by flipping one flag.
+FANTASTIC_HISTORICAL_RECOVERY_MAX_ROWS_PER_RUN = _env_int(
+    "FANTASTIC_HISTORICAL_RECOVERY_MAX_ROWS_PER_RUN", 0)
+#: Its OWN namespace. Never the windowed engine's state.
+FANTASTIC_HISTORICAL_RECOVERY_STATE_PATH = os.getenv(
+    "FANTASTIC_HISTORICAL_RECOVERY_STATE_PATH",
+    str(Path(STATE_DIR) / "fantastic_historical_recovery.json"))
+
+APOLLO_ORG_ID_FALLBACK_MAX_PAID_MATCHES_PER_RUN = _env_int(
+    "APOLLO_ORG_ID_FALLBACK_MAX_PAID_MATCHES_PER_RUN", 0)
+
+# Overall ceiling on paid `people/match` calls per run, across every path (primary,
+# alternate cascade, org-id fallback). 0 = no ceiling, which is the behaviour that
+# existed before this setting and is therefore the default: this is a guard to be
+# switched on deliberately, not a silent new limit on work already authorized.
+APOLLO_MAX_PERSON_MATCH_CALLS_PER_RUN = _env_int(
+    "APOLLO_MAX_PERSON_MATCH_CALLS_PER_RUN", 0)
 
 # Company-level opportunity collapse (company_opportunity_collapse.py): elect ONE
 # posting per trusted employer identity BEFORE paid person enrichment, so an
