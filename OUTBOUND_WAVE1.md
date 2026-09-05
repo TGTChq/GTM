@@ -94,10 +94,12 @@ is the absence of an experiment, not a reassignment, and it is logged as such.
 | `outbound_wave1/render.py` | E1 per campaign/tier; E2–E4 frozen verbatim |
 | `outbound_wave1/qa.py` | The hard gates |
 | `outbound_wave1/timing.py` | Day 1 / 4 / 8 / 13, business days only |
-| `outbound_wave1/measurement.py` | Randomisation frame and the primary metric |
+| `outbound_wave1/measurement.py` | Randomisation frame and the primary metric (joins outcomes) |
+| `outbound_wave1/outcomes.py` | READ-ONLY outcome ingestion from Instantly (fetches them) |
 | `outbound_wave1/resolver.py` | Orchestrates the above |
 | `data/wave1_claims.json` | The static registry (economics unpopulated) |
 | `run_wave1_dryrun.py` | Zero-write dry run over real stored opportunities |
+| `run_wave1_outcomes.py` | READ-ONLY outcome report; listing reads only |
 
 ## Assignment
 
@@ -389,3 +391,64 @@ deliberately not performed by this branch.
 reverts to Control A with a byte-identical payload, no code change and no
 campaign change. Setting the map to `{}` has the same effect through
 suppression. Pausing the Challengers stops follow-ups to leads already enrolled.
+
+
+## Measuring the result
+
+`measurement.py` was written to join outcomes and says so plainly: *"Outcomes
+arrive from outside (Instantly events, Airtable lifecycle, CRM). This module joins
+them; it never fetches them."* Nothing fetched them, so the experiment could
+compute a denominator and never a numerator.
+
+`outbound_wave1/outcomes.py` is that missing half. It performs **listing reads
+only** — `POST /leads/list` with the singular `campaign` filter, the one proven to
+work in production — and returns exactly the mapping `analyze()` expects. It holds
+no write path.
+
+```bash
+python -u run_wave1_outcomes.py                 # summary only
+python -u run_wave1_outcomes.py --json out.json # + the full outcome map
+```
+
+### What each outcome is derived from
+
+Verified against the live lead shape on 2026-09-05:
+
+| outcome | derived from |
+| --- | --- |
+| `delivered` | `status_summary.lastStep.timestamp_executed`, **or** any reply — you cannot reply to an email that never arrived |
+| `bounced` | lead `status == -1` |
+| `replied` | `email_reply_count > 0` |
+| `reply_step` | `email_replied_step` — the sequence step the reply came at |
+| `positive_reply`, `meeting_booked`, `opportunity_created`, `fulfilled` | `lt_interest_status` |
+
+### Two rules that keep the numerator honest
+
+**An outcome we did not observe is absent, never `False`.** `_accumulate` counts a
+falsy value as "did not happen", so writing `positive_reply: False` for a lead
+whose interest status we could not classify would quietly deflate whichever arm
+received it. Unclassifiable leads carry no key at all, and the collection reports
+how many there were (`leads_with_unclassified_interest`).
+
+**The raw provider value travels with every row.** `instantly_status` and
+`lt_interest_status` are carried verbatim beside the derived booleans. This
+matters because the interest enum is **declared from Instantly's documentation,
+not measured here** — only `0` and `1` appeared in the production sample. If the
+mapping is wrong, a saved collection can be reclassified offline with no second
+read and no re-derived denominator.
+
+Both arms are read. A lift is a comparison; reading only the treatment arm
+measures nothing. `OUTBOUND_WAVE1_MIN_RECORD_CREATED_AT` is applied as the
+`since` floor so the numerator covers exactly the population the frame does.
+
+A campaign that fails or is truncated contributes **nothing** and is named in
+`campaigns_failed` / `campaigns_truncated`, with `ok = False` on the collection —
+a partial read must never produce a rate that looks complete.
+
+### The join key
+
+`analyze()` joins on `RandomizationRow.contact_key`. Instantly can supply an email
+and cannot supply our `Lead Key`, so the **normalized (lowercased, trimmed) email
+is the key on both sides**. Build the frame with
+`randomization_row(resolution, contact_key=normalize_contact_key(email))` — the
+override parameter exists for exactly this.
