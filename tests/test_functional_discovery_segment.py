@@ -229,3 +229,65 @@ class TheFrameContract(unittest.TestCase):
         now = datetime(2026, 9, 5, 12, tzinfo=timezone.utc)
         self.assertEqual(fja._frame_horizon(now, "7d", 0), now - timedelta(days=7))
         self.assertEqual(fja._frame_horizon(now, "24h", 0), now - timedelta(hours=24))
+
+
+class FunctionalRowsReachRoleGateWithATarget(unittest.TestCase):
+    """RoleGate verifies a title AGAINST A TARGET ROLE. A functional result has no
+    matched title family by construction, so without a classification step every row
+    the segment returns is UNVERIFIED whatever it is -- which reads as "functional
+    discovery finds nothing relevant" when it means "the gate was never told what to
+    check against". That was an integration gap in this path, not evidence about the
+    postings.
+
+    `_classify` is the existing supported answer, the same step the external-batch
+    path runs. It supplies the missing input and nothing else: a catalog role when
+    the title maps to one, no role when it does not. Commercial fit is never inferred
+    from task vocabulary.
+    """
+
+    def test_a_catalog_title_gets_its_role_target(self):
+        rows = [{"job_title": "Lifecycle Marketing Specialist",
+                 "job_description": "own the lifecycle programme",
+                 "employer_name": "Acme", "job_id": "j1"}]
+        metrics = {}
+        fja._classify_functional_rows(rows, metrics)
+
+        self.assertTrue(rows[0].get("_matched_role"),
+                        "a catalog title must reach RoleGate with a target")
+        self.assertNotEqual(rows[0].get("_role_relevance_status"), "reject")
+        self.assertEqual(metrics["functional_discovery"]["role_relevant"], 1)
+
+    def test_a_title_outside_the_catalog_stays_reviewable(self):
+        """Preserved uncertainty. The row keeps its acquisition and reaches review
+        with no asserted role -- it is never promoted on the strength of its
+        description."""
+        rows = [{"job_title": "Underwater Basket Weaver",
+                 "job_description": "quota carrying pipeline generation",
+                 "employer_name": "Acme", "job_id": "j2"}]
+        metrics = {}
+        fja._classify_functional_rows(rows, metrics)
+
+        # `_classify` always names a best-fit role; the ASSESSMENT is what carries
+        # the verdict, and here it rejects. Task words in the description did not
+        # manufacture relevance, which is the property that matters.
+        self.assertEqual(rows[0].get("_role_relevance_status"), "reject")
+        self.assertEqual(metrics["functional_discovery"]["role_rejected_reviewable"], 1)
+
+    def test_the_split_is_reported_so_the_segment_can_be_judged(self):
+        rows = [{"job_title": "Account Executive", "job_description": "d",
+                 "employer_name": "A", "job_id": "a"},
+                {"job_title": "Underwater Basket Weaver", "job_description": "d",
+                 "employer_name": "B", "job_id": "b"}]
+        metrics = {}
+        fja._classify_functional_rows(rows, metrics)
+
+        block = metrics["functional_discovery"]
+        self.assertEqual(block["rows"], 2)
+        self.assertEqual(block["role_relevant"] + block["role_rejected_reviewable"]
+                         + block["classify_errors"], 2)
+
+    def test_a_classifier_error_never_costs_the_acquisition(self):
+        rows = [{"job_title": None, "job_description": None}]
+        metrics = {}
+        fja._classify_functional_rows(rows, metrics)  # must not raise
+        self.assertEqual(metrics["functional_discovery"]["rows"], 1)

@@ -246,6 +246,10 @@ ATS_SOURCE = "fantastic_jobs_ats"
 #: same job boards through active-jb without a title restriction. It carries its own
 #: label so its billing, novelty and drain state are attributable on their own.
 FUNCTIONAL_SOURCE = "fantastic_jobs_functional"
+#: Historical recovery is its own labelled stream: cursor mode, 6m frame, its
+#: own state file. It must never be confused with a windowed offset pass.
+HISTORICAL_SOURCE = "fantastic_jobs_historical"
+_HISTORICAL_SCHEMA = "fantastic-historical-recovery/1"
 
 JB_SEGMENTS = {
     "wellfound": ("fantastic_jobs_wellfound", ("wellfound", "angellist", "angel.co")),
@@ -1089,6 +1093,178 @@ def build_jb_params(source_key: str, *, title_advanced_expr: str = "") -> Dict[s
         for key in _NULL_EXCLUDING_FIRMOGRAPHIC_PARAMS:
             params.pop(key, None)
     return params
+
+
+def run_historical_recovery(http_get: HttpGet, quota: "_QuotaState",
+                            seen_ids: set, metrics: Dict[str, Any],
+                            *, max_rows: Optional[int] = None) -> List[Dict[str, Any]]:
+    """Bounded backfill over ``time_frame=6m`` using the provider's CURSOR mode.
+
+    The windowed engine pages `date_created` by OFFSET, which is what the provider
+    documents for 1h/24h/7d. It cannot cover an interruption longer than the frame:
+    once the floor rises past a gap those postings are unreachable by any windowed
+    request, whatever offset is used.
+
+    The documented way back is the other mode -- `time_frame=6m` with `cursor` set to
+    the LAST ID RETURNED, which orders by `id` ASCENDING rather than `date_posted`
+    descending. Two consequences shape everything here:
+
+      * an id cursor is not an offset and the two are never mixed. The provider warns
+        against resuming one with the other, so this keeps its own state file and
+        never reads or writes `window_offsets`;
+      * ascending id order makes the cursor genuinely resumable. Progress is
+        persisted after EVERY page, so an interruption resumes at the last id
+        instead of restarting the backfill.
+
+    Bounded by construction: disabled unless both the flag and a non-zero row budget
+    say otherwise, and it never bills past that budget. Rows already in `seen_ids`
+    are deduped exactly as everywhere else -- recovery cannot double-count what the
+    windowed engine already has.
+
+    WHAT IT CANNOT DO: reach past provider retention, or resurrect an expired
+    posting. `6m` is the oldest frame offered; a gap older than that stays a gap.
+    """
+    block = metrics.setdefault("historical_recovery", {"enabled": False})
+    if not bool(getattr(config, "FANTASTIC_HISTORICAL_RECOVERY_ENABLED", False)):
+        block["stop_reason"] = "disabled"
+        return []
+    budget = int(max_rows if max_rows is not None
+                 else getattr(config, "FANTASTIC_HISTORICAL_RECOVERY_MAX_ROWS_PER_RUN", 0) or 0)
+    if budget <= 0:
+        # No implicit budget. An unbounded historical backfill must not be reachable
+        # by flipping one flag.
+        block.update({"enabled": True, "stop_reason": "no_row_budget", "billed": 0})
+        return []
+
+    state_path = str(getattr(config, "FANTASTIC_HISTORICAL_RECOVERY_STATE_PATH", "") or "")
+    state: Dict[str, Any] = {}
+    if state_path and os.path.isfile(state_path):
+        try:
+            with open(state_path, encoding="utf-8") as fh:
+                loaded = json.load(fh)
+            if isinstance(loaded, dict) and loaded.get("schema") == _HISTORICAL_SCHEMA:
+                state = loaded
+        except (OSError, ValueError):
+            state = {}
+    cursor = str(state.get("cursor") or "")
+
+    def _save() -> None:
+        if not state_path:
+            return
+        try:
+            os.makedirs(os.path.dirname(state_path) or ".", exist_ok=True)
+            state["schema"] = _HISTORICAL_SCHEMA
+            state["updated_at"] = _iso_z(datetime.now(timezone.utc))
+            tmp = f"{state_path}.tmp"
+            with open(tmp, "w", encoding="utf-8") as fh:
+                json.dump(state, fh)
+            os.replace(tmp, state_path)
+        except OSError:
+            pass
+
+    base = {"time_frame": "6m", "exclude_ats_duplicate": "true"}
+    base.update(_jb_filter_params())
+    _apply_server_industry_exclusions(base)
+    expr = build_title_query_plan().get("expression") or ""
+    if expr:
+        base["title_advanced"] = expr
+
+    endpoint = "/v1/active-jb"
+    label = HISTORICAL_SOURCE
+    billed = kept = pages = 0
+    jobs: List[Dict[str, Any]] = []
+    stop = ""
+    while billed < budget:
+        want = min(budget - billed, 100)
+        params = dict(base, limit=want)
+        if cursor:
+            params["cursor"] = cursor
+        try:
+            rows, _q = _request(endpoint, params, http_get,
+                                metrics["segments"].setdefault(label, {}))
+        except FantasticRequestError as exc:
+            stop = f"request_error:{exc.code}"
+            break
+        pages += 1
+        if not rows:
+            stop = "exhausted"
+            break
+        last_id = ""
+        for record in rows:
+            billed += 1
+            quota.jobs_consumed += 1
+            rid = str((record or {}).get("id") or "")
+            if rid:
+                last_id = rid
+            job, _reason = map_record(record, label, metrics["segments"].setdefault(label, {}))
+            if job is None:
+                continue
+            if job["job_id"] in seen_ids:
+                continue
+            seen_ids.add(job["job_id"])
+            jobs.append(job)
+            kept += 1
+        if not last_id:
+            # Without an id there is no cursor to advance, and repeating the same
+            # request would bill the same page forever.
+            stop = "no_cursor_id"
+            break
+        cursor = last_id
+        state["cursor"] = cursor
+        state["billed_total"] = int(state.get("billed_total", 0)) + len(rows)
+        _save()          # after EVERY page: an interruption resumes, never restarts
+        if len(rows) < want:
+            stop = "exhausted"
+            break
+    block.update({"enabled": True, "billed": billed, "kept": kept, "pages": pages,
+                  "cursor": cursor, "stop_reason": stop or "row_budget_reached",
+                  "budget": budget, "state_path": state_path,
+                  "pagination": "cursor(id asc)", "time_frame": "6m"})
+    return jobs
+
+
+def _classify_functional_rows(rows: List[Dict[str, Any]], metrics: Dict[str, Any]) -> None:
+    """Give functional-segment rows the role target RoleGate verifies against.
+
+    Runs the SAME `multi_source_acquisition._classify` the external-batch path uses,
+    for the same reason: a row that did not arrive from a title-matched query has no
+    `_matched_role`, and RoleGate cannot verify a title against a target that is not
+    there. Without this every functional row is UNVERIFIED by construction, which
+    reads as "the segment finds nothing relevant" when it means "the gate was never
+    told what to check".
+
+    It supplies the missing input and nothing else. The classifier assigns a CATALOG
+    role or none; a title the catalog does not cover still ends with no role and
+    stays reviewable. No commercial fit is inferred from task vocabulary, and every
+    downstream gate is untouched.
+
+    Fail-open per row: a classifier error leaves that row unclassified (reviewable)
+    rather than losing the acquisition.
+    """
+    classified = unmapped = errors = 0
+    try:
+        from multi_source_acquisition import _classify
+    except Exception:  # noqa: BLE001 - acquisition must not fail on an import
+        metrics.setdefault("functional_discovery", {})["classify"] = "unavailable"
+        return
+    # `_matched_role` is ALWAYS set: `_classify` picks the best catalog role for any
+    # title, and for an irrelevant one it picks a poor match and says so in
+    # `_role_relevance_status`. Counting role PRESENCE would therefore report every
+    # row as classified and overstate what this segment finds. The assessment is the
+    # signal, and a rejected assessment is the classifier correctly declining -- the
+    # row keeps its acquisition and reaches review carrying that verdict.
+    for job in rows:
+        try:
+            _classify(job)
+            if str(job.get("_role_relevance_status") or "").lower() == "reject":
+                unmapped += 1
+            else:
+                classified += 1
+        except Exception:  # noqa: BLE001
+            errors += 1
+    metrics.setdefault("functional_discovery", {}).update({
+        "rows": len(rows), "role_relevant": classified,
+        "role_rejected_reviewable": unmapped, "classify_errors": errors})
 
 
 def build_functional_params() -> Dict[str, Any]:
@@ -3045,6 +3221,22 @@ def run_fantastic_jobs_acquisition(http_get: HttpGet = _http_get, *,
                 # provider, so a title filter here would confine this segment to the
                 # jobs the main query already reaches -- which is the one thing it
                 # exists not to do.
+                #
+                # AND THAT CREATES AN INTEGRATION PROBLEM THIS SEGMENT MUST SOLVE.
+                # RoleGate verifies a title against a TARGET role (`_matched_role`),
+                # and the title-matched path sets that from the family that matched.
+                # A functional result has no matched family by construction, so
+                # without a classification step every row it returns arrives with no
+                # target and is UNVERIFIED regardless of what it is -- which would
+                # look like "functional discovery finds nothing relevant" when it is
+                # really "we never told the gate what to check against".
+                #
+                # `_classify` is the existing, supported answer: the same step the
+                # external-batch path runs so RoleGate has a target to verify. It
+                # assigns the best CATALOG role and its relevance assessment. It
+                # infers nothing from task keywords, and a title the catalog does not
+                # cover still ends with no role -- reviewable, never approved. The
+                # uncertainty is preserved; only the missing input is supplied.
                 jb_params = build_functional_params()
                 if not jb_params:
                     metrics["segments"].setdefault(seg.label, {}).setdefault(
@@ -3057,7 +3249,17 @@ def run_fantastic_jobs_acquisition(http_get: HttpGet = _http_get, *,
                                      "params": jb_params, "accept": seg.accept,
                                      "resumable": not seg.feeds_cursor}
             before_billed = quota.jobs_consumed
-            if seg.feeds_cursor:
+            if seg.dispatch == "functional":
+                _before_fn = len(result.jobs)
+                if watermark_engine is not None:
+                    watermark_engine.run_stream(seg.endpoint, jb_params, seg.label,
+                                                room, seg.accept)
+                else:
+                    result.jobs.extend(_fetch_segment(
+                        seg.endpoint, jb_params, seg.label, room, quota, http_get,
+                        seen_ids, metrics, accept_source=seg.accept))
+                _classify_functional_rows(result.jobs[_before_fn:], metrics)
+            elif seg.feeds_cursor:
                 # Plain LinkedIn stream (no title mode): keeps the single-stream
                 # head/deep date_posted cursor exactly as before.
                 _run_single_stream(seg.endpoint, jb_params, seg.label, room, seg.accept)
