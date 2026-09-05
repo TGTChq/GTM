@@ -294,17 +294,37 @@ def run_census(
                         and r["contributes"].get(key, {}).get("value") is not None]
         total = sum(int(r["contributes"][key]["value"]) for r in contributing)
         metric = metrics.get(key)
+        included = [r for r in rows if r["decision"] == "included"]
+        silent = [r["run_id"] for r in included
+                  if r["contributes"].get(key, {}).get("value") is None]
+        # COMPLETENESS, checked as well as the value. A subtotal of zero over the runs
+        # that answered is not a measured zero for the period while another included
+        # run is silent -- "nothing happened" and "one run could not say" are
+        # different claims, and only the value check cannot tell them apart.
+        if not contributing:
+            expected_status = STATUS_UNAVAILABLE
+        elif silent:
+            expected_status = STATUS_PARTIAL
+        else:
+            expected_status = STATUS_MEASURED
+        reported_status = None if metric is None else metric.status
         reconciles[key] = {
             "census_total": total if contributing else None,
             "census_runs": sorted(r["run_id"] for r in contributing),
+            "census_silent_runs": sorted(silent),
+            "census_expected_status": expected_status,
             "reported_value": None if metric is None else metric.value,
             "reported_runs": sorted(metric.contributing_run_ids) if metric else [],
-            "agrees": bool(metric is not None
-                           and (metric.value if contributing else None)
-                           == (total if contributing else None)
-                           and sorted(metric.contributing_run_ids)
-                           == sorted(r["run_id"] for r in contributing)),
+            "reported_status": reported_status,
+            "values_agree": bool(metric is not None
+                                 and (metric.value if contributing else None)
+                                 == (total if contributing else None)
+                                 and sorted(metric.contributing_run_ids)
+                                 == sorted(r["run_id"] for r in contributing)),
+            "completeness_agrees": bool(reported_status == expected_status),
         }
+        reconciles[key]["agrees"] = bool(reconciles[key]["values_agree"]
+                                        and reconciles[key]["completeness_agrees"])
 
     by_day: Dict[str, List[str]] = {}
     for row in rows:

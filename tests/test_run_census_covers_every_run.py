@@ -121,6 +121,43 @@ class TestEveryRunIsAccountedFor:
             assert check["census_total"] == check["reported_value"], key
             assert check["census_runs"] == check["reported_runs"], key
 
+    def test_completeness_is_reconciled_not_just_the_value(self, tmp_path):
+        """A subtotal of zero over the runs that answered is not a measured zero for
+        the period while another included run is silent. "Nothing happened" and "one
+        run could not say" are different claims, and comparing values alone cannot
+        tell them apart -- so the census checks the STATUS the report will render."""
+        report = _build(_populated_week(tmp_path / "orchestrator_v2"))
+
+        reviewed = report.census["reconciles"]["jobs_reviewed"]
+        assert reviewed["census_silent_runs"] == ["20260908T170000Z-partial1"]
+        assert reviewed["census_expected_status"] == "partial"
+        assert reviewed["reported_status"] == "partial"
+        assert reviewed["values_agree"] and reviewed["completeness_agrees"]
+
+        captured = report.census["reconciles"]["jobs_captured"]
+        assert captured["census_silent_runs"] == []
+        assert captured["census_expected_status"] == "measured"
+        assert captured["reported_status"] == "measured"
+
+    def test_a_silent_run_cannot_certify_a_complete_zero(self, tmp_path):
+        """The specific corruption: every run that answered reported 0, one run
+        answered nothing, and the period must not read as a measured zero."""
+        root = tmp_path / "orchestrator_v2"
+        _ledger(root, "20260907T170000Z-zeroonly", started="2026-09-07T17:00:00Z",
+                finished="2026-09-07T18:00:00Z",
+                metrics={"net_new_jobs_captured": 0, "jobs_reviewed": 0})
+        _ledger(root, "20260907T230000Z-silent01", started="2026-09-07T23:00:00Z",
+                finished="2026-09-08T00:30:00Z", metrics={})
+
+        report = _build(root)
+        check = report.census["reconciles"]["jobs_captured"]
+
+        assert check["census_total"] == 0, "the runs that answered add to zero"
+        assert check["census_silent_runs"] == ["20260907T230000Z-silent01"]
+        assert check["census_expected_status"] == "partial", "not a complete zero"
+        assert check["reported_status"] == "partial"
+        assert check["agrees"], "value and completeness both reconcile"
+
     def test_a_run_in_both_stores_is_counted_once(self, tmp_path):
         """The normal state before retention evicts the artifacts."""
         root = _populated_week(tmp_path / "orchestrator_v2")
