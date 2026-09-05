@@ -339,15 +339,20 @@ def _two_runs(root: Path, *, second_reports_qualified: bool):
     return root
 
 
-def test_a_partial_metric_says_so_in_bretts_message(tmp_path):
+def test_an_incomplete_full_period_total_is_not_shown_as_a_number(tmp_path):
+    """The 2026-09-04/05 shape, and why a caveated number is still wrong.
+
+    `qualified_opportunities` was reported only by the 03:00 run, which acquired
+    nothing. The full-period total is 0-plus-an-unknown. Printing `0` -- with or
+    without a parenthetical -- puts a figure where a period total belongs, and it
+    is read as one, next to 1,048 contacts the silent run had found.
+    """
     root = _two_runs(tmp_path / "artifacts", second_reports_qualified=True)
     text = _stakeholder(root)
 
     line = next(l for l in text.splitlines() if l.startswith("Qualified opportunities:"))
-    assert line.startswith("Qualified opportunities: 0 ("), line
-    assert "partial" in line and "1 of 2 runs" in line, (
-        "an unqualified 0 beside 1,048 contacts reads as a total it is not"
-    )
+    assert line == "Qualified opportunities: not measured for the full period", line
+    assert "0" not in line, "no figure may stand where the period total is unknown"
     # A metric EVERY run reported stays a plain number.
     assert "Contacts found: 1,048" in text
 
@@ -362,8 +367,8 @@ def test_a_fully_reported_metric_is_never_annotated(tmp_path):
     assert "Qualified opportunities: not measured" in text
 
 
-def test_a_partial_review_rate_is_labelled_too(tmp_path):
-    """A rate over an incomplete population is an incomplete rate."""
+def test_an_incomplete_review_population_yields_no_rate(tmp_path):
+    """A rate over an incomplete population is not the period's rate."""
     from orchestrator.run_ledger import RunLedger
 
     root = tmp_path / "artifacts"
@@ -381,5 +386,34 @@ def test_a_partial_review_rate_is_labelled_too(tmp_path):
                      finished_at=_instant(finished))
 
     line = next(l for l in _stakeholder(root).splitlines() if l.startswith("Jobs:"))
-    assert "partial" in line, line
-    assert "150 captured" in line and "100 reviewed" in line
+    assert line == "Jobs: 150 captured / reviewed not measured for the full period", line
+    assert "%" not in line, "no percentage may be invented to preserve the template"
+
+
+# --------------------------------------------------------------------------
+# 6. the period label must be the period
+# --------------------------------------------------------------------------
+
+def test_a_seven_day_period_is_called_a_week(heavy_root, tmp_path):
+    assert _stakeholder(heavy_root).splitlines()[0].startswith("Week of ")
+
+
+def test_a_partial_period_is_not_labelled_as_a_completed_week(heavy_root):
+    """An anchored window is whatever elapsed since the last report -- a retry, a
+    first anchored run or a mid-period read is routinely a day or two. Calling
+    that "Week of" presents a partial period as a completed one."""
+    from datetime import datetime, timezone
+
+    from weekly_report.render import render_stakeholder_summary
+    from weekly_report.report import build_report
+    from weekly_report.timewindow import anchored_window
+
+    start = datetime(2026, 9, 8, 7, 0, tzinfo=timezone.utc)
+    now = datetime(2026, 9, 9, 7, 30, tzinfo=timezone.utc)
+    window = anchored_window(start, now, tz_name="America/Los_Angeles")
+    first = render_stakeholder_summary(
+        build_report(window, artifact_roots=[str(heavy_root)], now=now)).splitlines()[0]
+
+    assert first.startswith("Period: "), first
+    assert "1.0 days" in first
+    assert "Week of" not in first

@@ -199,6 +199,24 @@ _STAKEHOLDER_ROWS = (
 #: At most this many actions reach the stakeholder message.
 _MAX_ACTIONS = 3
 
+#: How far from seven days a period may be and still be called a week.
+_WEEK_TOLERANCE_DAYS = 0.75
+
+
+def _period_label(window) -> str:
+    """One short line naming the period the numbers actually cover.
+
+    "Week of ..." is only true when the span IS about a week. An anchored window
+    is whatever elapsed since the last report -- a retry, a first anchored run, or
+    a mid-period read is routinely a day or two -- and labelling that a week
+    presents a partial period as a completed one.
+    """
+    days = (window.end_utc - window.start_utc).total_seconds() / 86400.0
+    if abs(days - 7.0) <= _WEEK_TOLERANCE_DAYS:
+        return f"Week of {window.label}"
+    return (f"Period: {window.start_local:%b %d %H:%M} - "
+            f"{window.end_local:%b %d %H:%M %Z} ({days:.1f} days)")
+
 
 def _count(metric: Optional[Metric]) -> str:
     """A stakeholder-facing count. Never invents a zero for a missing measurement.
@@ -220,12 +238,17 @@ def _count(metric: Optional[Metric]) -> str:
     """
     if metric is None or metric.value is None:
         return "not measured"
-    rendered = f"{int(metric.value):,}"
     if metric.status == STATUS_PARTIAL:
-        missing = len(metric.runs_missing_field)
-        total = missing + len(metric.contributing_run_ids)
-        return f"{rendered} (partial: {missing} of {total} runs did not report it)"
-    return rendered
+        # A partial total is a sum over SOME of the period's runs. Printing the
+        # number with a caveat still puts a figure where a full-period total
+        # belongs, and it is read as one -- on 2026-09-04/05 that figure was `0`,
+        # contributed entirely by a run that acquired nothing, standing next to
+        # 1,048 contacts the silent run had found. The subtotal, the runs that
+        # were silent, and the field that answered stay in the JSON and the
+        # internal summary; what Brett sees is that the period total is not
+        # established.
+        return "not measured for the full period"
+    return f"{int(metric.value):,}"
 
 
 def _pct(value: float) -> str:
@@ -247,22 +270,31 @@ def _jobs_line(report: WeeklyReport) -> str:
     """
     captured = report.metrics.get("jobs_captured")
     reviewed = report.metrics.get("jobs_reviewed")
+    # Each half is stated on its own evidence. Suppressing a measured half because
+    # the other is incomplete throws away a real number; carrying an incomplete
+    # half as a figure asserts a period total that is not established.
     if captured is None or captured.value is None:
-        return "Jobs: not measured"
-    head = f"Jobs: {int(captured.value):,} captured"
+        head = "Jobs: captured not measured"
+    elif captured.status == STATUS_PARTIAL:
+        head = "Jobs: captured not measured for the full period"
+    else:
+        head = f"Jobs: {int(captured.value):,} captured"
     if reviewed is None or reviewed.value is None:
         return f"{head} / reviewed not measured"
+    if reviewed.status == STATUS_PARTIAL:
+        return f"{head} / reviewed not measured for the full period"
     tail = f" / {int(reviewed.value):,} reviewed"
+    if captured is None or captured.value is None or captured.status == STATUS_PARTIAL:
+        # No denominator, so no rate. Not "0%", not "N/A%" -- the template's
+        # percentage simply has nothing to report.
+        return f"{head}{tail}"
     rate = report.metrics.get("review_rate_pct")
     if rate is not None and rate.value is not None:
-        line = f"{head}{tail} ({_pct(rate.value)}%)"
-    else:
-        line = f"{head}{tail} (N/A)"
-    # Same rule as the counts below: a rate whose inputs are partial is a rate over
-    # an incomplete population, and saying so costs one clause.
-    if STATUS_PARTIAL in (captured.status, reviewed.status):
-        line += " -- partial: not every run reported these"
-    return line
+        return f"{head}{tail} ({_pct(rate.value)}%)"
+    # Both totals are established but the rate is not -- an empty denominator, or
+    # the two sides covering different runs. `N/A` says the rate is undefined;
+    # inventing 0% would assert that nothing captured was reviewed.
+    return f"{head}{tail} (N/A)"
 
 
 def render_stakeholder_summary(report: WeeklyReport) -> str:
@@ -273,7 +305,7 @@ def render_stakeholder_summary(report: WeeklyReport) -> str:
     document and the internal summary, which are written on every run regardless.
     """
     lines: List[str] = [
-        f"Week of {report.window.label}",
+        _period_label(report.window),
         _jobs_line(report),
     ]
     for key, label in _STAKEHOLDER_ROWS:

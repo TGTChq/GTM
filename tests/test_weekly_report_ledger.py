@@ -77,7 +77,17 @@ def write_ledger_run(
 
     ``state=STATE_RUNNING`` leaves the entry unfinalized, which is exactly what a
     hard-killed run leaves behind.
+
+    A caller that passes ``jobs_captured`` gets ``net_new_jobs_captured`` alongside
+    it, because that is what `_ledger_record_acquisition` writes -- both keys, same
+    value, every run since 2026-09-04. Modelling only the older key would make the
+    fixture a build that has not existed since then, and the metric guard would
+    (correctly) refuse to read it. A test that WANTS that older shape writes it
+    directly; see ``test_a_pre_net_new_entry_is_not_read_as_net_new``.
     """
+    metrics = dict(metrics or {})
+    if "jobs_captured" in metrics and "net_new_jobs_captured" not in metrics:
+        metrics["net_new_jobs_captured"] = metrics["jobs_captured"]
     ledger = RunLedger(root, run_id)
     ledger.begin(
         started_at=_instant(started),
@@ -333,7 +343,8 @@ def test_a_completed_run_carries_every_counter_it_measured(tmp_path):
         root, "20260903T130019Z-65ca91e1",
         started="2026-09-03T13:00:19Z", finished="2026-09-03T13:01:26Z",
         metrics={
-            "jobs_captured": 6206, "unique_opportunities": 6000, "jobs_reviewed": 5746,
+            "jobs_captured": 6206, "net_new_jobs_captured": 6206,
+            "unique_opportunities": 6000, "jobs_reviewed": 5746,
             "qualified_opportunities": 1264, "contacts_found": 613,
             "final_pass_leads": 425, "verified_emails": 606,
             "sent_to_airtable": 400, "airtable_suppressed": 13,
@@ -351,7 +362,10 @@ def test_a_completed_run_carries_every_counter_it_measured(tmp_path):
     }
     row = report.runs[0]
     assert row["evidence_source"] == "ledger"
-    assert row["metric_sources"]["jobs_captured"] == "reporting_ledger:metrics.jobs_captured"
+    assert row["metric_sources"]["jobs_captured"] == (
+        "reporting_ledger:metrics.net_new_jobs_captured"), (
+        "the net-new key answers; the ambiguous jobs_captured key is only a "
+        "guarded fallback")
 
 
 # --------------------------------------------------------------------------
@@ -369,7 +383,8 @@ def test_an_interrupted_run_stays_visible_with_the_counters_it_did_record(tmp_pa
     ledger = RunLedger(root, "20260904T064411Z-66ea967e")
     ledger.begin(started_at=_instant("2026-09-04T06:44:11Z"), mode="live_acquisition_and_enrichment",
                  allow_network=True, allow_enrichment=True, lanes=["fantastic"])
-    ledger.record("acquisition", {"jobs_captured": 6206})
+    ledger.record("acquisition", {"jobs_captured": 6206,
+                                  "net_new_jobs_captured": 6206})
     ledger.record("enrichment", {"jobs_reviewed": 5746, "contacts_found": 613})
     # No finalize(): the process was killed.
 
