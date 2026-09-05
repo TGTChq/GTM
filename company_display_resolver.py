@@ -91,6 +91,12 @@ def _anchor_match(name_key: str, anchor: str) -> str:
 
 
 def _anchors_conflict(slug_anchor: str, domain_anchor: str) -> bool:
+    """Do the LinkedIn slug and the domain brand disagree as strings?
+
+    Deliberately unchanged and deliberately crude: it answers only "are these two
+    anchor strings different", which is a fact. It is NOT on its own evidence that
+    the display NAME is wrong -- see :func:`_bridging_brand`.
+    """
     if not slug_anchor or not domain_anchor:
         return False
     if slug_anchor == domain_anchor:
@@ -99,6 +105,58 @@ def _anchors_conflict(slug_anchor: str, domain_anchor: str) -> bool:
     if len(shorter) >= 4 and longer.startswith(shorter):
         return False
     return True
+
+
+#: Shortest brand that may bridge two disagreeing anchors. Below this, a shared
+#: token is coincidence rather than identity -- it is what stops an acronym
+#: collision (``hex`` inside ``hextechnologies`` and ``hexagon``) from bridging
+#: two unrelated companies.
+_MIN_BRIDGING_BRAND = 4
+
+
+def _bridging_brand(chosen: Optional[Dict[str, Any]],
+                    slug_anchor: str, domain_anchor: str) -> str:
+    """The display name, when it is the brand BOTH anchors are built from.
+
+    A company routinely brands its domain differently from its LinkedIn slug --
+    ``getclark`` vs ``clarkaudit``, ``theblueground`` vs ``bluegroundco``,
+    ``mycarpe`` vs ``carpe1``. In every one of those the published NAME ("Clark",
+    "Blueground", "Carpe") is contained in BOTH anchors: the anchors are two
+    decorations of one brand, so their string distance is a naming artifact and
+    not evidence that the name is wrong.
+
+    That containment is the whole test, and it is what makes it safe. When the two
+    anchors are genuinely different entities the name cannot be inside both:
+
+    * ``Acme`` with slug ``globex``      -- ``acme`` is not in ``globex``
+    * ``Massachusetts DDS`` on ``mass.gov`` with slug ``ddsmass`` -- the published
+      name is in neither
+    * ``Diamond Jo Casino & Hotel`` with slug ``diamondjoworth`` and domain
+      ``boydgaming`` -- the parent's domain shares nothing with the property name
+
+    Returns the bridging brand, or ``""`` when the anchors are not bridged.
+    Fail-closed on every ambiguity: no candidate, no corroboration, or a brand
+    shorter than :data:`_MIN_BRIDGING_BRAND` returns ``""``.
+    """
+    if not chosen or not slug_anchor or not domain_anchor:
+        return ""
+    # The name must already be corroborated by at least one anchor. Containment
+    # alone is not enough -- this keeps the existing corroboration bar in force.
+    if not any(chosen.get("identity_matches", {}).values()):
+        return ""
+    cleaned = str(chosen.get("cleaned") or "")
+    expanded = re.sub(r"\s*&\s*", " and ", cleaned)
+    candidates = {
+        _name_key(value, drop_legal=drop_legal)
+        for value in (cleaned, expanded)
+        for drop_legal in (False, True)
+    }
+    bridging = [
+        key for key in candidates
+        if len(key) >= _MIN_BRIDGING_BRAND
+        and key in slug_anchor and key in domain_anchor
+    ]
+    return max(bridging, key=len) if bridging else ""
 
 
 @dataclass(frozen=True)
@@ -371,6 +429,10 @@ def resolve_company_display(
 
     evaluated.sort(key=lambda item: (-item["score"], len(item["cleaned"]), item["source"]))
     chosen = evaluated[0] if evaluated else None
+    # A disagreement between the two anchors is only benign when the chosen name is
+    # the brand BOTH of them are built from. Computed once, after the candidate is
+    # chosen, because it is a fact about that candidate.
+    bridging_brand = _bridging_brand(chosen, slug_anchor, domain_anchor) if conflict else ""
     name = str((chosen or {}).get("cleaned") or "")
     confidence = "low"
     identity_safe = False
@@ -380,7 +442,7 @@ def resolve_company_display(
         reasons.append("no_company_name_candidate")
     elif not identity_keys:
         reasons.append("no_stable_linkedin_or_domain_identity")
-    elif conflict:
+    elif conflict and not bridging_brand:
         reasons.append("linkedin_slug_domain_disagreement")
     elif chosen["ambiguous_separator"]:
         reasons.append("unresolved_multi_entity_or_franchise_name")
@@ -418,6 +480,13 @@ def resolve_company_display(
         else:
             reasons.append("selected_name_not_corroborated_by_identity")
 
+    if conflict and bridging_brand and identity_safe:
+        # The anchors still differ as strings. The bridging brand proved they are
+        # decorations of one name, not that they are the same legal entity, so such
+        # a row is never promoted to high confidence -- it stays sendable at medium.
+        confidence = "medium" if confidence == "high" else confidence
+        reasons.append("identity_conflict_bridged_by_shared_brand")
+
     hold = confidence == "low" or not identity_safe or not name
     evidence = {
         "identity_keys": identity_keys,
@@ -426,6 +495,7 @@ def resolve_company_display(
         "cache_hit": False,
         "manual_override": False,
         "identity_conflict": conflict,
+        "bridging_brand": bridging_brand,
         "reasons": reasons,
         "candidates": evaluated,
     }
