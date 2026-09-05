@@ -260,8 +260,9 @@ def _collect_gaps(
                     reason=metric.reason or "some runs did not report this counter",
                     impact=f"'{metric.label}' is a floor over {len(metric.contributing_run_ids)} run(s), not a total.",
                     remedy=(
-                        "Re-run the silent runs on current code, or accept the number as a "
-                        "lower bound and say so to the reader."
+                        "Identify which runs are silent and why. A partial total is a "
+                        "floor over the runs that answered; it is never presented as the "
+                        "period's number, and it must not be quoted as one."
                     ),
                 )
             )

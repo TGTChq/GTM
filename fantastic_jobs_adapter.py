@@ -114,10 +114,13 @@ def _frame_horizon(now: datetime, time_frame: str, margin_minutes: int = 0) -> d
     window is ``max(window_lower, now - time_frame)`` -- and that bound advances with
     the clock, continuously, whether or not the window is reused.
 
-    Dropping ``time_frame`` is not an available alternative: without it the feed
-    could not serve the production query at all (45s read timeout, then HTTP 504 at
-    240s). It is what makes the query fast enough to answer, so the window has to be
-    kept inside it instead.
+    Dropping ``time_frame`` is not currently available: the two requests made without
+    it both failed -- a 45s read timeout on the full window, and HTTP 504 at 240s on
+    a 5.95-day slice carrying the production title expression. Those two shapes are
+    not servable. Nothing about that rules out a smaller partition, or the same range
+    without the 4,222-character ``title_advanced``; neither was tried. So the window
+    is kept inside the frame because that is what answers today, not because the
+    alternative was proven impossible.
 
     ``margin_minutes`` holds the window a little above the horizon so a long run does
     not slide off the edge it was clamped to while it is still paging."""
@@ -1094,6 +1097,37 @@ def _quota_would_breach(quota: _QuotaState, want: int) -> str:
     return ""
 
 
+def _observe_order(seg: Dict[str, Any], rows: List[Any]) -> None:
+    """Watch the direction the feed returns ``date_created`` in, across a whole pass.
+
+    Sets ``order_observed`` to ``desc``, ``asc``, ``constant`` or ``unordered`` and
+    keeps the first and last value seen. Rows without a parsable date are skipped
+    rather than treated as a break in the sequence."""
+    dates = [str(r.get("date_created") or "") for r in rows if isinstance(r, dict)]
+    dates = [d for d in dates if d]
+    if not dates:
+        return
+    probe = seg.setdefault("order_probe", {
+        "first": dates[0], "last": "", "rows": 0, "desc_breaks": 0, "asc_breaks": 0})
+    prev = probe.get("last") or probe["first"]
+    for value in dates:
+        if value > prev:
+            probe["desc_breaks"] += 1
+        elif value < prev:
+            probe["asc_breaks"] += 1
+        prev = value
+    probe["last"] = dates[-1]
+    probe["rows"] += len(dates)
+    if not probe["desc_breaks"] and not probe["asc_breaks"]:
+        probe["order_observed"] = "constant"
+    elif not probe["desc_breaks"]:
+        probe["order_observed"] = "desc"
+    elif not probe["asc_breaks"]:
+        probe["order_observed"] = "asc"
+    else:
+        probe["order_observed"] = "unordered"
+
+
 def _fetch_segment(endpoint: str, base_params: Dict[str, Any], source_label: str, cap: int,
                    quota: _QuotaState, http_get: HttpGet, seen_ids: set,
                    metrics: Dict[str, Any], accept_source: Optional[Tuple[str, ...]] = None,
@@ -1193,6 +1227,19 @@ def _fetch_segment(endpoint: str, base_params: Dict[str, Any], source_label: str
             seg["stop_reason"] = "repeated_page"
             break
         fingerprints.add(fp)
+        # ORDERING OBSERVATION -- free, and the only evidence we have.
+        #
+        # No `order_by`/`sort` parameter is sent (see build_jb_params), and the
+        # provider documents no ordering, so the sequence rows arrive in is entirely
+        # theirs. That sequence decides whether a persisted OFFSET is safe: if the
+        # feed is newest-first, rows ageing out of the time_frame leave the tail and
+        # a consumed prefix keeps its meaning; if it is oldest-first, they leave the
+        # head and every saved offset points past rows nobody inspected.
+        #
+        # We already receive every row's date_created, so the direction can simply be
+        # watched. Recorded, never acted on: this establishes the ordering from real
+        # traffic instead of a probe assuming it.
+        _observe_order(seg, rows)
         new_ids = 0
         for record in rows:
             seg["returned"] += 1
@@ -1741,6 +1788,13 @@ class DateCreatedWatermarkEngine:
             # What the feed's own time_frame took off this window, stated rather than
             # absorbed: the horizon it could not reach below, the span conceded to it
             # (if any), and a window abandoned outright for falling entirely below it.
+            # The PROVIDER's floor and OUR margin, reported apart so they can never
+            # be confused. `frame_floor` is now - time_frame, which is the provider's
+            # and is not ours to move. `frame_horizon` is what we actually clamped
+            # to; with the margin at its default 0 they are the same instant, and any
+            # gap between them is inventory WE chose to concede, not inventory the
+            # feed refused.
+            "frame_floor": self._iso(_frame_horizon(self.now, config.FANTASTIC_JOBS_TIME_FRAME, 0)),
             "frame_horizon": horizon, "frame_margin_minutes": margin,
             "lower_clamped_to_frame": clamped, "window_abandoned_below_frame": abandoned,
             # How far the feed's floor has risen since this window opened. Zero on a
@@ -1751,6 +1805,36 @@ class DateCreatedWatermarkEngine:
             # oldest-first would not. Reported so the effect can be measured on a real
             # run rather than assumed in either direction.
             "frame_slippage_minutes": self._slippage_minutes(horizon_dt),
+            # COVERAGE ACCOUNTING. Four different things get flattened into "the run
+            # acquired N", and only the first is throughput:
+            #
+            #   inspected              rows this window has actually paid for and
+            #                          looked at, per source (the saved offsets);
+            #   outside_frame          the part of the window BELOW the provider's
+            #                          floor -- reported as a SPAN, not a count,
+            #                          because counting it needs a request we have
+            #                          not spent;
+            #   excluded_by_config     narrowed away by OUR filters before the feed
+            #                          ever ranked a row. Not missing inventory: a
+            #                          choice, listed so it reads as one;
+            #   possibly_skipped       sources where an offset was resumed across a
+            #                          moved floor, so rows may have shifted past it.
+            #
+            # An empty page tells you a query returned nothing NOW. It cannot tell
+            # the four apart, and treating it as "everything was inspected" is how a
+            # watermark advances over rows nobody read.
+            "coverage": {
+                "inspected_rows_by_source": dict(self.window_offsets()),
+                "outside_frame": ({"from": self.state.get("window_start_requested") or self.lower,
+                                   "to": horizon,
+                                   "days": (clamped or {}).get("unreachable_days", 0.0),
+                                   "counted": False}
+                                  if clamped else None),
+                "excluded_by_config": sorted(
+                    k for k in _jb_filter_params()
+                    if k not in ("limit", "offset")),
+                "possibly_skipped_sources": [],
+            },
             # The cursor state as it stood BEFORE this run paged anything. Production
             # acceptance of the persisted cursor is "the first offset we requested
             # equals the offset the previous run left behind", and that is not
@@ -1825,7 +1909,96 @@ class DateCreatedWatermarkEngine:
         self.acquired.extend(got)
         self.result.jobs.extend(got)
         self.metrics["watermark"]["acquired"] = self.metrics["watermark"].get("acquired", 0) + len(got)
-        self.mark_source_drained(label)
+        # COVERAGE, not just position. Running out of rows proves this source is
+        # exhausted only if the offset we resumed from still addressed the row it
+        # addressed when it was saved. It does not when BOTH of these hold:
+        #
+        #   * the pass started from a saved offset rather than the head, and
+        #   * the frame floor has risen since the window opened, so rows have left
+        #     the result set that offset indexes into.
+        #
+        # Under a newest-first feed those rows leave the tail and nothing moves.
+        # Under an oldest-first feed they leave the head, every later row shifts down
+        # by the number that left, and the saved offset lands that far past where it
+        # pointed -- stepping over rows no request ever inspected. The feed is asked
+        # for no ordering and documents none, so which of those we are in is not
+        # established (``order_probe`` is now recording it from real traffic).
+        #
+        # The danger is not the wasted page; it is that ``empty_page`` is a DRAINED
+        # stop, so an over-shot offset reaches the end of a shrunken set, the window
+        # commits, and the watermark advances past those rows permanently.
+        #
+        # So: do not accept that drain. Rewind this source to the head instead. The
+        # next run re-pages the window from 0, ``seen_ids`` discards what we already
+        # hold, ``duplicate_page_cap`` bounds what that costs, and the durable cursor
+        # lets it page THROUGH the duplicates to the rows that were skipped. It can
+        # happen at most once per window per source -- the re-pass starts at 0, so
+        # this condition cannot hold for it -- and the window then drains honestly.
+        seg_now = (self.metrics.get("segments", {}).get(label) or {})
+        slipped = float(self.metrics["watermark"].get("frame_slippage_minutes") or 0.0)
+        stop = str(seg_now.get("stop_reason") or "")
+        exposed = bool(base > 0 and slipped > 0 and stop in self._DRAINED_STOPS)
+        # WHICH WAY THE FEED IS ORDERED decides whether exposure is actual harm, and
+        # it is observed rather than assumed (``_observe_order``). A newest-first
+        # feed loses the rows that age out from its TAIL -- inventory this offset had
+        # not reached -- so the consumed prefix still means what it meant and the
+        # drain is honest. Oldest-first, or no stable order at all, loses them from
+        # the HEAD and the offset lands past rows nobody inspected.
+        #
+        # With no observation yet we do NOT re-pass on suspicion. A re-pass costs a
+        # full window of billed rows, and buying that to defend against a hazard that
+        # has not been shown to exist is the same kind of unevidenced move as
+        # assuming it away. The doubt is recorded instead, and the zero-credit
+        # closed-window recheck is what would catch a row we lost.
+        # The order is the FEED's property, not this pass's, and a pass that returned
+        # nothing observed none -- which is exactly the pass where the question is
+        # being asked. So it is remembered across runs, and a definite reading is
+        # never overwritten by a pass too small to see a direction ("constant").
+        order = str((seg_now.get("order_probe") or {}).get("order_observed") or "")
+        remembered = self.state.get("feed_order_observed")
+        remembered = dict(remembered) if isinstance(remembered, dict) else {}
+        if order and order != "constant":
+            remembered[str(label)] = order
+            self.state["feed_order_observed"] = remembered
+            self._save()
+        elif not order or order == "constant":
+            order = remembered.get(str(label), order)
+        adverse = order in ("asc", "unordered")
+        already_rewound = self.coverage_rewinds().get(str(label), 0) > 0
+        if exposed and not adverse:
+            seg_now["coverage_uncertain"] = {
+                "resumed_from": base, "frame_slippage_minutes": slipped,
+                "order_observed": order or "not_yet_observed",
+                "drained_stop_accepted": stop,
+                "resolution": ("ordering_not_adverse" if order
+                               else "ordering_unobserved_no_repass_bought"),
+                "action": "window allowed to close; recheck the closed-window count"}
+        uncertain = exposed and adverse
+        if exposed:
+            skipped = self.metrics["watermark"].setdefault("coverage", {}).setdefault(
+                "possibly_skipped_sources", [])
+            if str(label) not in skipped:
+                skipped.append(str(label))
+        if uncertain and not already_rewound:
+            self.rewind_window_offset(label)
+            seg_now["coverage_uncertain"] = {
+                "resumed_from": base, "frame_slippage_minutes": slipped,
+                "order_observed": order,
+                "drained_stop_refused": stop, "resolution": "rewound",
+                "action": "offset rewound to 0; window held open for a full re-pass"}
+        else:
+            if uncertain:
+                # Already re-passed once and still cannot be certain. Accept the
+                # drain so the window can close and acquisition keeps moving, but
+                # SAY SO: the closed-window audit re-counts each window at zero Jobs
+                # credits, and a count above what we acquired is how a skipped row
+                # gets found after the fact.
+                seg_now["coverage_uncertain"] = {
+                    "resumed_from": base, "frame_slippage_minutes": slipped,
+                    "order_observed": order,
+                    "drained_stop_accepted": stop, "resolution": "accepted_after_rewind",
+                    "action": "window allowed to close; recheck the closed-window count"}
+            self.mark_source_drained(label)
         # CURSOR OBSERVABILITY. Without this the only evidence that the persisted
         # cursor was honoured is a diff of two runs' saved state, which nobody has
         # at report time. ``offset_from`` is pinned to the FIRST pass of this run
@@ -1989,6 +2162,31 @@ class DateCreatedWatermarkEngine:
         m = self.window_offsets()
         m[str(label)] = max(int(m.get(str(label), 0) or 0), int(value or 0))
         self.state["window_offsets"] = m
+
+    def coverage_rewinds(self) -> Dict[str, int]:
+        """How many times each source was sent back to the head of THIS window."""
+        m = self.state.get("window_coverage_rewinds")
+        return {str(k): int(v or 0) for k, v in m.items()} if isinstance(m, dict) else {}
+
+    def rewind_window_offset(self, label: str) -> None:
+        """Send a source back to the head of the current window, once.
+
+        ``record_window_offset`` is deliberately monotonic -- a later pass that
+        returned nothing must never undo an earlier pass's progress -- so a rewind
+        cannot go through it and is written directly. The counter is what keeps this
+        terminating: a window whose consumed prefix is longer than the duplicate-page
+        cap cannot page back to its tail in one run, so without a bound the refuse ->
+        rewind -> partial re-pass -> refuse cycle could repeat indefinitely. One
+        rewind per source per window; after that the drain is accepted and the
+        residual doubt is carried into the closed-window record instead.
+        """
+        offsets = self.window_offsets()
+        offsets[str(label)] = 0
+        self.state["window_offsets"] = offsets
+        counts = self.coverage_rewinds()
+        counts[str(label)] = counts.get(str(label), 0) + 1
+        self.state["window_coverage_rewinds"] = counts
+        self._save()
 
     def source_already_drained(self, label: str) -> bool:
         """True when THIS source already exhausted the CURRENT window.

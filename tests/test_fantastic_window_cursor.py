@@ -424,3 +424,122 @@ class FrameHorizonTests(unittest.TestCase):
 
 def _iso_at(dt):
     return fja._iso_z(dt)
+
+
+class _AscendingFeed(_Feed):
+    """The same fake provider, returning OLDEST first.
+
+    ``_Feed`` sorts newest-first, which is what the head/deep path has always
+    assumed. Nothing in the request asks for either, so the other direction is
+    equally consistent with the contract -- and it is the one under which a saved
+    offset stops meaning what it meant."""
+
+    def __call__(self, url, headers, params, timeout):
+        response = super().__call__(url, headers, params, timeout)
+        # Re-select in the opposite order: paging must be applied AFTER the sort,
+        # so reversing the returned page would not model this.
+        gte, lt = params.get("date_created_gte"), params.get("date_created_lt")
+        sel = [r for r in self.rows if (gte is None or r["date_created"] >= gte)
+               and (lt is None or r["date_created"] < lt)]
+        sel = [r for r in sel if r.get("source_type") != "ats"]
+        if params.get("source"):
+            sel = [r for r in sel if r.get("source") == params["source"]]
+        sel.sort(key=lambda r: r["date_created"])
+        o, l = int(params.get("offset", 0)), int(params.get("limit", 100))
+        response._d = sel[o:o + l]
+        return response
+
+
+class CoverageAfterTheFloorMovesTests(unittest.TestCase):
+    """Running out of rows is only proof of coverage if the offset still points
+    where it pointed when it was saved.
+
+    ``time_frame`` is intersected with ``date_created`` (#87), so the floor under an
+    open window rises between runs and rows leave the result set an offset indexes
+    into. Whether that MOVES the remaining rows depends on the order the feed
+    returns them in -- which nothing requests and the provider does not document, so
+    it is observed from real rows rather than assumed.
+
+    The consequence is not a wasted page. ``empty_page`` is a drained stop, so an
+    over-shot offset reaches the end of a shrunken set, the window commits, and the
+    watermark advances past rows no request ever inspected. See
+    ``tests/test_offset_continuity_under_a_moving_horizon.py`` for the mechanism in
+    isolation; these run it through the real engine.
+    """
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.mkdtemp()
+        self.path = os.path.join(self.tmp, "wm.json")
+        self.cfg = dict(_PROD,
+                        FANTASTIC_DATE_CREATED_WATERMARK_ENABLED=True,
+                        FANTASTIC_DATE_CREATED_LAG_MINUTES=180,
+                        FANTASTIC_DATE_CREATED_OVERLAP_MINUTES=60,
+                        FANTASTIC_TIME_FRAME_MARGIN_MINUTES=0,
+                        FANTASTIC_WATERMARK_STATE_PATH=self.path,
+                        FANTASTIC_JOBS_LINKEDIN_LIMIT=150,
+                        FANTASTIC_JOBS_MAX_JOBS_PER_RUN=150)
+
+    def _run(self, rows, now, ascending=False):
+        feed = _AscendingFeed(list(rows)) if ascending else _Feed(list(rows))
+        with mock.patch.multiple(config, **self.cfg), \
+                mock.patch.object(fja, "datetime", wraps=datetime) as dt:
+            dt.now.return_value = now
+            dt.fromisoformat = datetime.fromisoformat
+            return fja.run_fantastic_jobs_acquisition(http_get=feed)
+
+    @staticmethod
+    def _seg(result):
+        return result.metadata["segments"]["fantastic_jobs_linkedin"]
+
+    def test_an_ascending_feed_is_observed_and_the_drain_is_refused(self):
+        """Oldest-first: rows age out of the HEAD, so a saved offset lands past rows
+        nobody inspected. The drain is refused and the source is sent back to the
+        head of the window rather than allowed to close it."""
+        rows = _recs(300, created_start=NOW - timedelta(hours=20), step_min=2)
+        first = self._run(rows, NOW, ascending=True)
+        self.assertEqual(self._seg(first)["order_probe"]["order_observed"], "asc")
+        saved = json.load(open(self.path, encoding="utf-8"))
+        self.assertGreater(saved["window_offsets"]["fantastic_jobs_linkedin"], 0)
+
+        second = self._run(rows[:150], NOW + timedelta(days=1), ascending=True)
+        seg = self._seg(second)
+        self.assertIn("coverage_uncertain", seg)
+        self.assertEqual(seg["coverage_uncertain"]["resolution"], "rewound")
+        saved = json.load(open(self.path, encoding="utf-8"))
+        self.assertEqual(saved["window_offsets"]["fantastic_jobs_linkedin"], 0,
+                         "the source restarts at the head of the window")
+        self.assertFalse(
+            second.metadata["watermark"]["drained_sources"]["fantastic_jobs_linkedin"],
+            "a refused drain must leave the window open")
+
+    def test_the_rewind_happens_at_most_once_so_a_window_still_closes(self):
+        """A prefix longer than the duplicate-page cap cannot be re-paged in one run,
+        so an unbounded refuse -> rewind cycle would never terminate. The second time
+        the drain is accepted and the doubt is carried into the record instead."""
+        rows = _recs(300, created_start=NOW - timedelta(hours=20), step_min=2)
+        self._run(rows, NOW, ascending=True)
+        self._run(rows[:150], NOW + timedelta(days=1), ascending=True)
+        self._run(rows[:150], NOW + timedelta(days=2), ascending=True)
+        third = self._run(rows[:150], NOW + timedelta(days=3), ascending=True)
+
+        seg = self._seg(third)
+        self.assertEqual(seg["coverage_uncertain"]["resolution"], "accepted_after_rewind")
+        self.assertTrue(
+            third.metadata["watermark"]["drained_sources"]["fantastic_jobs_linkedin"],
+            "acquisition must not stall on a window it cannot prove it covered")
+
+    def test_an_unobserved_ordering_does_not_buy_a_speculative_re_pass(self):
+        """A re-pass costs a whole window of billed rows. Buying that against a
+        hazard nobody has shown to exist is as unevidenced as assuming it away, so
+        the exposure is recorded and the window is allowed to close."""
+        flat = _recs(300, created_start=NOW - timedelta(hours=20), step_min=0)
+        first = self._run(flat, NOW)
+        # Every row shares one timestamp, so the pass shows no direction at all.
+        self.assertEqual(self._seg(first)["order_probe"]["order_observed"], "constant")
+
+        second = self._run(flat[:150], NOW + timedelta(days=1))
+        seg = self._seg(second)
+        self.assertNotEqual(seg.get("coverage_uncertain", {}).get("resolution"), "rewound")
+        saved = json.load(open(self.path, encoding="utf-8"))
+        self.assertGreater(saved["window_offsets"]["fantastic_jobs_linkedin"], 0,
+                           "no rewind was bought")
