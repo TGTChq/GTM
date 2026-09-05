@@ -92,9 +92,13 @@ def build_window(args: argparse.Namespace, now: datetime,
 
     ``--anchored`` ends the window at THIS generation instant and starts it at the
     previously persisted one, so the run that just finished is inside it and the
-    next window starts exactly where this one ends. Without a stored anchor (first
-    ever anchored report) it falls back to the fixed weekly boundary, so the very
-    first window is still a sane week rather than "all of history".
+    next window starts exactly where this one ends.
+
+    With no stored anchor the caller seeds it, in order: the last report's own
+    ``reporting_window_end`` (see ``anchor.seed_from_last_report``), then the fixed
+    weekly boundary. The first fallback matters because anchoring was introduced
+    after reports had been going out -- without it the first anchored window
+    re-covers a span already delivered.
     """
     if getattr(args, "anchored", False) and not (args.start or args.end):
         if anchor_start is not None:
@@ -402,6 +406,18 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                      else Path(roots[0]) / _DEFAULT_SUBDIR)
         anchor_file = anchor_mod.anchor_path_for(probe_dir)
         anchor_start = anchor_mod.read_anchor(anchor_file)
+        if anchor_start is None:
+            # No anchor yet, but reports may already exist: anchoring was added
+            # after they had been going out on a fixed Friday-to-Friday boundary.
+            # Seeding from `weekly_window` here would re-report a span Brett has
+            # already read -- 13.9 days labelled as a week, at the real firing
+            # instants. The last report's own `reporting_window_end` is where the
+            # next window starts, which is exactly the anchor's semantics
+            # recovered from the artifact the anchor did not exist to record.
+            anchor_start = anchor_mod.seed_from_last_report(probe_dir)
+            if anchor_start is not None and not args.quiet:
+                print(f"weekly report: no anchor yet; seeding the boundary from the "
+                      f"last report's window end ({anchor_start.isoformat()})")
         # A second invocation at (or before) the stored boundary has nothing new to
         # cover. Exit cleanly rather than constructing an empty-or-inverted window:
         # this is the normal shape of a restart, a double cron firing, or a clock

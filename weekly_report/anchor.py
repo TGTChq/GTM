@@ -97,3 +97,41 @@ def write_anchor(path: Path, report_end: datetime, *, window: Optional[Dict[str,
             pass
         raise
     return path
+
+
+def seed_from_last_report(out_dir: Path) -> Optional[datetime]:
+    """Where the LAST DELIVERED report's window ended, read from the reports
+    themselves. Used only when no anchor file exists yet.
+
+    Anchoring was introduced after reports had already been going out on a fixed
+    Friday-to-Friday boundary. Without this, the first anchored report seeds from
+    ``weekly_window``, which returns the most recently CLOSED week -- a span the
+    previous report had already covered and Brett had already read. At the real
+    firing instants that produces a 13.9-day first window labelled as a week, and
+    re-reports the earlier one inside it.
+
+    The anchor's own semantics answer this: the next window starts where the last
+    report ended. That instant is recorded in every report document as
+    ``reporting_window_end``, so it is recoverable from the artifact even though
+    the anchor did not exist to record it.
+
+    Returns the LATEST such instant, or ``None`` when no report is on disk (a
+    genuinely first-ever run, where the weekly seed is correct).
+    """
+    directory = Path(out_dir)
+    if not directory.is_dir():
+        return None
+    latest: Optional[datetime] = None
+    for path in sorted(directory.glob("weekly_report_*.json")):
+        if path.name == ANCHOR_FILENAME:
+            continue
+        try:
+            document = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            # A half-written or hand-edited report must not stop the seed; the
+            # remaining documents still answer the question.
+            continue
+        moment = parse_instant((document or {}).get("reporting_window_end"))
+        if moment is not None and (latest is None or moment > latest):
+            latest = moment
+    return latest
