@@ -308,3 +308,102 @@ def test_the_offline_argv_under_test_sends_nothing(root):
     assert "--slack" not in argv and "--instantly" not in argv
     run_weekly_report.main(argv)
     assert list(root.rglob("*.slack_sent.json")) == []
+
+
+# --------------------------------------------------------------------------
+# the FIRST anchored report, on a volume that already holds older reports
+# --------------------------------------------------------------------------
+#
+# Anchoring was introduced after reports had been going out on a fixed
+# Friday-to-Friday boundary, and 2026-W36 was delivered to Slack on 2026-09-04
+# covering Aug 28 - Sep 4. Seeding the first anchored window from
+# ``weekly_window`` would re-cover that span: at the real firing instants it
+# produces a 13.9-day window labelled as a week, containing a report Brett has
+# already read.
+
+def _existing_report(root: Path, iso_week: str, start: str, end: str) -> None:
+    d = root / REPORT_DIR
+    d.mkdir(parents=True, exist_ok=True)
+    (d / f"weekly_report_{iso_week}.json").write_text(json.dumps({
+        "schema": "tgtc-weekly-report/1", "iso_week": iso_week,
+        "reporting_window_start": start, "reporting_window_end": end,
+        "included_run_ids": [], "metrics": {}}), encoding="utf-8")
+
+
+def test_the_first_anchored_window_starts_where_the_last_report_ended(root):
+    """The real shape: 2026-W36 already went out, ending 2026-09-04T07:00:00Z."""
+    _existing_report(root, "2026-W36",
+                     "2026-08-28T07:00:00Z", "2026-09-04T07:00:00Z")
+    fire = cron_fire(11)
+    at = fire + timedelta(hours=3.3)
+    write_run(root, "fri", at - timedelta(minutes=10))
+
+    assert run_weekly_report.main(_offline_argv(root, at)) == 0
+    docs = [json.loads(p.read_text(encoding="utf-8")) for p in documents(root)]
+    # The pre-existing 2026-W36 stub is the fixture; the report just written is
+    # the one carrying real content.
+    fresh = [d for d in docs if d.get("included_run_ids")]
+    assert len(fresh) == 1, [d.get("reporting_window_start") for d in docs]
+    assert fresh[0]["reporting_window_start"] == "2026-09-04T07:00:00Z", (
+        "the new window must begin where the delivered one ended -- no gap, no "
+        "re-report"
+    )
+    # Exactly the un-reported span: the previous window's end to this generation
+    # instant (03:00 UTC cron + a 3.3 h acquisition).
+    assert fresh[0]["reporting_window_end"] == "2026-09-11T06:18:00Z"
+
+
+def test_without_the_seed_the_first_window_would_have_been_two_weeks(root):
+    """The defect, stated as a measurement rather than a claim."""
+    from weekly_report.anchor import seed_from_last_report
+
+    _existing_report(root, "2026-W36",
+                     "2026-08-28T07:00:00Z", "2026-09-04T07:00:00Z")
+    at = cron_fire(11) + timedelta(hours=3.3)
+    args = run_weekly_report.build_parser().parse_args(_offline_argv(root, at))
+
+    unseeded = run_weekly_report.build_window(args, at, None)
+    seeded = run_weekly_report.build_window(
+        args, at, seed_from_last_report(root / REPORT_DIR))
+
+    unseeded_days = (unseeded.end_utc - unseeded.start_utc).total_seconds() / 86400
+    seeded_days = (seeded.end_utc - seeded.start_utc).total_seconds() / 86400
+    assert 13.9 < unseeded_days < 14.0, f"{unseeded_days:.2f} days labelled as a week"
+    assert 6.9 < seeded_days < 7.0, f"{seeded_days:.2f} days"
+    assert unseeded.start_utc.isoformat().startswith("2026-08-28")
+    assert seeded.start_utc.isoformat().startswith("2026-09-04")
+
+
+def test_a_genuinely_first_ever_run_still_seeds_from_the_weekly_boundary(root):
+    """No reports on disk: the weekly seed is correct and must not be lost."""
+    from weekly_report.anchor import seed_from_last_report
+
+    assert seed_from_last_report(root / REPORT_DIR) is None
+    at = cron_fire(11) + timedelta(hours=3.3)
+    write_run(root, "fri", at - timedelta(minutes=10))
+    assert run_weekly_report.main(_offline_argv(root, at)) == 0
+    assert documents(root), "a first-ever anchored report still writes"
+
+
+def test_a_corrupt_report_on_disk_does_not_stop_the_seed(root):
+    from weekly_report.anchor import seed_from_last_report
+
+    d = root / REPORT_DIR
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "weekly_report_2026-W35.json").write_text("{ not json", encoding="utf-8")
+    _existing_report(root, "2026-W36",
+                     "2026-08-28T07:00:00Z", "2026-09-04T07:00:00Z")
+
+    seed = seed_from_last_report(d)
+    assert seed is not None and seed.isoformat().startswith("2026-09-04T07:00")
+
+
+def test_the_latest_report_wins_when_several_are_present(root):
+    from weekly_report.anchor import seed_from_last_report
+
+    _existing_report(root, "2026-W34", "2026-08-14T07:00:00Z", "2026-08-21T07:00:00Z")
+    _existing_report(root, "2026-W36", "2026-08-28T07:00:00Z", "2026-09-04T07:00:00Z")
+    _existing_report(root, "2026-W35", "2026-08-21T07:00:00Z", "2026-08-28T07:00:00Z")
+
+    seed = seed_from_last_report(root / REPORT_DIR)
+    assert seed.isoformat().startswith("2026-09-04T07:00")
