@@ -66,7 +66,14 @@ Founding year is intentionally **neutral** for qualification in the definitive
 ICP: it is enriched/persisted/shown when available but never rejects a company.
 `ENFORCE_FOUNDED_BEFORE` / `FOUNDED_BEFORE_YEAR` are therefore inert (leave unset).
 
-Set on **GTM Approved Sync** (unchanged intent): `APPROVED_SYNC_REVALIDATE_PROVIDERS=true`.
+`APPROVED_SYNC_REVALIDATE_PROVIDERS` is **deprecated and not read at runtime.**
+Approved Sync is delivery-only: it makes no Apollo, Hunter, Fantastic or
+JobSourceResolver call, and `run_approved.run()` explicitly ignores the equivalent
+argument. The variable is currently `true` on GTM Approved Sync; that value selects
+nothing. Do not set it on a new environment, and do not read it as evidence that
+provider revalidation is on — it is not, and re-enabling it is what caused the
+2026-08-12 incident (627 Approved rows marked Error by a 24h validation-age gate
+that ran before any provider call, so nothing enrolled).
 
 Secrets (names only, must be PRESENT): `RAPIDAPI_KEY`, `APOLLO_API_KEY`,
 `HUNTER_API_KEY`, `AIRTABLE_TOKEN`, `AIRTABLE_BASE_ID`, `AIRTABLE_TABLE_NAME`,

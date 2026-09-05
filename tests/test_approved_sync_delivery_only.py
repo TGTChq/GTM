@@ -289,3 +289,78 @@ def test_failure_logging_is_bounded(caplog):
     assert "failed=627" in text
     for i in range(50, 627):
         assert f"a{i}@x.com" not in text, "must not dump every failure object"
+
+
+# ------------------------------------------- 8. the contract is also STRUCTURAL
+#
+# The behavioural tests above prove the delivery path made no provider call on a
+# given input. These prove it CANNOT, by reading what the module actually imports
+# and what the deprecated switch actually selects -- which is the shape a
+# reintroduction would take.
+
+
+def test_run_approved_does_not_import_the_legacy_revalidation_module():
+    """``approved_revalidation`` calls Apollo, Hunter and JobSourceResolver.
+
+    It is retained for the gate-composition tests that exercise it directly, and
+    for the record of what the delivery path deliberately does not do. Reaching it
+    from the delivery path is exactly the 2026-08-12 regression.
+    """
+    import ast
+    from pathlib import Path
+
+    tree = ast.parse(Path("run_approved.py").read_text(encoding="utf-8"))
+    imported = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            imported.update(alias.name.split(".")[0] for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            imported.add(node.module.split(".")[0])
+
+    forbidden = {"approved_revalidation", "apollo_client", "hunter_client",
+                 "job_source_resolver", "fantastic_jobs_adapter",
+                 "qualification_pipeline", "hiring_manager"}
+    assert not (imported & forbidden), (
+        f"run_approved must stay delivery-only; it imports {sorted(imported & forbidden)}"
+    )
+
+
+def test_the_deprecated_revalidate_switch_selects_nothing(caplog):
+    """``APPROVED_SYNC_REVALIDATE_PROVIDERS`` is `true` on the live service.
+
+    It must remain a name that changes no behaviour, so a reader of the Railway
+    variables cannot conclude that provider revalidation is on.
+    """
+    records = [_rec("recA")]
+    with patch.object(airtable_client, "select_eligible_approved",
+                      return_value=(records, {"approved_seen": 1, "approved_eligible": 1,
+                                              "approved_skipped_legacy": 0,
+                                              "approved_skipped_invalid": 0})), \
+         patch.object(instantly_client, "enroll_approved_leads",
+                      return_value=_ok_enroll(["recA"])), \
+         patch.object(airtable_client, "mark_enrolled"), \
+         patch.object(airtable_client, "mark_error"), \
+         patch.object(config, "APPROVED_SYNC_REVALIDATE_PROVIDERS", True):
+        with_flag = run_approved.run()
+        with patch.object(config, "APPROVED_SYNC_REVALIDATE_PROVIDERS", False):
+            without_flag = run_approved.run()
+
+    assert with_flag["approved_attempted"] == without_flag["approved_attempted"] == 1
+    assert with_flag["revalidation_failed"] == without_flag["revalidation_failed"] == 0
+
+
+def test_passing_revalidate_providers_is_ignored_and_says_so(caplog):
+    records = [_rec("recA")]
+    with caplog.at_level("WARNING"), \
+         patch.object(airtable_client, "select_eligible_approved",
+                      return_value=(records, {"approved_seen": 1, "approved_eligible": 1,
+                                              "approved_skipped_legacy": 0,
+                                              "approved_skipped_invalid": 0})), \
+         patch.object(instantly_client, "enroll_approved_leads",
+                      return_value=_ok_enroll(["recA"])), \
+         patch.object(airtable_client, "mark_enrolled"), \
+         patch.object(airtable_client, "mark_error"):
+        result = run_approved.run(revalidate_providers=True)
+
+    assert result["approved_attempted"] == 1, "the record is still delivered"
+    assert "ignored" in caplog.text.lower()

@@ -1402,12 +1402,19 @@ AIRTABLE_STATUS_ERROR = os.getenv("AIRTABLE_STATUS_ERROR", "Error")
 FANTASTIC_AUTO_APPROVE_SEND_SAFE = _env_bool("FANTASTIC_AUTO_APPROVE_SEND_SAFE", True)
 APPROVED_REVALIDATION_MAX_AGE_HOURS = _env_int("APPROVED_REVALIDATION_MAX_AGE_HOURS", 24)
 APPROVED_REVALIDATE_JOB_SOURCE = _env_bool("APPROVED_REVALIDATE_JOB_SOURCE", True)
-# Approved-sync worker: keep the fail-closed Apollo/Hunter revalidation ON by
-# default in production (re-checks current employment/email immediately before
-# Instantly enrollment). When set false, the worker still fail-closes on the
-# zero-network validation fingerprint + Airtable Approved status + email/campaign/
-# suppression checks, but makes no provider call. The definitive production
-# worker runs with this true.
+# DEPRECATED AND NOT READ AT RUNTIME. Approved Sync is delivery-only: it makes no
+# Apollo, Hunter, Fantastic or JobSourceResolver call, and `run_approved.run()`
+# explicitly ignores the equivalent argument (logging a warning if it is passed).
+#
+# It is kept as a defined name only so an environment that still sets it -- GTM
+# Approved Sync has `APPROVED_SYNC_REVALIDATE_PROVIDERS=true` today -- does not
+# read as "provider revalidation is on". It is not.
+#
+# The behaviour it used to select caused the 2026-08-12 incident: 627 Approved
+# rows were marked Error by a 24h validation-age gate that ran BEFORE any provider
+# call, so nothing enrolled and nothing reached Instantly. Approved is now the
+# authorization boundary -- the worker delivers, it does not re-qualify. Setting
+# this true does not and must not bring that path back.
 APPROVED_SYNC_REVALIDATE_PROVIDERS = _env_bool("APPROVED_SYNC_REVALIDATE_PROVIDERS", True)
 SLA_REQUIRE_NET_NEW_AIRTABLE = _env_bool("SLA_REQUIRE_NET_NEW_AIRTABLE", True)
 # A commercial volume miss is reported in the run summary but is not a process
