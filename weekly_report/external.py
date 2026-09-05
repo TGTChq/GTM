@@ -23,6 +23,17 @@ an email that already exists, so an accepted API call is not a delivery, but a n
 Leads are listed per campaign with ``POST /leads/list`` and the singular
 ``campaign`` filter, which is the filter proven to work in production (the plural
 ``campaign_ids`` filter is ignored by the API and must never be relied on).
+
+Instantly stores a SEPARATE lead record per campaign, so one person enrolled in two
+campaigns is two records with two ids and one address. "Sent to Instantly" counts
+PEOPLE, so the headline is the number of distinct lowercased addresses whose
+``timestamp_created`` falls in the window -- not the sum of the per-campaign counts,
+which counts records. Both are reported; ``people_in_more_than_one_campaign`` is the
+difference.
+
+What this measurement does NOT claim: that anyone was emailed. A lead can sit in a
+campaign with no sequence step executed -- 769 of 769 did on 2026-09-05. Import is
+what is counted, and import is what the name means.
 """
 
 from __future__ import annotations
@@ -161,6 +172,18 @@ def collect_instantly(
         return deadline is not None and clock() >= deadline
 
     per_campaign: Dict[str, int] = {}
+    # IDENTITY IS THE EMAIL, not the lead id. Instantly creates a SEPARATE lead
+    # record per campaign, so one person enrolled in two campaigns has two ids and
+    # one address. Summing the per-campaign counts therefore reported that person as
+    # two deliveries -- and "sent to Instantly" is a count of people reached, not of
+    # rows created. With 18 campaigns configured, the two numbers are only equal for
+    # as long as no address appears in more than one of them.
+    #
+    # Nothing is stored: the set holds a lowercased address for the duration of the
+    # call so it can be counted once, and is discarded with the frame.
+    in_window_identities: set = set()
+    occurrences_in_window = 0
+    unidentifiable = 0
     failed_campaigns: List[str] = []
     truncated_campaigns: List[str] = []
     skipped_campaigns: List[str] = []
@@ -179,6 +202,8 @@ def collect_instantly(
         campaign_hits = 0
         campaign_scanned = 0
         campaign_undated = 0
+        campaign_identities: set = set()
+        campaign_unidentified = 0
         truncated = False
         try:
             while True:
@@ -200,6 +225,16 @@ def collect_instantly(
                         continue
                     if window.contains(created):
                         campaign_hits += 1
+                        identity = str((item or {}).get("email") or "").strip().lower()
+                        if not identity:
+                            # No address to identify the person by. Counted, because
+                            # the lead is real, but it cannot be collapsed with any
+                            # other -- and that limitation is reported rather than
+                            # assumed away.
+                            identity = "lead-id:" + str((item or {}).get("id") or
+                                                        f"unknown-{campaign_id}-{campaign_scanned}")
+                            campaign_unidentified += 1
+                        campaign_identities.add(identity)
                 next_cursor = str(payload.get("next_starting_after") or "")
                 pages += 1
                 if not next_cursor or next_cursor == cursor:
@@ -215,6 +250,9 @@ def collect_instantly(
         per_campaign[campaign_id] = campaign_hits
         scanned += campaign_scanned
         undated += campaign_undated
+        occurrences_in_window += campaign_hits
+        unidentifiable += campaign_unidentified
+        in_window_identities |= campaign_identities
         if truncated:
             truncated_campaigns.append(campaign_id)
             result.errors.append(
@@ -238,12 +276,27 @@ def collect_instantly(
         "leads_without_timestamp_created": undated,
         "per_campaign_in_window": per_campaign,
         "timestamp_field": "lead.timestamp_created",
+        # The breakdown counts lead RECORDS per campaign; the headline counts PEOPLE.
+        # Both are reported so the headline stays explainable when they differ.
+        "lead_records_in_window": occurrences_in_window,
+        "distinct_people_in_window": len(in_window_identities),
+        "people_in_more_than_one_campaign":
+            occurrences_in_window - len(in_window_identities),
+        "leads_without_an_address": unidentifiable,
+        "identity_field": "lead.email (lowercased)",
     }
     if not per_campaign:
         return result
     result.ok = True
-    # The headline is exactly the sum of the breakdown, always.
-    result.count = sum(per_campaign.values())
+    # DISTINCT PEOPLE, not the sum of the breakdown. The per-campaign figures remain
+    # in `detail` and still add up to `lead_records_in_window`, so the difference is
+    # visible rather than silently absorbed.
+    result.count = len(in_window_identities)
+    if occurrences_in_window != len(in_window_identities):
+        result.errors.append(
+            f"{occurrences_in_window - len(in_window_identities)} person(s) appear in "
+            "more than one campaign; the headline counts each once, so it is lower "
+            "than the sum of the per-campaign breakdown")
     if failed_campaigns:
         result.errors.append(
             f"{len(failed_campaigns)} of {len(ids)} campaign(s) could not be read; the count "
