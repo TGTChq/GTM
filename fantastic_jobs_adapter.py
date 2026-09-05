@@ -77,13 +77,41 @@ def _advance_iso_second(value: str, seconds: int = 1) -> str:
     return (dt + timedelta(seconds=seconds)).isoformat()
 
 
+#: The time frames the provider documents for /v1/active-jb and /v1/active-ats.
+#: Anything else is a configuration error, not a value to guess at.
+SUPPORTED_TIME_FRAMES = ("1h", "24h", "7d", "6m")
+
+#: Days charged to a month when converting ``6m`` to hours. A calendar six months is
+#: 181-184 days; 30 UNDERSTATES it deliberately. This number only ever feeds
+#: ``_frame_horizon``, and understating the frame puts the horizon LATER, so a window
+#: is clamped slightly higher than it strictly needs to be. That concedes a little
+#: reach and can never leave a dead zone below the floor -- the failure that direction
+#: causes is silent data loss, and this one is a smaller window.
+_DAYS_PER_MONTH_FLOOR = 30
+
+
 def _parse_time_frame_hours(time_frame: str) -> float:
-    """Parse a Fantastic ``time_frame`` like ``24h`` / ``3d`` into hours."""
-    m = re.match(r"^\s*(\d+)\s*([hd])\s*$", str(time_frame or "").lower())
+    """Parse a documented Fantastic ``time_frame`` into hours.
+
+    ``1h`` / ``24h`` / ``7d`` / ``6m`` are the four the provider documents. ``6m`` is
+    a rolling SIX-MONTH window, and parsing it with an hours/days-only pattern
+    returned the 24.0 fallback -- a 6-month frame read as one day, which would drive
+    ``_frame_horizon`` to clamp every window to the last 24 hours and abandon any
+    window older than that as unreachable.
+
+    An unrecognised value still returns the 24h fallback rather than raising, because
+    this runs inside acquisition; but it can no longer arrive from configuration --
+    ``config`` validates ``FANTASTIC_JOBS_TIME_FRAME`` against
+    ``SUPPORTED_TIME_FRAMES`` at import, so a typo fails the deploy instead of
+    quietly shrinking the window a run can see."""
+    m = re.match(r"^\s*(\d+)\s*([hdm])\s*$", str(time_frame or "").lower())
     if not m:
         return 24.0
     n = int(m.group(1))
-    return n * 24.0 if m.group(2) == "d" else float(n)
+    unit = m.group(2)
+    if unit == "m":
+        return n * _DAYS_PER_MONTH_FLOOR * 24.0
+    return n * 24.0 if unit == "d" else float(n)
 
 
 def _cursor_is_stale(cursor_date_iso: str, time_frame: str) -> bool:
@@ -1097,13 +1125,26 @@ def _quota_would_breach(quota: _QuotaState, want: int) -> str:
     return ""
 
 
-def _observe_order(seg: Dict[str, Any], rows: List[Any]) -> None:
-    """Watch the direction the feed returns ``date_created`` in, across a whole pass.
+def _observe_order(seg: Dict[str, Any], rows: List[Any],
+                   field: str = "date_posted") -> None:
+    """Watch the direction the feed returns ``field`` in, across a whole pass.
 
-    Sets ``order_observed`` to ``desc``, ``asc``, ``constant`` or ``unordered`` and
-    keeps the first and last value seen. Rows without a parsable date are skipped
-    rather than treated as a break in the sequence."""
-    dates = [str(r.get("date_created") or "") for r in rows if isinstance(r, dict)]
+    The provider documents the default order as ``date_posted`` DESCENDING (cursor
+    mode instead orders by ``id`` ascending, and we do not use cursor mode). This
+    watched ``date_created`` -- the field our WINDOW is bounded on, and not the field
+    the rows are sorted by -- so its reading said nothing about the page order.
+
+    That distinction is the hazard, not a detail. Pages are ordered by
+    ``date_posted``; the frame floor rises on ``date_created``. The two correlate but
+    are not the same instant, so rows dropping out below the floor are scattered
+    through the page order rather than confined to either end of it. No observed
+    direction can make a persisted offset safe across such a change -- which is why
+    the coverage guard keys on whether the floor is INSIDE the window, and this
+    stays an observation.
+
+    Sets ``order_observed`` to ``desc``, ``asc``, ``constant`` or ``unordered``.
+    Rows without a parsable date are skipped rather than treated as a break."""
+    dates = [str(r.get(field) or "") for r in rows if isinstance(r, dict)]
     dates = [d for d in dates if d]
     if not dates:
         return
@@ -1239,7 +1280,8 @@ def _fetch_segment(endpoint: str, base_params: Dict[str, Any], source_label: str
         # We already receive every row's date_created, so the direction can simply be
         # watched. Recorded, never acted on: this establishes the ordering from real
         # traffic instead of a probe assuming it.
-        _observe_order(seg, rows)
+        _observe_order(seg, rows)                       # documented sort: date_posted
+        _observe_order(seg.setdefault("window_field_order", {}), rows, "date_created")
         new_ids = 0
         for record in rows:
             seg["returned"] += 1
@@ -1938,41 +1980,43 @@ class DateCreatedWatermarkEngine:
         slipped = float(self.metrics["watermark"].get("frame_slippage_minutes") or 0.0)
         stop = str(seg_now.get("stop_reason") or "")
         exposed = bool(base > 0 and slipped > 0 and stop in self._DRAINED_STOPS)
-        # WHICH WAY THE FEED IS ORDERED decides whether exposure is actual harm, and
-        # it is observed rather than assumed (``_observe_order``). A newest-first
-        # feed loses the rows that age out from its TAIL -- inventory this offset had
-        # not reached -- so the consumed prefix still means what it meant and the
-        # drain is honest. Oldest-first, or no stable order at all, loses them from
-        # the HEAD and the offset lands past rows nobody inspected.
+        # IS THE FLOOR INSIDE THE WINDOW? That, not an observed direction, decides
+        # whether rows are actually leaving the set this offset indexes into.
         #
-        # With no observation yet we do NOT re-pass on suspicion. A re-pass costs a
-        # full window of billed rows, and buying that to defend against a hazard that
-        # has not been shown to exist is the same kind of unevidenced move as
-        # assuming it away. The doubt is recorded instead, and the zero-credit
-        # closed-window recheck is what would catch a row we lost.
-        # The order is the FEED's property, not this pass's, and a pass that returned
-        # nothing observed none -- which is exactly the pass where the question is
-        # being asked. So it is remembered across runs, and a definite reading is
-        # never overwritten by a pass too small to see a direction ("constant").
+        # The provider sorts pages by `date_posted` DESC (documented), while the
+        # frame floor rises on `date_created`. Those correlate but are not the same
+        # instant, so rows dropping below the floor leave from scattered positions in
+        # the page order -- not from one end. No observed sort direction can make a
+        # persisted offset safe across that, which is why the earlier gate on
+        # `order_observed` was answering a question the ordering cannot settle.
+        #
+        # What CAN be settled is whether the floor cuts the window at all. While
+        # `lower >= horizon` the whole window sits inside the frame and the floor
+        # removes nothing, so the offset still addresses what it addressed -- and in
+        # steady state that is every run, because a one-day window opened from
+        # yesterday's watermark sits six days above a 7d floor. The guard fires only
+        # for a window the floor has actually reached, which is the backlog case.
+        horizon = str(self.metrics["watermark"].get("frame_horizon") or "")
+        # Read the CLAMP, not the bounds. `open()` raises a reused window's lower
+        # bound to the horizon when the floor has reached into it, so by the time we
+        # are here `lower == horizon` and comparing them can never be true again --
+        # the evidence that the floor cut in is that the clamp fired.
+        floor_inside_window = bool(self.metrics["watermark"].get("lower_clamped_to_frame"))
         order = str((seg_now.get("order_probe") or {}).get("order_observed") or "")
-        remembered = self.state.get("feed_order_observed")
-        remembered = dict(remembered) if isinstance(remembered, dict) else {}
-        if order and order != "constant":
-            remembered[str(label)] = order
-            self.state["feed_order_observed"] = remembered
-            self._save()
-        elif not order or order == "constant":
-            order = remembered.get(str(label), order)
-        adverse = order in ("asc", "unordered")
-        already_rewound = self.coverage_rewinds().get(str(label), 0) > 0
-        if exposed and not adverse:
+        adverse = floor_inside_window
+        if exposed:
             seg_now["coverage_uncertain"] = {
                 "resumed_from": base, "frame_slippage_minutes": slipped,
-                "order_observed": order or "not_yet_observed",
-                "drained_stop_accepted": stop,
-                "resolution": ("ordering_not_adverse" if order
-                               else "ordering_unobserved_no_repass_bought"),
-                "action": "window allowed to close; recheck the closed-window count"}
+                "window_lower": self.lower, "frame_horizon": horizon,
+                "floor_inside_window": floor_inside_window,
+                "page_order_observed": order or "not_yet_observed",
+                "drained_stop": stop,
+            }
+        already_rewound = self.coverage_rewinds().get(str(label), 0) > 0
+        if exposed and not adverse:
+            seg_now["coverage_uncertain"]["resolution"] = "floor_outside_window"
+            seg_now["coverage_uncertain"]["action"] = (
+                "window allowed to close; the frame floor never reached into it")
         uncertain = exposed and adverse
         if exposed:
             skipped = self.metrics["watermark"].setdefault("coverage", {}).setdefault(
@@ -1981,11 +2025,9 @@ class DateCreatedWatermarkEngine:
                 skipped.append(str(label))
         if uncertain and not already_rewound:
             self.rewind_window_offset(label)
-            seg_now["coverage_uncertain"] = {
-                "resumed_from": base, "frame_slippage_minutes": slipped,
-                "order_observed": order,
-                "drained_stop_refused": stop, "resolution": "rewound",
-                "action": "offset rewound to 0; window held open for a full re-pass"}
+            seg_now["coverage_uncertain"]["resolution"] = "rewound"
+            seg_now["coverage_uncertain"]["action"] = (
+                "offset rewound to 0; window held open for a full re-pass")
         else:
             if uncertain:
                 # Already re-passed once and still cannot be certain. Accept the
@@ -1993,11 +2035,9 @@ class DateCreatedWatermarkEngine:
                 # SAY SO: the closed-window audit re-counts each window at zero Jobs
                 # credits, and a count above what we acquired is how a skipped row
                 # gets found after the fact.
-                seg_now["coverage_uncertain"] = {
-                    "resumed_from": base, "frame_slippage_minutes": slipped,
-                    "order_observed": order,
-                    "drained_stop_accepted": stop, "resolution": "accepted_after_rewind",
-                    "action": "window allowed to close; recheck the closed-window count"}
+                seg_now["coverage_uncertain"]["resolution"] = "accepted_after_rewind"
+                seg_now["coverage_uncertain"]["action"] = (
+                    "window allowed to close; recheck the closed-window count")
             self.mark_source_drained(label)
         # CURSOR OBSERVABILITY. Without this the only evidence that the persisted
         # cursor was honoured is a diff of two runs' saved state, which nobody has

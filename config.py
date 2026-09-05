@@ -914,6 +914,11 @@ FANTASTIC_MAX_CONSECUTIVE_DUPLICATE_PAGES = _env_int(
 #: shown to be approximate a small margin is the right response. Raising it should
 #: cite the measurement that justified it. ``frame_floor`` and ``frame_horizon`` are
 #: reported separately so the provider's floor and our margin never get confused.
+#: The four frames the provider documents for active-jb / active-ats. Kept here so
+#: configuration is validated against them at import; the adapter re-exports the same
+#: tuple as SUPPORTED_TIME_FRAMES.
+_SUPPORTED_TIME_FRAMES = ("1h", "24h", "7d", "6m")
+
 FANTASTIC_TIME_FRAME_MARGIN_MINUTES = _env_int("FANTASTIC_TIME_FRAME_MARGIN_MINUTES", 0)
 
 FANTASTIC_DATE_CREATED_LAG_MINUTES = _env_int("FANTASTIC_DATE_CREATED_LAG_MINUTES", 180)
@@ -1204,6 +1209,17 @@ def validate_fantastic_jobs_config() -> None:
             "FANTASTIC_JOBS_ATS_LIMIT>0 but FANTASTIC_ATS_SOURCE_ENABLED=0: the active-ats "
             "segment is DISABLED (set FANTASTIC_ATS_SOURCE_ENABLED=1 to acquire from it).",
             RuntimeWarning, stacklevel=2)
+    # ``time_frame`` is sent on EVERY request, watermark engine or not, so this is
+    # checked unconditionally. The provider documents exactly four frames; an
+    # unrecognised value reaches `_parse_time_frame_hours`, which falls back to 24
+    # hours -- so a typo would silently tell the frame horizon the feed only reaches
+    # back one day, clamping every window to the last 24 hours and abandoning
+    # anything older as unreachable. Fail the deploy instead of shrinking the window.
+    if FANTASTIC_JOBS_TIME_FRAME not in _SUPPORTED_TIME_FRAMES:
+        raise ValueError(
+            "FANTASTIC_JOBS_TIME_FRAME must be one of "
+            + ", ".join(_SUPPORTED_TIME_FRAMES)
+            + f" (got {FANTASTIC_JOBS_TIME_FRAME!r})")
     # Watermark lag/overlap must be sane before the engine may ever run.
     if FANTASTIC_DATE_CREATED_WATERMARK_ENABLED:
         if FANTASTIC_DATE_CREATED_LAG_MINUTES < 60:
