@@ -792,7 +792,7 @@ def _print_run_summary(ctx, mode, result, state) -> None:
     if skips:
         # Mutually exclusive: submitted - created - failed == sum of these.
         for k in ("skipped_existing", "updated_existing", "company_function_suppressed",
-                  "account_suppressed", "no_contact", "other"):
+                  "account_suppressed", "no_contact", "send_safe_withheld", "other"):
             line(f"  skip.{k}", skips.get(k))
         line("  person_employer_duplicate (withheld pre-submit)",
              (result.get("delivery") or {}).get("person_employer_duplicate"))

@@ -48,11 +48,26 @@ performs a readiness check instead of silently running acquisition.
 `railway redeploy` re-deploys the OLD snapshot and will not pick up a settings
 change. Use the dashboard, or a `serviceInstanceDeployV2` call.
 
-**GTM** (as deployed 2026-09-04):
+**GTM** (as applied 2026-09-05 — acquisition first, then the anchored report):
 
 ```sh
-sh -c 'python -u run_weekly_report.py --artifact-root /app/data/state/orchestrator_v2 --if-due friday --once-per-window --instantly --slack --max-seconds 480 || true; exec python -u run_orchestrator.py --mode live_acquisition_and_enrichment --lanes fantastic --target 300 --airtable-write --global-budget 1500 --artifact-root /app/data/state/orchestrator_v2'
+sh -c 'python -u run_orchestrator.py --mode live_acquisition_and_enrichment --lanes fantastic --target 300 --airtable-write --global-budget 1500 --artifact-root /app/data/state/orchestrator_v2; rc=$?; python -u run_weekly_report.py --artifact-root /app/data/state/orchestrator_v2 --if-due friday --once-per-window --anchored --require-completed-run --instantly --slack --max-seconds 480 || true; exit $rc'
 ```
+
+The order is not cosmetic. `--anchored` ends the reporting window at the
+generation instant, so a report that runs FIRST can never contain the run in its
+own container. `exec` had to go for the same reason — something now runs after
+acquisition — so `rc=$?` … `exit $rc` preserves the pipeline's exit code as the
+container's, verified across all nine exit-code combinations.
+
+`--if-due friday` is evaluated in **UTC**, which is the zone Railway cron
+schedules in. It defaulted to the reporting timezone (Pacific), and when the cron
+moved to `0 3 * * *` the gate stopped matching entirely: 03:00 UTC Friday is
+Thursday 20:00 Pacific. The job printed "not due today" and exited 0, every day.
+
+The whole string is pinned in `tests/test_gtm_start_command_contract.py` and
+driven at the real firing instants, including the 3.3 h and 6.7 h acquisition
+cases.
 
 **GTM Approved Sync**: `python -u run_approved.py`
 
@@ -103,13 +118,80 @@ The two services do **not** share an environment, and reading one and calling it
 
 | variable | GTM | GTM Approved Sync |
 |---|---|---|
-| `OUTBOUND_WAVE1_*` | not set | set (`ENABLED=1`, 50% split, 10 challenger campaigns) |
+| `OUTBOUND_WAVE1_ENABLED` | **not set** (delivery cannot fire here) | `1` |
+| `OUTBOUND_WAVE1_B_SPLIT_PCT` / `_SALT` / `_MIN_RECORD_CREATED_AT` | not set | set |
+| `OUTBOUND_WAVE1_CHALLENGER_CAMPAIGNS_JSON` | set 2026-09-05, **read only by the weekly report** | set, read by the enrollment overlay |
 | `SLACK_WEEKLY_REPORT_WEBHOOK_URL` | set | not set (correct) |
 | `PIPELINE_ARTIFACT_ROOT` | set | not set (no volume) |
 | `VALIDATION_VERSION` | set | not set |
 
 `TZ=America/Merida` on both. It affects log timestamps, not the reporting window
 (Pacific) or the `--if-due` gate (UTC).
+
+The Wave 1 campaign map is on GTM **only** so `configured_campaign_ids()` counts
+Challenger-arm deliveries in `sent to Instantly` — without it that number
+under-reports by the challenger share (measured 2026-09-05: 361 challenger vs 408
+control of 770 delivered). It cannot enable delivery there:
+`wave1_enrollment_overlay` returns `("", {})` unless `OUTBOUND_WAVE1_ENABLED` is
+true, and GTM never calls `airtable_record_to_lead` at all — `run_approved.py` is
+the only production caller, and it runs on the other service.
+
+---
+
+## 2b. What GTM actually does to an Airtable row
+
+Two policies decide this, both ON in production, and both have been documented
+wrongly before. Neither is "everything uncertain lands in Pending for a human".
+
+### `AIRTABLE_WRITE_SEND_SAFE_ONLY=1` — a non-send-safe row is NOT WRITTEN
+
+`airtable_client.push_leads` filters the create list through `send_safe_facts`
+before writing. A candidate that fails is **withheld entirely** — not written as
+`Pending`, not written in any status. It stays in the run's enrichment artifacts
+and is reported as `skip.send_safe_withheld`.
+
+This was the largest single category on 2026-09-04: **1,681 submitted, 781
+created**. The other 900 were withheld here.
+
+### `FANTASTIC_AUTO_APPROVE_SEND_SAFE` (default `True`, unset in Railway) — a send-safe Fantastic row is created `Approved`
+
+`airtable_client._job_to_fields` sets `Status = Pending`, then promotes to
+`Approved` when all three hold:
+
+1. `FANTASTIC_AUTO_APPROVE_SEND_SAFE` is on;
+2. `_is_fantastic_job(job)` — a genuine Fantastic Direct API record, identified by
+   the `_fantastic_internal_id` the adapter stamps. Never an ATS/JSearch/free-feed
+   row;
+3. `send_safe_facts(cleaned)` passes.
+
+**`send_safe_facts` is disposition-label-INDEPENDENT.** Its actionable set is
+`{FINAL_PASS, NEEDS_CHECK, UNVERIFIED}`, so a `NEEDS_CHECK` or `UNVERIFIED` record
+whose stored facts are all safe **is** auto-approved. FINAL_PASS alone is not the
+criterion and never was. What it actually requires: an actionable Final Decision,
+the current validation version, a present and matching fingerprint, a non-empty
+email, `Apollo Email Status = verified`, `Email Validation = PASS`,
+`Contact Alignment = PASS`, and no `Outbound Hold`.
+
+`Status` is excluded from the signed fingerprint, so promoting it falsifies
+nothing — the original decision, reason and evidence bundle are preserved intact.
+
+### The two together
+
+With both on, essentially every row GTM writes is created `Approved`, because the
+write gate and the approval gate are the same predicate. That is the intended
+design, not a bypass: Approved Sync independently re-runs `send_safe_facts` before
+any enrollment, so a row whose facts have since changed is refused at delivery.
+
+### Do not misread the preflight line
+
+```
+delivery   airtable=review-staging(Pending) auto_approve=OFF instantly=OFF
+```
+
+`auto_approve` there is `RealDelivery.auto_approve` — the *delivery mode* that
+would submit only FINAL_PASS rows and enroll them directly. It is correctly OFF.
+It is **not** `FANTASTIC_AUTO_APPROVE_SEND_SAFE`, which is ON and operates inside
+`_job_to_fields`. Two different switches, similar names, opposite states.
 
 ---
 
@@ -217,5 +299,39 @@ as its own piece of work.
 | what does the stakeholder see? | the `.slack.txt` beside it — same report object, shorter |
 | was it delivered? | `weekly_report_<ISO week>.slack_sent.json` — the only delivery record |
 | how many credits did a source cost? | `orchestrator_result.json:acquisition.cumulative.per_source` |
+| why were rows submitted but not created? | `delivery.json:skip_breakdown` — `send_safe_withheld` is usually the largest |
+| what does each Brett number mean? | [METRIC_CONTRACT.md](METRIC_CONTRACT.md) |
 | what did a source yield per credit? | `orchestrator_result.json:yield_ledger.by_source` |
 | where is the cursor? | `orchestrator_result.json:lanes.fantastic.attribution.watermark` |
+
+---
+
+## 9. Evidence-backed limitations, as of 2026-09-05
+
+Stated because a runbook that only lists what works is not a runbook.
+
+* **The persistent window cursor (#68) has not been observed resuming across two
+  scheduled runs.** It was deployed at 18:54 on 2026-09-04; the last cron before
+  that was 13:00, and the cron then moved to `0 3 * * *`. The acceptance
+  comparison — `watermark.offsets_at_open` on run N equals `offsets_at_close` on
+  run N-1, for the same window — needs two consecutive runs on a build carrying
+  the cursor. An initial zero offset after a backward-compatible migration proves
+  nothing, and a legitimately new window resets offsets by design.
+* **The weekly report has not delivered under the new Start Command.** The
+  configuration is applied and its argument path is tested at the real firing
+  instants, but `--if-due friday` means the first live delivery is the Friday
+  cron. A Saturday or Sunday firing correctly writes nothing.
+* **`sent to Instantly` measures enrollment, not sending.** A lead that entered a
+  campaign has not necessarily been emailed. `outbound_wave1/outcomes.py` reads
+  the `delivered` fact separately.
+* **Apollo shared credits are an account limit, not a software defect.** The
+  2026-09-04 run stopped Apollo enrichment at `credit_exhausted` after 2,170
+  companies and correctly opened the circuit, preserving completed work. No code
+  change moves that ceiling.
+* **`COMPANY_OPPORTUNITY_COLLAPSE_ENABLED` is off** and stays off: there is no
+  measured reason to enable it, and a flag flipped without one is a change nobody
+  can evaluate.
+* **The #71 company-display backfill is not applied.** 14 rows are candidates for
+  a hold repair; 10 of them additionally carry a verified email and would become
+  enrollable. Those are two different counts of two different things, and the
+  migration needs its own action-time authorization.

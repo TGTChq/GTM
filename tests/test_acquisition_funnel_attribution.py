@@ -404,3 +404,41 @@ class SinglePassPathUsesBillingAccurateCountersTests(unittest.TestCase):
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
+
+
+class SendSafeWithholdingIsNamedTests(_Harness):
+    """The 2026-09-04 gap, identified.
+
+    ``AIRTABLE_WRITE_SEND_SAFE_ONLY=1`` is set in production, so a candidate that
+    fails ``send_safe_facts`` is NOT WRITTEN AT ALL -- not written as Pending, not
+    written in any status. On 2026-09-04 that was the largest single category:
+    1,681 submitted, 781 created. It reached the summary as an unnamed residual,
+    which reads as "900 rows lost" rather than "900 rows deliberately withheld
+    because their stored facts are not send-safe".
+    """
+
+    def test_withheld_rows_are_their_own_counter_not_an_unnamed_residual(self):
+        class _WithholdingDelivery:
+            def deliver(self, leads, **kwargs):
+                n = len(leads)
+                return RealDeliveryReport(
+                    mode="review_staging", entered=n, reviewable_submitted=n,
+                    created=1 if n else 0,
+                    send_safe_withheld=n - 1 if n else 0,
+                    detail={"withheld_before_submit": 0})
+
+        slices = [[_job(f"a{i}", "ats") for i in range(5)],
+                  [_job(f"b{i}", "ats") for i in range(3)]]
+        result, entry = self._run(slices, delivery=_WithholdingDelivery())
+        deliv = result["delivery"]
+
+        self.assertEqual(deliv["reviewable_submitted"], 8)
+        self.assertEqual(deliv["created"], 2)
+        self.assertEqual(deliv["skip_breakdown"]["send_safe_withheld"], 6)
+        self.assertEqual(deliv["skip_breakdown"]["other"], 0,
+                         "the residual is now empty because the reason is named")
+        self.assertEqual(
+            deliv["reviewable_submitted"] - deliv["created"] - deliv["failed"],
+            sum(deliv["skip_breakdown"].values()))
+        self.assertTrue(deliv["reviewable_reconciles"])
+        self.assertEqual(entry["delivery_skip_breakdown"]["send_safe_withheld"], 6)

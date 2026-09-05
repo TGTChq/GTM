@@ -1030,6 +1030,7 @@ class Orchestrator:
                            "skipped_existing", "skipped_already_delivered",
                            "updated_existing", "company_function_suppressed",
                            "account_suppressed", "no_contact",
+                           "send_safe_withheld",
                            "person_employer_duplicate", "other_unreconciled",
                            "failed", "enrolled", "instantly_contacts",
                            "final_pass", "needs_check", "other_reviewable"):
