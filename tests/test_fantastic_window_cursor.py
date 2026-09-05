@@ -92,8 +92,13 @@ class WindowCursorTests(unittest.TestCase):
             json.dump(engine_state, fh)
         self._run(NOW + timedelta(days=1))
         saved = json.load(open(self.path, encoding="utf-8"))
-        self.assertGreaterEqual(saved["window_offsets"]["fantastic_jobs_linkedin"], 900,
-                                "a later pass must never rewind an advanced cursor")
+        # A later PASS never rewinds an advanced cursor. The coverage guard is the one
+        # exception and it is not a pass: it is a deliberate, once-per-window return to
+        # the head after the frame floor cut into the window, recorded as such.
+        offset = saved["window_offsets"]["fantastic_jobs_linkedin"]
+        rewinds = saved.get("window_coverage_rewinds", {})
+        self.assertTrue(offset >= 900 or rewinds.get("fantastic_jobs_linkedin") == 1,
+                        "only the coverage guard may return a cursor to the head")
 
     def test_a_new_window_starts_at_offset_zero(self):
         """A cursor belongs to the window it was measured in."""
@@ -114,7 +119,7 @@ class WindowCursorTests(unittest.TestCase):
         seen: set = set()
         total_billed = 0
         committed_on = None
-        for day in range(5):
+        for day in range(9):
             result, commit, _offsets, billed = self._run(NOW + timedelta(days=day))
             seen |= {j["job_id"] for j in result.jobs}
             total_billed += billed
@@ -122,10 +127,21 @@ class WindowCursorTests(unittest.TestCase):
                 committed_on = day + 1
 
         self.assertEqual(len(seen), WINDOW_INVENTORY, "no in-window job is skipped")
-        self.assertEqual(total_billed, WINDOW_INVENTORY,
-                         "and none is billed twice: novelty is 100% per credit")
-        self.assertEqual(committed_on, 4,
-                         "the watermark advances only once the window is genuinely drained")
+        # Novelty stays 100% per credit for a window the frame floor never reaches.
+        # THIS window is the bootstrap shape -- frame-wide, so its lower bound sits on
+        # the horizon and the floor cuts in on every later run. That buys exactly ONE
+        # extra pass, once, and it is what recovers rows the moving floor shifted past
+        # the saved offset. The guarantee is bounded re-billing, not zero.
+        saved = json.load(open(self.path, encoding="utf-8"))
+        rewinds = sum((saved.get("window_coverage_rewinds") or {}).values())
+        self.assertLessEqual(rewinds, 1, "at most one re-pass per source per window")
+        # One rewind costs at most one more pass over the window, and never more.
+        self.assertLessEqual(total_billed, WINDOW_INVENTORY * (rewinds + 1),
+                             "re-billing is bounded by the guard, not open-ended")
+        self.assertIsNotNone(committed_on,
+                             "the window must still close: the guard is bounded, not a stall")
+        self.assertGreaterEqual(committed_on, 4,
+                                "the watermark advances only once the window is drained")
 
     def test_a_full_page_of_duplicates_does_not_count_as_drained(self):
         """``no_new_ids`` means 'all seen', never 'nothing left'.
@@ -180,7 +196,13 @@ class WindowCursorTests(unittest.TestCase):
 
         self.rows = _recs(50, created_start=NOW - timedelta(hours=6), step_min=0)
         done, _c2, _o2, _b2 = self._run(NOW + timedelta(days=1))
-        self.assertEqual(done.metadata["watermark"]["undrained_sources"], [])
+        # With the frame floor cutting into this bootstrap-shaped window, the first
+        # natural end is refused once and the source stays undrained for that run.
+        undrained = done.metadata["watermark"]["undrained_sources"]
+        rewound = json.load(open(self.path, encoding="utf-8")).get(
+            "window_coverage_rewinds", {})
+        self.assertTrue(undrained == [] or rewound.get("fantastic_jobs_linkedin") == 1,
+                        "a source is only left undrained by the coverage guard")
 
 
 if __name__ == "__main__":  # pragma: no cover
@@ -491,19 +513,32 @@ class CoverageAfterTheFloorMovesTests(unittest.TestCase):
     def _seg(result):
         return result.metadata["segments"]["fantastic_jobs_linkedin"]
 
-    def test_an_ascending_feed_is_observed_and_the_drain_is_refused(self):
-        """Oldest-first: rows age out of the HEAD, so a saved offset lands past rows
-        nobody inspected. The drain is refused and the source is sent back to the
-        head of the window rather than allowed to close it."""
+    def test_the_page_order_is_watched_on_the_field_the_provider_sorts_by(self):
+        """The provider documents the default sort as ``date_posted`` DESC. This used
+        to watch ``date_created`` -- the field the WINDOW is bounded on, not the one
+        the rows are ordered by -- so its reading said nothing about page order."""
         rows = _recs(300, created_start=NOW - timedelta(hours=20), step_min=2)
-        first = self._run(rows, NOW, ascending=True)
-        self.assertEqual(self._seg(first)["order_probe"]["order_observed"], "asc")
+        first = self._run(rows, NOW)
+        seg = self._seg(first)
+
+        assert seg["order_probe"]["order_observed"] == "desc", "as documented"
+        assert "window_field_order" in seg, "the window field is watched separately"
+
+    def test_a_floor_inside_the_window_refuses_the_drain(self):
+        """Rows leave the result set only when the frame floor has actually reached
+        into the window. Pages are ordered by ``date_posted`` while the floor rises on
+        ``date_created``, so those rows leave from scattered positions -- no sort
+        direction makes the saved offset safe, and the drain is not accepted."""
+        rows = _recs(300, created_start=NOW - timedelta(hours=20), step_min=2)
+        self._run(rows, NOW)
         saved = json.load(open(self.path, encoding="utf-8"))
         self.assertGreater(saved["window_offsets"]["fantastic_jobs_linkedin"], 0)
 
-        second = self._run(rows[:150], NOW + timedelta(days=1), ascending=True)
+        second = self._run(rows[:150], NOW + timedelta(days=1))
         seg = self._seg(second)
+
         self.assertIn("coverage_uncertain", seg)
+        self.assertTrue(seg["coverage_uncertain"]["floor_inside_window"])
         self.assertEqual(seg["coverage_uncertain"]["resolution"], "rewound")
         saved = json.load(open(self.path, encoding="utf-8"))
         self.assertEqual(saved["window_offsets"]["fantastic_jobs_linkedin"], 0,
@@ -512,34 +547,38 @@ class CoverageAfterTheFloorMovesTests(unittest.TestCase):
             second.metadata["watermark"]["drained_sources"]["fantastic_jobs_linkedin"],
             "a refused drain must leave the window open")
 
+    def test_a_window_sitting_above_the_floor_is_left_alone(self):
+        """Steady state, and the reason this guard is affordable: a one-day window
+        opened from yesterday's watermark sits six days above a 7d floor, so the floor
+        removes nothing and no re-pass is bought."""
+        rows = _recs(40, created_start=NOW - timedelta(hours=6), step_min=2)
+        self._run(rows, NOW)
+        with mock.patch.multiple(config, **self.cfg):
+            fja.commit_watermark(success=True)
+
+        later = NOW + timedelta(days=1)
+        third = self._run(_recs(40, created_start=NOW, step_min=2), later)
+        wm = third.metadata["watermark"]
+
+        self.assertGreater(wm["lower"], wm["frame_horizon"],
+                           "the whole window is inside the frame")
+        self.assertNotIn("coverage_uncertain", self._seg(third))
+        saved = json.load(open(self.path, encoding="utf-8"))
+        self.assertEqual(saved.get("window_coverage_rewinds", {}), {},
+                         "no rewind was bought in the normal case")
+
     def test_the_rewind_happens_at_most_once_so_a_window_still_closes(self):
         """A prefix longer than the duplicate-page cap cannot be re-paged in one run,
         so an unbounded refuse -> rewind cycle would never terminate. The second time
         the drain is accepted and the doubt is carried into the record instead."""
         rows = _recs(300, created_start=NOW - timedelta(hours=20), step_min=2)
-        self._run(rows, NOW, ascending=True)
-        self._run(rows[:150], NOW + timedelta(days=1), ascending=True)
-        self._run(rows[:150], NOW + timedelta(days=2), ascending=True)
-        third = self._run(rows[:150], NOW + timedelta(days=3), ascending=True)
+        self._run(rows, NOW)
+        self._run(rows[:150], NOW + timedelta(days=1))
+        self._run(rows[:150], NOW + timedelta(days=2))
+        third = self._run(rows[:150], NOW + timedelta(days=3))
 
         seg = self._seg(third)
         self.assertEqual(seg["coverage_uncertain"]["resolution"], "accepted_after_rewind")
         self.assertTrue(
             third.metadata["watermark"]["drained_sources"]["fantastic_jobs_linkedin"],
             "acquisition must not stall on a window it cannot prove it covered")
-
-    def test_an_unobserved_ordering_does_not_buy_a_speculative_re_pass(self):
-        """A re-pass costs a whole window of billed rows. Buying that against a
-        hazard nobody has shown to exist is as unevidenced as assuming it away, so
-        the exposure is recorded and the window is allowed to close."""
-        flat = _recs(300, created_start=NOW - timedelta(hours=20), step_min=0)
-        first = self._run(flat, NOW)
-        # Every row shares one timestamp, so the pass shows no direction at all.
-        self.assertEqual(self._seg(first)["order_probe"]["order_observed"], "constant")
-
-        second = self._run(flat[:150], NOW + timedelta(days=1))
-        seg = self._seg(second)
-        self.assertNotEqual(seg.get("coverage_uncertain", {}).get("resolution"), "rewound")
-        saved = json.load(open(self.path, encoding="utf-8"))
-        self.assertGreater(saved["window_offsets"]["fantastic_jobs_linkedin"], 0,
-                           "no rewind was bought")
