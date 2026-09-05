@@ -699,9 +699,61 @@ def _print_run_summary(ctx, mode, result, state) -> None:
         line("jobs_quota_consumed", cum.get("jobs_quota_consumed"))
         line("physical_requests", cum.get("physical_requests"))
         line("cross_query_duplicates", cum.get("cross_query_duplicates"))
+        line("cross_source_duplicates", cum.get("cross_source_duplicates"))
+        # The three dedupe exits, stated separately. They partition every posting
+        # the lanes kept, so the identity below is checkable by eye:
+        #   jobs_unique_kept = net_new + previously_seen + in_run_dup + no_identity
+        line("net_new_jobs_captured", cum.get("net_new_jobs_captured"))
+        line("historical_previously_seen", cum.get("historical_previously_seen_duplicates"))
+        line("canonical_duplicates_in_run", cum.get("canonical_duplicates_in_run"))
+        line("postings_missing_identity", cum.get("postings_missing_identity"))
+        line("dedupe_reconciles", cum.get("dedupe_reconciles"))
         line("jobs_quota_remaining", cum.get("last_jobs_quota_remaining"))
         for src, s in sorted((cum.get("per_source") or {}).items()):
-            line(f"  {src}", f"jobs={s.get('jobs')} billed={s.get('returned_billed')} requests={s.get('requests')}")
+            novelty = s.get("novelty_pct")
+            line(f"  {src}",
+                 f"billed={s.get('returned_billed')} kept={s.get('jobs')} "
+                 f"net_new={s.get('net_new')} seen={s.get('historical_previously_seen')} "
+                 f"dup_in_run={s.get('canonical_duplicates_in_run')} "
+                 f"x_source={s.get('cross_source_duplicates')} "
+                 f"schema_rej={s.get('schema_rejected')} "
+                 f"src_filtered={s.get('source_filtered_out')} "
+                 f"requests={s.get('requests')} "
+                 f"novelty={novelty if novelty is not None else 'n/a'}% "
+                 f"offset {s.get('offset_from')}->{s.get('offset_to')} "
+                 f"drained={s.get('drained')} stop={s.get('stop_reason') or '-'}")
+        # WINDOW CURSOR: the acceptance evidence for the persisted per-source
+        # offset. "Resumed from where the last run stopped" is only provable by
+        # printing the offset read at open next to the one written at close.
+        wm = ((result.get("lanes") or {}).get("fantastic") or {}).get(
+            "attribution", {}).get("watermark") or {}
+        if wm.get("enabled"):
+            print("---- Acquisition window (canonical date_created cursor) ----")
+            line("window_lower", wm.get("lower"))
+            line("window_upper", wm.get("upper"))
+            line("window_reused", wm.get("window_reused"))
+            line("previous_watermark", wm.get("previous_watermark"))
+            line("offsets_at_open", wm.get("offsets_at_open"))
+            line("offsets_at_close", wm.get("offsets_at_close"))
+            line("drained_at_open", wm.get("drained_at_open"))
+            line("drained_sources", wm.get("drained_sources"))
+            line("undrained_sources", wm.get("undrained_sources"))
+            line("window_drained", wm.get("drained"))
+            line("watermark_committed", (cum.get("watermark_commit") or {}).get("committed"))
+        # PER-SOURCE ECONOMICS: net-new send-safe Airtable rows per 1,000 credits.
+        by_source = ((result.get("yield_ledger") or {}).get("by_source") or {})
+        if by_source:
+            print("---- Yield per source (per 1,000 Fantastic credits) ----")
+            for src, g in sorted(by_source.items()):
+                line(f"  {src}",
+                     f"credits={g.get('credits')} net_new={g.get('net_new')} "
+                     f"icp_pass={g.get('icp_pass')} hm_found={g.get('hm_found')} "
+                     f"send_safe={g.get('send_safe')} "
+                     f"airtable={g.get('airtable_created')} "
+                     f"net_new_send_safe={g.get('net_new_send_safe')} "
+                     f"| net_new/1k={g.get('net_new_per_1k_credits')} "
+                     f"airtable/1k={g.get('airtable_created_per_1k_credits')} "
+                     f"nnss/1k={g.get('net_new_send_safe_per_1k_credits')}")
         line("final_stop_reason", acq.get("final_stop_reason"))
         govd = (result.get("governor") or {}).get("decision") or {}
         if govd:
@@ -739,9 +791,19 @@ def _print_run_summary(ctx, mode, result, state) -> None:
     line("airtable_failed", at_failed)
     if skips:
         # Mutually exclusive: submitted - created - failed == sum of these.
-        for k in ("updated_existing", "company_function_suppressed", "account_suppressed",
-                  "no_contact", "person_employer_duplicate", "other"):
+        for k in ("skipped_existing", "updated_existing", "company_function_suppressed",
+                  "account_suppressed", "no_contact", "other"):
             line(f"  skip.{k}", skips.get(k))
+        line("  person_employer_duplicate (withheld pre-submit)",
+             (result.get("delivery") or {}).get("person_employer_duplicate"))
+        # State it rather than leaving the reader to add up the columns: an
+        # unexplained gap between submitted and created is the thing this line
+        # exists to make impossible to miss.
+        _unexplained = (int(at_submitted or 0) - int(at_created or 0) - int(at_failed or 0)
+                        - sum(int(v or 0) for v in skips.values()))
+        line("  skip.UNEXPLAINED", _unexplained)
+        line("  reviewable_reconciles",
+             (result.get("delivery") or {}).get("reviewable_reconciles"))
     ats = (result.get("lanes") or {}).get("ats") or {}
     if ats:
         attr = ats.get("attribution") or {}
