@@ -461,17 +461,24 @@ _BACKFILL_FIELDS = (
     # remains, and nothing left on disk can contradict it.
     #
     # ``stages[acquisition_dedup].passed`` is one PASSED per posting that cleared
-    # both in-run dedupe and the cross-run seen store, declared "posting", written
-    # by the same ``_dedup`` call that increments ``net_new_jobs_captured`` today.
-    # Verified present on the build that ran 20260904T130130Z-13b44a0c (8291a09).
+    # both in-run dedupe and the cross-run seen store, written by the same ``_dedup``
+    # call that increments ``net_new_jobs_captured`` today. Verified present on the
+    # build that ran 20260904T130130Z-13b44a0c (8291a09).
+    #
+    # THE UNIT IS MATCHED, not assumed. ``reconcile_stage`` takes the unit as an
+    # argument, so a future stage of the same name reconciled in some other unit
+    # would otherwise be summed straight into a posting total. Requiring
+    # ``unit=posting`` means a stage that no longer counts postings simply does not
+    # answer, and the run reads as silent about its capture -- which is correct, and
+    # is the whole point of the guard.
     #
     # ``unit_totals.opportunities`` is deliberately absent: on the top-up path that
     # key is ``len(all_leads)``, so for that run it is 2,410 LEADS, not postings.
     ("jobs_captured", (("orchestrator_result", "acquisition.cumulative.net_new_jobs_captured"),
-                       ("waterfall", "stages[stage=acquisition_dedup].passed"))),
+                       ("waterfall", "stages[stage=acquisition_dedup,unit=posting].passed"))),
     ("net_new_jobs_captured",
      (("orchestrator_result", "acquisition.cumulative.net_new_jobs_captured"),
-      ("waterfall", "stages[stage=acquisition_dedup].passed"))),
+      ("waterfall", "stages[stage=acquisition_dedup,unit=posting].passed"))),
     ("provider_jobs_returned",
      (("orchestrator_result", "acquisition.cumulative.jobs_returned_billed"),)),
     ("provider_jobs_billed",
@@ -532,12 +539,15 @@ def _dig(payload: Any, path: str) -> Any:
     for part in path.split("."):
         if part.endswith("]") and "[" in part:
             name, selector = part[:-1].split("[", 1)
-            key, wanted = selector.split("=", 1)
+            # Comma-separated conditions, ALL of which must hold. More than one is
+            # not decoration: a stage's `passed` only means what a metric needs it
+            # to mean if the stage ALSO declares the unit that metric counts.
+            conditions = [c.split("=", 1) for c in selector.split(",") if "=" in c]
             items = current.get(name) if isinstance(current, dict) else None
-            if not isinstance(items, list):
+            if not isinstance(items, list) or not conditions:
                 return None
             current = next((i for i in items if isinstance(i, dict)
-                            and str(i.get(key)) == wanted), None)
+                            and all(str(i.get(k)) == v for k, v in conditions)), None)
             if current is None:
                 return None
             continue
@@ -567,7 +577,23 @@ def backfill_from_artifacts(
     if not base.is_dir():
         return {"written": written, "existence_only": existence_only}
 
-    existing = {entry.get("run_id") for entry in read_entries(root)[0]}
+    # A run that reported its own counters is NEVER rewritten. A previous
+    # RECONSTRUCTION may be, and has to be: this function's mapping is what a
+    # reconstruction means, and that mapping has been wrong.
+    #
+    # The 2026-09-05 run shipped with `jobs_captured` falling back to
+    # `unit_totals.postings`. Anything it reconstructed therefore carries PROVIDER
+    # VOLUME under a stakeholder key. The report refuses that value -- it is not
+    # accompanied by `net_new_jobs_captured` -- so it was never printed, but a
+    # skip-if-present rule would leave it in the durable store permanently, long
+    # after the artifacts that could correct it are pruned.
+    #
+    # So a reconstruction is re-derived whenever the current mapping yields
+    # something different, and left alone byte for byte when it does not.
+    existing = {}
+    for entry in read_entries(root)[0]:
+        if entry.get("run_id"):
+            existing[str(entry["run_id"])] = entry
     try:
         children = sorted(d for d in base.iterdir() if d.is_dir())
     except OSError:
@@ -575,8 +601,9 @@ def backfill_from_artifacts(
 
     for run_dir in children:
         run_id = run_dir.name
-        if run_id in existing:
-            continue
+        prior = existing.get(run_id)
+        if prior is not None and not prior.get("backfilled_from_artifacts"):
+            continue  # the run reported this itself; nothing here improves on that
         artifacts: Dict[str, Any] = {}
         for name in ("run_manifest", "run_status", "waterfall", "delivery",
                      "capacity_report", "lanes", "orchestrator_result"):
@@ -623,6 +650,10 @@ def backfill_from_artifacts(
             enrolled = _as_count(_dig(artifacts.get("delivery"), "enrolled"))
             if enrolled is not None:
                 measured["sent_to_instantly"] = enrolled
+        if prior is not None and dict(prior.get("metrics") or {}) == measured:
+            # An identical re-derivation. Leave the file untouched so repeated runs
+            # are idempotent down to the timestamp.
+            continue
         if measured:
             # Provenance says "artifacts", not "pipeline": these counters were
             # lifted from the evidence after the fact, not observed as it ran.

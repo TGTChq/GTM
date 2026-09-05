@@ -267,12 +267,12 @@ def _jobs_line(report: WeeklyReport) -> str:
     ``test_captured_equals_reviewed``), so in a run that reached enrichment they are
     equal and Z is 100.
 
-    Z is therefore 100% whenever it can be computed at all. It is retained because
-    the stakeholder format specifies it, NOT because it measures a conversion --
-    changing what Brett reads is a business decision, and this is flagged for that
-    decision rather than taken unilaterally. The two counts do carry information the
-    rate does not: a run that stops between the acquisition checkpoint and the
-    enrichment funnel emits the first and not the second.
+    So Z reads 100% when every captured posting entered review -- the shape of a run
+    that completed the slices it acquired. It is not guaranteed: acquisition
+    accumulates per slice RUN and the funnel per slice FINISHED, so a run interrupted
+    between the two reviews fewer postings than it captured and Z falls below 100.
+    Z is omitted entirely rather than guessed whenever the numerator, denominator,
+    units or run coverage cannot support it.
 
     A zero denominator renders ``(N/A)``: a rate over an empty population is
     undefined, and printing 0% would assert that nothing captured was reviewed.

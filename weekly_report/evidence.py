@@ -160,16 +160,21 @@ def dig(payload: Any, path: str) -> Any:
     for part in path.split("."):
         if part.endswith("]") and "[" in part:
             name, selector = part[:-1].split("[", 1)
-            if "=" not in selector:
+            # Comma-separated conditions, ALL required. A stage's `passed` only
+            # means what a metric needs it to mean if the stage also declares the
+            # unit that metric counts -- `reconcile_stage` takes the unit as an
+            # argument, so the stage NAME alone does not fix the population.
+            conditions = [c.split("=", 1) for c in selector.split(",") if "=" in c]
+            if not conditions:
                 return None
-            key, wanted = selector.split("=", 1)
             if not isinstance(current, dict):
                 return None
             items = current.get(name)
             if not isinstance(items, list):
                 return None
             current = next((i for i in items
-                            if isinstance(i, dict) and str(i.get(key)) == wanted), None)
+                            if isinstance(i, dict)
+                            and all(str(i.get(k)) == v for k, v in conditions)), None)
             if current is None:
                 return None
             continue

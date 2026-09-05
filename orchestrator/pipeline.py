@@ -417,15 +417,32 @@ class Orchestrator:
             # deletes its evidence. Without this the last runs written by the
             # previous build would vanish from the very report the ledger exists
             # to fix. Idempotent, so it is a no-op once every run has an entry.
+            backfilled = False
             try:
                 backfill_from_artifacts(self.state.root)
+                backfilled = True
             except Exception:  # noqa: BLE001
                 pass
-            try:
-                self.state.prune(keep=int(retention_keep), max_bytes=RETENTION_MAX_BYTES,
-                                 protect={self.ctx.run_id})
-            except Exception:  # noqa: BLE001
-                pass
+            # PRUNE ONLY IF THE LIFT SUCCEEDED. Both steps were separately
+            # fail-open, which reads as caution and is not: a backfill that raised
+            # left runs with no compact record, and the very next statement deleted
+            # the artifacts that were the only remaining copy. Retention is a
+            # disk-space guarantee, and disk space is the one thing that is not
+            # urgent -- the artifacts are already bounded, one extra run's worth
+            # costs nothing, and the next run retries the lift. Losing the evidence
+            # is not recoverable at any later time.
+            if backfilled:
+                try:
+                    self.state.prune(keep=int(retention_keep), max_bytes=RETENTION_MAX_BYTES,
+                                     protect={self.ctx.run_id})
+                except Exception:  # noqa: BLE001
+                    pass
+            else:
+                # print, not logging: this module has no logger, and reaching for
+                # one is how run_orchestrator.py:461 shipped a NameError into a live
+                # acquisition path (#39).
+                print("[retention] skipped: backfill_from_artifacts failed, so "
+                      "pruning could delete run evidence that has no ledger entry")
             # Ledger retention is separate and far longer: the compact record must
             # outlive the heavy evidence it summarises (that is the entire point).
             try:
