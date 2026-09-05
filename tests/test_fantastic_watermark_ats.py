@@ -214,7 +214,16 @@ class WatermarkEngineTests(unittest.TestCase):
         p = feed.calls[0][1]
         upper = _iso(NOW - timedelta(minutes=180))
         self.assertEqual(p["date_created_lt"], upper)
-        self.assertEqual(p["date_created_gte"], _iso(NOW - timedelta(minutes=180) - timedelta(days=7)))
+        # The bootstrap asks for one time_frame of history, but the feed intersects
+        # time_frame with date_created, so the 3h of lag below `now - 7d` could never
+        # have been served. The window opens at the horizon it can actually reach
+        # (plus the margin) instead of carrying a dead zone from birth.
+        margin = timedelta(minutes=config.FANTASTIC_TIME_FRAME_MARGIN_MINUTES)
+        self.assertEqual(p["date_created_gte"], _iso(NOW - timedelta(days=7) + margin))
+        wm0 = res.metadata["watermark"]
+        self.assertEqual(wm0["lower_clamped_to_frame"]["was"],
+                         _iso(NOW - timedelta(minutes=180) - timedelta(days=7)))
+        self.assertEqual(wm0["frame_slippage_minutes"], 0.0, "a fresh window has not slipped")
         # Only rows with date_created < upper are acquired (lag respected).
         self.assertTrue(all(j["_fantastic_date_created"] < upper.replace("Z", "+00:00") or
                             j["_fantastic_date_created"][:19] < upper[:19] for j in res.jobs))
@@ -263,10 +272,20 @@ class WatermarkEngineTests(unittest.TestCase):
         self.assertTrue(res1.metadata["watermark"]["drained_sources"]["fantastic_jobs_linkedin"])
         feed2 = _Feed(rows)
         res2 = self._run(feed2, now=NOW + timedelta(hours=3))
-        # Window reused verbatim (not re-derived from the new `now`).
-        self.assertTrue(res2.metadata["watermark"]["window_reused"])
-        self.assertEqual(res2.metadata["watermark"]["lower"], res1.metadata["watermark"]["lower"])
-        self.assertEqual(res2.metadata["watermark"]["upper"], res1.metadata["watermark"]["upper"])
+        # Window reused (not re-derived from the new `now`). The upper bound is
+        # verbatim. The lower bound may only RISE to the frame horizon -- a
+        # shrink-only correction toward what the feed will serve, never a
+        # recomputation from `now`, which would move the window wholesale and
+        # re-bill inventory the run already holds.
+        wm1, wm2 = res1.metadata["watermark"], res2.metadata["watermark"]
+        self.assertTrue(wm2["window_reused"])
+        self.assertEqual(wm2["upper"], wm1["upper"])
+        self.assertIn(wm2["lower"], (wm1["lower"], wm2["frame_horizon"]))
+        self.assertGreaterEqual(wm2["lower"], wm1["lower"])
+        self.assertNotEqual(wm2["lower"], _iso(NOW + timedelta(hours=3) - timedelta(minutes=240)),
+                            "the lower bound must not be re-derived from `now`")
+        self.assertEqual(wm2["frame_slippage_minutes"], 180.0,
+                         "three hours passed, so the feed's floor rose three hours")
         # Nothing re-emitted AND nothing re-billed.
         self.assertEqual(len(res2.jobs), 0)
         self.assertEqual(feed2.calls, [], "a drained source must not be re-billed")

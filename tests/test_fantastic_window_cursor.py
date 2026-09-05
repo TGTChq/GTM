@@ -306,3 +306,121 @@ class ConsumedPrefixTests(unittest.TestCase):
         self.assertEqual(
             metrics["segments"]["fantastic_jobs_linkedin"].get("stop_reason"),
             "no_new_ids")
+
+
+class FrameHorizonTests(unittest.TestCase):
+    """The feed's ``time_frame`` is a hard floor under every window.
+
+    PROVEN 2026-09-05 against the live provider with two ``/v1/active-jb-count``
+    requests (zero Jobs credits, zero rows): a window lying entirely below the frame
+    returned **0** rows while ``time_frame=7d`` was sent, and **24,784** for the same
+    window with the parameter removed. The provider INTERSECTS the two.
+
+    Removing ``time_frame`` is not an available fix: without it the feed could not
+    serve the production query at all -- a 45s read timeout, then HTTP 504 at 240s.
+    It is what makes the query answerable, so the window has to live inside it.
+
+    Two consequences, and this class pins both:
+
+    * A window whose lower bound is below ``now - time_frame`` has a dead zone that
+      no request can reach, and the watermark advances past it silently.
+    * A window whose UPPER bound has fallen below the horizon can return nothing at
+      all -- and because nothing marks a source drained on an empty interval,
+      ``window_drained`` never becomes true and the watermark never advances. The
+      window stays open and acquisition stops. That is the ten-day zero-acquisition
+      outage of 2026-08, reproduced below and ended by the abandon branch.
+    """
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.mkdtemp()
+        self.path = os.path.join(self.tmp, "wm.json")
+        self.cfg = dict(_PROD,
+                        FANTASTIC_DATE_CREATED_WATERMARK_ENABLED=True,
+                        FANTASTIC_DATE_CREATED_LAG_MINUTES=180,
+                        FANTASTIC_DATE_CREATED_OVERLAP_MINUTES=60,
+                        FANTASTIC_TIME_FRAME_MARGIN_MINUTES=30,
+                        FANTASTIC_WATERMARK_STATE_PATH=self.path)
+
+    def _open(self, now, state=None):
+        """Open a window at ``now`` and return its watermark metrics."""
+        if state is not None:
+            with open(self.path, "w", encoding="utf-8") as fh:
+                json.dump(dict(state, schema="fantastic-watermark/1"), fh)
+        metrics = {"segments": {}}
+        with mock.patch.multiple(config, **self.cfg), \
+                mock.patch.object(fja, "datetime", wraps=datetime) as dt:
+            dt.now.return_value = now
+            dt.fromisoformat = datetime.fromisoformat
+            eng = fja.DateCreatedWatermarkEngine(
+                result=None, quota=fja._QuotaState(), http_get=None,
+                seen_ids=set(), metrics=metrics, run_cap=100, now=now)
+            eng.open()
+        return eng, metrics["watermark"]
+
+    def test_a_window_is_never_born_below_the_horizon(self):
+        _eng, wm = self._open(NOW)
+        self.assertGreaterEqual(wm["lower"], wm["frame_horizon"])
+        self.assertIsNotNone(wm["lower_clamped_to_frame"])
+        self.assertIsNone(wm["window_abandoned_below_frame"])
+
+    def test_the_conceded_span_is_recorded_not_absorbed(self):
+        """The rows below the horizon are lost either way. What changes is whether
+        anyone can see that they were."""
+        _eng, wm = self._open(NOW)
+        clamp = wm["lower_clamped_to_frame"]
+        self.assertLess(clamp["was"], clamp["now"])
+        self.assertGreater(clamp["unreachable_days"], 0)
+
+    def test_clamping_never_rewinds_the_cursor(self):
+        """The feed serves from max(lower, horizon) whether or not the request says
+        so, so raising the lower bound returns the same rows and costs the cursor
+        nothing. Resetting offsets here would rewind every run whose window sits near
+        the horizon -- exactly the livelock the durable cursor exists to end."""
+        state = {"last_successful_watermark": _iso_at(NOW - timedelta(days=9)),
+                 "window_start": _iso_at(NOW - timedelta(days=9)),
+                 "window_end": _iso_at(NOW - timedelta(days=1)),
+                 "in_flight_window_end": _iso_at(NOW - timedelta(days=1)),
+                 "window_offsets": {"fantastic_jobs_linkedin": 2400},
+                 "window_acquired_ids": []}
+        eng, wm = self._open(NOW, state)
+        self.assertTrue(wm["window_reused"])
+        self.assertIsNotNone(wm["lower_clamped_to_frame"])
+        self.assertEqual(eng.window_offsets()["fantastic_jobs_linkedin"], 2400)
+        self.assertEqual(wm["offsets_at_open"]["fantastic_jobs_linkedin"], 2400)
+
+    def test_a_window_below_the_horizon_is_abandoned_not_replayed(self):
+        """The 2026-08 outage: an in-flight window everyone kept replaying, which
+        could not return a row and therefore could never drain or commit."""
+        dead_lower = _iso_at(NOW - timedelta(days=20))
+        dead_upper = _iso_at(NOW - timedelta(days=11))
+        state = {"last_successful_watermark": dead_lower,
+                 "window_start": dead_lower, "window_end": dead_upper,
+                 "in_flight_window_end": dead_upper,
+                 "window_offsets": {"fantastic_jobs_linkedin": 3000},
+                 "window_drained_sources": {"fantastic_jobs_linkedin": True},
+                 "window_acquired_ids": ["a", "b"]}
+        _eng, wm = self._open(NOW, state)
+        gone = wm["window_abandoned_below_frame"]
+        self.assertIsNotNone(gone, "a window that can return nothing must not be reused")
+        self.assertEqual((gone["lower"], gone["upper"]), (dead_lower, dead_upper))
+        self.assertFalse(wm["window_reused"], "the run must open a fresh window instead")
+        # ...and the fresh window is one the feed can actually answer, starting from
+        # where the dead one ended rather than from the dead one's start.
+        self.assertGreaterEqual(wm["lower"], wm["frame_horizon"])
+        self.assertLess(wm["lower"], wm["upper"], "a live window, not an empty interval")
+        self.assertEqual(wm["offsets_at_open"], {}, "a new window pages from its head")
+
+    def test_slippage_is_reported_so_the_effect_can_be_measured(self):
+        """Whether a rising floor SHIFTS the rows a saved offset indexes into depends
+        on an ordering the provider does not document. The movement is reported so a
+        real run can measure it; it is not assumed in either direction."""
+        _e1, wm1 = self._open(NOW)
+        self.assertEqual(wm1["frame_slippage_minutes"], 0.0)
+        state = json.load(open(self.path, encoding="utf-8"))
+        _e2, wm2 = self._open(NOW + timedelta(hours=6), state)
+        self.assertTrue(wm2["window_reused"])
+        self.assertEqual(wm2["frame_slippage_minutes"], 360.0)
+
+
+def _iso_at(dt):
+    return fja._iso_z(dt)

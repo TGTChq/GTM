@@ -103,6 +103,28 @@ def _cursor_is_stale(cursor_date_iso: str, time_frame: str) -> bool:
     return dt < datetime.now(timezone.utc) - timedelta(hours=hours)
 
 
+def _frame_horizon(now: datetime, time_frame: str, margin_minutes: int = 0) -> datetime:
+    """The oldest ``date_created`` the feed will return for a query carrying
+    ``time_frame``.
+
+    PROVEN (2026-09-05 live probe, ``/v1/active-jb-count``, zero Jobs credits): the
+    provider INTERSECTS ``time_frame`` with ``date_created_gte``/``date_created_lt``
+    rather than ignoring it. A window lying entirely below the frame returned 0 with
+    ``time_frame=7d`` and 24,784 without it. So the EFFECTIVE lower bound of any
+    window is ``max(window_lower, now - time_frame)`` -- and that bound advances with
+    the clock, continuously, whether or not the window is reused.
+
+    Dropping ``time_frame`` is not an available alternative: without it the feed
+    could not serve the production query at all (45s read timeout, then HTTP 504 at
+    240s). It is what makes the query fast enough to answer, so the window has to be
+    kept inside it instead.
+
+    ``margin_minutes`` holds the window a little above the horizon so a long run does
+    not slide off the edge it was clamped to while it is still paging."""
+    hours = _parse_time_frame_hours(time_frame)
+    return now - timedelta(hours=hours) + timedelta(minutes=max(0, margin_minutes))
+
+
 def _family_id(term: str) -> str:
     """Stable slug identifying a title-query family in continuation state."""
     return "".join(c if c.isalnum() else "_" for c in str(term or "").lower()).strip("_")
@@ -1586,6 +1608,22 @@ class DateCreatedWatermarkEngine:
     def _iso(dt: datetime) -> str:
         return _iso_z(dt)
 
+    def _slippage_minutes(self, horizon_dt: datetime) -> float:
+        """Minutes the frame horizon has advanced since this window opened.
+
+        0.0 for a fresh window, and 0.0 when the birth horizon was never recorded
+        (state written by an older build) -- an unknown is not reported as movement."""
+        born = str(self.state.get("frame_horizon_at_open") or "")
+        if not born:
+            return 0.0
+        try:
+            born_dt = datetime.fromisoformat(born.replace("Z", "+00:00"))
+        except (ValueError, TypeError):
+            return 0.0
+        if born_dt.tzinfo is None:
+            born_dt = born_dt.replace(tzinfo=timezone.utc)
+        return round(max(0.0, (horizon_dt - born_dt).total_seconds() / 60.0), 1)
+
     # -- window ------------------------------------------------------------------
     def open(self) -> None:
         """Compute the deterministic window for this run and persist the in-flight
@@ -1602,6 +1640,16 @@ class DateCreatedWatermarkEngine:
         prev = self.state.get("last_successful_watermark") or ""
         in_flight = self.state.get("in_flight_window_end") or ""
         reused = False
+        # THE FRAME HORIZON. ``time_frame`` is intersected with ``date_created``
+        # (proven live -- see _frame_horizon), so no window can reach below this
+        # instant, and the instant advances with the clock. A window is therefore
+        # only as durable as its distance from the horizon, and both the reuse path
+        # and the derivation below have to be kept above it.
+        margin = int(getattr(config, "FANTASTIC_TIME_FRAME_MARGIN_MINUTES", 30) or 0)
+        horizon_dt = _frame_horizon(self.now, config.FANTASTIC_JOBS_TIME_FRAME, margin)
+        horizon = self._iso(horizon_dt)
+        abandoned: Optional[Dict[str, Any]] = None
+        clamped: Optional[Dict[str, Any]] = None
         # Guard a corrupt in-flight record (marker without a parsable window start):
         # treat it as "no open window" rather than crashing acquisition uncaught.
         try:
@@ -1609,9 +1657,42 @@ class DateCreatedWatermarkEngine:
             start_ok = bool(self.state.get("window_start"))
         except (ValueError, TypeError):
             start_ok = False
+        if in_flight and start_ok and str(in_flight) <= horizon:
+            # The window's UPPER bound has itself fallen below the horizon: every row
+            # it could ever return is now unreachable, so replaying it returns empty
+            # forever. Nothing marks a source drained on an empty interval, so
+            # ``window_drained`` never becomes true and ``commit_watermark`` never
+            # advances -- the window stays open and acquisition stops indefinitely.
+            # That is the ten-day zero-acquisition outage of 2026-08, and this is the
+            # branch that ends it: abandon the dead window, record exactly what was
+            # skipped, and derive a fresh in-frame one from where it ended.
+            abandoned = {"lower": str(self.state.get("window_start") or ""),
+                         "upper": str(in_flight), "horizon": horizon,
+                         "reason": "window_entirely_below_frame_horizon"}
+            prev, in_flight = str(in_flight), ""
+            self.state["window_acquired_ids"] = []
+            self.state["window_drained_sources"] = {}
+            self.state["window_offsets"] = {}
         if in_flight and start_ok:
             self.lower, self.upper = str(self.state.get("window_start")), str(in_flight)
             reused = True
+            if self.lower < horizon:
+                # Part of the window is still reachable, part is not. Raise the lower
+                # bound to what the feed will actually serve, so the window states its
+                # real extent and the conceded span is recorded instead of absorbed.
+                #
+                # This does NOT reset the persisted offsets, and must not: the feed
+                # serves from max(lower, horizon) whether or not we say so, and this
+                # only makes the request agree with the answer. It returns the same
+                # rows either way, so there is nothing here for a cursor to lose --
+                # while resetting on a window that sits near the horizon would rewind
+                # the cursor on every run and rebuild the very livelock the durable
+                # cursor was added to end.
+                clamped = {"was": self.lower, "now": horizon,
+                           "unreachable_days": round(
+                               (horizon_dt - datetime.fromisoformat(
+                                   self.lower.replace("Z", "+00:00"))).total_seconds() / 86400.0, 2)}
+                self.lower = horizon
         else:
             upper_dt = self.now - timedelta(minutes=max(0, lag))
             if prev:
@@ -1623,6 +1704,14 @@ class DateCreatedWatermarkEngine:
                 # Bootstrap: cover the current time_frame window exactly once.
                 hours = _parse_time_frame_hours(config.FANTASTIC_JOBS_TIME_FRAME)
                 lower_dt = upper_dt - timedelta(hours=hours)
+            if lower_dt < horizon_dt:
+                # Opening below the horizon would build a window with a dead zone at
+                # its old end from the very first request. Start where the feed can
+                # actually answer, and say how far behind we were.
+                clamped = {"was": self._iso(lower_dt), "now": horizon,
+                           "unreachable_days": round(
+                               (horizon_dt - lower_dt).total_seconds() / 86400.0, 2)}
+                lower_dt = horizon_dt
             if lower_dt >= upper_dt:
                 lower_dt = upper_dt  # run started inside the lag buffer: empty interval
             self.lower, self.upper = self._iso(lower_dt), self._iso(upper_dt)
@@ -1633,6 +1722,11 @@ class DateCreatedWatermarkEngine:
             # ... and at offset 0. A cursor is only meaningful for the window it
             # was measured in; carrying it forward would skip the new window's head.
             self.state["window_offsets"] = {}
+            # Where the horizon stood when this window was born. The gap between that
+            # and the horizon on a later run is how far the feed's floor has risen
+            # underneath a window we are still paging with saved offsets -- see
+            # ``frame_slippage_minutes``.
+            self.state["frame_horizon_at_open"] = horizon
         for key in ("boundary_ids", "overlap_band_ids", "window_acquired_ids"):
             self.seen_ids |= {f"fantastic_{i}" for i in (self.state.get(key) or [])}
         self.state.update({"window_start": self.lower, "window_end": self.upper,
@@ -1644,6 +1738,19 @@ class DateCreatedWatermarkEngine:
             "enabled": True, "lower": self.lower, "upper": self.upper,
             "previous_watermark": prev, "window_reused": reused,
             "lag_minutes": lag, "overlap_minutes": overlap, "empty_interval": (self.lower == self.upper),
+            # What the feed's own time_frame took off this window, stated rather than
+            # absorbed: the horizon it could not reach below, the span conceded to it
+            # (if any), and a window abandoned outright for falling entirely below it.
+            "frame_horizon": horizon, "frame_margin_minutes": margin,
+            "lower_clamped_to_frame": clamped, "window_abandoned_below_frame": abandoned,
+            # How far the feed's floor has risen since this window opened. Zero on a
+            # fresh window. Above zero it means rows have left the result set that
+            # the persisted offsets index into, and whether that SHIFTS the remaining
+            # rows depends on an ordering the provider does not document and we have
+            # not established -- newest-first would leave the consumed prefix intact,
+            # oldest-first would not. Reported so the effect can be measured on a real
+            # run rather than assumed in either direction.
+            "frame_slippage_minutes": self._slippage_minutes(horizon_dt),
             # The cursor state as it stood BEFORE this run paged anything. Production
             # acceptance of the persisted cursor is "the first offset we requested
             # equals the offset the previous run left behind", and that is not
@@ -1686,9 +1793,16 @@ class DateCreatedWatermarkEngine:
         #
         # It is deliberately NOT added to ``start_offset``: this cursor is advanced
         # after every pass, so by round 2 of the same run it already CONTAINS that
-        # run's progress, and adding the two would skip a page per round. Offset
-        # paging over a lag-bounded historical window is stable, which is what makes
-        # the saved cursor a valid resume point.
+        # run's progress, and adding the two would skip a page per round.
+        #
+        # A saved offset is only a valid resume point while the window still selects
+        # the same rows. It does NOT do so indefinitely: ``time_frame`` is
+        # intersected with ``date_created``, so the window's effective lower bound
+        # advances with the clock (proven 2026-09-05; see _frame_horizon). ``open()``
+        # keeps the window above that horizon and resets these offsets on the one
+        # transition where the set demonstrably changed, which is what makes the
+        # cursor safe to carry across runs -- not any inherent stability of offset
+        # paging.
         base = int(self.window_offsets().get(str(label), 0) or 0)
         # BILLED, not KEPT (see _fetch_segment's billing-accurate cap): the provider
         # bills every RETURNED row, so measuring cross-segment consumption by kept

@@ -882,6 +882,19 @@ FANTASTIC_DATE_CREATED_WATERMARK_ENABLED = _env_bool("FANTASTIC_DATE_CREATED_WAT
 FANTASTIC_MAX_CONSECUTIVE_DUPLICATE_PAGES = _env_int(
     "FANTASTIC_MAX_CONSECUTIVE_DUPLICATE_PAGES", 40)
 
+#: How far ABOVE the ``time_frame`` horizon a window's lower bound is held.
+#:
+#: The feed intersects ``time_frame`` with ``date_created`` -- proven 2026-09-05 by
+#: two count requests (zero Jobs credits): a window lying entirely below the frame
+#: returned 0 rows with ``time_frame=7d`` and 24,784 without it. So the horizon
+#: ``now - time_frame`` is a hard floor on every window, and it advances with the
+#: clock. Sending no ``time_frame`` is not an alternative -- without it the feed
+#: could not serve the production query at all (read timeout, then HTTP 504).
+#:
+#: The margin keeps a window from being clamped to an edge it then slides off while
+#: it is still paging. 30 minutes covers a long run without conceding real inventory.
+FANTASTIC_TIME_FRAME_MARGIN_MINUTES = _env_int("FANTASTIC_TIME_FRAME_MARGIN_MINUTES", 30)
+
 FANTASTIC_DATE_CREATED_LAG_MINUTES = _env_int("FANTASTIC_DATE_CREATED_LAG_MINUTES", 180)
 FANTASTIC_DATE_CREATED_OVERLAP_MINUTES = _env_int("FANTASTIC_DATE_CREATED_OVERLAP_MINUTES", 60)
 FANTASTIC_WATERMARK_STATE_PATH = os.getenv(
@@ -1176,6 +1189,8 @@ def validate_fantastic_jobs_config() -> None:
             raise ValueError("FANTASTIC_DATE_CREATED_LAG_MINUTES must be >= 60 (provider commit lag ~1h)")
         if FANTASTIC_DATE_CREATED_OVERLAP_MINUTES < 0:
             raise ValueError("FANTASTIC_DATE_CREATED_OVERLAP_MINUTES must be >= 0")
+        if FANTASTIC_TIME_FRAME_MARGIN_MINUTES < 0:
+            raise ValueError("FANTASTIC_TIME_FRAME_MARGIN_MINUTES must be >= 0")
 
 
 # ---------- Railway startup guard (a deploy must not auto-run the pipeline) ----------
