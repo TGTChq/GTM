@@ -59,6 +59,16 @@ class Metric:
     runs_missing_field: List[str] = field(default_factory=list)
     reason: str = ""
     notes: List[str] = field(default_factory=list)
+    #: The population this number counts, as a machine key. ``unit`` is a display
+    #: word ("posting", "contact") and two metrics can share one while counting
+    #: different things; this is the identity a subtraction has to match on.
+    #: Empty means "not declared", which is treated as incomparable.
+    counted_unit: str = ""
+    #: WHERE the population came from. Two counters can share a unit and still be
+    #: different cohorts -- this week's contacts and this week's Instantly
+    #: enrollments are both people, but the enrollments come from an Approved
+    #: backlog accumulated over previous weeks, so their difference is not a loss.
+    cohort: str = ""
 
     @property
     def available(self) -> bool:
@@ -76,6 +86,10 @@ class Metric:
             "evidence": list(self.evidence),
             "attribution": self.attribution,
             "contributing_run_ids": list(self.contributing_run_ids),
+            # Carried into the JSON so a dashboard cannot repeat the subtraction
+            # this report refuses to make.
+            "counted_unit": self.counted_unit,
+            "cohort": self.cohort,
         }
         if self.runs_missing_field:
             payload["runs_missing_field"] = list(self.runs_missing_field)

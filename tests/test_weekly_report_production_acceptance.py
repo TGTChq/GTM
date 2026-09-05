@@ -215,3 +215,86 @@ def test_a_malformed_wave1_mapping_is_ignored_rather_than_crashing(monkeypatch):
     for bad in ("not-a-dict", None, ["a", "b"], 7):
         cfg.OUTBOUND_WAVE1_CHALLENGER_CAMPAIGNS = bad
         assert configured_campaign_ids(cfg) == ["control-finance"]
+
+
+# --------------------------------------------------------------------------
+# 4. Brett's format is FIXED
+# --------------------------------------------------------------------------
+#
+# The message is four numbers, a cause and a plan. Everything else -- the metric
+# dashboard, the acquisition table, the FINAL_PASS census, provider duplication,
+# gate jargon, the gap register -- is already written to the JSON document and
+# the internal summary on every run. Adding any of it here is how a stakeholder
+# message stops being read, so the structure is asserted rather than sampled.
+
+from weekly_report.render import render_stakeholder_summary  # noqa: E402
+from weekly_report.report import build_report  # noqa: E402
+from weekly_report.timewindow import explicit_window  # noqa: E402
+
+
+def _stakeholder(root: Path) -> str:
+    window = explicit_window(
+        __import__("datetime").date(2026, 9, 5), __import__("datetime").date(2026, 9, 12),
+        boundary_hour=0, tz_name="America/Los_Angeles")
+    return render_stakeholder_summary(build_report(window, artifact_roots=[str(root)]))
+
+
+def test_the_message_is_exactly_the_agreed_shape(heavy_root):
+    text = _stakeholder(heavy_root)
+    lines = text.splitlines()
+
+    assert lines[0].startswith("Week of "), "one short period label, then the numbers"
+    assert lines[1].startswith("Jobs: ") and " captured / " in lines[1]
+    assert lines[2].startswith("Qualified opportunities: ")
+    assert lines[3].startswith("Contacts found: ")
+    assert lines[4].startswith("sent to Instantly: ")
+    assert lines[5] == ""
+    assert lines[6] == "Biggest bottleneck from past week"
+    blank = lines.index("", 7)
+    assert lines[blank + 1] == "Action plan for the following week"
+
+
+def test_the_message_carries_no_dashboard_debug_or_gate_jargon(heavy_root):
+    text = _stakeholder(heavy_root)
+    for banned in (
+        "FINAL_PASS", "NEEDS_CHECK", "UNVERIFIED", "JobGate", "RoleGate",
+        "provider_jobs_returned", "historical_duplicates", "cross_source",
+        "per_source", "run_ledger", "reporting_ledger:", "waterfall.json",
+        "orchestrator_result", "NOT MEASURED", "CONVERSION", "FUNNEL",
+        "Headline metrics measured", "writes performed", "basis:",
+        "tz source", "Dry runs excluded", "Pipeline runs",
+    ):
+        assert banned not in text, f"{banned!r} belongs in the internal view, not Brett's"
+
+
+def test_at_most_three_actions_reach_the_message(heavy_root):
+    text = _stakeholder(heavy_root)
+    plan = text.split("Action plan for the following week", 1)[1]
+    numbered = [l for l in plan.splitlines() if l[:2] in ("1.", "2.", "3.", "4.", "5.")]
+    assert 0 <= len(numbered) <= 3
+
+
+def test_equal_populations_render_100_percent_and_zero_renders_na(tmp_path):
+    """Two specific renderings the format calls out by name."""
+    from orchestrator.run_ledger import RunLedger
+
+    def render(metrics):
+        root = tmp_path / f"r{abs(hash(tuple(sorted(metrics.items()))))}"
+        ledger = RunLedger(root, "20260908T030131Z-rate")
+        ledger.begin(started_at=_instant("2026-09-08T03:01:31Z"),
+                     mode="live_acquisition_and_enrichment", lanes=("fantastic",))
+        ledger.record("acquisition", metrics)
+        ledger.finalize(state="complete", status="complete",
+                        finished_at=_instant("2026-09-08T03:41:00Z"))
+        return _stakeholder(root)
+
+    equal = render({"net_new_jobs_captured": 412, "jobs_reviewed": 412})
+    assert "Jobs: 412 captured / 412 reviewed (100%)" in equal, (
+        "equal non-zero populations are 100%, not 100.0% and not a rounded 99%"
+    )
+
+    empty = render({"net_new_jobs_captured": 0, "jobs_reviewed": 0})
+    assert "Jobs: 0 captured / 0 reviewed (N/A)" in empty, (
+        "a rate over an empty population is undefined; 0% would assert that "
+        "nothing captured was reviewed"
+    )

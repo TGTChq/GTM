@@ -170,9 +170,12 @@ def test_the_ledger_census_is_bounded_and_counts_only(tmp_path):
 
 
 def _loss_without_reasons(root: Path) -> None:
+    """A collapsed but COMPARABLE boundary: contact discovery is unmeasured, so
+    the adjacent pair becomes qualified_opportunities -> sent_to_airtable. Both
+    count company x role-bucket units, so the difference is a real loss."""
     write_ledger_run(root, "20260905T130000Z-aaaaaaaa", started="2026-09-05T13:00:00Z",
                      finished="2026-09-05T16:00:00Z",
-                     metrics={"jobs_captured": 6205, "contacts_found": 1048})
+                     metrics={"qualified_opportunities": 6205, "sent_to_airtable": 1048})
 
 
 def test_the_plan_never_claims_no_loss_when_a_loss_was_measured(tmp_path):
@@ -198,9 +201,63 @@ def test_a_collapsed_boundary_still_produces_a_stage_level_action(tmp_path):
 
     report = build_report(_september_window(), artifact_roots=[root])
 
-    assert report.bottleneck.boundary == "jobs_captured->contacts_found"
+    assert report.bottleneck.boundary == "qualified_opportunities->sent_to_airtable"
     assert any("spans more than one stage" in a.action for a in report.actions)
     assert str(report.bottleneck.lost) in " ".join(a.basis for a in report.actions)
+
+
+def test_postings_are_never_subtracted_from_opportunities(tmp_path):
+    """The exact subtraction that invented a bottleneck.
+
+    ``jobs_captured`` counts POSTINGS. ``contacts_found`` counts COMPANY x ROLE
+    BUCKET units -- ``hiring_manager`` produces one Lead per bucket, not per
+    posting. 6,205 - 1,048 is not "5,157 lost"; the second number does not count a
+    subset of the first. With no comparable pair left, the report must say the
+    bottleneck cannot be measured rather than pick the biggest-looking gap.
+    """
+    root = tmp_path / "orchestrator_v2"
+    write_ledger_run(root, "20260905T130000Z-aaaaaaaa", started="2026-09-05T13:00:00Z",
+                     finished="2026-09-05T16:00:00Z",
+                     metrics={"jobs_captured": 6205, "contacts_found": 1048})
+
+    report = build_report(_september_window(), artifact_roots=[root])
+
+    assert report.bottleneck.lost is None
+    assert report.bottleneck.kind == "no_measured_loss"
+    refused = {b["boundary"]: b["reason"]
+               for b in report.bottleneck.incomparable_boundaries}
+    assert "jobs_captured->contacts_found" in refused
+    assert "not a subset" in refused["jobs_captured->contacts_found"]
+    assert "5157" not in json.dumps(report.to_dict()), (
+        "the invalid difference must not appear anywhere in the document"
+    )
+
+
+def test_instantly_enrollments_are_never_treated_as_a_delivery_loss(tmp_path):
+    """Same unit is not enough -- the COHORT differs.
+
+    Enrollment is performed by GTM Approved Sync from the Airtable Approved
+    backlog, which accumulates across weeks: the 2026-09-05 sync delivered 770
+    leads from 781 rows built up over the preceding fortnight. Subtracting that
+    from this window's Airtable rows compares two unrelated populations that
+    happen to share a date range.
+    """
+    root = tmp_path / "orchestrator_v2"
+    write_ledger_run(root, "20260905T130000Z-aaaaaaaa", started="2026-09-05T13:00:00Z",
+                     finished="2026-09-05T16:00:00Z",
+                     metrics={"qualified_opportunities": 900, "contacts_found": 800,
+                              "sent_to_airtable": 781})
+
+    from weekly_report.external import CollectorResult
+
+    collector = CollectorResult(name="instantly", enabled=True, ok=True, count=12)
+    report = build_report(_september_window(), artifact_roots=[root],
+                          instantly=collector)
+
+    assert report.metrics["sent_to_instantly"].value == 12
+    refused = {b["boundary"] for b in report.bottleneck.incomparable_boundaries}
+    assert "instantly_delivery" in refused
+    assert report.bottleneck.boundary != "instantly_delivery"
 
 
 def test_a_genuinely_clean_week_is_not_described_as_a_loss(tmp_path):
@@ -256,7 +313,14 @@ def test_reviewing_every_net_new_posting_is_a_100_percent_review_rate(tmp_path):
 
 
 def test_the_review_boundary_is_no_longer_the_invented_bottleneck(tmp_path):
-    """With comparable populations, nothing is lost at review."""
+    """With comparable populations, nothing is lost at review.
+
+    SYNTHETIC figures. 2,410 and 1,698 were never emitted as posting or
+    qualification counters by any production build -- 2,410 was
+    ``unique_opportunities`` (company x bucket lead units) and 1,698 was
+    reconstructed from dispositions. They are used here only to exercise the
+    renderer and the boundary search.
+    """
     root = tmp_path / "orchestrator_v2"
     write_ledger_run(root, "20260905T130000Z-aaaaaaaa", started="2026-09-05T13:00:00Z",
                      finished="2026-09-05T16:00:00Z",
@@ -269,11 +333,18 @@ def test_the_review_boundary_is_no_longer_the_invented_bottleneck(tmp_path):
     assert report.bottleneck.boundary != "review", (
         "a fully reviewed batch must not be reported as the biggest loss"
     )
-    # With comparable populations the biggest real drop is the ICP decision
-    # (2410 -> 1698 = 712), just ahead of contact discovery (1698 -> 1048 = 650).
-    assert report.bottleneck.boundary == "qualification"
-    assert report.bottleneck.entered == 2410 and report.bottleneck.advanced == 1698
-    assert report.bottleneck.lost == 712
+    # ``qualification`` is jobs_reviewed (POSTINGS) -> qualified_opportunities
+    # (COMPANY x ROLE BUCKET). 2410 - 1698 = 712 looks like a loss and is not one:
+    # the second number does not count a subset of the first. That boundary is now
+    # refused, and the largest COMPARABLE loss is contact discovery, which is
+    # opportunity -> opportunity on both sides.
+    assert report.bottleneck.boundary == "contact_discovery"
+    assert report.bottleneck.entered == 1698 and report.bottleneck.advanced == 1048
+    assert report.bottleneck.lost == 650
+    refused = {b["boundary"] for b in report.bottleneck.incomparable_boundaries}
+    assert "qualification" in refused
+    assert any("not a loss" in b["reason"]
+               for b in report.bottleneck.incomparable_boundaries)
 
 
 def test_provider_duplication_never_counts_as_captured(tmp_path):

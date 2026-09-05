@@ -33,9 +33,12 @@ from weekly_report.evidence import (
 )
 from weekly_report.external import CollectorResult
 from weekly_report.metrics import (
+    COHORT_EXTERNAL_BACKLOG,
+    COHORT_RUN_WINDOW,
     MetricSpec,
     RUN_METRIC_SPECS,
     SUPPORTING_METRIC_SPECS,
+    UNIT_INSTANTLY_LEAD,
     acquisition_failures,
     aggregate,
     build_run_metrics,
@@ -73,6 +76,10 @@ _ENROLLED_SPEC = MetricSpec(
         ("orchestrator_result", "delivery.enrolled"),
         ("waterfall", "unit_totals.enrolled_contacts"),
     ),
+    counted_unit=UNIT_INSTANTLY_LEAD,
+    # This variant IS same-window (the run enrolled them itself), but production
+    # never takes it: GTM runs with allow_instantly_enrollment=false.
+    cohort=COHORT_RUN_WINDOW,
 )
 
 _INSTANTLY_DEFINITION = (
@@ -116,6 +123,14 @@ def instantly_metric(
         definition=_INSTANTLY_DEFINITION,
         source="instantly",
         attribution="Instantly lead.timestamp_created",
+        counted_unit=UNIT_INSTANTLY_LEAD,
+        # A DIFFERENT COHORT, and the most consequential declaration in this file.
+        # Enrollment is performed by GTM Approved Sync from the Airtable Approved
+        # backlog, which accumulates across weeks: on 2026-09-05 it delivered 770
+        # leads from 781 Approved rows built up over the preceding fortnight.
+        # Subtracting that from THIS window's contacts is not a delivery loss, it
+        # is two unrelated populations.
+        cohort=COHORT_EXTERNAL_BACKLOG,
     )
     if collector is not None and collector.enabled and collector.ok and collector.count is not None:
         metric.value = collector.count
