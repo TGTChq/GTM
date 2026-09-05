@@ -36,13 +36,25 @@ Himalayas + Jobicy + We Work Remotely + Remotive + Remote OK
 
 ## Workflow
 
-### Daily Pipeline
+### Daily Pipeline (production spine)
 
 ```bash
-python -u run_daily.py
+python -u run_orchestrator.py --mode live_acquisition_and_enrichment --lanes fantastic --target 300 --airtable-write --global-budget 1500 --artifact-root data/orchestrator
 ```
 
-The daily pipeline performs acquisition, qualification, enrichment, and Airtable synchronization. The production default is `ACQUISITION_MODE=free_multi_source`; JSearch remains available only as an explicit rollback mode.
+`run_orchestrator.py` is the production acquisition, qualification, enrichment and
+Airtable-delivery spine, and it is what the Railway **GTM** service runs. It
+performs a strict zero-network preflight (integrity manifest, credential presence,
+board registry, disk space, run lock) before any external request.
+
+`run_daily.py` is **retired** and is not a production entry point, not the Docker
+`CMD`, and not a Railway Start Command. It remains only for historical reference
+and for the tests that still exercise its legacy multi-source path. Its own module
+docstring says so; earlier revisions of this README did not.
+
+See [PRODUCTION_RUNBOOK.md](PRODUCTION_RUNBOOK.md) for the authoritative
+production configuration — it is the one document to read before touching a live
+service.
 
 ### Free-Source Shadow Benchmark
 
@@ -94,20 +106,34 @@ python -m venv .venv
 .venv\Scripts\activate
 ```
 
-Install dependencies:
+Install dependencies. `requirements.txt` is what the production image installs;
+`requirements-dev.txt` adds the test and lint tooling and is never in the image:
 
 ```bash
-pip install -r requirements.txt
+pip install -r requirements.txt -r requirements-dev.txt
 ```
 
-Create a local `.env` using `.env.example` as the reference.
+Create a local `.env` using `.env.example` as the reference. **The test suite needs
+no credential and makes no network call** — `-p ci_no_network` refuses any
+non-loopback socket for the whole run, so that is enforced rather than intended.
 
-Run validation (102 tests, including live-data regression hardening):
+Run the same three gates CI runs, in the same order:
 
 ```bash
-python -m unittest discover -s tests -v
-python validate_setup.py
+python -m pyflakes $(git ls-files '*.py')   # only "undefined name" is a failure
+python ci_check_integrity.py                # orchestrator.MANIFEST.sha256 vs the tree
+python -m pytest tests -q -p ci_no_network
 ```
+
+Expect `2848 passed, 1 skipped, 991 subtests` and roughly 90 seconds.
+
+If you edit a file listed in `orchestrator.MANIFEST.sha256`, refresh its line
+(`<sha256 of LF-normalized bytes>  <length>  <path>`) in the same commit — a stale
+manifest fails the production strict preflight **before any external request**, so
+the run stops with no other symptom.
+
+`python validate_setup.py` additionally checks a local `.env`, and is the only one
+of these that wants credentials.
 
 Run a controlled end-to-end test:
 

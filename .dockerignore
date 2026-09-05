@@ -16,3 +16,11 @@ data/enriched/*
 data/state/*
 *.corrupt.*
 *.zip
+
+# CI-only files. They are never imported at runtime and must not enter the
+# production image -- ci_no_network.py in particular monkeypatches sockets, and
+# nothing that does that belongs beside a live pipeline.
+.github/
+ci_no_network.py
+ci_check_integrity.py
+requirements-dev.txt

@@ -1,5 +1,10 @@
 # TGTC Production Deployment (Definitive)
 
+> **Stale in part.** [PRODUCTION_RUNBOOK.md](PRODUCTION_RUNBOOK.md) is the
+> authoritative document for the live system; where this file disagrees with it,
+> this one is out of date. It is kept for its history and its reasoning, not as
+> operating instructions.
+
 This is the authoritative production configuration. It supersedes
 `DEPLOY_RAILWAY_STEP_BY_STEP.md`, `PRODUCTION_HANDOFF_CHECKLIST.md`, and
 `READY_V1_DEPLOY.md`.
