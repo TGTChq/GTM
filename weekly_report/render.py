@@ -201,10 +201,31 @@ _MAX_ACTIONS = 3
 
 
 def _count(metric: Optional[Metric]) -> str:
-    """A stakeholder-facing count. Never invents a zero for a missing measurement."""
+    """A stakeholder-facing count. Never invents a zero for a missing measurement.
+
+    A PARTIAL metric is labelled. It is a sum over the runs that reported the
+    field, and the runs that did not are not zeros -- so an unqualified number
+    would be read as a total it is not.
+
+    This is not pedantry. On the 2026-09-04/05 week, `qualified_opportunities` was
+    emitted by the 03:00 run (which acquired nothing, so: 0) and NOT by the 13:00
+    run (whose build predated the counter, and which found 1,048 contacts). The
+    bare rendering was:
+
+        Qualified opportunities: 0
+        Contacts found: 1,048
+
+    which says we found a thousand contacts from nothing. The number is right; the
+    silence next to it is what needed saying.
+    """
     if metric is None or metric.value is None:
         return "not measured"
-    return f"{int(metric.value):,}"
+    rendered = f"{int(metric.value):,}"
+    if metric.status == STATUS_PARTIAL:
+        missing = len(metric.runs_missing_field)
+        total = missing + len(metric.contributing_run_ids)
+        return f"{rendered} (partial: {missing} of {total} runs did not report it)"
+    return rendered
 
 
 def _pct(value: float) -> str:
@@ -234,8 +255,14 @@ def _jobs_line(report: WeeklyReport) -> str:
     tail = f" / {int(reviewed.value):,} reviewed"
     rate = report.metrics.get("review_rate_pct")
     if rate is not None and rate.value is not None:
-        return f"{head}{tail} ({_pct(rate.value)}%)"
-    return f"{head}{tail} (N/A)"
+        line = f"{head}{tail} ({_pct(rate.value)}%)"
+    else:
+        line = f"{head}{tail} (N/A)"
+    # Same rule as the counts below: a rate whose inputs are partial is a rate over
+    # an incomplete population, and saying so costs one clause.
+    if STATUS_PARTIAL in (captured.status, reviewed.status):
+        line += " -- partial: not every run reported these"
+    return line
 
 
 def render_stakeholder_summary(report: WeeklyReport) -> str:

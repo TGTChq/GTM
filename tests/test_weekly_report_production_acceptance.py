@@ -298,3 +298,88 @@ def test_equal_populations_render_100_percent_and_zero_renders_na(tmp_path):
         "a rate over an empty population is undefined; 0% would assert that "
         "nothing captured was reviewed"
     )
+
+
+# --------------------------------------------------------------------------
+# 5. a PARTIAL number must not read as a total
+# --------------------------------------------------------------------------
+#
+# Found by rendering the real 2026-09-04/05 week. `qualified_opportunities` was
+# emitted by the 03:00 run (which acquired nothing: 0) and NOT by the 13:00 run,
+# whose build predated the counter and which found 1,048 contacts. Brett's message
+# said:
+#
+#     Qualified opportunities: 0
+#     Contacts found: 1,048
+#
+# a thousand contacts from nothing. The number was right; the silence beside it
+# was what needed saying.
+
+def _two_runs(root: Path, *, second_reports_qualified: bool):
+    from orchestrator.run_ledger import RunLedger
+
+    for run_id, started, finished, metrics in (
+        ("run_silent", "2026-09-08T03:00:00Z", "2026-09-08T06:00:00Z",
+         {"acquisition": {"net_new_jobs_captured": 6205},
+          "enrichment": {"jobs_reviewed": 6205, "contacts_found": 1048}}),
+        ("run_reports", "2026-09-09T03:00:00Z", "2026-09-09T03:05:00Z",
+         {"acquisition": {"net_new_jobs_captured": 0},
+          "enrichment": ({"jobs_reviewed": 0, "contacts_found": 0,
+                          "qualified_opportunities": 0}
+                         if second_reports_qualified
+                         else {"jobs_reviewed": 0, "contacts_found": 0})}),
+    ):
+        led = RunLedger(root, run_id)
+        led.begin(started_at=_instant(started),
+                  mode="live_acquisition_and_enrichment", lanes=("fantastic",))
+        for stage, values in metrics.items():
+            led.record(stage, values)
+        led.finalize(state="complete", status="complete",
+                     finished_at=_instant(finished))
+    return root
+
+
+def test_a_partial_metric_says_so_in_bretts_message(tmp_path):
+    root = _two_runs(tmp_path / "artifacts", second_reports_qualified=True)
+    text = _stakeholder(root)
+
+    line = next(l for l in text.splitlines() if l.startswith("Qualified opportunities:"))
+    assert line.startswith("Qualified opportunities: 0 ("), line
+    assert "partial" in line and "1 of 2 runs" in line, (
+        "an unqualified 0 beside 1,048 contacts reads as a total it is not"
+    )
+    # A metric EVERY run reported stays a plain number.
+    assert "Contacts found: 1,048" in text
+
+
+def test_a_fully_reported_metric_is_never_annotated(tmp_path):
+    root = _two_runs(tmp_path / "artifacts", second_reports_qualified=False)
+    text = _stakeholder(root)
+
+    assert "Contacts found: 1,048" in text
+    assert "Jobs: 6,205 captured / 6,205 reviewed (100%)" in text
+    # No run reported it at all -> not measured, which is the existing rule.
+    assert "Qualified opportunities: not measured" in text
+
+
+def test_a_partial_review_rate_is_labelled_too(tmp_path):
+    """A rate over an incomplete population is an incomplete rate."""
+    from orchestrator.run_ledger import RunLedger
+
+    root = tmp_path / "artifacts"
+    for run_id, started, finished, metrics in (
+        ("a", "2026-09-08T03:00:00Z", "2026-09-08T06:00:00Z",
+         {"net_new_jobs_captured": 100, "jobs_reviewed": 100}),
+        ("b", "2026-09-09T03:00:00Z", "2026-09-09T03:05:00Z",
+         {"net_new_jobs_captured": 50}),
+    ):
+        led = RunLedger(root, run_id)
+        led.begin(started_at=_instant(started),
+                  mode="live_acquisition_and_enrichment", lanes=("fantastic",))
+        led.record("acquisition", metrics)
+        led.finalize(state="complete", status="complete",
+                     finished_at=_instant(finished))
+
+    line = next(l for l in _stakeholder(root).splitlines() if l.startswith("Jobs:"))
+    assert "partial" in line, line
+    assert "150 captured" in line and "100 reviewed" in line
