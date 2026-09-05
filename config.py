@@ -940,6 +940,39 @@ _SUPPORTED_TIME_FRAMES = ("1h", "24h", "7d", "6m")
 # UNEVALUATED: it is implemented and reachable, and its incremental yield has not
 # been measured. `description_advanced` is also rejected on `time_frame=6m` (HTTP
 # 400), so this segment is only valid on 1h/24h/7d.
+# EVALUATED 2026-09-05 AND KEPT OFF. Not "untested and disabled" -- measured, on
+# 4,231 cached postings carrying real descriptions (median 4,510 chars), with no
+# provider request and no spend:
+#
+#   functional expression matched a description       418
+#     of which the title query already reaches        416   (99.5%)
+#     reachable ONLY by the functional query            2
+#       of those, mapping to a catalog role             0
+#
+# Two findings, and both point the same way.
+#
+# The overlap is 99.5%. A functional segment running beside the title query would
+# spend almost its whole grant re-buying rows the title query returns anyway, and
+# those rows are billed on arrival -- dedupe happens after the provider has charged.
+#
+# And its unique reach is unusable as it stands. RoleGate verifies a title against a
+# TARGET ROLE; a functional-only result has none by construction, so unless its title
+# maps to the catalog the posting is UNVERIFIED -- reviewable, never approved. Both
+# unique hits here were "Lifecycle Marketing Manager", which the catalog does not
+# define. Turning this on would buy reviewable uncertainty, not approved leads.
+#
+# WHAT THIS EVIDENCE CANNOT DO is prove the wild population looks like this corpus.
+# The corpus came from an acquisition that itself used title targeting -- 4,125 of
+# 4,231 titles match the deployed expression -- so postings outside the title filter
+# are largely absent from it BY CONSTRUCTION, and the measured B is a floor, not an
+# estimate. What it does establish is that the gain is bounded by the CATALOG, not by
+# the query: reach without a catalog role cannot become an approved lead. Expanding
+# the catalog is what would unlock this, and that is the work already done for the 13
+# aligned title families -- not a description query.
+#
+# So: implemented, reachable, funded when enabled, and deliberately off on evidence.
+# Revisit when the catalog covers roles the title expression cannot express, which is
+# the only condition under which the unique reach becomes deliverable.
 FANTASTIC_FUNCTIONAL_DISCOVERY_ENABLED = _env_bool(
     "FANTASTIC_FUNCTIONAL_DISCOVERY_ENABLED", False)
 FANTASTIC_JOBS_FUNCTIONAL_LIMIT = _env_int("FANTASTIC_JOBS_FUNCTIONAL_LIMIT", 0)
