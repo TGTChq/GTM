@@ -858,10 +858,16 @@ FANTASTIC_DATE_CREATED_WATERMARK_ENABLED = _env_bool("FANTASTIC_DATE_CREATED_WAT
 #: How many CONSECUTIVE all-duplicate pages a source will pay to page past inside
 #: one run, when it has a DURABLE cursor to make progress with.
 #:
-#: A full page of already-seen rows means two different things depending on whether
-#: the offset survives the run. Without a cursor it means "this query is exhausted"
-#: -- the next run would re-page the same rows anyway. With one it means "the prefix
-#: is consumed", and stopping throws away the only mechanism that reaches the tail.
+#: A full page of already-seen rows does NOT prove the query is exhausted, with or
+#: without a cursor: it says the rows at THIS offset are ones we hold, and nothing
+#: about what lies deeper. That is why ``no_new_ids`` is not in ``_DRAINED_STOPS``
+#: and can never advance the watermark.
+#:
+#: What changes with a durable cursor is what stopping COSTS. Without one, the
+#: offset dies with the run, so paging on would spend on rows the next run must
+#: re-buy from zero regardless -- stopping is a budget decision. With one, the
+#: offset survives, so paging on is the only mechanism that ever reaches the tail,
+#: and stopping throws it away.
 #:
 #: Measured 2026-09-05: the first canonical-window run after the cursor shipped
 #: found a window whose first 3,000 rows per source a previous (pre-cursor) run had

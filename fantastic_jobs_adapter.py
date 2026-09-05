@@ -1086,12 +1086,15 @@ def _fetch_segment(endpoint: str, base_params: Dict[str, Any], source_label: str
     are skipped while genuinely new same-second siblings are still kept.
 
     ``durable_cursor`` says the caller persists this segment's offset across runs
-    (the canonical windowed pass and the bootstrap backfill both do). It changes
-    exactly one thing: what a FULL page of already-seen rows means. Without a
-    cursor it means "this query is exhausted, stop" -- the next run would re-page
-    from the same place anyway. With one it means "the prefix is consumed, keep
-    going": the offset advances, so paging on reaches inventory the duplicates are
-    sitting in front of."""
+    (the canonical windowed pass and the bootstrap backfill both do).
+
+    It changes what a FULL page of already-seen rows COSTS, not what it proves.
+    Such a page never proves exhaustion -- it says the rows at this offset are ones
+    we already hold, and nothing about what lies deeper, which is why
+    ``no_new_ids`` is not a drained stop. Without a durable cursor the offset dies
+    with the run, so paging on spends on rows the next run must re-buy from zero
+    anyway: stopping is the cheaper of two bad options. With one the offset
+    survives, so paging on is the only thing that ever reaches the tail."""
     jobs: List[Dict[str, Any]] = []
     boundary_hit = False
     duplicate_pages = 0
@@ -1255,7 +1258,9 @@ def _fetch_segment(endpoint: str, base_params: Dict[str, Any], source_label: str
             seg["stop_reason"] = seg["stop_reason"] or "short_page"
             break
         if new_ids == 0:
-            # A FULL page in which every row was already seen.
+            # A FULL page in which every row was already seen. This is not
+            # evidence of exhaustion -- see ``no_new_ids`` above and its absence
+            # from ``_DRAINED_STOPS``. It is only evidence about this offset.
             #
             # Measured 2026-09-05: the first canonical-window run after the cursor
             # shipped opened a window whose prefix a PREVIOUS run had already
@@ -1265,8 +1270,9 @@ def _fetch_segment(endpoint: str, base_params: Dict[str, Any], source_label: str
             # At one page per run that is ~30 runs and ~6,000 credits to page back
             # to where the previous run had already reached.
             #
-            # With a durable cursor the offset has already moved, so the next page
-            # is genuinely further in. Stopping here throws that away.
+            # With a durable cursor the offset has already moved, so the next
+            # page is genuinely further in and the spend is not repeated next run.
+            # Stopping here throws that away.
             if not durable_cursor:
                 seg["stop_reason"] = seg["stop_reason"] or "no_new_ids"
                 break
