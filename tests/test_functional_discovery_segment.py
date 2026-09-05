@@ -175,3 +175,57 @@ class WhatItIsNotAllowedToChange(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TheFrameContract(unittest.TestCase):
+    """`6m` is a documented provider frame and is not a frame this engine can page.
+
+    The provider assigns offset+limit to 1h/24h/7d and reserves id-cursor pagination
+    for 6m, which also reorders results from `date_posted` DESC to `id` ASC, and
+    warns against resuming an offset run with a cursor or the reverse. This adapter
+    pages and persists OFFSETS and implements no id cursor, so the combination is
+    rejected rather than half-supported. Parsing the string does not create a cursor
+    mode, a separate state namespace, or a budget for historical recovery.
+    """
+
+    def test_six_months_is_refused_because_we_page_by_offset(self):
+        with mock.patch.multiple(config, FANTASTIC_JOBS_TIME_FRAME="6m",
+                                 FANTASTIC_JOBS_ENABLED=True,
+                                 FANTASTIC_JOBS_API_KEY="k"):
+            with self.assertRaises(ValueError) as caught:
+                config.validate_fantastic_jobs_config()
+        message = str(caught.exception)
+        self.assertIn("cursor", message)
+        self.assertIn("OFFSET", message)
+
+    def test_the_documented_short_frames_are_accepted(self):
+        for frame in ("1h", "24h", "7d"):
+            with self.subTest(frame), mock.patch.multiple(
+                    config, FANTASTIC_JOBS_TIME_FRAME=frame,
+                    FANTASTIC_JOBS_ENABLED=True, FANTASTIC_JOBS_API_KEY="k",
+                    FANTASTIC_FUNCTIONAL_DISCOVERY_ENABLED=False):
+                config.validate_fantastic_jobs_config()
+
+    def test_a_month_horizon_is_calendar_exact_not_an_average(self):
+        """The horizon is a floor the provider enforces. Approximating it with an
+        average month either invents a floor above the provider's -- discarding
+        inventory the feed would still serve -- or one below it, leaving a dead zone
+        no request can reach."""
+        from datetime import datetime, timezone
+
+        # 31 August minus six months lands in February: the day must clamp, not roll.
+        horizon = fja._frame_horizon(
+            datetime(2026, 8, 31, 12, tzinfo=timezone.utc), "6m", 0)
+        self.assertEqual((horizon.year, horizon.month, horizon.day), (2026, 2, 28))
+
+        # And a real calendar span, not 180 days.
+        span = (datetime(2026, 9, 5, 12, tzinfo=timezone.utc)
+                - fja._frame_horizon(datetime(2026, 9, 5, 12, tzinfo=timezone.utc), "6m", 0)).days
+        self.assertGreaterEqual(span, 181, "six calendar months is never 180 days")
+
+    def test_hours_and_days_are_unchanged(self):
+        from datetime import datetime, timedelta, timezone
+
+        now = datetime(2026, 9, 5, 12, tzinfo=timezone.utc)
+        self.assertEqual(fja._frame_horizon(now, "7d", 0), now - timedelta(days=7))
+        self.assertEqual(fja._frame_horizon(now, "24h", 0), now - timedelta(hours=24))

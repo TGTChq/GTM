@@ -81,13 +81,35 @@ def _advance_iso_second(value: str, seconds: int = 1) -> str:
 #: Anything else is a configuration error, not a value to guess at.
 SUPPORTED_TIME_FRAMES = ("1h", "24h", "7d", "6m")
 
-#: Days charged to a month when converting ``6m`` to hours. A calendar six months is
-#: 181-184 days; 30 UNDERSTATES it deliberately. This number only ever feeds
-#: ``_frame_horizon``, and understating the frame puts the horizon LATER, so a window
-#: is clamped slightly higher than it strictly needs to be. That concedes a little
-#: reach and can never leave a dead zone below the floor -- the failure that direction
-#: causes is silent data loss, and this one is a smaller window.
-_DAYS_PER_MONTH_FLOOR = 30
+#: Days per month for the HOURS form of a month-based frame. Named for what it is: a
+#: 30-day approximation, used only where an hours figure is required (the bootstrap
+#: window width). It is NOT used for the frame horizon, which is calendar-exact --
+#: an approximation there would either invent a floor above the provider's, silently
+#: discarding months of recoverable inventory, or one below it, leaving a dead zone.
+_APPROX_DAYS_PER_MONTH = 30
+
+
+def _subtract_months(moment: datetime, months: int) -> datetime:
+    """``moment`` minus N calendar months, clamping the day into the target month.
+
+    A calendar six months is 181-184 days depending on where you start. Converting
+    months to a fixed number of days and subtracting that is wrong in one of two
+    directions, and both directions cost something real: too few days puts the
+    horizon later than the provider's, so windows are clamped above inventory the
+    feed would still serve; too many puts it earlier, leaving a dead zone below the
+    real floor that no request can reach.
+    """
+    year, month = moment.year, moment.month - months
+    while month <= 0:
+        month += 12
+        year -= 1
+    day = moment.day
+    while True:
+        try:
+            return moment.replace(year=year, month=month, day=day)
+        except ValueError:
+            # 31st landing in a 30-day month (or Feb 29 in a common year).
+            day -= 1
 
 
 def _parse_time_frame_hours(time_frame: str) -> float:
@@ -110,7 +132,7 @@ def _parse_time_frame_hours(time_frame: str) -> float:
     n = int(m.group(1))
     unit = m.group(2)
     if unit == "m":
-        return n * _DAYS_PER_MONTH_FLOOR * 24.0
+        return n * _APPROX_DAYS_PER_MONTH * 24.0
     return n * 24.0 if unit == "d" else float(n)
 
 
@@ -152,8 +174,15 @@ def _frame_horizon(now: datetime, time_frame: str, margin_minutes: int = 0) -> d
 
     ``margin_minutes`` holds the window a little above the horizon so a long run does
     not slide off the edge it was clamped to while it is still paging."""
-    hours = _parse_time_frame_hours(time_frame)
-    return now - timedelta(hours=hours) + timedelta(minutes=max(0, margin_minutes))
+    # Months are subtracted by CALENDAR, never by an average day count: the horizon
+    # is a floor the provider enforces, and approximating it moves real inventory in
+    # or out of reach. Hours and days are exact already.
+    m = re.match(r"^\s*(\d+)\s*m\s*$", str(time_frame or "").lower())
+    if m:
+        base = _subtract_months(now, int(m.group(1)))
+    else:
+        base = now - timedelta(hours=_parse_time_frame_hours(time_frame))
+    return base + timedelta(minutes=max(0, margin_minutes))
 
 
 def _family_id(term: str) -> str:
@@ -2850,6 +2879,35 @@ def run_fantastic_jobs_acquisition(http_get: HttpGet = _http_get, *,
             metrics["title_advanced"] = {"expression_chars": len(title_advanced_expr),
                                          "fingerprint": title_plan.get("fingerprint", ""),
                                          "clauses": len(title_plan.get("clauses") or [])}
+            # FUNCTION-AWARE UPSTREAM SUPPRESSION IS NOT APPLICABLE HERE, and that is
+            # a provider constraint rather than a wiring gap.
+            #
+            # `exclude_organization_slug` applies to the WHOLE request. The single
+            # title_advanced stream asks one question covering every role family at
+            # once, so excluding a company covered for GTM would also remove its
+            # Engineering demand from the same response. There is no way to scope the
+            # exclusion by function inside one combined query, and suppressing a whole
+            # company because one of its functions is covered is precisely what the
+            # rule forbids.
+            #
+            # Per-function scoping needs the per-family partition, which is a
+            # different billing shape: N requests, and a job matched by two families
+            # billed twice. That trade is deliberately not made by default.
+            #
+            # So the earliest SAFE suppression on this path is downstream:
+            # PRE_APOLLO_EXISTING_DEDUPE (enabled), which runs after Fantastic has
+            # already billed the row. It saves Apollo credits, not acquisition
+            # credits, and the rows for an already-covered company x function are an
+            # unavoidable acquisition cost of querying all families together.
+            metrics["function_dedupe"] = {
+                "enabled": False,
+                "applicable": False,
+                "reason": ("exclude_organization_slug scopes to the whole request; the "
+                           "single title_advanced stream covers every role family, so "
+                           "a per-function exclusion cannot be expressed without "
+                           "partitioning into per-family queries"),
+                "earliest_safe_suppression": "PRE_APOLLO_EXISTING_DEDUPE (post-billing)",
+            }
             jb_params = {"time_frame": config.FANTASTIC_JOBS_TIME_FRAME,
                          "exclude_ats_duplicate": "true", "source": "linkedin",
                          "title_advanced": title_advanced_expr}
