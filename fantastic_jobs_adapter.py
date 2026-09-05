@@ -213,6 +213,11 @@ _PII_SUBSTRINGS = ("recruiter", "hiring_manager", "email", "phone", "contact_")
 
 # Segment definitions: (endpoint, source label, response-source match keys).
 ATS_SOURCE = "fantastic_jobs_ats"
+#: The functional segment is a QUERY SHAPE, not a provider source: it reaches the
+#: same job boards through active-jb without a title restriction. It carries its own
+#: label so its billing, novelty and drain state are attributable on their own.
+FUNCTIONAL_SOURCE = "fantastic_jobs_functional"
+
 JB_SEGMENTS = {
     "wellfound": ("fantastic_jobs_wellfound", ("wellfound", "angellist", "angel.co")),
     "ycombinator": ("fantastic_jobs_ycombinator", ("ycombinator", "y combinator", "workatastartup")),
@@ -989,6 +994,19 @@ def build_source_plan(*, title_advanced_active: bool, used_title_families: bool)
             accept=accept, feeds_cursor=True,
             dispatch=("title_advanced" if title_advanced_active
                       else "title_families" if used_title_families else "plan")))
+    # FUNCTIONAL (task-based) discovery: its own segment, because a description
+    # expression ANDed onto the title query could only narrow it. Two-key gated and
+    # default OFF, so a deploy cannot start paying for it. It draws an allocator
+    # grant like every other source, which is what keeps it from starving the ones
+    # with proven yield -- and what lets the allocator's exploration floor fund it
+    # while it has none.
+    fn_limit = int(getattr(config, "FANTASTIC_JOBS_FUNCTIONAL_LIMIT", 0) or 0)
+    if (bool(getattr(config, "FANTASTIC_FUNCTIONAL_DISCOVERY_ENABLED", False))
+            and fn_limit > 0
+            and str(getattr(config, "FANTASTIC_FUNCTIONAL_DESCRIPTION_ADVANCED", "") or "").strip()):
+        plan.append(_SourceSegment(key="functional", label=FUNCTIONAL_SOURCE,
+                                   endpoint="/v1/active-jb", limit=fn_limit,
+                                   accept=None, dispatch="functional"))
     for key, flag in (("wellfound", "FANTASTIC_WELLFOUND_SOURCE_ENABLED"),
                       ("ycombinator", "FANTASTIC_YCOMBINATOR_SOURCE_ENABLED")):
         limit = int(getattr(config, f"FANTASTIC_JOBS_{key.upper()}_LIMIT", 0) or 0)
@@ -1041,6 +1059,34 @@ def build_jb_params(source_key: str, *, title_advanced_expr: str = "") -> Dict[s
     if not source_supports_provider_firmographics(source_key):
         for key in _NULL_EXCLUDING_FIRMOGRAPHIC_PARAMS:
             params.pop(key, None)
+    return params
+
+
+def build_functional_params() -> Dict[str, Any]:
+    """``/v1/active-jb`` request for the FUNCTIONAL (task-based) segment.
+
+    Carries ``description_advanced`` and deliberately NO ``title_advanced``.
+
+    The provider ANDs the ``_advanced`` parameters together, so adding a description
+    expression to the existing title query can only narrow it -- it cannot reach a
+    job the title filter already excluded. Title synonyms have the same ceiling: they
+    lengthen the list of titles we recognise, and a posting whose title is nothing
+    like any of them stays invisible however many aliases are added. Reaching work
+    under an unfamiliar title needs a request that does not filter on title at all.
+
+    Every other ICP filter is kept, so this widens the query on ONE axis only. What
+    comes back is subject to the same RoleGate, ICP, firmographic and send-safe
+    decisions as everything else: this widens what is CONSIDERED, never what is
+    approved.
+    """
+    expression = str(getattr(config, "FANTASTIC_FUNCTIONAL_DESCRIPTION_ADVANCED", "") or "").strip()
+    if not expression:
+        return {}
+    params: Dict[str, Any] = {"time_frame": config.FANTASTIC_JOBS_TIME_FRAME,
+                              "exclude_ats_duplicate": "true",
+                              "description_advanced": expression}
+    params.update(_jb_filter_params())
+    _apply_server_industry_exclusions(params)
     return params
 
 
@@ -2920,7 +2966,7 @@ def run_fantastic_jobs_acquisition(http_get: HttpGet = _http_get, *,
         for seg in source_plan:
             if seg.key == "ats":
                 continue  # dispatched above (different endpoint + circuit breaker)
-            if seg.dispatch != "plan":
+            if seg.dispatch not in ("plan", "functional"):
                 continue  # LinkedIn under a title MODE: dispatched + settled above
             if quota.stop_reason:
                 metrics["segments"].setdefault(seg.label, {}).setdefault(
@@ -2936,7 +2982,19 @@ def run_fantastic_jobs_acquisition(http_get: HttpGet = _http_get, *,
             # SOURCE-AWARE: omits the null-excluding firmographic predicates for a
             # source that carries no provider firmographics, and applies role
             # targeting -- which this loop never used to send at all.
-            jb_params = build_jb_params(seg.key, title_advanced_expr=title_advanced_expr)
+            if seg.dispatch == "functional":
+                # Description expression, NO title_advanced. The two are ANDed by the
+                # provider, so a title filter here would confine this segment to the
+                # jobs the main query already reaches -- which is the one thing it
+                # exists not to do.
+                jb_params = build_functional_params()
+                if not jb_params:
+                    metrics["segments"].setdefault(seg.label, {}).setdefault(
+                        "stop_reason", "no_functional_expression")
+                    allocator.settle(seg, 0)
+                    continue
+            else:
+                jb_params = build_jb_params(seg.key, title_advanced_expr=title_advanced_expr)
             seg_resume[seg.label] = {"seg": seg, "endpoint": seg.endpoint,
                                      "params": jb_params, "accept": seg.accept,
                                      "resumable": not seg.feeds_cursor}
