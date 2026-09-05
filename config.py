@@ -919,6 +919,37 @@ FANTASTIC_MAX_CONSECUTIVE_DUPLICATE_PAGES = _env_int(
 #: tuple as SUPPORTED_TIME_FRAMES.
 _SUPPORTED_TIME_FRAMES = ("1h", "24h", "7d", "6m")
 
+
+# ---------- functional (task-based) discovery ----------
+# WHY A SEPARATE SEGMENT, not an addition to the existing query.
+#
+# The provider ANDs the `_advanced` parameters together at the query level. So
+# sending `description_advanced` ALONGSIDE `title_advanced` can only NARROW the
+# existing result set -- it cannot reach a single job the title filter already
+# excluded. Title synonyms have the same ceiling: they widen the list of titles, and
+# a job whose title is nothing like ours stays invisible however many aliases we add.
+#
+# Reaching work under an unfamiliar title therefore needs its own request, carrying
+# `description_advanced` and NO `title_advanced`, with every other ICP filter intact.
+# That is what this segment is. Downstream RoleGate, ICP, firmographic and send-safe
+# decisions stay authoritative over everything it returns -- the segment widens what
+# is CONSIDERED, never what is approved.
+#
+# Two-key gate, the same shape Wellfound and Y Combinator use: an explicit flag AND a
+# non-zero limit, so a code deploy can never start paying for it. Default OFF and
+# UNEVALUATED: it is implemented and reachable, and its incremental yield has not
+# been measured. `description_advanced` is also rejected on `time_frame=6m` (HTTP
+# 400), so this segment is only valid on 1h/24h/7d.
+FANTASTIC_FUNCTIONAL_DISCOVERY_ENABLED = _env_bool(
+    "FANTASTIC_FUNCTIONAL_DISCOVERY_ENABLED", False)
+FANTASTIC_JOBS_FUNCTIONAL_LIMIT = _env_int("FANTASTIC_JOBS_FUNCTIONAL_LIMIT", 0)
+#: Boolean expression over the job DESCRIPTION, in the provider's syntax
+#: (`&` AND, `|` OR, `!` NOT, `'...'` phrase, `(...)` grouping). Empty means the
+#: segment cannot run: a description query with no expression is an unrestricted
+#: description search, which is exactly what must not be issued.
+FANTASTIC_FUNCTIONAL_DESCRIPTION_ADVANCED = os.getenv(
+    "FANTASTIC_FUNCTIONAL_DESCRIPTION_ADVANCED", "")
+
 FANTASTIC_TIME_FRAME_MARGIN_MINUTES = _env_int("FANTASTIC_TIME_FRAME_MARGIN_MINUTES", 0)
 
 FANTASTIC_DATE_CREATED_LAG_MINUTES = _env_int("FANTASTIC_DATE_CREATED_LAG_MINUTES", 180)
@@ -1215,6 +1246,17 @@ def validate_fantastic_jobs_config() -> None:
     # hours -- so a typo would silently tell the frame horizon the feed only reaches
     # back one day, clamping every window to the last 24 hours and abandoning
     # anything older as unreachable. Fail the deploy instead of shrinking the window.
+    if (FANTASTIC_FUNCTIONAL_DISCOVERY_ENABLED
+            and FANTASTIC_JOBS_FUNCTIONAL_LIMIT > 0):
+        if not FANTASTIC_FUNCTIONAL_DESCRIPTION_ADVANCED.strip():
+            raise ValueError(
+                "FANTASTIC_FUNCTIONAL_DISCOVERY_ENABLED with a non-zero limit requires "
+                "FANTASTIC_FUNCTIONAL_DESCRIPTION_ADVANCED; an empty expression would "
+                "issue an unrestricted description search")
+        if FANTASTIC_JOBS_TIME_FRAME == "6m":
+            raise ValueError(
+                "functional discovery cannot run on time_frame=6m: the provider "
+                "rejects description search on that frame with HTTP 400")
     if FANTASTIC_JOBS_TIME_FRAME not in _SUPPORTED_TIME_FRAMES:
         raise ValueError(
             "FANTASTIC_JOBS_TIME_FRAME must be one of "
