@@ -259,14 +259,23 @@ def _pct(value: float) -> str:
 def _jobs_line(report: WeeklyReport) -> str:
     """``Jobs: X captured / Y reviewed (Z%)``, degrading honestly.
 
-    Both sides count POSTINGS -- ``_dedup`` counts one per provider posting and
-    ``qualification_pipeline`` reports ``input_jobs = len(jobs)`` -- so this is the
-    one boundary in the message whose two numbers are the same population and
-    whose ratio is meaningful.
+    Both sides count POSTINGS, and more than that: they are the SAME list measured
+    twice. ``_dedup`` returns the opportunities, the pipeline takes ``len()`` of them
+    for ``jobs_captured``, and hands that identical list to enrichment, which writes
+    it verbatim as qualification's input -- whose length becomes ``jobs_reviewed``.
+    Nothing filters between the two measurements (pinned by
+    ``test_captured_equals_reviewed``), so in a run that reached enrichment they are
+    equal and Z is 100.
 
-    Equal non-zero populations render ``(100%)``. A zero denominator renders
-    ``(N/A)``: a rate over an empty population is undefined, and printing 0%
-    would assert that nothing captured was reviewed.
+    Z is therefore 100% whenever it can be computed at all. It is retained because
+    the stakeholder format specifies it, NOT because it measures a conversion --
+    changing what Brett reads is a business decision, and this is flagged for that
+    decision rather than taken unilaterally. The two counts do carry information the
+    rate does not: a run that stops between the acquisition checkpoint and the
+    enrichment funnel emits the first and not the second.
+
+    A zero denominator renders ``(N/A)``: a rate over an empty population is
+    undefined, and printing 0% would assert that nothing captured was reviewed.
     """
     captured = report.metrics.get("jobs_captured")
     reviewed = report.metrics.get("jobs_reviewed")

@@ -304,8 +304,14 @@ def test_counters_sum_across_the_runs_in_the_window(artifact_root, pacific_week)
 
 
 def test_a_run_that_does_not_report_a_counter_is_partial_not_zero(artifact_root, pacific_week):
+    """A run that could not answer must not be read as a run that answered zero.
+
+    The silent run reports NEITHER capture nor review. That is the real shape of a
+    run that stopped before enrichment, and the only shape that is genuinely silent
+    about how much it captured -- a run that reviewed N necessarily captured N.
+    """
     write_run(artifact_root, "a", finished="2026-08-22T13:00:00Z", postings=100)
-    write_run(artifact_root, "b", finished="2026-08-25T13:00:00Z", postings=None)
+    write_run(artifact_root, "b", finished="2026-08-25T13:00:00Z", postings=None, reviewed=None)
     runs, _ = discover_runs([artifact_root])
     inside, _ = select_window(runs, pacific_week)
     metric = build_run_metrics(inside)["jobs_captured"]
@@ -313,6 +319,21 @@ def test_a_run_that_does_not_report_a_counter_is_partial_not_zero(artifact_root,
     assert metric.status == STATUS_PARTIAL
     assert metric.runs_missing_field == ["b"]
     assert "did not report" in metric.reason
+
+
+def test_a_capture_count_is_recovered_from_the_review_count(artifact_root, pacific_week):
+    """The deduped opportunities are handed straight to qualification, so a run that
+    reviewed N captured N. A build that predates the net-new counter still emits the
+    review count, and that is a measurement, not a reconstruction -- refusing it
+    would report a week as unmeasured while the number sat in the ledger."""
+    write_run(artifact_root, "a", finished="2026-08-22T13:00:00Z", postings=100)
+    write_run(artifact_root, "b", finished="2026-08-25T13:00:00Z", postings=None, reviewed=90)
+    runs, _ = discover_runs([artifact_root])
+    inside, _ = select_window(runs, pacific_week)
+    metric = build_run_metrics(inside)["jobs_captured"]
+    assert metric.value == 190
+    assert metric.status == STATUS_MEASURED
+    assert metric.runs_missing_field == []
 
 
 def test_a_counter_no_run_reports_is_unavailable_with_a_reason(artifact_root, pacific_week):
@@ -335,6 +356,12 @@ def test_an_empty_window_reports_unavailable_never_zero():
 
 
 def test_review_rate_is_derived_and_refuses_an_empty_denominator(artifact_root, pacific_week):
+    """NOTE: a production run cannot actually produce 200 captured / 50 reviewed --
+    the two are one list measured at two points, so a real rate is always 100%. The
+    unequal fixture is here to prove the ARITHMETIC and the empty-denominator guard,
+    which is all this rate has ever tested. See
+    ``tests/test_captured_equals_reviewed.py`` for the identity itself.
+    """
     write_run(artifact_root, "a", finished="2026-08-22T13:00:00Z", postings=200, reviewed=50)
     runs, _ = discover_runs([artifact_root])
     inside, _ = select_window(runs, pacific_week)
