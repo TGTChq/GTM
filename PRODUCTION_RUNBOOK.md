@@ -274,21 +274,51 @@ Command, the environment, the cron, the volume, that a scheduled run occurred,
 that a flag was enabled, that the feature executed, or that the result improved.
 Those are seven separate facts and each needs its own evidence.
 
-## 7. Operational data in a public repository
+## 7. Operational data in a public repository — measured, 2026-09-05
 
-`reports/` contains generated run evidence — company names, Airtable record ids,
-campaign ids — committed over time. `.gitignore` now denies the families that
-carry the most (`reports/wave1_*`, `reports/anchor_conflict_*.json`,
-`reports/*control_activation*`, `reports/weekly/`), but files committed before
-those rules are still in history.
+Previously stated here as an open risk ("files committed before those rules are
+still in history"). It was measured instead of assumed, and it is much smaller
+than that implied.
 
-**Do not rewrite history to remove them.** Every clone, fork and worktree would
-diverge, and the exposure is already public. The safe remediation is, in order:
-inventory what is actually exposed; confirm no credential or personal email is
-among it (mailbox addresses and lead emails are the material risk, company names
-are not); decide with the owner whether the repository should be private; and
-treat any exposed credential as rotated-by-default rather than assessed. Track it
-as its own piece of work.
+Method: enumerate every blob reachable from **remote** refs (`git rev-list
+--objects --remotes`) — which is what is actually public, as distinct from
+`--all`, which also reaches local-only branches on one laptop. Scan each blob for
+third-party email addresses, Airtable record ids and credential-shaped strings.
+Counts only; no address, name or row was reproduced.
+
+**Publicly reachable operational data: 11 paths, 13 blob versions.**
+
+```
+third_party_emails         0
+airtable_record_ids        0
+credential_shaped_strings  0
+```
+
+The six public `reports/` files are all from one 2026-08-07 run and carry company
+names, job titles, employer domains and 12 UUIDs — business data, not personal
+data.
+
+The files that *do* carry personal data were never pushed. `git rev-list
+--objects --all` reaches 59 `reports/` paths; only **6** are reachable from a
+remote ref. The rest — including `enrolled_airtable_norm_dryrun.json` with 1,848
+third-party addresses and 924 Airtable record ids — exist only in local objects on
+the machine that generated them, and are now covered by `.gitignore`.
+
+**Consequently:**
+
+* no credential rotation is indicated — nothing credential-shaped is public;
+* no history rewrite is indicated, and it would still be the wrong tool: every
+  clone, fork and worktree would diverge to remove nothing;
+* no repository-visibility change is forced by this finding.
+
+What remains is a judgement call rather than an incident: whether company-level
+operational output belongs in a public repository at all. That is the owner's to
+make. Until then the `.gitignore` families (`reports/wave1_*`,
+`reports/anchor_conflict_*.json`, `reports/*control_activation*`,
+`reports/weekly/`) are what keep the next one from being committed.
+
+Re-run the inventory before trusting this section — it is a measurement with a
+date on it, not a property.
 
 ## 8. Where the numbers come from
 
@@ -310,13 +340,25 @@ as its own piece of work.
 
 Stated because a runbook that only lists what works is not a runbook.
 
-* **The persistent window cursor (#68) has not been observed resuming across two
-  scheduled runs.** It was deployed at 18:54 on 2026-09-04; the last cron before
-  that was 13:00, and the cron then moved to `0 3 * * *`. The acceptance
-  comparison — `watermark.offsets_at_open` on run N equals `offsets_at_close` on
-  run N-1, for the same window — needs two consecutive runs on a build carrying
-  the cursor. An initial zero offset after a backward-compatible migration proves
-  nothing, and a legitimately new window resets offsets by design.
+* **The persistent window cursor (#68) is proven against the live provider, but
+  not yet across two scheduled production runs.** No two consecutive crons have
+  executed on a build carrying it: #68 deployed at 18:54 on 2026-09-04, after that
+  day's 13:00 cron, and the cron then moved to `0 3 * * *`. So the first scheduled
+  run on such a build opens with `offsets_at_open = {}` by construction, which
+  proves nothing.
+
+  A live-provider isolated validation closed that gap on 2026-09-05: two passes
+  over one canonical window, LinkedIn only, 100 rows each, every state path
+  redirected into a temp directory. Pass 1 stopped on `cap_reached`, stayed
+  undrained and persisted `offsets_at_close = {linkedin: 100}` without committing
+  the watermark. Pass 2 **reused the same window** and its first requested offset
+  was **100** — resumption from the persisted cursor, against the real API, with
+  100 further rows kept and none re-billed. 200 rows spent of the 200 authorised;
+  all 10 production state files byte-identical before and after.
+
+  That is the mechanism proven. The remaining question is narrower: that two
+  *scheduled* runs behave the same way on the volume, which the 2026-09-06 cron
+  answers.
 * **The weekly report has not delivered under the new Start Command.** The
   configuration is applied and its argument path is tested at the real firing
   instants, but `--if-due friday` means the first live delivery is the Friday
