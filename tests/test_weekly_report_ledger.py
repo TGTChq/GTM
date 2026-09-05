@@ -465,9 +465,9 @@ def test_the_stakeholder_message_uses_ledger_totals_in_bretts_format(tmp_path):
     assert "Jobs: 6,206 captured / 5,746 reviewed (92.6%)" in text
     assert "Qualified opportunities: 1,264" in text
     assert "Contacts found: 613" in text
-    assert "Sent to Instantly:" in text
-    assert "BIGGEST BOTTLENECK" in text
-    assert "NEXT WEEK" in text
+    assert "sent to Instantly:" in text, "Brett's wording is lower-case here"
+    assert "Biggest bottleneck from past week" in text
+    assert "Action plan for the following week" in text
     # Internal evidence must not leak into the stakeholder view.
     assert "20260901T130000Z-aaaaaaaa" not in text
     assert "reporting_ledger:" not in text

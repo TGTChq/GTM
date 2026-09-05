@@ -274,6 +274,46 @@ def identify(
     incomparable: List[Dict[str, str]] = []
     for (from_key, from_metric), (to_key, to_metric) in zip(available, available[1:]):
         boundary_name = BOUNDARY_NAMES.get((from_key, to_key), f"{from_key}->{to_key}")
+        # UNIT. The two sides must count the SAME KIND OF THING. They frequently do
+        # not: acquisition counts postings, the hiring-manager stage counts
+        # company x role-bucket opportunities. On 2026-09-04 that was 6,205
+        # postings and 2,410 opportunities, and subtracting them yields a
+        # 61% "review loss" that nobody lost -- the second number is not a subset
+        # of the first, it is a different population.
+        #
+        # A metric with no declared unit is treated as incomparable rather than
+        # assumed compatible: an undeclared unit is exactly the state that produced
+        # the wrong number in the first place.
+        from_unit = getattr(from_metric, "counted_unit", "") or ""
+        to_unit = getattr(to_metric, "counted_unit", "") or ""
+        if from_unit != to_unit or not from_unit:
+            incomparable.append({
+                "boundary": boundary_name,
+                "reason": (
+                    f"{from_key} counts {from_unit or 'an undeclared unit'} and "
+                    f"{to_key} counts {to_unit or 'an undeclared unit'}; one is not a "
+                    "subset of the other, so their difference is not a loss"
+                ),
+            })
+            continue
+        # COHORT. Same unit is not enough. ``sent_to_instantly`` is observed at the
+        # provider and drawn from the Airtable Approved backlog, which accumulates
+        # across windows -- the 2026-09-05 sync delivered 770 leads from 781
+        # Approved rows built up over the preceding fortnight. Subtracting that
+        # from this window's contacts compares two unrelated cohorts.
+        from_cohort = getattr(from_metric, "cohort", "") or ""
+        to_cohort = getattr(to_metric, "cohort", "") or ""
+        if from_cohort != to_cohort:
+            incomparable.append({
+                "boundary": boundary_name,
+                "reason": (
+                    f"{from_key} is the {from_cohort or 'undeclared'} cohort and "
+                    f"{to_key} is the {to_cohort or 'undeclared'} cohort; they are "
+                    "different populations measured over the same dates, not two "
+                    "points on one funnel"
+                ),
+            })
+            continue
         # Two run-derived counters may have been summed over DIFFERENT run sets when
         # one of them is partial. Subtracting those is arithmetic on incomparable
         # populations, so the boundary is declared rather than measured.

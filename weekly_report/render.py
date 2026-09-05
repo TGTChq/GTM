@@ -166,13 +166,38 @@ def render_summary(report: WeeklyReport) -> str:
 
 
 # -- the stakeholder view --------------------------------------------------
+#
+# THIS IS A FIXED FORMAT. Brett's message is exactly:
+#
+#     <one short period label>
+#     Jobs: {X} captured / {Y} reviewed ({Z}%)
+#     Qualified opportunities: {Q}
+#     Contacts found: {C}
+#     sent to Instantly: {I}
+#
+#     Biggest bottleneck from past week
+#     <one short, evidence-backed explanation>
+#
+#     Action plan for the following week
+#     <one to three concrete actions>
+#
+# Nothing else. No metric dashboard, no debug counters, no acquisition table, no
+# FINAL_PASS census, no gate jargon, no provider-duplication line. All of that is
+# already written on every run, to the JSON document and the internal summary,
+# and adding it here is how a stakeholder message stops being read.
+#
+# ``render_summary`` above is the internal view and is deliberately unconstrained.
 
-#: Brett's format, in his order. ``jobs`` is rendered as one combined line.
+#: The three plain count lines, in Brett's order and with his exact wording --
+#: including the lower-case "sent to Instantly", which is his, not a typo.
 _STAKEHOLDER_ROWS = (
     ("qualified_opportunities", "Qualified opportunities"),
     ("contacts_found", "Contacts found"),
-    ("sent_to_instantly", "Sent to Instantly"),
+    ("sent_to_instantly", "sent to Instantly"),
 )
+
+#: At most this many actions reach the stakeholder message.
+_MAX_ACTIONS = 3
 
 
 def _count(metric: Optional[Metric]) -> str:
@@ -182,11 +207,22 @@ def _count(metric: Optional[Metric]) -> str:
     return f"{int(metric.value):,}"
 
 
+def _pct(value: float) -> str:
+    """``100%`` rather than ``100.0%``; one decimal only when it carries meaning."""
+    return f"{value:.0f}" if float(value).is_integer() else f"{value:.1f}"
+
+
 def _jobs_line(report: WeeklyReport) -> str:
     """``Jobs: X captured / Y reviewed (Z%)``, degrading honestly.
 
-    The rate is printed only when both sides were measured over the same runs --
-    the report already refuses to divide otherwise, so this just follows it.
+    Both sides count POSTINGS -- ``_dedup`` counts one per provider posting and
+    ``qualification_pipeline`` reports ``input_jobs = len(jobs)`` -- so this is the
+    one boundary in the message whose two numbers are the same population and
+    whose ratio is meaningful.
+
+    Equal non-zero populations render ``(100%)``. A zero denominator renders
+    ``(N/A)``: a rate over an empty population is undefined, and printing 0%
+    would assert that nothing captured was reviewed.
     """
     captured = report.metrics.get("jobs_captured")
     reviewed = report.metrics.get("jobs_reviewed")
@@ -195,39 +231,39 @@ def _jobs_line(report: WeeklyReport) -> str:
     head = f"Jobs: {int(captured.value):,} captured"
     if reviewed is None or reviewed.value is None:
         return f"{head} / reviewed not measured"
-    rate = report.metrics.get("review_rate_pct")
     tail = f" / {int(reviewed.value):,} reviewed"
+    rate = report.metrics.get("review_rate_pct")
     if rate is not None and rate.value is not None:
-        tail += f" ({rate.value:.1f}%)"
-    return head + tail
+        return f"{head}{tail} ({_pct(rate.value)}%)"
+    return f"{head}{tail} (N/A)"
 
 
 def render_stakeholder_summary(report: WeeklyReport) -> str:
-    """The weekly message Brett reads: the numbers, the bottleneck, the plan.
+    """The weekly message Brett reads. Four numbers, a cause, a plan.
 
-    Deliberately short. Everything this omits -- run ids, artifact field paths,
-    provenance, the gap register -- stays in the JSON document and the internal
-    summary, which are written on every run regardless.
+    Everything this omits -- run ids, artifact field paths, provenance, the gap
+    register, per-source acquisition, loss-reason censuses -- stays in the JSON
+    document and the internal summary, which are written on every run regardless.
     """
-    window = report.window
     lines: List[str] = [
-        "TGTC Weekly Pipeline Report",
-        f"Week of {window.label}",
-        "",
+        f"Week of {report.window.label}",
         _jobs_line(report),
     ]
     for key, label in _STAKEHOLDER_ROWS:
         lines.append(f"{label}: {_count(report.metrics.get(key))}")
 
     lines.append("")
-    lines.append("BIGGEST BOTTLENECK")
+    lines.append("Biggest bottleneck from past week")
     lines.extend(_wrap(report.bottleneck.statement or "not determined", indent=""))
 
-    if report.actions:
-        lines.append("")
-        lines.append("NEXT WEEK")
-        for action in report.actions:
-            lines.extend(
-                _wrap(f"{action.priority}. {action.action}", indent="", hanging="   ")
-            )
+    lines.append("")
+    lines.append("Action plan for the following week")
+    actions = list(report.actions)[:_MAX_ACTIONS]
+    if actions:
+        for index, action in enumerate(actions, start=1):
+            lines.extend(_wrap(f"{index}. {action.action}", indent="", hanging="   "))
+    else:
+        lines.extend(_wrap(
+            "No action is proposed: no comparable funnel boundary could be measured "
+            "this window, so any plan would be guessing at a cause.", indent=""))
     return "\n".join(lines)

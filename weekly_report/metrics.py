@@ -58,6 +58,14 @@ class MetricSpec:
     definition: str
     #: ``(artifact_stem, dotted_path)`` candidates, most authoritative first.
     fields: Tuple[Tuple[str, str], ...]
+    #: The population this metric counts, as a machine key. ``unit`` is a display
+    #: word; this is the identity a boundary subtraction must match on. Getting it
+    #: wrong is how "3,000 postings minus 400 opportunities = 2,600 lost" happens.
+    counted_unit: str = ""
+    #: Where the population came from. ``run_window`` = produced by the runs in
+    #: this window. ``external_backlog`` = observed at a provider, drawn from work
+    #: accumulated over previous windows.
+    cohort: str = "run_window"
 
     def field_labels(self) -> Tuple[str, ...]:
         """Every candidate this metric may be read from, most authoritative first."""
@@ -78,6 +86,30 @@ class MetricSpec:
                 return value, _field_label(stem, path)
         return None, ""
 
+
+#: COUNTED UNITS -- the identity a boundary subtraction must match on.
+#:
+#: These were read from the producers, not chosen to make the funnel look tidy:
+#:
+#:   UNIT_POSTING       ``_dedup`` counts one per provider posting, and
+#:                      ``qualification_pipeline`` reports ``input_jobs = len(jobs)``;
+#:   UNIT_OPPORTUNITY   ``hiring_manager`` increments ``contact_discovery_entered``
+#:                      once per COMPANY x ROLE BUCKET about to run a people search,
+#:                      and produces one Lead per that same key -- so "qualified
+#:                      opportunities" and "contacts found" are the same population
+#:                      at two points, and one Airtable row is created per Lead;
+#:   UNIT_INSTANTLY_LEAD an Instantly lead is a PERSON in a campaign.
+#:
+#: A run acquiring 6,205 postings and entering 2,410 opportunities has not "lost
+#: 3,795": the second number counts a different thing. That subtraction is what
+#: these constants exist to make impossible.
+UNIT_POSTING = "posting"
+UNIT_OPPORTUNITY = "company_role_bucket_opportunity"
+UNIT_INSTANTLY_LEAD = "instantly_lead"
+
+#: Cohorts. Two counters can share a unit and still be incomparable.
+COHORT_RUN_WINDOW = "run_window"
+COHORT_EXTERNAL_BACKLOG = "external_backlog"
 
 #: The headline funnel, in pipeline order. The dashboard renders this order too.
 RUN_METRIC_SPECS: Tuple[MetricSpec, ...] = (
@@ -106,6 +138,7 @@ RUN_METRIC_SPECS: Tuple[MetricSpec, ...] = (
             ("capacity_report", "raw_postings"),
             ("orchestrator_result", "waterfall.unit_totals.postings"),
         ),
+        counted_unit=UNIT_POSTING,
     ),
     MetricSpec(
         key="jobs_reviewed",
@@ -120,6 +153,7 @@ RUN_METRIC_SPECS: Tuple[MetricSpec, ...] = (
             ("ledger", "metrics.jobs_reviewed"),
             ("orchestrator_result", "enrichment.funnel.qualification_input"),
         ),
+        counted_unit=UNIT_POSTING,
     ),
     MetricSpec(
         key="qualified_opportunities",
@@ -136,6 +170,7 @@ RUN_METRIC_SPECS: Tuple[MetricSpec, ...] = (
             ("ledger", "metrics.qualified_opportunities"),
             ("orchestrator_result", "enrichment.funnel.contact_discovery_entered"),
         ),
+        counted_unit=UNIT_OPPORTUNITY,
     ),
     MetricSpec(
         key="contacts_found",
@@ -151,6 +186,7 @@ RUN_METRIC_SPECS: Tuple[MetricSpec, ...] = (
             ("orchestrator_result", "waterfall.unit_totals.contacts"),
             ("orchestrator_result", "enrichment.funnel.contactable_hiring_managers"),
         ),
+        counted_unit=UNIT_OPPORTUNITY,
     ),
     MetricSpec(
         key="sent_to_airtable",
@@ -165,6 +201,7 @@ RUN_METRIC_SPECS: Tuple[MetricSpec, ...] = (
             ("delivery", "created"),
             ("orchestrator_result", "delivery.created"),
         ),
+        counted_unit=UNIT_OPPORTUNITY,
     ),
 )
 
@@ -360,6 +397,8 @@ def aggregate(spec: MetricSpec, runs: Sequence[RunRecord]) -> Metric:
         source=SOURCE_RUN_ARTIFACTS,
         definition=spec.definition,
         attribution="run completion timestamp (run_manifest.finished_at)",
+        counted_unit=spec.counted_unit,
+        cohort=spec.cohort,
     )
     if not runs:
         metric.status = STATUS_UNAVAILABLE
