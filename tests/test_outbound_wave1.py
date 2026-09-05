@@ -1088,3 +1088,72 @@ def test_configured_buckets_helper_ignores_blank_campaign_ids(monkeypatch):
         {"finance": "id-1", "Marketing": " ", "product": "id-2", "": "id-3"},
     )
     assert config.wave1_configured_challenger_buckets() == frozenset({"finance", "product"})
+
+
+# ---------------------------------------------------------------------------
+# Friction resolution: every campaign x signal x proof, exhaustively
+# ---------------------------------------------------------------------------
+#
+# `_T3_FRICTION` was deleted in 83ab76a (renamed to `_DEGRADED_EVIDENCE_FRICTION`)
+# and two references to it were left behind in `_friction`. 108 of the 270
+# campaign x signal x proof combinations raised `NameError`, in every one of the
+# nine campaigns.
+#
+# It never broke an enrollment -- `wave1_enrollment_overlay` wraps the whole
+# overlay -- and that is exactly what made it invisible: the record was quietly
+# enrolled on Control A with a one-line warning, having already been RANDOMIZED
+# INTO ARM B. The overlay's own docstring says a record that cannot render is
+# suppressed and "excluded from both denominators", not "reassigned to the
+# control group". A NameError did the second thing.
+#
+# So the test is the whole matrix rather than a sample: a friction resolver that
+# fails on 40% of its inputs and is caught upstream is precisely the shape that
+# survives a spot check.
+
+
+def _every_friction_input():
+    import itertools
+
+    import outbound_wave1.campaigns as campaigns_mod
+    import outbound_wave1.render as render_mod
+
+    policies = [v for v in vars(campaigns_mod).values()
+                if isinstance(v, campaigns_mod.CampaignPolicy)]
+    signals = [getattr(render_mod, n) for n in dir(render_mod) if n.startswith("SIGNAL_")]
+    proofs = [getattr(render_mod, n) for n in dir(render_mod) if n.startswith("PROOF_")]
+    assert policies and signals and proofs
+    return render_mod, list(itertools.product(policies, signals, proofs))
+
+
+def test_friction_resolves_for_every_campaign_signal_and_proof():
+    render_mod, combinations = _every_friction_input()
+    failures = []
+    for policy, signal, proof in combinations:
+        try:
+            angle, text = render_mod._friction(policy, signal, proof)
+        except Exception as exc:  # noqa: BLE001 - the point is to catch every one
+            failures.append(f"{policy.key}/{signal}/{proof}: {type(exc).__name__}: {exc}")
+            continue
+        if not angle or not text:
+            failures.append(f"{policy.key}/{signal}/{proof}: empty friction")
+    assert not failures, (
+        f"{len(failures)} of {len(combinations)} friction inputs do not resolve:\n"
+        + "\n".join(failures[:10])
+    )
+
+
+def test_a_campaign_friction_that_needs_a_signal_falls_back_rather_than_raising():
+    """The specific branch that was broken.
+
+    OPERATIONS' T1 friction reads off `role_focus_match`. Behind a different
+    signal it must degrade to the generic line, not raise.
+    """
+    import outbound_wave1.campaigns as campaigns_mod
+    import outbound_wave1.render as render_mod
+
+    angle, text = render_mod._friction(
+        campaigns_mod.OPERATIONS,
+        render_mod.SIGNAL_MULTI_OPENING,
+        render_mod.PROOF_EMPLOYMENT_ADMIN,
+    )
+    assert (angle, text) == render_mod._DEGRADED_EVIDENCE_FRICTION

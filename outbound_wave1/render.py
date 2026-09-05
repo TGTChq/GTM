@@ -470,14 +470,14 @@ def _friction(policy: CampaignPolicy, signal_type: str, proof_type: str) -> Tupl
         return by_proof
     campaign_friction = _FRICTION_BY_CAMPAIGN.get(policy.key)
     if campaign_friction is None:
-        return _T3_FRICTION
+        return _DEGRADED_EVIDENCE_FRICTION
     # A campaign friction that reads off the signal cannot be used when that
     # signal did not fire. PRODUCT's "getting them all approved" only makes sense
     # behind a multi-opening count, so a degraded signal takes the generic
     # friction instead of asserting something the record does not support.
     angle, _text = campaign_friction
     if angle in _FRICTION_REQUIRES_SIGNAL and signal_type not in _FRICTION_REQUIRES_SIGNAL[angle]:
-        return _T3_FRICTION
+        return _DEGRADED_EVIDENCE_FRICTION
     return campaign_friction
 
 
