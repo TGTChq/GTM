@@ -35,6 +35,7 @@ from weekly_report.evidence import (
     dig,
     weakest,
 )
+from orchestrator.run_ledger import STATE_COMPLETE
 from weekly_report.run_artifacts import LEDGER_STEM, RunRecord
 
 #: Every run-derived metric now reads the compact ledger first and the heavy
@@ -57,14 +58,21 @@ class MetricSpec:
     unit: str
     definition: str
     #: Candidates, most authoritative first. Each is ``(artifact_stem, dotted_path)``
-    #: or ``(artifact_stem, dotted_path, guard)`` where ``guard`` is another
-    #: ``(stem, path)`` that MUST also be present on the run before the candidate
-    #: may answer.
+    #: or ``(artifact_stem, dotted_path, guard)``.
+    #:
+    #: A guard is ``(stem, path)`` -- that field must be PRESENT on the run -- or
+    #: ``(stem, path, expected)`` -- it must be present AND equal to ``expected``.
     #:
     #: The guard exists because a field NAME is not a contract. ``jobs_captured``
     #: meant unique-kept postings before 2026-09-04T19:03 and net-new postings
     #: after it, on the same key, in the same store. Reading it without proof of
     #: which build wrote it silently mixes two populations into one total.
+    #:
+    #: The value form exists for a second reason: some candidates are only
+    #: EQUIVALENT to the metric under a stated execution condition. A candidate that
+    #: is exact for a completed run and a lower bound for an interrupted one must
+    #: not answer for the interrupted one, because an aggregate cannot carry "this
+    #: contribution is a floor" -- it would be summed as though it were exact.
     fields: Tuple[Tuple, ...]
     #: The population this metric counts, as a machine key. ``unit`` is a display
     #: word; this is the identity a boundary subtraction must match on. Getting it
@@ -90,12 +98,17 @@ class MetricSpec:
         for candidate in self.fields:
             stem, path = candidate[0], candidate[1]
             guard = candidate[2] if len(candidate) > 2 else None
-            if guard is not None and dig(run.artifact(guard[0]), guard[1]) is None:
+            if guard is not None:
+                seen = dig(run.artifact(guard[0]), guard[1])
                 # The candidate is present but nothing proves it counts what this
                 # metric needs. Silence is the correct answer: an unguarded read
                 # here is how a pre-2026-09-04 unique-kept total gets summed into a
                 # net-new figure and reported as one number.
-                continue
+                if seen is None:
+                    continue
+                # Value form: the candidate is only equivalent under this condition.
+                if len(guard) > 2 and str(seen) != str(guard[2]):
+                    continue
             raw = dig(run.artifact(stem), path)
             value = as_count(raw)
             if value is not None:
@@ -153,12 +166,22 @@ RUN_METRIC_SPECS: Tuple[MetricSpec, ...] = (
             # reintroduce the mix silently.
             ("ledger", "metrics.jobs_captured",
              ("ledger", "metrics.net_new_jobs_captured")),
-            # RECOVERY for runs whose build predated the net-new counter. The
-            # acquisition-dedupe stage has always recorded PASSED = postings that
-            # cleared BOTH in-run canonical dedupe and the cross-run seen store --
-            # which is the same population `net_new_jobs_captured` counts, written
-            # by the same `_dedup` call. It is a genuine directly-emitted counter
-            # from that run, not a reconstruction.
+            # RECOVERY for runs whose build predated the net-new counter, and the
+            # PREFERRED one: it is a directly-emitted counter, in the right unit,
+            # from the run itself.
+            #
+            # VERIFIED against the build that actually ran 20260904T130130Z-13b44a0c
+            # (commit 8291a09): `_dedup` there ends
+            #     stage = reconcile_stage("acquisition_dedup", "posting", dispo)
+            # with one PASSED appended per surviving posting, and `WaterfallReport.
+            # to_dict` writes every stage. So `passed` is exactly the population
+            # `net_new_jobs_captured` counts today, declared "posting", written by
+            # the same call. That run wrote no ledger at all -- `run_ledger.py` did
+            # not exist until b332577, four hours after it finished -- so this
+            # heavy-artifact field is the ONLY thing that can measure its capture.
+            #
+            # NOT `unit_totals.opportunities`: on the top-up path that run took,
+            # that key is `len(all_leads)` (2,410 leads), not postings.
             ("waterfall", "stages[stage=acquisition_dedup].passed"),
             ("orchestrator_result",
              "waterfall.stages[stage=acquisition_dedup].passed"),
@@ -183,8 +206,21 @@ RUN_METRIC_SPECS: Tuple[MetricSpec, ...] = (
             # capture counter of its own. Current builds checkpoint acquisition
             # before enrichment, so a run that stopped early still answers directly;
             # in practice this reaches only builds that predate the net-new counter.
-            ("ledger", "metrics.jobs_reviewed"),
-            ("orchestrator_result", "enrichment.funnel.qualification_input"),
+            #
+            # GUARDED ON COMPLETION, and that guard is the whole reason this is
+            # safe. The equality is per-slice: acquisition accumulates
+            # `len(opportunities)` for every slice it ran, the funnel accumulates
+            # `qualification_input` for every slice that finished enrichment. A run
+            # that stopped in between -- a crash, a raised iteration guard mid-slice
+            # -- has run more acquisition slices than enrichment slices, so reviewed
+            # is a FLOOR, not the count. An aggregate has nowhere to record "this
+            # contribution is a floor": it would be summed as though exact and the
+            # period total would silently understate captured work. So a run that
+            # did not complete does not answer here at all, and reads as silent.
+            ("ledger", "metrics.jobs_reviewed",
+             ("ledger", "state", STATE_COMPLETE)),
+            ("orchestrator_result", "enrichment.funnel.qualification_input",
+             ("run_manifest", "status", "complete")),
             # REMOVED, deliberately: waterfall.unit_totals.postings,
             # capacity_report.raw_postings and the orchestrator_result copy of the
             # first. All three count rows the lanes KEPT, before cross-run dedupe.

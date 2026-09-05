@@ -888,12 +888,33 @@ FANTASTIC_MAX_CONSECUTIVE_DUPLICATE_PAGES = _env_int(
 #: two count requests (zero Jobs credits): a window lying entirely below the frame
 #: returned 0 rows with ``time_frame=7d`` and 24,784 without it. So the horizon
 #: ``now - time_frame`` is a hard floor on every window, and it advances with the
-#: clock. Sending no ``time_frame`` is not an alternative -- without it the feed
-#: could not serve the production query at all (read timeout, then HTTP 504).
+#: clock. Two attempts to query WITHOUT it failed -- a 45s read timeout on the full
+#: window, then HTTP 504 at 240s on a 5.95-day slice carrying the production title
+#: expression. That establishes those two request shapes are not servable. It does
+#: NOT establish that no partition is: a materially narrower slice, or the same
+#: range without the 4,222-character ``title_advanced``, was never tried, and either
+#: might answer. Treat "we must send time_frame" as the current operating
+#: constraint, not as a proven property of the API.
 #:
-#: The margin keeps a window from being clamped to an edge it then slides off while
-#: it is still paging. 30 minutes covers a long run without conceding real inventory.
-FANTASTIC_TIME_FRAME_MARGIN_MINUTES = _env_int("FANTASTIC_TIME_FRAME_MARGIN_MINUTES", 30)
+#: DEFAULT 0, and that is deliberate.
+#:
+#: This was introduced at 30 minutes to "keep a window from being clamped to an edge
+#: it then slides off while it is still paging". It cannot do that. The horizon moves
+#: with the clock for as long as a run lasts, and runs last hours -- 20260904T130130Z
+#: ran 13:01:30 -> 16:21:24, three hours and twenty minutes. A 30-minute margin does
+#: not cover that, and no fixed margin can: the only margin that survives a run is
+#: one wider than the run, which concedes more inventory than it protects.
+#:
+#: What it DID do is raise every window's floor 30 minutes above the provider's real
+#: floor, discarding half an hour of reachable inventory on every window, for a
+#: purpose that was never demonstrated. So the default is 0: the clamp targets the
+#: provider's actual floor and concedes nothing beyond it.
+#:
+#: The knob remains because the floor is the provider's, not ours, and if it is ever
+#: shown to be approximate a small margin is the right response. Raising it should
+#: cite the measurement that justified it. ``frame_floor`` and ``frame_horizon`` are
+#: reported separately so the provider's floor and our margin never get confused.
+FANTASTIC_TIME_FRAME_MARGIN_MINUTES = _env_int("FANTASTIC_TIME_FRAME_MARGIN_MINUTES", 0)
 
 FANTASTIC_DATE_CREATED_LAG_MINUTES = _env_int("FANTASTIC_DATE_CREATED_LAG_MINUTES", 180)
 FANTASTIC_DATE_CREATED_OVERLAP_MINUTES = _env_int("FANTASTIC_DATE_CREATED_OVERLAP_MINUTES", 60)

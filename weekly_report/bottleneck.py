@@ -79,6 +79,27 @@ REASONS_BY_BOUNDARY = {
 #: withheld records, and only the delivery skip breakdown separates them.
 SUBSET_BOUNDARIES = frozenset({"review", "contact_discovery"})
 
+#: Metric pairs whose difference is NOT a set of records that failed, so the pair
+#: may not be named as the bottleneck on size alone. Keyed on the metrics rather
+#: than the boundary label, which collapses when an intervening stage is unmeasured.
+#:
+#: ``contacts_found -> sent_to_airtable`` is the one that matters. Created rows are
+#: not a subset of contacts: on 2026-09-04 the writer received 1,681 candidates
+#: against 1,048 contacts, because leads with NO contact are still submitted for
+#: review, and some of those become rows. So 1,048 - 781 is not "267 contacts lost";
+#: it is a difference between two populations that are not nested in either
+#: direction. Ranking it by size made it the headline of a report where the entry
+#: population had not even been established.
+#:
+#: ``qualified_opportunities -> sent_to_airtable`` is deliberately NOT here: rows
+#: created are nested under opportunities that entered contact discovery, so that
+#: collapsed pair remains a real, if multi-stage, loss.
+#:
+#: A pair listed here is still measured, still reported in the document, and still
+#: eligible to be the headline the moment a reason code recorded at that boundary
+#: makes the difference attributable.
+NON_NESTED_PAIRS = frozenset({("contacts_found", "sent_to_airtable")})
+
 #: Reason codes whose remedy is well understood, mapped to the action to take.
 REASON_ACTIONS = {
     "no_search_domain": (
@@ -336,6 +357,9 @@ def identify(
         )
 
     worst: Optional[Bottleneck] = None
+    #: Every boundary that showed a positive difference, eligible or not. The
+    #: document keeps all of them; only an eligible one may be the headline.
+    observed: List[Bottleneck] = []
     incomparable: List[Dict[str, str]] = []
     for (from_key, from_metric), (to_key, to_metric) in zip(available, available[1:]):
         boundary_name = BOUNDARY_NAMES.get((from_key, to_key), f"{from_key}->{to_key}")
@@ -417,10 +441,45 @@ def identify(
             evidence=sorted(set(from_metric.evidence) | set(to_metric.evidence)),
             unmeasured_boundaries=unmeasured,
         )
+        # Only reasons that can be RECORDED at this boundary may explain it.
+        admissible = REASONS_BY_BOUNDARY.get(boundary_name)
+        scoped = {r: c for r, c in reasons.items()
+                  if admissible is None or r in admissible}
+        candidate.top_reasons = [
+            {"reason": reason, "count": count} for reason, count in list(scoped.items())[:5]
+        ]
+        observed.append(candidate)
+
+    # ELIGIBILITY. A boundary may be named as THE bottleneck only if its difference
+    # is actionable: either the two counters are nested, so the difference is a set
+    # of records that entered and did not advance, or a reason code recorded AT that
+    # boundary attributes it.
+    #
+    # Checked on the METRIC PAIR, not the boundary label, because a label collapses
+    # when the stage between two counters is unmeasured -- and the pair is what
+    # decides whether the subtraction means anything.
+    eligible = [c for c in observed
+                if (c.from_metric, c.to_metric) not in NON_NESTED_PAIRS
+                or c.top_reasons]
+    for candidate in eligible:
         if worst is None or (candidate.lost or 0) > (worst.lost or 0):
             worst = candidate
 
     if worst is None:
+        ineligible = sorted({c.boundary for c in observed})
+        if ineligible:
+            return Bottleneck(
+                kind="no_attributable_boundary",
+                statement=(
+                    "No boundary this window can be named as the bottleneck. "
+                    + ", ".join(b.replace("_", " ") for b in ineligible)
+                    + (" shows a difference, but its two counters are not a proven "
+                       "subset and no reason code was recorded there, so the "
+                       "difference is a transition and not a measured loss.")
+                ),
+                unmeasured_boundaries=unmeasured,
+                incomparable_boundaries=incomparable,
+            )
         return Bottleneck(
             kind="no_measured_loss",
             statement=(
@@ -433,13 +492,6 @@ def identify(
         )
 
     worst.incomparable_boundaries = incomparable
-    # Only reasons that can be RECORDED at this boundary may explain it.
-    admissible = REASONS_BY_BOUNDARY.get(worst.boundary)
-    scoped = {r: c for r, c in reasons.items()
-              if admissible is None or r in admissible}
-    worst.top_reasons = [
-        {"reason": reason, "count": count} for reason, count in list(scoped.items())[:5]
-    ]
     compared = len(available) - 1 - len(incomparable)
     plural = "y" if compared == 1 else "ies"
     if worst.boundary in SUBSET_BOUNDARIES:

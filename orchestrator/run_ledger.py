@@ -446,13 +446,32 @@ def prune_ledger(
 #: first. Mirrors ``weekly_report.metrics`` deliberately: the orchestrator must not
 #: import the reporting layer, so the field list is restated rather than shared.
 _BACKFILL_FIELDS = (
-    # Net-new first: a run written after 2026-09-05 records it directly. Older
-    # runs fall back to the raw posting count, which is the only thing they know.
+    # Net-new first: a run written after 2026-09-05 records it directly. An older
+    # run does NOT fall back to a raw posting count -- it falls back to the
+    # acquisition-dedupe stage, which is the same population in the same unit.
+    #
+    # It used to fall back to ``unit_totals.postings``, and that was the very
+    # conflation the net-new semantics exist to remove, reintroduced at the one
+    # place it does the most damage. The report refuses a ledger ``jobs_captured``
+    # that has no ``net_new_jobs_captured`` beside it, so the wrong number would not
+    # have been PRINTED -- but it would have been written into the durable store as
+    # the run's capture count, and the store outlives the artifact that could have
+    # answered correctly. Retention keeps four runs; the ledger keeps 180 days.
+    # After the artifacts go, provider volume under a stakeholder key is all that
+    # remains, and nothing left on disk can contradict it.
+    #
+    # ``stages[acquisition_dedup].passed`` is one PASSED per posting that cleared
+    # both in-run dedupe and the cross-run seen store, declared "posting", written
+    # by the same ``_dedup`` call that increments ``net_new_jobs_captured`` today.
+    # Verified present on the build that ran 20260904T130130Z-13b44a0c (8291a09).
+    #
+    # ``unit_totals.opportunities`` is deliberately absent: on the top-up path that
+    # key is ``len(all_leads)``, so for that run it is 2,410 LEADS, not postings.
     ("jobs_captured", (("orchestrator_result", "acquisition.cumulative.net_new_jobs_captured"),
-                       ("waterfall", "unit_totals.postings"),
-                       ("capacity_report", "raw_postings"))),
+                       ("waterfall", "stages[stage=acquisition_dedup].passed"))),
     ("net_new_jobs_captured",
-     (("orchestrator_result", "acquisition.cumulative.net_new_jobs_captured"),)),
+     (("orchestrator_result", "acquisition.cumulative.net_new_jobs_captured"),
+      ("waterfall", "stages[stage=acquisition_dedup].passed"))),
     ("provider_jobs_returned",
      (("orchestrator_result", "acquisition.cumulative.jobs_returned_billed"),)),
     ("provider_jobs_billed",
@@ -507,8 +526,21 @@ _BACKFILL_STATES = {
 
 
 def _dig(payload: Any, path: str) -> Any:
+    """Dotted lookup, with a list selector: ``stages[stage=acquisition_dedup].passed``
+    picks the first item of ``stages`` whose ``stage`` equals that value."""
     current = payload
     for part in path.split("."):
+        if part.endswith("]") and "[" in part:
+            name, selector = part[:-1].split("[", 1)
+            key, wanted = selector.split("=", 1)
+            items = current.get(name) if isinstance(current, dict) else None
+            if not isinstance(items, list):
+                return None
+            current = next((i for i in items if isinstance(i, dict)
+                            and str(i.get(key)) == wanted), None)
+            if current is None:
+                return None
+            continue
         if not isinstance(current, dict) or part not in current:
             return None
         current = current[part]
