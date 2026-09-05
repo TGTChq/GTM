@@ -195,9 +195,14 @@ def test_the_report_cannot_change_the_containers_exit_status():
 @pytest.mark.parametrize("report_rc", [0, 1, 137])
 def test_the_wrapper_propagates_the_pipeline_exit_code(tmp_path, pipeline_rc, report_rc):
     """Every combination, because this is the one property `exec` gave for free."""
-    (tmp_path / "pipe.sh").write_text(f"#!/bin/sh\nexit {pipeline_rc}\n")
-    (tmp_path / "report.sh").write_text(f"#!/bin/sh\nexit {report_rc}\n")
-    script = ("./pipe.sh; rc=$?; ./report.sh || true; exit $rc")
+    for name, code in (("pipe.sh", pipeline_rc), ("report.sh", report_rc)):
+        path = tmp_path / name
+        path.write_text(f"#!/bin/sh\nexit {code}\n")
+        # Git Bash on Windows ignores the mode bit; Linux does not, and without
+        # this every case returns 126 (permission denied) rather than the code
+        # under test -- which is a green-looking pass locally and a red CI.
+        path.chmod(0o755)
+    script = "./pipe.sh; rc=$?; ./report.sh || true; exit $rc"
     result = subprocess.run(["sh", "-c", script], cwd=tmp_path)
     assert result.returncode == pipeline_rc
 
