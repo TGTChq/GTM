@@ -173,6 +173,9 @@ RUN_METRIC_SPECS: Tuple[MetricSpec, ...] = (
             # VERIFIED against the build that actually ran 20260904T130130Z-13b44a0c
             # (commit 8291a09): `_dedup` there ends
             #     stage = reconcile_stage("acquisition_dedup", "posting", dispo)
+            # -- and the UNIT is matched, not assumed. `reconcile_stage` takes the
+            # unit as an argument, so a stage of the same name reconciled in some
+            # other unit would otherwise be summed straight into a posting total.
             # with one PASSED appended per surviving posting, and `WaterfallReport.
             # to_dict` writes every stage. So `passed` is exactly the population
             # `net_new_jobs_captured` counts today, declared "posting", written by
@@ -182,9 +185,9 @@ RUN_METRIC_SPECS: Tuple[MetricSpec, ...] = (
             #
             # NOT `unit_totals.opportunities`: on the top-up path that run took,
             # that key is `len(all_leads)` (2,410 leads), not postings.
-            ("waterfall", "stages[stage=acquisition_dedup].passed"),
+            ("waterfall", "stages[stage=acquisition_dedup,unit=posting].passed"),
             ("orchestrator_result",
-             "waterfall.stages[stage=acquisition_dedup].passed"),
+             "waterfall.stages[stage=acquisition_dedup,unit=posting].passed"),
             # LAST-RESORT RECOVERY, and legitimate because it is the SAME LIST
             # measured twice. `_dedup` returns `opportunities`; the pipeline adds
             # `len(opportunities)` to net_new_jobs_captured and hands that identical
@@ -708,10 +711,12 @@ def build_run_metrics(runs: Sequence[RunRecord]) -> Dict[str, Metric]:
         metrics["jobs_reviewed"],
         metrics["jobs_captured"],
         definition=(
-            "Jobs reviewed as a percentage of jobs captured in the same runs. NOTE: "
-            "these are one list measured at two points, not a transition, so this is "
-            "100% whenever it can be computed. It is published because the "
-            "stakeholder format specifies it, not because it measures a conversion."),
+            "Jobs reviewed as a percentage of jobs captured in the same runs. 100% "
+            "means every captured posting entered review -- which is what a run that "
+            "completed its slices looks like, because the deduped opportunity list is "
+            "handed straight to qualification. It is not automatic: a run interrupted "
+            "between acquiring a slice and enriching it reviews fewer than it "
+            "captured, and the rate falls below 100 accordingly."),
     )
     metrics["qualification_rate_pct"] = ratio_metric(
         "qualification_rate_pct",

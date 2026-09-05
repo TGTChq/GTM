@@ -522,6 +522,33 @@ def identify(
     return worst
 
 
+#: Metrics derived from other metrics, and the inputs they are derived from. A rate
+#: is incomplete exactly when its inputs are, so it carries no separate cause.
+_DERIVED_INPUTS = {
+    "review_rate_pct": ("jobs_captured", "jobs_reviewed"),
+    "qualification_rate_pct": ("qualified_opportunities", "jobs_reviewed"),
+}
+
+
+def _silent_runs(metrics: Dict[str, Metric], bottleneck: Bottleneck) -> frozenset:
+    """The runs whose silence the bottleneck is already reporting."""
+    if bottleneck.kind not in ("entry_not_established", "insufficient_measurement"):
+        return frozenset()
+    entry = metrics.get("jobs_captured")
+    return frozenset(entry.runs_missing_field) if entry is not None else frozenset()
+
+
+def _shares_cause(key: str, metrics: Dict[str, Metric], silent: frozenset) -> bool:
+    """True when this metric is incomplete for the reason already being reported."""
+    inputs = _DERIVED_INPUTS.get(key)
+    if inputs:
+        return all(_shares_cause(name, metrics, silent) for name in inputs)
+    metric = metrics.get(key)
+    if metric is None:
+        return False
+    return bool(metric.runs_missing_field) and frozenset(metric.runs_missing_field) == silent
+
+
 def action_plan(
     bottleneck: Bottleneck,
     metrics: Dict[str, Metric],
@@ -615,11 +642,23 @@ def action_plan(
     # identified. Telling Brett to "instrument sent_to_instantly" while acquisition
     # is down buries the finding that matters under housekeeping.
     if bottleneck.kind not in ("acquisition_entry", "acquisition_failure", "funnel_boundary"):
+        # ONE CAUSE, ONE ACTION. When several metrics are incomplete because the SAME
+        # runs were silent, they are not several problems -- they are one run that did
+        # not report, seen from three angles. Emitting a chore per metric filled the
+        # plan with three restatements of a single instrumentation gap and left no
+        # room for anything Brett could act on.
+        #
+        # Two metrics belong to the same cause when the same runs are missing from
+        # both; a derived rate belongs to it when both of its inputs do.
+        silent = _silent_runs(metrics, bottleneck)
         for gap in gaps:
             remedy = getattr(gap, "remedy", None)
             metric = getattr(gap, "metric", "")
-            if remedy:
-                add(remedy, f"evidence gap on {metric}")
+            if not remedy:
+                continue
+            if silent and _shares_cause(metric, metrics, silent):
+                continue
+            add(remedy, f"evidence gap on {metric}")
 
     if not actions:
         # This text may ONLY be used when nothing was measured to be lost. Emitting

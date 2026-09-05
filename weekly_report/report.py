@@ -412,8 +412,8 @@ _REMEDIES = {
     ),
     "review_rate_pct": (
         "Both jobs_captured and jobs_reviewed must be measurable for a rate to exist. "
-        "Note that they are one population measured at two points, so a computable "
-        "rate here is always 100%: read the two counts, not their ratio."
+        "A rate of 100% means every captured posting entered review; below 100 means "
+        "a run stopped between acquiring postings and reviewing them."
     ),
 }
 

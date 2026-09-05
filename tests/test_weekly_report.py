@@ -356,11 +356,11 @@ def test_an_empty_window_reports_unavailable_never_zero():
 
 
 def test_review_rate_is_derived_and_refuses_an_empty_denominator(artifact_root, pacific_week):
-    """NOTE: a production run cannot actually produce 200 captured / 50 reviewed --
-    the two are one list measured at two points, so a real rate is always 100%. The
-    unequal fixture is here to prove the ARITHMETIC and the empty-denominator guard,
-    which is all this rate has ever tested. See
-    ``tests/test_captured_equals_reviewed.py`` for the identity itself.
+    """200 captured / 50 reviewed is the shape of an INTERRUPTED run: acquisition
+    accumulates per slice run, the funnel per slice finished, so a run that stops
+    between the two reviews fewer postings than it captured. The fixture exercises
+    that arithmetic and the empty-denominator guard. See
+    ``tests/test_captured_equals_reviewed.py`` for why a COMPLETED run reads 100%.
     """
     write_run(artifact_root, "a", finished="2026-08-22T13:00:00Z", postings=200, reviewed=50)
     runs, _ = discover_runs([artifact_root])
