@@ -206,9 +206,12 @@ class ConsumedPrefixTests(unittest.TestCase):
     and ~6,000 credits to return to where the earlier run had already reached --
     with the window stale and nothing acquired the whole time.
 
-    A full page of duplicates means "this query is exhausted" only when the offset
-    does NOT survive the run. With a durable cursor it means "the prefix is
-    consumed", and stopping discards the one mechanism that reaches the tail.
+    A full page of duplicates never proves exhaustion -- it is evidence about one
+    offset, not about the tail, which is why ``no_new_ids`` is not a drained stop.
+    What the cursor changes is the COST of stopping: without a persisted offset
+    the spend is repeated from zero next run either way, so stopping is the
+    cheaper option; with one, stopping discards the only mechanism that reaches
+    the tail.
     """
 
     def setUp(self) -> None:
@@ -284,9 +287,10 @@ class ConsumedPrefixTests(unittest.TestCase):
                          fja.DateCreatedWatermarkEngine._DRAINED_STOPS)
 
     def test_without_a_durable_cursor_the_old_stop_is_unchanged(self):
-        """The head/deep path has no persisted offset: for it, a full duplicate
-        page really does mean the query is exhausted, and re-paging would just
-        re-bill the same rows next run."""
+        """The head/deep path persists no offset, so paging past a duplicate page
+        buys rows the next run must buy again from zero. Stopping is a budget
+        choice there, not a claim that the query is exhausted -- and it is
+        deliberately left as it was."""
         metrics = {"segments": {}}
         calls = {"n": 0}
 
