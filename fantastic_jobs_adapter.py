@@ -1076,15 +1076,31 @@ def _fetch_segment(endpoint: str, base_params: Dict[str, Any], source_label: str
                    quota: _QuotaState, http_get: HttpGet, seen_ids: set,
                    metrics: Dict[str, Any], accept_source: Optional[Tuple[str, ...]] = None,
                    stop_before_date: Optional[str] = None,
-                   start_offset: int = 0) -> List[Dict[str, Any]]:
+                   start_offset: int = 0,
+                   durable_cursor: bool = False) -> List[Dict[str, Any]]:
     """When ``stop_before_date`` is set (fresh-edge/head pass), the DESC feed is
     paged from the top and paging STOPS as soon as a job older than that timestamp
     is seen -- so only jobs newer than the prior high_water are collected. Jobs AT
     the boundary second flow through the normal ``seen_ids`` dedupe (the caller seeds
     it with the persisted high_water boundary IDs), so already-acquired boundary jobs
-    are skipped while genuinely new same-second siblings are still kept."""
+    are skipped while genuinely new same-second siblings are still kept.
+
+    ``durable_cursor`` says the caller persists this segment's offset across runs
+    (the canonical windowed pass and the bootstrap backfill both do). It changes
+    exactly one thing: what a FULL page of already-seen rows means. Without a
+    cursor it means "this query is exhausted, stop" -- the next run would re-page
+    from the same place anyway. With one it means "the prefix is consumed, keep
+    going": the offset advances, so paging on reaches inventory the duplicates are
+    sitting in front of."""
     jobs: List[Dict[str, Any]] = []
     boundary_hit = False
+    duplicate_pages = 0
+    #: How many CONSECUTIVE all-duplicate pages we will pay to skip before giving
+    #: up on this window for this run. The run cap already bounds total spend; this
+    #: bounds the pathological case where a whole window is overlap, so one run
+    #: cannot spend its entire budget discovering that.
+    max_duplicate_pages = max(1, int(getattr(
+        config, "FANTASTIC_MAX_CONSECUTIVE_DUPLICATE_PAGES", 40)))
     seg = metrics["segments"].setdefault(source_label, {
         "attempted": 0, "requests_succeeded": 0, "returned": 0, "schema_valid": 0,
         "schema_rejected": 0, "pii_dropped": 0, "non_us": 0, "source_filtered_out": 0,
@@ -1239,8 +1255,28 @@ def _fetch_segment(endpoint: str, base_params: Dict[str, Any], source_label: str
             seg["stop_reason"] = seg["stop_reason"] or "short_page"
             break
         if new_ids == 0:
-            seg["stop_reason"] = seg["stop_reason"] or "no_new_ids"
-            break
+            # A FULL page in which every row was already seen.
+            #
+            # Measured 2026-09-05: the first canonical-window run after the cursor
+            # shipped opened a window whose prefix a PREVIOUS run had already
+            # bought (3,000 rows per source), found no persisted offset because
+            # that run predates the cursor, re-paged from 0, hit this branch on
+            # page 1 and stopped. 200 rows billed, 0 net-new, cursor advanced 100.
+            # At one page per run that is ~30 runs and ~6,000 credits to page back
+            # to where the previous run had already reached.
+            #
+            # With a durable cursor the offset has already moved, so the next page
+            # is genuinely further in. Stopping here throws that away.
+            if not durable_cursor:
+                seg["stop_reason"] = seg["stop_reason"] or "no_new_ids"
+                break
+            duplicate_pages += 1
+            seg["duplicate_pages_skipped"] = duplicate_pages
+            if duplicate_pages >= max_duplicate_pages:
+                seg["stop_reason"] = seg["stop_reason"] or "duplicate_page_cap"
+                break
+        else:
+            duplicate_pages = 0
         page += 1
         if page > max(1, int(getattr(config, "FANTASTIC_JOBS_MAX_PAGES_PER_SEGMENT", 50))):
             seg["stop_reason"] = "page_cap"
@@ -1660,7 +1696,7 @@ class DateCreatedWatermarkEngine:
         before = self.quota.jobs_consumed
         got = _fetch_segment(endpoint, params, label, room, self.quota, self.http_get,
                              self.seen_ids, self.metrics, accept_source=accept,
-                             start_offset=base)
+                             start_offset=base, durable_cursor=True)
         # Advance by every row the provider RETURNED for this label in this pass
         # (billed rows, not kept rows -- the next unseen row sits exactly after
         # them because paging is contiguous). Same accounting the bootstrap uses.
@@ -1801,7 +1837,7 @@ class DateCreatedWatermarkEngine:
         before = self.quota.jobs_consumed
         got = _fetch_segment(endpoint, params, blabel, room, self.quota, self.http_get,
                              self.seen_ids, self.metrics, accept_source=accept,
-                             start_offset=start)
+                             start_offset=start, durable_cursor=True)
         consumed = self.quota.jobs_consumed - before
         self.acquired.extend(got)
         self.result.jobs.extend(got)
