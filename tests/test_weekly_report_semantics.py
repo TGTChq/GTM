@@ -306,6 +306,9 @@ def test_reviewing_every_net_new_posting_is_a_100_percent_review_rate(tmp_path):
 
     assert report.metrics["jobs_captured"].value == 2410, "captured is NET-NEW"
     assert report.metrics["jobs_reviewed"].value == 2410
+    # 100%, and structurally so: captured and reviewed are one list measured at two
+    # points. The rate is published because the stakeholder format specifies it, not
+    # because it measures a conversion -- see tests/test_captured_equals_reviewed.py.
     assert report.metrics["review_rate_pct"].value == 100.0
     # The provider duplication is still visible, just not as a funnel loss.
     assert report.metrics["provider_jobs_returned"].value == 6205

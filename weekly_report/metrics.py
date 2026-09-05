@@ -162,6 +162,29 @@ RUN_METRIC_SPECS: Tuple[MetricSpec, ...] = (
             ("waterfall", "stages[stage=acquisition_dedup].passed"),
             ("orchestrator_result",
              "waterfall.stages[stage=acquisition_dedup].passed"),
+            # LAST-RESORT RECOVERY, and legitimate because it is the SAME LIST
+            # measured twice. `_dedup` returns `opportunities`; the pipeline adds
+            # `len(opportunities)` to net_new_jobs_captured and hands that identical
+            # list to the enrichment engine, which writes it verbatim as
+            # qualification's input file, whose length becomes qualification_input.
+            # Nothing filters between the two `len()` calls, so in a run that reached
+            # enrichment they are equal by construction -- pinned by
+            # test_captured_and_reviewed_are_the_same_list.
+            #
+            # They are NOT redundant, and the asymmetry runs one way only: a run that
+            # stops between the acquisition checkpoint and the enrichment funnel --
+            # or between two slices of a multi-slice run -- emits the first and not
+            # the second, so reviewed <= captured always. This candidate therefore
+            # recovers a floor and can never overstate captured work. When the run
+            # never reviewed anything there is nothing here to read at all, so a
+            # genuinely silent run still reads as silent.
+            #
+            # It is also last, so it is consulted only when the run emitted no
+            # capture counter of its own. Current builds checkpoint acquisition
+            # before enrichment, so a run that stopped early still answers directly;
+            # in practice this reaches only builds that predate the net-new counter.
+            ("ledger", "metrics.jobs_reviewed"),
+            ("orchestrator_result", "enrichment.funnel.qualification_input"),
             # REMOVED, deliberately: waterfall.unit_totals.postings,
             # capacity_report.raw_postings and the orchestrator_result copy of the
             # first. All three count rows the lanes KEPT, before cross-run dedupe.
@@ -176,9 +199,12 @@ RUN_METRIC_SPECS: Tuple[MetricSpec, ...] = (
         label="Jobs reviewed",
         unit="posting",
         definition=(
-            "Postings that actually entered the qualification/review stage in those "
-            "runs. Captured postings that a run never reached -- because it stopped "
-            "early, hit a provider limit, or deduped them away -- are excluded."
+            "Postings that entered the qualification/review stage in those runs. "
+            "This is the SAME population as jobs captured, measured one stage later: "
+            "the deduped opportunity list is handed straight to qualification, so in "
+            "a run that reached enrichment the two are equal. They differ only when a "
+            "run stopped in between, where this one is absent rather than smaller. "
+            "There is no attrition between them, and no rate to read across them."
         ),
         fields=(
             ("ledger", "metrics.jobs_reviewed"),
@@ -645,7 +671,11 @@ def build_run_metrics(runs: Sequence[RunRecord]) -> Dict[str, Metric]:
         "Review rate",
         metrics["jobs_reviewed"],
         metrics["jobs_captured"],
-        definition="Jobs reviewed as a percentage of jobs captured in the same runs.",
+        definition=(
+            "Jobs reviewed as a percentage of jobs captured in the same runs. NOTE: "
+            "these are one list measured at two points, not a transition, so this is "
+            "100% whenever it can be computed. It is published because the "
+            "stakeholder format specifies it, not because it measures a conversion."),
     )
     metrics["qualification_rate_pct"] = ratio_metric(
         "qualification_rate_pct",

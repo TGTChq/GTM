@@ -409,7 +409,11 @@ _REMEDIES = {
     "sent_to_airtable": (
         "delivery.json is only written when a run reaches delivery; check the run's stop_reason."
     ),
-    "review_rate_pct": "Both jobs_captured and jobs_reviewed must be measurable for a rate to exist.",
+    "review_rate_pct": (
+        "Both jobs_captured and jobs_reviewed must be measurable for a rate to exist. "
+        "Note that they are one population measured at two points, so a computable "
+        "rate here is always 100%: read the two counts, not their ratio."
+    ),
 }
 
 #: When the collector *was* asked and failed, telling the reader to pass --instantly
