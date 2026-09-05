@@ -185,3 +185,120 @@ class WindowCursorTests(unittest.TestCase):
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
+
+
+class ConsumedPrefixTests(unittest.TestCase):
+    """A window whose prefix a PREVIOUS run already bought must not cost a month.
+
+    Measured in production 2026-09-05, run 20260905T030439Z-1d102bec. The first
+    canonical-window run after the cursor shipped reused a window opened by the
+    2026-09-04 run, which had bought 3,000 rows per source into it. That run
+    predates the cursor, so it persisted no offset; this one opened at
+    ``offsets_at_open = {}``, re-paged from 0, found page 1 entirely
+    already-seen, and stopped on ``no_new_ids``.
+
+        jobs_returned_billed  200
+        jobs_unique_kept        0
+        offsets_at_close      {ats: 100, linkedin: 100}
+        run_cap              2839   <- budget was NOT the constraint
+
+    One page per source per run, against a 3,000-row consumed prefix, is ~30 runs
+    and ~6,000 credits to return to where the earlier run had already reached --
+    with the window stale and nothing acquired the whole time.
+
+    A full page of duplicates means "this query is exhausted" only when the offset
+    does NOT survive the run. With a durable cursor it means "the prefix is
+    consumed", and stopping discards the one mechanism that reaches the tail.
+    """
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.mkdtemp()
+        self.path = os.path.join(self.tmp, "wm.json")
+        self.cfg = dict(
+            _PROD,
+            FANTASTIC_DATE_CREATED_WATERMARK_ENABLED=True,
+            FANTASTIC_DATE_CREATED_LAG_MINUTES=180,
+            FANTASTIC_DATE_CREATED_OVERLAP_MINUTES=60,
+            FANTASTIC_WATERMARK_STATE_PATH=self.path,
+            FANTASTIC_JOBS_LINKEDIN_LIMIT=1000,
+            FANTASTIC_JOBS_MAX_JOBS_PER_RUN=1000,
+        )
+        # 1,000 rows in the window; a previous run consumed the first 300.
+        self.rows = _recs(1000, created_start=NOW - timedelta(hours=6), step_min=0)
+
+    def _run(self, now, cfg=None):
+        feed = _Feed(list(self.rows))
+        with mock.patch.multiple(config, **(cfg or self.cfg)), \
+                mock.patch.object(fja, "datetime", wraps=datetime) as dt:
+            dt.now.return_value = now
+            dt.fromisoformat = datetime.fromisoformat
+            result = fja.run_fantastic_jobs_acquisition(http_get=feed)
+        billed = sum(int(s.get("returned", 0) or 0)
+                     for s in result.metadata["segments"].values())
+        return result, billed
+
+    def _seed_consumed_prefix(self, count: int) -> None:
+        """The production shape: ids already acquired, NO persisted offset."""
+        first, _billed = self._run(NOW)
+        saved = json.load(open(self.path, encoding="utf-8"))
+        # REPLACE, never union: the point of the fixture is that only the first
+        # ``count`` rows were consumed. Unioning with what this seeding run itself
+        # acquired would mark the whole window seen and test nothing.
+        saved["window_acquired_ids"] = sorted(
+            {str(j["job_id"]).replace("fantastic_", "") for j in first.jobs[:count]})
+        saved["window_offsets"] = {}          # the pre-cursor build persisted none
+        saved["window_drained_sources"] = {}
+        saved["window_drained"] = False
+        with open(self.path, "w", encoding="utf-8") as fh:
+            json.dump(saved, fh)
+
+    def test_a_durable_cursor_pages_past_the_consumed_prefix_in_one_run(self):
+        self._seed_consumed_prefix(300)
+        result, billed = self._run(NOW + timedelta(minutes=5))
+        seg = result.metadata["segments"]["fantastic_jobs_linkedin"]
+
+        self.assertGreater(len(result.jobs), 0,
+                           "the tail past the consumed prefix must be reached")
+        self.assertNotEqual(seg.get("stop_reason"), "no_new_ids")
+        self.assertGreaterEqual(seg.get("duplicate_pages_skipped", 0), 1,
+                                "the skipped duplicate pages are counted, not hidden")
+        saved = json.load(open(self.path, encoding="utf-8"))
+        self.assertGreaterEqual(
+            saved["window_offsets"]["fantastic_jobs_linkedin"], 300,
+            "the cursor moves past the prefix in ONE run, not one page per run")
+
+    def test_the_duplicate_page_budget_is_bounded(self):
+        """A window that is ENTIRELY overlap must not spend the whole run cap."""
+        self._seed_consumed_prefix(1000)
+        cfg = dict(self.cfg, FANTASTIC_MAX_CONSECUTIVE_DUPLICATE_PAGES=2)
+        result, billed = self._run(NOW + timedelta(minutes=5), cfg)
+        seg = result.metadata["segments"]["fantastic_jobs_linkedin"]
+
+        self.assertEqual(seg.get("stop_reason"), "duplicate_page_cap")
+        self.assertLessEqual(billed, 2 * 100 + 100,
+                             "spend is bounded by the duplicate-page cap")
+
+    def test_a_duplicate_page_cap_never_counts_as_drained(self):
+        """It is a budget stop, so the watermark must still not advance."""
+        self.assertNotIn("duplicate_page_cap",
+                         fja.DateCreatedWatermarkEngine._DRAINED_STOPS)
+
+    def test_without_a_durable_cursor_the_old_stop_is_unchanged(self):
+        """The head/deep path has no persisted offset: for it, a full duplicate
+        page really does mean the query is exhausted, and re-paging would just
+        re-bill the same rows next run."""
+        metrics = {"segments": {}}
+        calls = {"n": 0}
+
+        def feed(url, params=None, **kw):
+            calls["n"] += 1
+            return _Feed(list(self.rows))(url, params=params, **kw)
+
+        seen = {f"fantastic_{r['id']}" for r in self.rows[:100]}
+        with mock.patch.multiple(config, **self.cfg):
+            fja._fetch_segment("https://x/jb", {}, "fantastic_jobs_linkedin", 1000,
+                               fja._QuotaState(), feed, set(seen), metrics,
+                               durable_cursor=False)
+        self.assertEqual(
+            metrics["segments"]["fantastic_jobs_linkedin"].get("stop_reason"),
+            "no_new_ids")

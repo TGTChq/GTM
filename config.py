@@ -854,6 +854,28 @@ FANTASTIC_TITLE_ALIASES = _env_json("FANTASTIC_TITLE_ALIASES_JSON", {
 # watermark to `upper` only after the interval is fully processed+persisted.
 # Lag/overlap are conservative placeholders pending commit-lag validation.
 FANTASTIC_DATE_CREATED_WATERMARK_ENABLED = _env_bool("FANTASTIC_DATE_CREATED_WATERMARK_ENABLED", False)
+
+#: How many CONSECUTIVE all-duplicate pages a source will pay to page past inside
+#: one run, when it has a DURABLE cursor to make progress with.
+#:
+#: A full page of already-seen rows means two different things depending on whether
+#: the offset survives the run. Without a cursor it means "this query is exhausted"
+#: -- the next run would re-page the same rows anyway. With one it means "the prefix
+#: is consumed", and stopping throws away the only mechanism that reaches the tail.
+#:
+#: Measured 2026-09-05: the first canonical-window run after the cursor shipped
+#: found a window whose first 3,000 rows per source a previous (pre-cursor) run had
+#: already bought, re-paged from 0, hit a duplicate page immediately and stopped.
+#: 200 rows billed, 0 net-new, cursor advanced by 100. At one page per run that is
+#: ~30 runs and ~6,000 credits to return to where the earlier run had already
+#: reached, with the window stale and nothing acquired throughout.
+#:
+#: 40 pages is 4,000 rows -- enough to cross a full per-source cap in one run. The
+#: run cap still bounds total spend; this only bounds the pathological window whose
+#: whole length is overlap, so one run cannot spend its entire budget on nothing.
+FANTASTIC_MAX_CONSECUTIVE_DUPLICATE_PAGES = _env_int(
+    "FANTASTIC_MAX_CONSECUTIVE_DUPLICATE_PAGES", 40)
+
 FANTASTIC_DATE_CREATED_LAG_MINUTES = _env_int("FANTASTIC_DATE_CREATED_LAG_MINUTES", 180)
 FANTASTIC_DATE_CREATED_OVERLAP_MINUTES = _env_int("FANTASTIC_DATE_CREATED_OVERLAP_MINUTES", 60)
 FANTASTIC_WATERMARK_STATE_PATH = os.getenv(
