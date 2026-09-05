@@ -18,13 +18,24 @@ python -u run_weekly_report.py --artifact-root /app/data/state/orchestrator_v2
 
 ## Safety
 
-The layer performs **no writes anywhere**. It reads run artifacts from disk and,
+The layer performs **no external writes**. It reads run artifacts from disk and,
 only when explicitly asked, performs listing reads (`POST /leads/list`,
 `GET records`). It cannot enroll a lead, change a campaign, patch an Airtable row,
-or send a message. Every document records `provenance.writes_performed: none`.
+or change a pipeline's state. Every document records
+`provenance.writes_performed: none`, which refers to *provider* writes.
 
-`--strict` is the only flag that changes the exit status. Without it the job always
-exits 0, so chaining the report onto a pipeline run can never fail that run.
+It does write to its own output directory, and it is worth being precise about
+what, because "no writes anywhere" was the earlier claim here and it was not true:
+
+| file | when | purpose |
+|---|---|---|
+| `weekly_report_<week>.json` / `.txt` / `.slack.txt` | every generated report | the artifacts |
+| `weekly_report_anchor.json` | `--anchored` only | where the next window starts |
+| `weekly_report_<week>.slack_sent.json` | `--slack`, after Slack accepts | the delivery receipt |
+
+`--no-write` suppresses all of them. `--strict` is the only flag that changes the
+exit status; without it the job always exits 0, so chaining the report onto a
+pipeline run can never fail that run.
 
 ## The reporting window
 
@@ -36,6 +47,20 @@ the boundary (`timezone_source`).
 * Default: the most recently **closed** Friday→Friday week. Running at 06:00
   Pacific on a Friday reports the week that just ended and never reaches into the
   day it is written.
+* **`--anchored` (what production uses)** ends the window at THIS generation
+  instant and starts it at the previously persisted one, held in
+  `weekly_report_anchor.json` beside the reports. The run that just finished is
+  therefore inside this report, and the next window begins exactly where this one
+  ends — no gap, no overlap. The first ever anchored report seeds from the fixed
+  weekly boundary, so it is a sane week rather than all of history.
+  * The boundary advances **after the artifact is durably on disk and before Slack
+    is attempted**, so a delivery failure retries against the same closed window
+    instead of merging next week into it.
+  * `--anchored` requires acquisition to run **before** the report. See
+    *Ordering* below.
+  * `--require-completed-run` is its fail-safe: with no COMPLETED run attributed
+    to the window, nothing is written and the boundary is **held at the window
+    start**, so those runs land in the next report instead of being skipped over.
 * Windows are half-open `[start, end)`, so consecutive weeks never double-count a
   run.
 * A week containing a DST transition really is 167 or 169 hours long, and
@@ -70,18 +95,35 @@ Two exclusions are applied and both are declared in the document:
 
 ## Where each metric comes from
 
+**The compact reporting ledger is the first candidate for every run-derived
+metric**, and the heavy run artifacts are fallbacks. Heavy artifacts are pruned to
+a handful of runs by retention; the ledger is kept for 180 days. Reporting from
+the heavy artifacts alone silently lost 3 of 7 runs in 2026-W36.
+
 | Metric | Authoritative source | Timestamp that attributes it |
 |---|---|---|
-| `jobs_captured` | `waterfall.json:unit_totals.postings` (→ `capacity_report.json:raw_postings`) | run completion |
-| `jobs_reviewed` | `orchestrator_result.json:enrichment.funnel.qualification_input` | run completion |
+| `jobs_captured` | `reporting_ledger:metrics.net_new_jobs_captured` (→ `acquisition.cumulative.net_new_jobs_captured` → `waterfall.json:unit_totals.postings`) | run completion |
+| `jobs_reviewed` | `reporting_ledger:metrics.jobs_reviewed` (→ `enrichment.funnel.qualification_input`) | run completion |
 | `review_rate_pct` | derived: reviewed ÷ captured | — |
-| `qualified_opportunities` | `enrichment.funnel.target_role_eligible` (→ `icp_eligible_companies`) | run completion |
-| `contacts_found` | `waterfall.json:unit_totals.contacts` | run completion |
-| `sent_to_airtable` | `delivery.json:created` | run completion |
+| `qualified_opportunities` | `reporting_ledger:metrics.qualified_opportunities` (→ `enrichment.funnel.contact_discovery_entered`) | run completion |
+| `contacts_found` | `reporting_ledger:metrics.contacts_found` (→ `waterfall.json:unit_totals.contacts`) | run completion |
+| `sent_to_airtable` | `reporting_ledger:metrics.sent_to_airtable` (→ `delivery.json:created`) | run completion |
 | `sent_to_instantly` | **Instantly** `lead.timestamp_created` (`--instantly`) | the lead's own creation instant |
 
-The first four match `run_orchestrator.py`'s "Brett's daily metrics" block
-line-for-line, so the weekly totals and the daily Railway logs cannot disagree.
+Two of those definitions were narrowed and the change matters:
+
+* **`jobs_captured` is NET-NEW postings**, not provider rows. A row the provider
+  returns for the second time is acquisition cost, not throughput; counting it
+  here made a re-bought posting look like a review-stage loss. Provider volume is
+  reported separately as `provider_jobs_returned` / `provider_jobs_billed`, and the
+  reasons rows did not survive dedupe are three separate counters
+  (`historical_duplicates`, `canonical_duplicates_in_run`,
+  `cross_source_duplicates`).
+* **`qualified_opportunities` is `contact_discovery_entered`**, the moment a people
+  search is actually issued — i.e. job/role policy AND company/ICP AND a resolvable
+  domain all passed. It used to be `target_role_eligible`, a loose upstream gate
+  that 92.6% of postings passed on the 2026-09-04 control run; that counter is
+  still reported, as `role_qualified_postings`, but it is not "qualified".
 
 ### Aggregation rules
 
@@ -213,119 +255,155 @@ the gap is reported on stdout.
 
 ---
 
-# Deployment (requires approval — nothing below has been applied)
+# Deployment
 
-## Verified live state (Railway, read-only, 2026-09-01)
+## Verified live state (Railway, read-only, 2026-09-04 19:03 UTC)
 
 Project `tgtc-daily-pipeline` · environment `production` · workspace "My Projects".
+Read with `railway status --json` and `railway run --no-local`; **always read the
+live value before quoting a start command** — every table like this one in this
+repository has gone stale at least once.
 
 | | GTM | GTM Approved Sync |
 |---|---|---|
-| Deployed commit | `a098ec4` | `a098ec4` |
-| Cron | **`0 13 * * *`** | **`0 0 * * *`** |
-| Start Command | `python -u run_orchestrator.py --mode live_acquisition_and_enrichment --lanes fantastic --target 300 --airtable-write --global-budget 1500 --artifact-root /app/data/state/orchestrator_v2` | `python -u run_approved.py` |
-| Volume | `gtm-volume` → `/app/data/state` (5.3 / 19.5 GB) | none |
+| Service id | `3a41d0d7-…` | `d6b2e1c1-…` |
+| Deployed commit | `4b41c4b` | `4b41c4b` |
+| Deployment id | `cb739b78-…` | `a89cb53b-…` |
+| Cron | **`0 3 * * *`** | `0 0 * * *` |
+| Restart policy | `NEVER` (container exits after the run) | `NEVER` |
+| Volume | `gtm-volume` → `/app/data/state` (5.5 / 19.5 GB) | **none** |
 | `PIPELINE_ARTIFACT_ROOT` | `/app/data/state/orchestrator_v2` | — |
-| `INSTANTLY_API_KEY` | **already set** | already set |
-| `INSTANTLY_CAMPAIGN_*` | **all 10 buckets set** (36-char ids) | all 10 set |
-| Region / restart | sfo / container exits after the cron run | — |
+| `TZ` | `America/Merida` | `America/Merida` |
+| `INSTANTLY_API_KEY` | set | set |
+| `INSTANTLY_CAMPAIGN_*` | all 10 buckets set | all 10 set |
+| `SLACK_WEEKLY_REPORT_WEBHOOK_URL` | set | not set (correct) |
+| `OUTBOUND_WAVE1_*` | **not set** | set, `ENABLED=1`, 50% split |
 
-**Three of these contradict the older runbooks in this repo, which are stale:**
-
-* GTM cron is `0 13 * * *`, not the `0 14 * * *` in
-  `DEPLOY_RAILWAY_STEP_BY_STEP.md` / `PRODUCTION_HANDOFF_CHECKLIST.md`.
-* GTM's live lane set is `--lanes fantastic` with no ATS budget flags, not the
-  `--lanes ats,jsearch,free_feeds …` in `PRODUCTION_DEPLOYMENT.md`.
-* Approved Sync runs daily at `0 0 * * *`, not `*/5 * * * *`.
-
-Always read the live value before quoting a start command.
-
-**Consequence for this feature: no secret needs to be added.** GTM already holds
-`INSTANTLY_API_KEY` and all ten campaign ids, so `--instantly` works on GTM today.
-
-## The binding constraint
-
-Run artifacts live on `gtm-volume`, and a Railway volume attaches to exactly one
-service. A separate report service therefore **cannot** read run artifacts and
-would be limited to the Instantly and Airtable metrics. That constraint, not the
-schedule, decides the architecture.
-
-## Recommended: report first, then `exec` the pipeline (Option A)
-
-`0 13 * * *` UTC is **06:00 PDT / 05:00 PST** — before 08:00 Pacific year-round,
-with no schedule change at either DST transition. Railway cron is UTC only.
-
-Change **GTM → Settings → Start Command** to:
+GTM Start Command as deployed:
 
 ```sh
-sh -c 'python -u run_weekly_report.py --artifact-root /app/data/state/orchestrator_v2 --if-due friday --once-per-window --instantly --max-seconds 480 || true; exec python -u run_orchestrator.py --mode live_acquisition_and_enrichment --lanes fantastic --target 300 --airtable-write --global-budget 1500 --artifact-root /app/data/state/orchestrator_v2'
+sh -c 'python -u run_weekly_report.py --artifact-root /app/data/state/orchestrator_v2 --if-due friday --once-per-window --instantly --slack --max-seconds 480 || true; exec python -u run_orchestrator.py --mode live_acquisition_and_enrichment --lanes fantastic --target 300 --airtable-write --global-budget 1500 --artifact-root /app/data/state/orchestrator_v2'
 ```
 
-Cron unchanged. Nothing else changes.
+Two things about it are wrong for the anchored implementation, and both are
+config-only:
 
-Why the report runs **before** the pipeline, not after:
+1. **The report runs before the pipeline.** `--anchored` ends the window at the
+   generation instant, so with report-first the run happening in the same
+   container is never in the report it precedes. See *Ordering* below.
+2. **`--anchored` and `--require-completed-run` are not passed at all.** PR #62 is
+   deployed but not enabled: the report is still using the fixed Friday→Friday
+   window, with no fail-safe against a Friday whose acquisition did not complete.
 
-* **Delivery time is guaranteed.** The report finishes within minutes of 05:00/06:00
-  Pacific regardless of how long acquisition takes. Chaining it after the pipeline
-  would put the report's completion at the mercy of run duration, and a long run
-  could push it past Brett's 08:00 meeting.
-* **The data is identical either way.** The reported window ends Friday 00:00
-  Pacific. Friday's own run starts at 05:00/06:00 Pacific, *after* that boundary, so
-  it belongs to next week's report by construction and can never be part of this
-  one. Running first loses nothing.
-* **`exec` preserves exit semantics exactly.** The orchestrator replaces the shell
-  process, so the container's exit code *is* the pipeline's exit code — byte-for-byte
-  today's behaviour. No `rc=$?` bookkeeping, no wrapper swallowing a failure.
-* **The report cannot break the pipeline.** `--max-seconds 480` bounds provider
-  reads *in process* (no dependency on a `timeout` binary in the image), `|| true`
-  absorbs any non-zero exit, and neither can reach the `exec`. Verified locally:
-  with report exit codes 0/1/137 and pipeline exit codes 0/7/42, the wrapper's exit
-  code is always the pipeline's.
-* **`--once-per-window` bounds repeats.** A redeploy or second firing on the same
-  Friday exits immediately without touching Instantly.
+## The `--if-due` gate must be on the scheduler's calendar
 
-Trade-off worth stating: because the report runs first, a Friday report reflects
-runs through **Thursday**. That is exactly the closed week, so it is correct — but
-it does mean the report never contains the run happening in the same container.
+`--if-due-timezone` now defaults to **UTC**, not to `--timezone`. This is a real
+defect that was live:
 
-## Alternative: separate service (Option B)
+| cron | UTC weekday at the firing | Pacific weekday at the firing | `--if-due friday` under a Pacific gate |
+|---|---|---|---|
+| `0 13 * * *` | Friday | Friday 06:00 | matched |
+| `0 3 * * *` | Friday | **Thursday 20:00** | **never matched** |
 
-Only if the report must run independently of acquisition.
+The cron moved from `0 13 * * *` to `0 3 * * *` on 2026-09-04. The only symptom
+was an ordinary `not due today` line, printed daily, on a job that exited 0 — the
+weekly report simply stopped existing. The gate exists to pick one firing out of a
+daily **UTC** cron, so it now compares against UTC, and the skip message names the
+zone and the weekday it actually saw.
 
-| Setting | Value |
-|---|---|
-| Start Command | `python -u run_weekly_report.py --instantly --airtable --out-dir /app/data/weekly_reports` |
-| Cron | `0 13 * * 5` (06:00 PDT / 05:00 PST Friday) |
-| Volume | none available — `gtm-volume` belongs to GTM |
+The reporting **window** is unaffected and stays Pacific-labelled. Pass
+`--if-due-timezone America/Los_Angeles` to restore the old comparison.
 
-Without the volume, `jobs_captured`, `jobs_reviewed`, `review_rate_pct`,
-`qualified_opportunities` and `contacts_found` are **unavailable**. Only
-`sent_to_instantly` and the Airtable cross-check are measurable. The report says so
-plainly rather than filling the gap with zeros. Not recommended.
+## Ordering: acquisition first, then the report
+
+The report must be the **second** half of the Start Command:
+
+```sh
+sh -c 'python -u run_orchestrator.py --mode live_acquisition_and_enrichment --lanes fantastic --target 300 --airtable-write --global-budget 1500 --artifact-root /app/data/state/orchestrator_v2; python -u run_weekly_report.py --artifact-root /app/data/state/orchestrator_v2 --if-due friday --once-per-window --anchored --require-completed-run --instantly --slack --max-seconds 480 || true'
+```
+
+Why this order, and why the previous "report first" reasoning no longer holds:
+
+* **`--anchored` is the reason.** The window ends at the generation instant, so
+  Friday's own acquisition is in Friday's report only if acquisition already
+  finished. Report-first makes the anchored window structurally empty of the run
+  in its own container.
+* **The old argument was about a fixed window.** Under the fixed Friday→Friday
+  boundary, Friday's run started *after* the boundary and belonged to next week by
+  construction, so running first lost nothing. That is no longer the window in use.
+* **Delivery time is no longer pinned to the cron.** The report now lands after the
+  run, which took 3.3 h on 2026-09-04 (measured; 6.7 h at 2×). The cron at 03:00
+  UTC therefore delivers between roughly 06:20 and 09:40 UTC. This is the real
+  trade-off of anchoring, and it is why the due gate had to move to UTC: the
+  Pacific weekday at report time flips between Thursday and Friday depending on
+  how long the run took, while the UTC weekday stays Friday across the whole range.
+* **`exec` can no longer be used** on the pipeline half, because something must run
+  after it. The container's exit code becomes the *report's*, and the report exits
+  0 unless `--strict`. If the pipeline's exit code must remain the container's,
+  capture it (`rc=$?`) and `exit "$rc"` after the report — but note that the
+  restart policy is `NEVER`, so the exit code is observational either way.
+* **The report still cannot break the pipeline.** It runs after it, `|| true`
+  absorbs any non-zero exit, and `--max-seconds 480` bounds provider reads
+  in-process.
+* **`--once-per-window` still bounds repeats.** A redeploy or second firing on the
+  same Friday exits before touching Instantly.
+
+## Acceptance: heavy artifacts vs ledger-only
+
+The contract is that a week renders identically whether or not the heavy run
+artifacts still exist — retention deletes them long before the 8-week reporting
+horizon, and if the two stores disagree the ledger is a second opinion rather than
+a survivor.
+
+```bash
+# A: render from the real artifact root, into a scratch directory.
+python -u run_weekly_report.py --artifact-root <root> \
+  --start <YYYY-MM-DD> --end <YYYY-MM-DD> --out-dir /tmp/acc_heavy --quiet
+
+# B: copy ONLY the ledger store to an isolated root.
+mkdir -p /tmp/acc_root && cp -r <root>/run_ledger /tmp/acc_root/
+
+# C: render again from the ledger alone.
+python -u run_weekly_report.py --artifact-root /tmp/acc_root \
+  --start <YYYY-MM-DD> --end <YYYY-MM-DD> --out-dir /tmp/acc_ledger --quiet
+
+# D: the literal Slack text must be byte-identical.
+diff /tmp/acc_heavy/*.slack.txt /tmp/acc_ledger/*.slack.txt
+```
+
+`--start/--end` is the acceptance path specifically because an explicit window
+**cannot move the anchor** the next real report will read, and `--out-dir` keeps
+the output out of the production report directory. No `--slack`, so no receipt is
+written and nothing is delivered.
+
+`tests/test_weekly_report_production_acceptance.py` runs exactly this, including
+the loss-reason census: without it the ledger-only render can state the size of a
+drop but not its cause, which is a *different* message — so byte equality is also
+a check that the ledger carries everything the stakeholder page is built from.
 
 ## Instantly campaigns included
 
 `configured_campaign_ids()` reads every `INSTANTLY_CAMPAIGN_*` name in
 `config.CAMPAIGN_ENV_BY_BUCKET`, plus `_SMALL`/`_MID`/`_LARGE` band variants where
-set, plus the default `INSTANTLY_CAMPAIGN_ID`. Against the live GTM environment
-that resolves to exactly the ten role-bucket campaigns:
+set, plus the default `INSTANTLY_CAMPAIGN_ID`, **plus the Outbound Wave 1
+challenger campaigns** in `OUTBOUND_WAVE1_CHALLENGER_CAMPAIGNS_JSON`.
 
-```
-INSTANTLY_CAMPAIGN_CUSTOMER_SUCCESS   INSTANTLY_CAMPAIGN_MARKETING
-INSTANTLY_CAMPAIGN_CUSTOMER_SUPPORT   INSTANTLY_CAMPAIGN_OPERATIONS
-INSTANTLY_CAMPAIGN_ECOMMERCE          INSTANTLY_CAMPAIGN_PEOPLE_HR
-INSTANTLY_CAMPAIGN_ENGINEERING        INSTANTLY_CAMPAIGN_PRODUCT
-INSTANTLY_CAMPAIGN_FINANCE            INSTANTLY_CAMPAIGN_GTM
-```
+The challenger arm is not optional detail. Wave 1 routes a share of accounts into a
+separate campaign per role bucket, and those ids are not in
+`CAMPAIGN_ENV_BY_BUCKET`. With Wave 1 live at a 50% split, omitting them reports
+roughly half of the week's deliveries as not having happened — as a clean number,
+with no gap declared. Ids are deduplicated, so a bucket whose challenger and
+control are the same campaign is counted once (as `customer_success` and
+`customer_support` already are).
 
-No band variants are set, and `INSTANTLY_CAMPAIGN_ID` is present but **empty**, so
-it contributes nothing — matching `config.resolve_campaign_id`, which falls back to
-that empty default only when a bucket has no campaign. Every campaign the pipeline
-can route to is therefore covered.
+Against the live GTM environment the control set resolves to the ten role-bucket
+campaigns; `INSTANTLY_CAMPAIGN_ID` is present but **empty**, so it contributes
+nothing, matching `config.resolve_campaign_id`.
 
-If Outbound Wave 1 is ever enabled, its challenger campaigns are *not* in
-`CAMPAIGN_ENV_BY_BUCKET` and would need `--campaign-id` (or an env addition) to be
-counted. No Wave 1 variables exist on GTM today.
+**`OUTBOUND_WAVE1_CHALLENGER_CAMPAIGNS_JSON` is currently set on GTM Approved Sync
+only, not on GTM**, so the code path is in place but the report cannot see the
+challenger ids until that variable is added to GTM. `--campaign-id` (repeatable)
+remains available as an explicit override.
 
 Reads are `POST /leads/list` with the **singular** `campaign` filter — the plural
 `campaign_ids` filter is ignored by the API and must never be relied on. Leads are
@@ -333,28 +411,35 @@ counted by `timestamp_created`; a campaign that fails or hits the 200-page ceili
 is named in `campaigns_failed` / `campaigns_truncated`, contributes nothing
 silently, and drops the metric to `partial`.
 
-## Enabling Slack (a separate, later change)
+## The binding constraint on architecture
 
-Slack is off until two things happen, in this order:
+Run artifacts live on `gtm-volume`, and a Railway volume attaches to exactly one
+service. A separate report service therefore **cannot** read run artifacts and
+would be limited to the Instantly and Airtable metrics — `jobs_captured`,
+`jobs_reviewed`, `review_rate_pct`, `qualified_opportunities` and `contacts_found`
+would all be unavailable. That constraint, not the schedule, is why the report is
+chained onto GTM's cron.
 
-1. **Add the variable to GTM** (Railway UI, GTM service only):
-   `SLACK_WEEKLY_REPORT_WEBHOOK_URL = <webhook from the Slack app>`.
-   Nothing else needs it; do not add it to Approved Sync.
-2. **Add `--slack` to the reporter half of the Start Command**, leaving the
-   acquisition half untouched:
+## Slack delivery is live
 
-```sh
-sh -c 'python -u run_weekly_report.py --artifact-root /app/data/state/orchestrator_v2 --if-due friday --once-per-window --instantly --slack --max-seconds 480 || true; exec python -u run_orchestrator.py --mode live_acquisition_and_enrichment --lanes fantastic --target 300 --airtable-write --global-budget 1500 --artifact-root /app/data/state/orchestrator_v2'
-```
+`SLACK_WEEKLY_REPORT_WEBHOOK_URL` is set on **GTM only** (not on Approved Sync, and
+it should stay that way), and `--slack` is in the reporter half of the Start
+Command. The first real delivery landed at 2026-09-04T13:01:09Z (`HTTP 200 after 1
+attempt`), reporting 2026-W36.
 
-Cron stays `0 13 * * *`. To disable Slack again, drop `--slack` (the variable can
-stay); to disable without a deploy, clear the variable — the report still writes
-and simply declares the delivery gap.
+To disable Slack again, drop `--slack` from the Start Command (the variable can
+stay); to disable it without a deploy, clear the variable — the report still
+writes both artifacts and simply declares the delivery gap.
 
 ## Gates that still need explicit authorization
 
-* changing the GTM Start Command (the only production change required);
-* deploying / redeploying GTM.
+* **Changing the GTM Start Command** — to run acquisition first and to pass
+  `--anchored --require-completed-run`. This is the only production change the
+  reporting layer still needs, and it is config-only.
+* **Adding `OUTBOUND_WAVE1_CHALLENGER_CAMPAIGNS_JSON` to GTM** — read-only for the
+  report's purposes (it only widens which campaigns are counted), but it is a
+  service-setting change like any other.
+* Deploying / redeploying GTM.
 
-Not required and not proposed: cron changes, secret changes, new services, Airtable
-or Instantly writes, external sends.
+Not required and not proposed: cron changes beyond what is already live, secret
+rotation, new services, Airtable or Instantly writes, external sends.
