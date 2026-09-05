@@ -1,4 +1,25 @@
-"""Fail-closed revalidation immediately before Instantly enrollment."""
+"""LEGACY. Not on the Approved Sync delivery path, and must not be put back.
+
+This module re-ran the full qualification pipeline -- Apollo organization
+enrichment, Apollo person match, Hunter, JobSourceResolver -- immediately before
+Instantly enrollment, behind a 24-hour validation-age gate.
+
+On 2026-08-12 that gate marked 627 Approved rows ``Error`` with "Validation is
+stale; rerun qualification before enrollment". Every record failed it at line 41
+below, BEFORE any provider call, so nothing enrolled and nothing reached Instantly.
+
+Approved is now the authorization boundary: ``run_approved`` DELIVERS, it does not
+re-qualify. It performs one local, zero-network readiness check
+(``_delivery_precheck``) and nothing else. Nothing in production imports this
+module; ``config.APPROVED_SYNC_REVALIDATE_PROVIDERS`` is a deprecated name that
+selects nothing, and ``run_approved.run(revalidate_providers=True)`` is ignored
+with a warning.
+
+It is kept because two test modules exercise the gate composition through it, and
+because deleting the record of what the delivery path deliberately does NOT do
+makes it easier to reintroduce. ``tests/test_approved_sync_delivery_only.py``
+asserts the delivery path stays free of it.
+"""
 
 from __future__ import annotations
 
