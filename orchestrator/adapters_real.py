@@ -662,11 +662,14 @@ class RealDeliveryReport:
     # MUTUALLY EXCLUSIVE breakdown of every submitted-but-not-created row (Gate D):
     #   reviewable_submitted - created - failed
     #     == skipped_existing + updated_existing + company_function_suppressed
-    #        + account_suppressed + no_contact + person_employer_duplicate + other
+    #        + account_suppressed + no_contact + send_safe_withheld + other
     updated_existing: int = 0
     company_function_suppressed: int = 0
     account_suppressed: int = 0
     no_contact: int = 0
+    #: Withheld by AIRTABLE_WRITE_SEND_SAFE_ONLY: the row was NOT written at all,
+    #: in either status. It is preserved in the run's enrichment artifacts.
+    send_safe_withheld: int = 0
     person_employer_duplicate: int = 0
     other_unreconciled: int = 0
     failed: int = 0
@@ -697,6 +700,7 @@ class RealDeliveryReport:
             "company_function_suppressed": self.company_function_suppressed,
             "account_suppressed": self.account_suppressed,
             "no_contact": self.no_contact,
+            "send_safe_withheld": self.send_safe_withheld,
             "other": self.other_unreconciled,
         }
 
@@ -932,12 +936,20 @@ class RealDelivery:
         rep.company_function_suppressed = int(result.get("skipped_existing_company", 0) or 0)
         rep.account_suppressed = int(result.get("skipped_existing_account", 0) or 0)
         rep.no_contact = int(result.get("skipped_no_contact", 0) or 0)
-        # Rows withheld by AIRTABLE_WRITE_SEND_SAFE_ONLY are neither created nor a
-        # skip category above; book them explicitly so the identity stays exact.
-        not_send_safe = int(result.get("not_written_not_send_safe", 0) or 0)
+        # Rows withheld by AIRTABLE_WRITE_SEND_SAFE_ONLY are neither created nor
+        # any skip category above. They were the largest single category on
+        # 2026-09-04 -- 1,681 submitted, 781 created -- and they arrived in the run
+        # summary as an unnamed residual, which reads as "900 rows lost" rather
+        # than "900 rows deliberately not written because they are not send-safe".
+        #
+        # So they are now their own counter. ``other`` keeps the residual, because
+        # the reconciliation identity must stay exact even when the adapter reports
+        # something neither of us named; naming the send-safe share separately just
+        # means the reader no longer has to guess which it was.
+        rep.send_safe_withheld = int(result.get("not_written_not_send_safe", 0) or 0)
         accounted = (rep.created + rep.failed + rep.skipped_existing + rep.updated_existing
-                     + rep.company_function_suppressed + rep.account_suppressed + rep.no_contact)
-        # ``other`` = send-safe-withheld rows + any residual the adapter did not name.
+                     + rep.company_function_suppressed + rep.account_suppressed
+                     + rep.no_contact + rep.send_safe_withheld)
         rep.other_unreconciled = max(0, rep.reviewable_submitted - accounted)
         # person_employer_duplicate rows were removed BEFORE submission, so they are
         # withheld (like already-delivered), not part of the submitted identity.
