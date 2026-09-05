@@ -41,6 +41,10 @@ def write_run(root: Path, run_id: str, finished: str, *, postings: int = 100,
         "postings": postings, "opportunities": postings // 3,
         "contacts": postings // 8}}), encoding="utf-8")
     (d / "orchestrator_result.json").write_text(json.dumps({
+        # Net-new is the ONLY field that may answer jobs_captured. The old
+        # waterfall.unit_totals.postings fallback counted rows the lanes kept,
+        # before cross-run dedupe, and was removed for exactly that reason.
+        "acquisition": {"cumulative": {"net_new_jobs_captured": postings}},
         "enrichment": {"funnel": {"qualification_input": postings,
                                   "target_role_eligible": postings // 3}},
         "run": {"policy": {"allow_instantly_enrollment": False}}, "lanes": {}}),

@@ -19,7 +19,7 @@ import collections
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Sequence
 
-from weekly_report.evidence import Metric
+from weekly_report.evidence import Metric, STATUS_MEASURED, STATUS_PARTIAL
 from weekly_report.metrics import SOURCE_RUN_ARTIFACTS
 
 #: The ordered funnel the bottleneck search walks.
@@ -40,6 +40,44 @@ BOUNDARY_NAMES = {
     ("contacts_found", "sent_to_airtable"): "airtable_delivery",
     ("sent_to_airtable", "sent_to_instantly"): "instantly_delivery",
 }
+
+#: Which recorded reason codes may explain WHICH boundary.
+#:
+#: ``reason_census`` merges every reason the run recorded, at every stage. Handing
+#: that whole census to one boundary is how a delivery drop got explained by
+#: ``email_unverified`` and ``not_icp`` -- both decided at qualification, hundreds
+#: of records upstream, about a different population. A reason that cannot be
+#: recorded AT a boundary cannot be evidence about it.
+#:
+#: A boundary with no admissible reason present says so, rather than borrowing.
+REASONS_BY_BOUNDARY = {
+    "review": frozenset({
+        "previously_seen", "duplicate_in_run", "missing_job_id",
+    }),
+    "contact_discovery": frozenset({
+        "hiring_manager_not_found", "contact_not_found", "no_search_domain",
+        "zero_apollo_people", "company_unresolved", "not_icp",
+        "company_size_rejected", "in_crm",
+    }),
+    "airtable_delivery": frozenset({
+        "skipped_existing", "updated_existing", "company_function_suppressed",
+        "account_suppressed", "no_contact", "send_safe_withheld", "other",
+        "already_delivered", "adapter_error", "person_employer_duplicate",
+    }),
+}
+
+#: Boundaries whose ADVANCED side is a strict subset of the ENTERED side, so the
+#: difference is a set of records that entered and did not advance.
+#:
+#: ``airtable_delivery`` is deliberately absent. Every created row passes
+#: ``send_safe_facts``, which requires a non-empty verified email, so created rows
+#: ARE a subset of contacts-with-email -- but the population handed to the writer
+#: is larger than that subset in the other direction: on 2026-09-04 the writer
+#: received 1,681 candidates against 1,048 contacts, because leads with no contact
+#: are still submitted for review. The difference between contacts and created is
+#: therefore a mixture of never-submitted, suppressed-as-existing, updated and
+#: withheld records, and only the delivery skip breakdown separates them.
+SUBSET_BOUNDARIES = frozenset({"review", "contact_discovery"})
 
 #: Reason codes whose remedy is well understood, mapped to the action to take.
 REASON_ACTIONS = {
@@ -223,6 +261,26 @@ def identify(
     available = [(key, metrics[key]) for key in FUNNEL_ORDER if key in metrics and metrics[key].available]
     unmeasured = [key for key in FUNNEL_ORDER if key in metrics and not metrics[key].available]
 
+    # The period's entry total is not established: some runs reported net-new and
+    # some did not. Every downstream comparison inherits that, so name it rather
+    # than reporting the largest drop among a population of unknown size.
+    entry = metrics.get("jobs_captured")
+    if entry is not None and entry.status == STATUS_PARTIAL:
+        silent = list(entry.runs_missing_field)
+        return Bottleneck(
+            kind="entry_not_established",
+            boundary="acquisition",
+            statement=(
+                f"{len(silent)} of {len(silent) + len(entry.contributing_run_ids)} "
+                "runs in this period did not record net-new captured postings, so the "
+                "period's entry total is not established and no downstream rate can "
+                "be read against it. The runs that did record it are in the report "
+                "document."
+            ),
+            evidence=sorted(entry.evidence),
+            unmeasured_boundaries=unmeasured,
+        )
+
     # ZERO CAPTURE IS NOT "NO LOSS". The boundary search below skips every boundary
     # where lost <= 0, so a window that captured nothing produced no loss anywhere
     # and used to fall through to "no funnel boundary could be shown to lose
@@ -230,7 +288,14 @@ def identify(
     # Acquisition entry IS the bottleneck when nothing was captured, and the run
     # stop reasons say which kind of failure it was.
     captured = metrics.get("jobs_captured")
-    if captured is not None and captured.available and int(captured.value or 0) == 0:
+    # MEASURED, not merely available. A PARTIAL zero is a sum over the runs that
+    # reported the counter, and says nothing about the ones that did not -- on
+    # 2026-09-04/05 that would have announced "acquisition captured 0 jobs across
+    # 2 runs" when only one of the two had reported at all, and the silent one had
+    # bought 6,205 provider rows. A total outage and an unmeasured period are
+    # different findings with different fixes.
+    if (captured is not None and captured.status == STATUS_MEASURED
+            and int(captured.value or 0) == 0):
         stops = collections.Counter(
             str(getattr(run, "stop_reason", "") or "unrecorded") for run in (runs or ()))
         zero_budget = sum(n for reason, n in stops.items() if "governor_zero_budget" in reason)
@@ -368,15 +433,40 @@ def identify(
         )
 
     worst.incomparable_boundaries = incomparable
+    # Only reasons that can be RECORDED at this boundary may explain it.
+    admissible = REASONS_BY_BOUNDARY.get(worst.boundary)
+    scoped = {r: c for r, c in reasons.items()
+              if admissible is None or r in admissible}
     worst.top_reasons = [
-        {"reason": reason, "count": count} for reason, count in list(reasons.items())[:5]
+        {"reason": reason, "count": count} for reason, count in list(scoped.items())[:5]
     ]
     compared = len(available) - 1 - len(incomparable)
-    worst.statement = (
-        f"The {worst.boundary.replace('_', ' ')} boundary lost {worst.lost} of {worst.entered} "
-        f"records ({worst.loss_pct}%), the largest drop among the {compared} funnel "
-        f"boundar{'y' if compared == 1 else 'ies'} this window could compare."
-    )
+    plural = "y" if compared == 1 else "ies"
+    if worst.boundary in SUBSET_BOUNDARIES:
+        worst.statement = (
+            f"The {worst.boundary.replace('_', ' ')} boundary lost {worst.lost} of "
+            f"{worst.entered} records ({worst.loss_pct}%), the largest drop among the "
+            f"{compared} funnel boundar{plural} this window could compare."
+        )
+    else:
+        # NOT a subset boundary: state the transition that was observed, and stop.
+        # "Lost N" asserts that N records entered and failed, which this boundary
+        # does not establish -- a record suppressed because it already exists in
+        # Airtable did not fail delivery, and one never submitted did not reach it.
+        worst.statement = (
+            f"{worst.advanced} of {worst.entered} "
+            f"{worst.from_metric.replace('_', ' ')} became {worst.to_metric.replace('_', ' ')} "
+            f"({100 - (worst.loss_pct or 0):.1f}%), the largest observed drop among the "
+            f"{compared} boundar{plural} this window could compare. The remaining "
+            f"{worst.lost} did not all fail: suppressed-as-existing, updated, "
+            "withheld as not send-safe and never-submitted records are all in that "
+            "difference, and only the delivery skip breakdown separates them."
+        )
+    if not worst.top_reasons:
+        worst.statement += (
+            " No reason code recorded at this boundary is present, so the size of "
+            "the transition is measured and its cause is not attributable."
+        )
     return worst
 
 
@@ -455,6 +545,13 @@ def action_plan(
         if reached_provider and bottleneck.top_reasons:
             add(ACQUISITION_REACHED_PROVIDER_ACTION,
                 "runs had budget and reached the provider yet captured 0 jobs")
+    elif bottleneck.kind == "entry_not_established":
+        add(
+            "Some runs in this period did not record net-new captured postings, so "
+            "the period total cannot be stated. Confirm every run in the window is "
+            "on a build that emits it before reading this report's rates.",
+            bottleneck.statement,
+        )
     elif bottleneck.kind == "insufficient_measurement":
         add(
             "Instrument the missing funnel stages before the next report; the week cannot "

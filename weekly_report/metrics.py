@@ -56,8 +56,16 @@ class MetricSpec:
     label: str
     unit: str
     definition: str
-    #: ``(artifact_stem, dotted_path)`` candidates, most authoritative first.
-    fields: Tuple[Tuple[str, str], ...]
+    #: Candidates, most authoritative first. Each is ``(artifact_stem, dotted_path)``
+    #: or ``(artifact_stem, dotted_path, guard)`` where ``guard`` is another
+    #: ``(stem, path)`` that MUST also be present on the run before the candidate
+    #: may answer.
+    #:
+    #: The guard exists because a field NAME is not a contract. ``jobs_captured``
+    #: meant unique-kept postings before 2026-09-04T19:03 and net-new postings
+    #: after it, on the same key, in the same store. Reading it without proof of
+    #: which build wrote it silently mixes two populations into one total.
+    fields: Tuple[Tuple, ...]
     #: The population this metric counts, as a machine key. ``unit`` is a display
     #: word; this is the identity a boundary subtraction must match on. Getting it
     #: wrong is how "3,000 postings minus 400 opportunities = 2,600 lost" happens.
@@ -69,7 +77,7 @@ class MetricSpec:
 
     def field_labels(self) -> Tuple[str, ...]:
         """Every candidate this metric may be read from, most authoritative first."""
-        return tuple(_field_label(stem, path) for stem, path in self.fields)
+        return tuple(_field_label(c[0], c[1]) for c in self.fields)
 
     def read(self, run: RunRecord) -> Tuple[Optional[int], str]:
         """First present candidate as ``(value, "stem.json:path")``.
@@ -79,7 +87,15 @@ class MetricSpec:
         handful of runs, the ledger is retained for months. The heavy fields remain
         as fallbacks so pre-ledger runs still read exactly as they did.
         """
-        for stem, path in self.fields:
+        for candidate in self.fields:
+            stem, path = candidate[0], candidate[1]
+            guard = candidate[2] if len(candidate) > 2 else None
+            if guard is not None and dig(run.artifact(guard[0]), guard[1]) is None:
+                # The candidate is present but nothing proves it counts what this
+                # metric needs. Silence is the correct answer: an unguarded read
+                # here is how a pre-2026-09-04 unique-kept total gets summed into a
+                # net-new figure and reported as one number.
+                continue
             raw = dig(run.artifact(stem), path)
             value = as_count(raw)
             if value is not None:
@@ -128,15 +144,30 @@ RUN_METRIC_SPECS: Tuple[MetricSpec, ...] = (
         ),
         fields=(
             ("ledger", "metrics.net_new_jobs_captured"),
-            ("ledger", "metrics.jobs_captured"),
             ("orchestrator_result", "acquisition.cumulative.net_new_jobs_captured"),
-            # LAST RESORT, and only for runs written before net-new was recorded:
-            # the raw provider count. ``Metric.evidence`` names the field that
-            # answered per run, so a window mixing the two says so rather than
-            # quietly presenting re-bought rows as new work.
-            ("waterfall", "unit_totals.postings"),
-            ("capacity_report", "raw_postings"),
-            ("orchestrator_result", "waterfall.unit_totals.postings"),
+            # ``jobs_captured`` is only net-new on a build that ALSO records
+            # ``net_new_jobs_captured`` -- which is exactly the build that made it
+            # net-new. Before 2026-09-04T19:03 the same key held unique-kept
+            # postings. The guard is redundant in practice (net-new is listed
+            # first) and kept because a future reordering would otherwise
+            # reintroduce the mix silently.
+            ("ledger", "metrics.jobs_captured",
+             ("ledger", "metrics.net_new_jobs_captured")),
+            # RECOVERY for runs whose build predated the net-new counter. The
+            # acquisition-dedupe stage has always recorded PASSED = postings that
+            # cleared BOTH in-run canonical dedupe and the cross-run seen store --
+            # which is the same population `net_new_jobs_captured` counts, written
+            # by the same `_dedup` call. It is a genuine directly-emitted counter
+            # from that run, not a reconstruction.
+            ("waterfall", "stages[stage=acquisition_dedup].passed"),
+            ("orchestrator_result",
+             "waterfall.stages[stage=acquisition_dedup].passed"),
+            # REMOVED, deliberately: waterfall.unit_totals.postings,
+            # capacity_report.raw_postings and the orchestrator_result copy of the
+            # first. All three count rows the lanes KEPT, before cross-run dedupe.
+            # On 2026-09-04 that was 6,205 against a net-new figure the run never
+            # emitted. A run that cannot answer must read as unavailable, not as
+            # provider volume wearing the throughput label.
         ),
         counted_unit=UNIT_POSTING,
     ),
@@ -465,14 +496,60 @@ def ratio_metric(
         metric.status = STATUS_UNAVAILABLE
         metric.reason = f"requires {' and '.join(missing)}, which {'is' if len(missing) == 1 else 'are'} unavailable"
         return metric
+    # UNIT. A rate between two different populations is not a conversion rate. It
+    # is the same rule the bottleneck search applies to a subtraction, and for the
+    # same reason: postings divided by company x role-bucket opportunities is a
+    # number with no referent.
+    num_unit = numerator.counted_unit or ""
+    den_unit = denominator.counted_unit or ""
+    if num_unit != den_unit or not num_unit:
+        metric.status = STATUS_UNAVAILABLE
+        metric.reason = (
+            f"{numerator.key} counts {num_unit or 'an undeclared unit'} and "
+            f"{denominator.key} counts {den_unit or 'an undeclared unit'}; a ratio "
+            "between different populations is not a conversion rate")
+        return metric
+    if (numerator.cohort or "") != (denominator.cohort or ""):
+        metric.status = STATUS_UNAVAILABLE
+        metric.reason = (
+            f"{numerator.key} is the {numerator.cohort or 'undeclared'} cohort and "
+            f"{denominator.key} is the {denominator.cohort or 'undeclared'} cohort; "
+            "they share a date range, not a population")
+        return metric
+    # RUN SET. Dividing a total summed over runs {A,B} by one summed over {A}
+    # produces a rate that describes neither. Recording the intersection in
+    # metadata does not make the divided totals comparable -- the division has
+    # already happened by then.
+    #
+    # A same-cohort subset rate IS legitimate, but only when BOTH sides are
+    # recomputed from that exact subset. That is a different metric with a
+    # different denominator, and it must never be presented as the full-period
+    # rate, so it is not silently substituted here.
+    num_runs = set(numerator.contributing_run_ids)
+    den_runs = set(denominator.contributing_run_ids)
+    if num_runs != den_runs:
+        only_num = sorted(num_runs - den_runs)
+        only_den = sorted(den_runs - num_runs)
+        metric.status = STATUS_UNAVAILABLE
+        metric.reason = (
+            f"{numerator.key} and {denominator.key} were summed over different run "
+            f"sets (only in {numerator.key}: {', '.join(only_num) or 'none'}; only "
+            f"in {denominator.key}: {', '.join(only_den) or 'none'}), so their "
+            "ratio is not a rate for either population")
+        return metric
     if not denominator.value:
         metric.status = STATUS_UNAVAILABLE
         metric.reason = f"{denominator.key} is 0; a rate over an empty denominator is undefined"
         return metric
     metric.value = round(100.0 * float(numerator.value) / float(denominator.value), 1)
+    # Both sides now cover the SAME runs, so a partial pair is partial in the same
+    # way on both sides and the rate is exact over the runs it covers. It is still
+    # labelled, because it is not a rate for the full period.
     metric.status = weakest(numerator.status, denominator.status)
     if metric.status == STATUS_PARTIAL:
-        metric.reason = "derived from at least one partial input"
+        metric.reason = (
+            f"exact over the {len(num_runs)} run(s) that reported both counters; "
+            "not the full-period rate")
     return metric
 
 

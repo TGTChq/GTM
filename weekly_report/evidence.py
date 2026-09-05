@@ -149,9 +149,30 @@ def dig(payload: Any, path: str) -> Any:
 
     Deliberately strict about type: a value that is present but not a number is
     surfaced as-is so the caller can reject it, rather than being coerced.
+
+    One segment form selects out of a LIST: ``stages[stage=acquisition_dedup]``
+    takes the first element whose ``stage`` key equals that value. The waterfall
+    records its boundaries as a list, and the acquisition-dedupe stage is the only
+    place a pre-2026-09-04 run wrote a correctly scoped net-new posting count --
+    so without this the number is unrecoverable rather than merely unrecorded.
     """
     current = payload
     for part in path.split("."):
+        if part.endswith("]") and "[" in part:
+            name, selector = part[:-1].split("[", 1)
+            if "=" not in selector:
+                return None
+            key, wanted = selector.split("=", 1)
+            if not isinstance(current, dict):
+                return None
+            items = current.get(name)
+            if not isinstance(items, list):
+                return None
+            current = next((i for i in items
+                            if isinstance(i, dict) and str(i.get(key)) == wanted), None)
+            if current is None:
+                return None
+            continue
         if not isinstance(current, dict):
             return None
         if part not in current:
