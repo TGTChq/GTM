@@ -185,9 +185,9 @@ RUN_METRIC_SPECS: Tuple[MetricSpec, ...] = (
             #
             # NOT `unit_totals.opportunities`: on the top-up path that run took,
             # that key is `len(all_leads)` (2,410 leads), not postings.
-            ("waterfall", "stages[stage=acquisition_dedup,unit=posting].passed"),
+            ("waterfall", "stages[all:stage=acquisition_dedup,unit=posting].passed"),
             ("orchestrator_result",
-             "waterfall.stages[stage=acquisition_dedup,unit=posting].passed"),
+             "waterfall.stages[all:stage=acquisition_dedup,unit=posting].passed"),
             # LAST-RESORT RECOVERY, and legitimate because it is the SAME LIST
             # measured twice. `_dedup` returns `opportunities`; the pipeline adds
             # `len(opportunities)` to net_new_jobs_captured and hands that identical

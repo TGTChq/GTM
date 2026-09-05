@@ -209,6 +209,44 @@ class BackfillBeforePruneTests(unittest.TestCase):
                 self.assertEqual(metrics["contacts_found"], 1048)
                 self.assertEqual(metrics["sent_to_airtable"], 781)
 
+    def test_every_top_up_slice_counts_toward_the_run_capture(self):
+        """`report.add` APPENDS, so the acquisition-dedupe stage is written once per
+        top-up slice. A productive run has several, and the run's capture is all of
+        them -- exactly as `net_new_jobs_captured` accumulates `len(opportunities)`
+        per slice. Reading only the first reported slice one as the whole run.
+
+        20260904T130130Z-13b44a0c ran a single iteration, so this never showed on the
+        one run available to check against; it would show on the next productive one.
+        """
+        root = Path(tempfile.mkdtemp()) / "orchestrator_v2"
+        _heavy(root, R1,
+               waterfall=dict(R1_WATERFALL,
+                              stages=[_dedupe_stage(1200), _dedupe_stage(630),
+                                      {"stage": "review", "unit": "posting", "passed": 5}]),
+               funnel={}, delivery=R1_DELIVERY,
+               acquisition={"jobs_returned_billed": 6205})
+        backfill_from_artifacts(root)
+        metrics = read_entries(root)[0][0]["metrics"]
+
+        self.assertEqual(metrics["jobs_captured"], 1830, "1200 + 630, not 1200")
+        self.assertEqual(metrics["net_new_jobs_captured"], 1830)
+
+    def test_a_slice_in_the_wrong_unit_disqualifies_the_whole_sum(self):
+        """Summing across a mixed-unit set would be adding postings to something
+        else. Refusing is correct: the run then reads as silent about its capture."""
+        root = Path(tempfile.mkdtemp()) / "orchestrator_v2"
+        _heavy(root, R1,
+               waterfall=dict(R1_WATERFALL,
+                              stages=[_dedupe_stage(1200), _dedupe_stage(630, "lead")]),
+               funnel={}, delivery=R1_DELIVERY,
+               acquisition={"jobs_returned_billed": 6205})
+        backfill_from_artifacts(root)
+        metrics = read_entries(root)[0][0]["metrics"]
+
+        self.assertEqual(metrics.get("jobs_captured"), 1200,
+                         "only the posting-unit slices are summed")
+        self.assertEqual(metrics["contacts_found"], 1048, "the run is still preserved")
+
     def test_provider_volume_is_never_promoted_to_captured(self):
         """6,205 is what the provider returned. It is recorded under its own name."""
         backfill_from_artifacts(self.root)
