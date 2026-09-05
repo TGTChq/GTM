@@ -916,6 +916,52 @@ def test_a_failed_instantly_read_asks_for_the_credential_not_for_the_flag_again(
 # --------------------------------------------------------------------------
 
 
+def test_one_person_in_two_campaigns_is_one_delivery(pacific_week):
+    """Instantly stores a separate lead RECORD per campaign, so a person enrolled in
+    two campaigns has two ids and one address. "Sent to Instantly" counts people
+    reached, not rows created -- 18 campaigns are configured, so summing the
+    breakdown would report the overlap as extra delivery."""
+    result = collect_instantly(
+        pacific_week, cfg=_cfg(), campaign_ids=["camp-1", "camp-2"],
+        requester=_instantly_requester({
+            "camp-1": [
+                {"id": "lead-a", "email": "HM@Example.com",
+                 "timestamp_created": "2026-08-22T10:00:00Z"},
+                {"id": "lead-b", "email": "other@example.com",
+                 "timestamp_created": "2026-08-22T11:00:00Z"},
+            ],
+            # The same person, a different campaign, a different lead id.
+            "camp-2": [{"id": "lead-c", "email": "hm@example.com",
+                        "timestamp_created": "2026-08-23T10:00:00Z"}],
+        }),
+    )
+
+    assert result.count == 2, "two people, three lead records"
+    assert result.detail["lead_records_in_window"] == 3
+    assert result.detail["distinct_people_in_window"] == 2
+    assert result.detail["people_in_more_than_one_campaign"] == 1
+    # The breakdown is unchanged and still explains the record count.
+    assert result.detail["per_campaign_in_window"] == {"camp-1": 2, "camp-2": 1}
+    assert any("more than one campaign" in e for e in result.errors), (
+        "a headline below the sum of its breakdown must say why")
+
+
+def test_a_lead_with_no_address_is_still_counted_once(pacific_week):
+    """It cannot be collapsed with anything, so it stands alone -- and the number of
+    such leads is reported rather than assumed to be zero."""
+    result = collect_instantly(
+        pacific_week, cfg=_cfg(), campaign_ids=["c"],
+        requester=_instantly_requester({
+            "c": [{"id": "lead-x", "timestamp_created": "2026-08-22T10:00:00Z"},
+                  {"id": "lead-y", "email": "", "timestamp_created": "2026-08-22T11:00:00Z"}],
+        }),
+    )
+
+    assert result.count == 2
+    assert result.detail["leads_without_an_address"] == 2
+    assert result.detail["people_in_more_than_one_campaign"] == 0
+
+
 def test_a_campaign_that_fails_mid_pagination_contributes_nothing(pacific_week):
     """The headline must always equal the sum of its own per-campaign breakdown."""
     state = {"pages": 0}

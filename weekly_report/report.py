@@ -46,6 +46,7 @@ from weekly_report.metrics import (
     reason_census,
 )
 from weekly_report.run_artifacts import (
+    LEDGER_STEM,
     RunRecord,
     discover_runs,
     partition_realism,
@@ -214,6 +215,110 @@ def _run_row(run: RunRecord, window: ReportingWindow) -> Dict[str, Any]:
     if run.attributed_at is not None:
         row["local_day"] = local_date_key(run.attributed_at, window.start_local.tzinfo)
     return row
+
+
+#: The counters a census reconciles. Each is summed over the runs that reported it,
+#: which is the same rule ``aggregate`` applies -- so a disagreement means discovery
+#: and aggregation saw different run sets, which is the failure this exists to catch.
+_CENSUS_METRICS = ("jobs_captured", "jobs_reviewed", "qualified_opportunities",
+                   "contacts_found", "sent_to_airtable")
+
+
+def run_census(
+    *,
+    all_runs: Sequence[RunRecord],
+    in_window: Sequence[RunRecord],
+    unattributable: Sequence[RunRecord],
+    simulated: Sequence[RunRecord],
+    window: ReportingWindow,
+    metrics: Dict[str, Metric],
+) -> Dict[str, Any]:
+    """Every discovered run, why it was included or not, and what it contributed.
+
+    A total is only trustworthy if you can name the runs behind it. "Seven runs, 6,205
+    captured" is not checkable; a row per run, each with its own decision and its own
+    contribution, is -- and it is the only way to see that two runs on the same day
+    were both counted, or that one of them was quietly dropped.
+
+    ``reconciles`` recomputes each headline from the census rows and compares it with
+    the metric the report will render. They are computed by different code over the
+    same runs, so a mismatch means discovery and aggregation disagree about the run
+    set -- the exact class of fault that made a report say four runs when there were
+    seven.
+
+    Internal. It is never rendered into the stakeholder message.
+    """
+    excluded_ids = {run.run_id for run in unattributable} | {run.run_id for run in simulated}
+    included_ids = {run.run_id for run in in_window}
+    rows: List[Dict[str, Any]] = []
+
+    for run in sorted(all_runs, key=lambda r: r.run_id):
+        if run.run_id in included_ids:
+            decision, reason = "included", ""
+        elif run.run_id in {r.run_id for r in unattributable}:
+            decision, reason = "excluded", "no usable completion timestamp"
+        elif run.run_id in {r.run_id for r in simulated}:
+            decision, reason = "excluded", "simulated run: " + (run.realism_reason or "dry run")
+        else:
+            decision = "excluded"
+            reason = ("finished outside the window ("
+                      + (run.attributed_at.isoformat() if run.attributed_at else "no timestamp")
+                      + ")")
+        contributions: Dict[str, Any] = {}
+        for spec in RUN_METRIC_SPECS:
+            if spec.key not in _CENSUS_METRICS:
+                continue
+            value, field_used = spec.read(run)
+            # None means SILENT, and stays None. A run that did not report a counter
+            # contributes nothing to it, which is not the same as contributing zero.
+            contributions[spec.key] = {"value": value, "field": field_used or None}
+        rows.append({
+            "run_id": run.run_id,
+            "state": run.status,
+            "attributed_at": run.attributed_at.isoformat() if run.attributed_at else None,
+            "attribution_field": run.attribution_field,
+            "local_day": (local_date_key(run.attributed_at, window.start_local.tzinfo)
+                          if run.attributed_at else None),
+            "evidence": ("ledger+artifacts" if run.has_ledger and len(run.artifacts) > 1
+                         else "ledger" if run.has_ledger else "artifacts"),
+            "reconstructed": bool(dig(run.artifact(LEDGER_STEM),
+                                      "backfilled_from_artifacts") or False),
+            "decision": decision,
+            "reason": reason,
+            "contributes": contributions,
+        })
+
+    reconciles: Dict[str, Any] = {}
+    for key in _CENSUS_METRICS:
+        contributing = [r for r in rows if r["decision"] == "included"
+                        and r["contributes"].get(key, {}).get("value") is not None]
+        total = sum(int(r["contributes"][key]["value"]) for r in contributing)
+        metric = metrics.get(key)
+        reconciles[key] = {
+            "census_total": total if contributing else None,
+            "census_runs": sorted(r["run_id"] for r in contributing),
+            "reported_value": None if metric is None else metric.value,
+            "reported_runs": sorted(metric.contributing_run_ids) if metric else [],
+            "agrees": bool(metric is not None
+                           and (metric.value if contributing else None)
+                           == (total if contributing else None)
+                           and sorted(metric.contributing_run_ids)
+                           == sorted(r["run_id"] for r in contributing)),
+        }
+
+    by_day: Dict[str, List[str]] = {}
+    for row in rows:
+        if row["decision"] == "included" and row["local_day"]:
+            by_day.setdefault(row["local_day"], []).append(row["run_id"])
+    return {
+        "runs": rows,
+        "included": sorted(included_ids),
+        "excluded": sorted(excluded_ids | {r["run_id"] for r in rows
+                                           if r["decision"] == "excluded"}),
+        "included_runs_by_local_day": {d: sorted(v) for d, v in sorted(by_day.items())},
+        "reconciles": reconciles,
+        "all_reconcile": all(v["agrees"] for v in reconciles.values()),
+    }
 
 
 def _daily_buckets(rows: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -446,6 +551,10 @@ class WeeklyReport:
     actions: List[Action]
     gaps: List[Gap]
     collectors: List[CollectorResult] = field(default_factory=list)
+    #: Internal run-by-run accounting: every discovered run, why it was included or
+    #: excluded, what it contributed, and whether those contributions add back up to
+    #: the rendered totals. Never rendered into the stakeholder message.
+    census: Dict[str, Any] = field(default_factory=dict)
     reasons: Dict[str, int] = field(default_factory=dict)
     dispositions: Dict[str, int] = field(default_factory=dict)
     run_status_census: Dict[str, int] = field(default_factory=dict)
@@ -499,6 +608,8 @@ class WeeklyReport:
         payload["action_plan"] = [action.to_dict() for action in self.actions]
         payload["gaps"] = [gap.to_dict() for gap in self.gaps]
         payload["run_status_census"] = dict(self.run_status_census)
+        if self.census:
+            payload["run_census"] = self.census
         payload["loss_reasons"] = dict(self.reasons)
         payload["disposition_census"] = dict(self.dispositions)
         payload["acquisition_lane_failures"] = list(self.lane_failures)
@@ -567,6 +678,9 @@ def build_report(
         status_census[run.status] = status_census.get(run.status, 0) + 1
 
     rows = [_run_row(run, window) for run in in_window]
+    census = run_census(all_runs=all_runs, in_window=in_window,
+                        unattributable=unattributable, simulated=simulated,
+                        window=window, metrics=metrics)
     gaps = _collect_gaps(
         metrics,
         runs=in_window,
@@ -596,6 +710,7 @@ def build_report(
         actions=actions,
         gaps=gaps,
         collectors=collectors,
+        census=census,
         reasons=reasons,
         dispositions=dispositions,
         run_status_census=status_census,
