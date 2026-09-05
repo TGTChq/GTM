@@ -1262,6 +1262,27 @@ def validate_fantastic_jobs_config() -> None:
             "FANTASTIC_JOBS_TIME_FRAME must be one of "
             + ", ".join(_SUPPORTED_TIME_FRAMES)
             + f" (got {FANTASTIC_JOBS_TIME_FRAME!r})")
+    # `6m` IS a documented provider frame and is NOT a frame this engine can page.
+    #
+    # The provider assigns offset+limit to 1h/24h/7d and reserves id-cursor
+    # pagination for 6m -- "pass the last id returned as the cursor", which also
+    # switches result ordering from date_posted DESC to id ASC -- and warns
+    # explicitly against resuming an offset run with a cursor or the reverse. This
+    # adapter pages by offset and persists offsets; it implements no id cursor.
+    #
+    # Running 6m on offsets would therefore page a frame the provider does not
+    # support paging that way, against a result set two orders of magnitude larger,
+    # while our persisted offsets sit in the same state namespace as the 7d windows
+    # they were measured in. Historical recovery needs a cursor mode, its own state
+    # namespace and its own budget; none of those exist yet, and parsing the string
+    # does not create them. Reject the combination rather than half-support it.
+    if FANTASTIC_JOBS_TIME_FRAME == "6m":
+        raise ValueError(
+            "FANTASTIC_JOBS_TIME_FRAME=6m is not supported by this engine: the "
+            "provider documents id-cursor pagination for that frame (ordering by id "
+            "ascending) while this adapter pages and persists OFFSETS, and mixing the "
+            "two is explicitly warned against. Historical recovery needs a cursor "
+            "mode with its own state namespace and budget, which is not implemented.")
     # Watermark lag/overlap must be sane before the engine may ever run.
     if FANTASTIC_DATE_CREATED_WATERMARK_ENABLED:
         if FANTASTIC_DATE_CREATED_LAG_MINUTES < 60:
