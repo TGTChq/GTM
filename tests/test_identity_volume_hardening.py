@@ -10,6 +10,7 @@ import apollo_client
 import config
 import hiring_manager
 import job_filter
+import job_signal
 import jsearch_scraper
 import role_mapping
 from pipeline_state import SeenJobsRegistry
@@ -100,6 +101,13 @@ class CompanyIdentityHardeningTests(unittest.TestCase):
             patch.object(hiring_manager.apollo, "match_person", return_value=person),
             patch.object(hiring_manager.config, "VERIFY_WITH_HUNTER", False),
             patch.object(hiring_manager.time, "sleep", return_value=None),
+            # ``job_signal._probe_url`` calls ``requests.get`` directly rather than
+            # through the ``request_with_retry`` seam, so this test was fetching the
+            # real builtin.com over the network -- making it slow, flaky and
+            # dependent on what a third party served that day. Stubbed to the 2xx
+            # the assertions below have always assumed.
+            patch.object(job_signal, "_probe_url",
+                         return_value=("verified", "probe_stubbed_offline")),
         ):
             leads, stats = hiring_manager.process_company([job])
 

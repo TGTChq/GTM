@@ -1,0 +1,100 @@
+name: CI
+
+# The repository had no automated gate at all. Every check below is one that has
+# already caught a real production defect in this codebase, so this is a record of
+# what went wrong rather than a generic template:
+#
+#   * undefined names        -- the live 2026-08-09 run died on
+#                               `NameError: name 'logger' is not defined`
+#                               (run_orchestrator.py:461), after the strict
+#                               preflight had passed and before acquisition;
+#   * the integrity manifest -- the same incident required refreshing it, and a
+#                               stale manifest fails the production preflight
+#                               BEFORE any external request, taking the run down;
+#   * network in the suite   -- one test was fetching a real third-party URL, so
+#                               "the offline suite" was slow, flaky and dependent
+#                               on what builtin.com served that day.
+#
+# Nothing here needs a credential, and the suite is blocked from opening a
+# non-loopback socket, so a fork PR cannot spend a provider credit.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          # Pinned to the version the production image runs (Dockerfile:
+          # python:3.12-slim). Testing a version production does not run tells us
+          # about a Python we do not deploy.
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+
+      - name: Install runtime + dev dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: Undefined names
+        # Only undefined names fail the build. Unused locals and shadowed imports
+        # are reported for the log and do not gate: this is a correctness check,
+        # not a style pass, and a gate that fires on style gets disabled.
+        run: |
+          set -o pipefail
+          python -m pyflakes $(git ls-files '*.py') | tee pyflakes.txt || true
+          if grep -q "undefined name" pyflakes.txt; then
+            echo "::error::pyflakes found an undefined name"
+            grep "undefined name" pyflakes.txt
+            exit 1
+          fi
+
+      - name: Integrity manifest
+        # The exact check run_orchestrator.py's strict preflight performs, with the
+        # same CRLF normalization. Editing a manifested file without refreshing the
+        # manifest fails production BEFORE any external call, so it must fail here
+        # first.
+        run: python ci_check_integrity.py
+
+      - name: Offline test suite
+        # -p ci_no_network refuses any non-loopback socket for the whole run, so
+        # "offline" is enforced rather than intended.
+        env:
+          PYTHONHASHSEED: "0"
+        run: python -m pytest tests -q -p ci_no_network
+
+      - name: Confirm no credential reached the job
+        # A belt-and-braces assertion that the gate is genuinely credential-free.
+        # If a secret is ever added to this workflow, this step must be removed
+        # deliberately rather than silently outgrown.
+        run: |
+          for name in RAPIDAPI_KEY APOLLO_API_KEY HUNTER_API_KEY AIRTABLE_TOKEN \
+                      INSTANTLY_API_KEY FANTASTIC_JOBS_API_KEY VALIDATION_SIGNING_KEY \
+                      SLACK_WEEKLY_REPORT_WEBHOOK_URL; do
+            if [ -n "${!name:-}" ]; then
+              echo "::error::$name is set in CI; this gate must stay credential-free"
+              exit 1
+            fi
+          done
+          echo "no provider credential is present"

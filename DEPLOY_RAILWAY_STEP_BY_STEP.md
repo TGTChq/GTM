@@ -1,4 +1,5 @@
-> **SUPERSEDED — see `PRODUCTION_DEPLOYMENT.md` for the definitive config.**
+> **SUPERSEDED — see [PRODUCTION_RUNBOOK.md](PRODUCTION_RUNBOOK.md) for the
+> authoritative live configuration.**
 > This document predates the single-spine `run_orchestrator.py` cutover and
 > describes the retired `run_daily.py` path. Kept for history only.
 

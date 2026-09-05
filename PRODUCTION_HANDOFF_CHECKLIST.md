@@ -1,4 +1,5 @@
-> **SUPERSEDED — see `PRODUCTION_DEPLOYMENT.md` for the definitive config.**
+> **SUPERSEDED — see [PRODUCTION_RUNBOOK.md](PRODUCTION_RUNBOOK.md) for the
+> authoritative live configuration.**
 > Predates the single-spine `run_orchestrator.py` cutover; kept for history only.
 
 # TGTC Production Handoff Checklist

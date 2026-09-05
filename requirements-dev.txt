@@ -1,0 +1,21 @@
+# Development and test dependencies.
+#
+# DELIBERATELY SEPARATE from requirements.txt, which is what the production image
+# installs. pytest is not a runtime dependency of the pipeline and must never be
+# pulled into the Railway image just because the tests need it.
+#
+# Install both to work on this repository:
+#     python -m pip install -r requirements.txt -r requirements-dev.txt
+#
+-r requirements.txt
+
+# The suite is plain pytest + unittest with no plugins; the upper bound exists so a
+# major release cannot silently change collection or fixture semantics in CI
+# without someone deciding to move it.
+pytest>=8.0,<10
+
+# Undeclared-name and unused-import checking. Used as a targeted gate, not a style
+# pass: an undefined name is what took the live 2026-08-09 run down
+# (`NameError: name 'logger' is not defined`, run_orchestrator.py:461, after the
+# strict preflight had already passed and before acquisition).
+pyflakes>=3.2,<4
