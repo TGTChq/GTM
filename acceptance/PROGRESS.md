@@ -541,11 +541,46 @@ only some of its postings carry a domain, and the domainless half spends an Apol
 organisation enrich to return `missing_company_domain` while the domain sits on a
 sibling posting. **3 companies, 4 opportunities out of 4,148.** Not worth a change.
 
-### Final state
+### Final state — 2026-09-06T15:30Z
 
-    origin/main   6b0d117, deployed to both services
-    GTM cron      0 3 * * *   (verified after every pass; nine so far)
-    Approved Sync 0 0 * * *   (untouched throughout)
-    acquisition   PAUSED      MAINTENANCE_ONLY=1 (must be 0 before resuming)
-    custody       3,595 postings = 2,998 opportunities, resumable
-    gates         3234 passed, 1 skipped, 1001 subtests; integrity 27/0/0
+    origin/main   afd92db, deployed to both services (SUCCESS)
+    GTM cron      0 3 * * *     (restored and verified after all 13 passes)
+    Approved Sync 0 0 * * *     (untouched throughout)
+    acquisition   PAUSED        FANTASTIC_JOBS_ENABLED=0
+    maintenance   MAINTENANCE_ONLY=1  (MUST be 0 before acquisition resumes)
+    probe vars    cleared       (MAINTENANCE_QUALIFY_RUNS, MAINTENANCE_ATS_BOARD_YIELD)
+    custody       3,595 postings = 2,998 opportunities, proved resumable
+    gates         3245 passed, 1 skipped, 1001 subtests; integrity 27/0/0
+    reporting     A/B on production files ACCEPTED: True
+
+## Remaining work — all of it external, and why
+
+| # | blocked action | who unblocks it | what it answers |
+|---|---|---|---|
+| **B3** | Apollo lead credits (`BILLING.LIMIT.CREDITS_EXHAUSTED`, balance 0, refuses rather than billing overage) | five read-only billing screens, `INCIDENT_2026-09-06_apollo_credits.md` | **the critical path.** Whether 25.5% opportunity → contact is real or an artefact of the truncation. Every remaining question about 1,000/day is downstream of it |
+| A1 | 500 Jobs credits, no Apollo | a spend decision | whether any of the 14.4x title-excluded inventory is relevant |
+| A2 | `ACQUISITION_EXTRA_LANES=ats` | a variable, once Apollo serves | activates 615 free opportunities + ~44/day |
+| A3 | historical backfill row budget | a spend decision | only worth deciding after A1 |
+
+**Nothing internal is outstanding.** The last internal hypothesis — that part of the
+contact-discovery loss was our own missing domains — was tested and is dead at 99.1%
+first-party domain coverage.
+
+### Resumable checkpoint
+
+* Reach the volume: `MAINTENANCE_ONLY=1` is already set; set `cronSchedule` a few
+  minutes ahead, wait for the build to be SUCCESS, **do not push during the window**,
+  capture with `railway logs -d <id>`, then restore `0 3 * * *` and verify.
+* Optional maintenance steps, all opt-in and all off right now:
+  `MAINTENANCE_CAPACITY_RUNS`, `MAINTENANCE_QUALIFY_RUNS`,
+  `MAINTENANCE_ATS_BOARD_YIELD`, `MAINTENANCE_DROP_EMPTY_RUN`.
+* Free measurements that can be re-run any time:
+  `acceptance/inventory_probe.py` (35 requests, 0 credits) and
+  `acceptance/ats_board_yield.py` (0 credits, in-container only).
+* When Apollo serves: `acceptance/apollo_readiness.py` → `MAINTENANCE_ONLY=0` →
+  `FANTASTIC_JOBS_ENABLED=1`, then watch the first run's
+  `cursor: date_created slices` and `expired_inventory` lines.
+
+**The 1,000/day target is NOT achieved and is not claimed to be.** It is
+inventory-feasible (~1,700–2,200 opportunities/day) and conversion-bound (needs ~51%,
+observed 18.8%), and the conversion measurement itself is blocked on Apollo.
