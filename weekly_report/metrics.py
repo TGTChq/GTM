@@ -671,6 +671,17 @@ def reason_census(runs: Sequence[RunRecord]) -> Dict[str, int]:
             # the counts sat in the artifact.
             _add({"already_delivered": delivery.get("skipped_already_delivered"),
                   "person_employer_duplicate": delivery.get("person_employer_duplicate")})
+            # THE RUN'S OWN IDENTITY CHECK, when it fails. `reviewable_reconciles`
+            # asserts submitted - created - failed == sum(skip_breakdown); when that
+            # is false the remainder is rows the writer did not create and did not
+            # say why. It is recorded AT this boundary and is the strongest thing
+            # that can be said about the difference, so it belongs in the census --
+            # "the run cannot account for 900 rows" beats "no reason was recorded".
+            if delivery.get("reviewable_reconciles") is False:
+                named = sum(v for v in (delivery.get("skip_breakdown") or {}).values()
+                            if isinstance(v, int))
+                gap = (as_count(delivery.get("reviewable_submitted")) or 0)                     - (as_count(delivery.get("created")) or 0)                     - (as_count(delivery.get("failed")) or 0) - named
+                _add({"delivery_unreconciled": max(0, gap)})
     # A REASON RECORDED AS ZERO EXPLAINS NOTHING. The delivery skip breakdown is a
     # fixed-shape dataclass: every bucket is emitted every run, so a policy that is
     # switched off still contributes its name with a count of 0. Left in, those keys

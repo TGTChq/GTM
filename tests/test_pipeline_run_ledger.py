@@ -93,7 +93,13 @@ class _Delivery:
     def deliver(self, leads, **kwargs):
         from orchestrator.adapters_real import RealDeliveryReport
 
-        return RealDeliveryReport(entered=len(leads), created=len(leads), skipped_existing=1)
+        # `withheld_before_submit` is declared because the real adapter always
+        # writes it and `reconciles()` no longer accepts its absence as a pass:
+        # an unrecorded withheld count is an unverifiable identity, not a
+        # satisfied one. Everything entered here was submitted.
+        return RealDeliveryReport(entered=len(leads), reviewable_submitted=len(leads),
+                                  created=len(leads), skipped_existing=1,
+                                  detail={"withheld_before_submit": 0})
 
 
 def _plan(runner, engine=None):

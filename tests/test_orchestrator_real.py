@@ -176,3 +176,39 @@ class RealDeliveryTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TheEnteredIdentityIsActuallyChecked(unittest.TestCase):
+    """`reconciles()` documents itself as NOT tautological, and its own default made
+    it exactly that: with `withheld_before_submit` absent it compared
+    `entered == reviewable_submitted + (entered - reviewable_submitted)`, true for
+    every input.
+
+    The 2026-09-04 production record has no such key and reported
+    `airtable_reconciles: true` on 2,410 entered against 1,681 submitted. Nothing had
+    checked anything.
+    """
+
+    def _rep(self, **kw):
+        from orchestrator.adapters_real import RealDeliveryReport
+        base = {"mode": "review_staging", "entered": 2410, "reviewable_submitted": 1681}
+        base.update(kw)
+        return RealDeliveryReport(**base)
+
+    def test_an_absent_withheld_count_is_not_a_pass(self):
+        self.assertFalse(self._rep().reconciles())
+
+    def test_a_recorded_count_that_closes_the_identity_passes(self):
+        self.assertTrue(self._rep(detail={"withheld_before_submit": 729}).reconciles())
+
+    def test_a_recorded_count_that_does_not_close_it_fails(self):
+        self.assertFalse(self._rep(detail={"withheld_before_submit": 700}).reconciles())
+
+    def test_a_run_that_delivered_nothing_still_passes(self):
+        """Nothing entered, nothing submitted: there is no identity to verify."""
+        self.assertTrue(self._rep(entered=0, reviewable_submitted=0).reconciles())
+
+    def test_dry_mode_is_exempt_like_its_sibling_check(self):
+        """`dry_no_write` never calls the writer -- the same exemption
+        `reviewable_reconciles` already makes."""
+        self.assertTrue(self._rep(mode="dry_no_write").reconciles())

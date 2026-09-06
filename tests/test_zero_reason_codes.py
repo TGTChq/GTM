@@ -157,3 +157,58 @@ class AnEmptyLedgerBlockIsNotAnAnswer(unittest.TestCase):
         run = _Run(**{mx.LEDGER_STEM: {"loss_reasons": {"not_icp": 9}},
                       "delivery": {"skip_breakdown": {"not_icp": 9}}})
         self.assertEqual(mx.reason_census([run]), {"not_icp": 9})
+
+
+class AFailedReconciliationIsTheStrongestThingSayable(unittest.TestCase):
+    """The 2026-09-04 production record: 1,681 submitted, 781 created, 0 failed, and
+    a skip breakdown summing to zero. `reviewable_reconciles` reports False -- the run
+    itself says it cannot account for 900 rows -- and the report said "no reason code
+    was recorded there", which is weaker AND less true.
+
+    A failed identity check is recorded AT that boundary and is exactly a reason."""
+
+    def _delivery(self, **kw):
+        base = {"reviewable_submitted": 1681, "created": 781, "failed": 0,
+                "skip_breakdown": {"account_suppressed": 0, "other": 0},
+                "reviewable_reconciles": False}
+        base.update(kw)
+        return _Run(delivery=base)
+
+    def test_the_unaccounted_remainder_becomes_a_reason(self):
+        self.assertEqual(mx.reason_census([self._delivery()]),
+                         {"delivery_unreconciled": 900})
+
+    def test_named_skips_are_subtracted_from_the_remainder(self):
+        census = mx.reason_census([self._delivery(
+            skip_breakdown={"no_contact": 400, "other": 0})])
+        self.assertEqual(census["no_contact"], 400)
+        self.assertEqual(census["delivery_unreconciled"], 500)
+
+    def test_a_reconciling_run_contributes_no_such_reason(self):
+        census = mx.reason_census([self._delivery(
+            reviewable_reconciles=True, skip_breakdown={"no_contact": 900})])
+        self.assertNotIn("delivery_unreconciled", census)
+
+    def test_a_missing_flag_is_not_read_as_a_failure(self):
+        run = _Run(delivery={"reviewable_submitted": 10, "created": 10,
+                             "skip_breakdown": {}})
+        self.assertNotIn("delivery_unreconciled", mx.reason_census([run]))
+
+    def test_it_makes_the_boundary_attributable_and_actionable(self):
+        metrics = {}
+        for key, value in (("contacts_found", 1048), ("sent_to_airtable", 781)):
+            m = mx.Metric(key=key, label=key, unit="company_role_bucket_opportunity",
+                          value=value)
+            m.status = mx.STATUS_MEASURED
+            m.counted_unit = "company_role_bucket_opportunity"
+            m.cohort = "run_window"
+            m.source = mx.SOURCE_RUN_ARTIFACTS
+            m.contributing_run_ids = ["r1"]
+            m.evidence = ["r1"]
+            metrics[key] = m
+        found = bn.identify(metrics, run_count=1,
+                            reasons={"delivery_unreconciled": 900})
+        self.assertEqual(found.kind, "funnel_boundary")
+        plan = " ".join(str(getattr(s, "text", s))
+                        for s in bn.action_plan(found, metrics))
+        self.assertIn("could not account for", plan)

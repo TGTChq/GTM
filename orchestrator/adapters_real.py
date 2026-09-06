@@ -686,8 +686,27 @@ class RealDeliveryReport:
         # NOT tautological (Gate D): ``skipped`` is derived, so check the entered set
         # against INDEPENDENT counters: everything entered is either submitted, or
         # withheld before submission (already delivered / non-reviewable disposition).
-        withheld = int(self.detail.get("withheld_before_submit", self.entered - self.reviewable_submitted))
-        return self.entered == self.reviewable_submitted + withheld
+        #
+        # ...which the old default quietly defeated. Falling back to
+        # ``entered - reviewable_submitted`` makes the comparison
+        # ``entered == reviewable_submitted + entered - reviewable_submitted``, i.e.
+        # true for every input -- exactly the tautology the docstring above denies.
+        # The 2026-09-04 production record has no ``withheld_before_submit`` and
+        # reported ``airtable_reconciles: true`` on 2,410 entered against 1,681
+        # submitted, which nothing had checked.
+        #
+        # An absent count is not a passing check. A run that entered nothing has
+        # nothing to verify and passes; anything else must have recorded the number.
+        # `dry_no_write` never calls the writer, so there is no submission identity
+        # to verify -- the same exemption `reviewable_reconciles` already makes.
+        if self.mode == "dry_no_write":
+            return True
+        if not self.entered and not self.reviewable_submitted:
+            return True
+        withheld = self.detail.get("withheld_before_submit")
+        if withheld is None:
+            return False
+        return self.entered == self.reviewable_submitted + int(withheld)
 
     def skip_breakdown(self) -> Dict[str, int]:
         """Mutually exclusive partition of submitted-but-not-created rows.

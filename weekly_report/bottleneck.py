@@ -63,6 +63,7 @@ REASONS_BY_BOUNDARY = {
         "skipped_existing", "updated_existing", "company_function_suppressed",
         "account_suppressed", "no_contact", "send_safe_withheld", "other",
         "already_delivered", "adapter_error", "person_employer_duplicate",
+        "delivery_unreconciled",
     }),
 }
 
@@ -142,6 +143,12 @@ REASON_ACTIONS = {
     ),
     "already_delivered": (
         "Leads were skipped as already delivered; this is idempotency working, not loss."
+    ),
+    "delivery_unreconciled": (
+        "The delivery step could not account for these rows: it submitted them, did "
+        "not create them, and recorded no skip reason. Its own reconciliation flag "
+        "reports the failure. Read the run's delivery record before treating this as "
+        "a yield problem -- an unnamed skip category looks identical to a loss."
     ),
 }
 

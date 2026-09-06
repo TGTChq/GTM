@@ -139,7 +139,13 @@ class _StubDelivery:
         return RealDeliveryReport(
             mode="review_staging", entered=len(leads), reviewable_submitted=len(leads),
             created=created, skipped=len(leads) - created, failed=0, final_pass=len(leads),
-            delivered_lead_keys=keys, detail={"airtable": {"created_lead_keys": keys}})
+            delivered_lead_keys=keys,
+            # Every lead entered is submitted here, so nothing is withheld -- but
+            # the count must be RECORDED: `reconciles()` no longer treats an
+            # absent one as a pass, because an unverifiable identity is not a
+            # satisfied one.
+            detail={"airtable": {"created_lead_keys": keys},
+                    "withheld_before_submit": 0})
 
 
 def _fantastic_runner(supply_per_slice, quota=999999):
