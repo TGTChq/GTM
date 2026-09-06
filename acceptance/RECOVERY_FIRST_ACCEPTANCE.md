@@ -28,28 +28,67 @@ Whatever fraction of it produces a contact IS the rate, measured rather than inf
 2. Custody intact: the maintenance pass reports `pending_postings 3595` across two
    runs, `resumable: true`, `unidentifiable_employer: 0`.
 
-## Configuration — three variables, and one of them stays OFF
+## Configuration — and the budget that actually bounds spend
+
+**`PENDING_WORK_RESUME_MAX_PER_RUN` is not a budget.** It bounds how much WORK a run
+adopts. 2,000 resumed postings can issue an organisation enrich, a people search and
+one or more person matches each, plus the alternate cascade and the org-id fallback
+behind them — so a workload cap of 2,000 could authorise several times that many
+chargeable calls. The earlier version of this document presented it as the spending
+control. It is not one.
+
+`orchestrator/apollo_budget.py` is. It counts **every chargeable path** — organisation
+enrich, people search, person match, wherever called from, retries included — it is
+**durable across runs** so an interrupted run cannot restart its own budget, and an
+**unset budget is zero, not unlimited**.
 
 | variable | value | why |
 |---|---|---|
-| `MAINTENANCE_ONLY` | **`0`** | lets the pipeline run at all; with it set the run exits 2 |
-| `FANTASTIC_JOBS_ENABLED` | **stays `0`** | **acquires nothing.** The run buys no postings; the whole workload is what custody hands back |
-| `PENDING_WORK_RESUME_MAX_PER_RUN` | `2000` (current default) | the budget. One run adopts at most this many; the remainder stays in custody for the next |
+| `MAINTENANCE_ONLY` | **`0`** | lets the pipeline run at all |
+| `FANTASTIC_JOBS_ENABLED` | **stays `0`** | **acquires nothing**; the workload is what custody hands back |
+| `PENDING_WORK_RESUME_MAX_PER_RUN` | `2000` | workload cap — *not* a spend cap |
+| `APOLLO_RECOVERY_BUDGET_ENABLED` | **`1`** | off by default, so today the run would refuse |
+| `APOLLO_RECOVERY_BUDGET_ID` | **an authorization label** | a NEW id resets the durable counter; raising the number alone does not |
+| `APOLLO_RECOVERY_BUDGET_CALLS` | **the granted number** | 0 = refuse |
+
+All three budget settings are required together. `apollo_budget.preflight()` answers
+before any work is adopted and names which one is missing, because a refusal at the
+top costs nothing and a refusal partway through has already spent.
+
+**Deferral needed no new mechanism.** On exhaustion the caller stops, the unfinished
+work never reaches a terminal disposition, and `pending_work` keeps it for a later
+run. Exhaustion is a pause, not a loss — which is what makes a hard ceiling safe to
+set low, and the reason to start low.
+
+### Sizing the grant
+
+Worst case is roughly **3 chargeable calls per company** (org enrich + people search +
+one person match), plus cascade and fallback retries where they fire. For the full
+2,998-opportunity cohort across 2,808 companies that is on the order of **8,400–12,000
+calls**; a first acceptance need not authorise all of it.
+
+**Recommended first grant: 1,000 calls.** Enough to process several hundred
+opportunities end to end and measure the conversion, small enough that being wrong
+about the per-opportunity cost is cheap. The remainder stays in custody, and the run
+summary reports exactly what was consumed and what deferred.
 
 That combination is not a special mode — it is the ordinary pipeline with an empty
 lane. Verified by execution in
 `tests/test_recovery_cohort_attribution.py::ARunThatBuysNOTHINGStillDrainsCustody`:
 a lane returning zero jobs still reaches the custody hand-back, `net_new_jobs_captured`
-is 0, `pending_work_resumed.adopted` is the cohort, and the resumed rows reach the
-enrichment engine.
+is 0, and the resumed rows reach the enrichment engine.
 
-Cost: **0 Fantastic credits.** Apollo enrichment for up to 2,000 opportunities.
+Cost: **0 Fantastic credits**, and Apollo bounded by the grant above.
 
 ## What to read from the run
 
-The run summary prints one line for this:
+The run summary prints the cohort in its three units, with the rate naming its own
+denominator:
 
-    RECOVERY COHORT   resumed N -> leads N -> with_contact N -> final_pass N -> delivered N
+    RECOVERY COHORT        postings N / opportunities N / leads N
+      attempted            N opportunities -> with_contact N -> final_pass N -> delivered N
+      opp->contact         0.NNNN (denominator: opportunities_attempted)
+      no reconciled outcome N
 
 and `acquisition.recovery_cohort` in the artifact carries the same figures plus
 `delivered_lead_keys`. Attribution is by **posting identity**, the one key the pending
@@ -60,12 +99,20 @@ understate the cohort exactly where the company+bucket collapse fires.
 Check, in order:
 
 1. `net_new_jobs_captured == 0` — nothing was bought.
-2. `pending_work_resumed.adopted` equals the budget or the whole remaining cohort.
-3. `RECOVERY COHORT` — this is the measurement. `with_contact / resumed` **is the
-   opportunity → contact rate**, on a known denominator, for the first time.
-4. `pending_work_released` and the new `pending_postings` — custody shrinks only by
+2. `postings_resumed`, `opportunities_resumed` and `leads` — **three different units,
+   reported separately.** Custody stores postings; approvals are capped per company ×
+   function; the stage emits leads. Conflating them is what produced every bad
+   capacity number this week.
+3. `opportunities_attempted` and `opportunity_to_contact_rate` — the rate divides by
+   **distinct opportunities the stage produced an outcome for**, and
+   `rate_denominator` names it. This is the first honest opportunity → contact
+   measurement, because this cohort's denominator is known before the run starts.
+4. `opportunities_without_reconciled_outcome` — work with no outcome. **Not** called
+   "never attempted": an absent outcome is not evidence of an absent attempt.
+5. `pending_work_released` and the new `pending_postings` — custody shrinks only by
    work that reached a terminal disposition.
-5. `all_reconcile: true`, and the delivery record's `reviewable_reconciles`.
+6. The Apollo budget summary — consumed, remaining, deferrals.
+7. `all_reconcile: true`, and the delivery record's `reviewable_reconciles`.
 
 ## Then follow it through approval and the normal sync
 
