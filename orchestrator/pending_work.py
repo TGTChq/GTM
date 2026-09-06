@@ -350,8 +350,11 @@ def adopt_from_artifacts(
     custody BEFORE prune can remove them -- the same ordering the reporting ledger's
     backfill already relies on.
 
-    Idempotent: a run is marked imported once, and ``record`` dedupes by identity
-    besides. Bounded by ``max_runs`` and ``limit``.
+    Idempotent by posting identity, not by a marker: every pass re-reads the files
+    and takes only what custody does not already hold and suppression has not
+    finished. The marker file is kept as a RECORD of which runs have been fully
+    taken in, but it is deliberately not a gate -- gating on it is what stranded a
+    truncated import permanently. Bounded by ``max_runs`` and ``limit``.
 
     COUNTING UNIT: ``postings.json`` holds NORMALIZED OPPORTUNITIES -- the deduped
     list handed to enrichment. It is not the raw provider payload set and is not
@@ -375,9 +378,12 @@ def adopt_from_artifacts(
         if info["runs_imported"] >= int(max_runs):
             break
         run_id = run_dir.name
-        if run_id in done:
-            info["already_imported"] += 1
-            continue
+        # NO MARKER GATE. It used to skip any run listed as imported -- checked
+        # BEFORE the file was opened -- which is what let a budget-truncated import
+        # strand its remainder for good. The gate was only ever an optimisation, and
+        # adoption is already safe without it: it skips what custody holds, filters
+        # out everything terminal, and is bounded by rows and runs. Re-reading a
+        # handful of small files each pass is cheaper than a class of silent loss.
         source = run_dir.joinpath(*ARTIFACT_RELPATH)
         if not source.is_file():
             continue
@@ -405,6 +411,11 @@ def adopt_from_artifacts(
         # pass would never come back for it.
         if not truncated:
             done.add(run_id)
+        if not jobs:
+            # Nothing left to take from this run: already fully held, or entirely
+            # terminal. Recorded, but it does not consume the run budget.
+            info["already_imported"] += 1
+            continue
         info["runs_imported"] += 1
         info["postings_imported"] += int(outcome.get("recorded", 0))
         if budget is not None:

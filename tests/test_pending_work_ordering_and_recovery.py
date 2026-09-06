@@ -303,3 +303,54 @@ class TerminalWorkIsReadFromTheRealSuppressionStore(unittest.TestCase):
         import run_maintenance
         self.assertEqual(run_maintenance.terminal_posting_keys(Path(tempfile.mkdtemp())),
                          set())
+
+
+class NoMarkerGateCanStrandWork(unittest.TestCase):
+    """The import marker is a record, not a gate.
+
+    It used to be consulted BEFORE the artifact file was opened, so a run listed as
+    imported was never revisited -- which is exactly how a budget-truncated import
+    stranded 4,431 of the 2026-09-04 run's retained opportunities permanently. The
+    gate was only an optimisation; adoption is safe without it because it skips what
+    custody holds and filters out everything terminal.
+    """
+
+    def setUp(self):
+        self.root = Path(tempfile.mkdtemp())
+        self.store = self.root / "pending_work"
+
+    def _artifact(self, run_id, n):
+        d = self.root / "run_artifacts" / run_id / "enrichment"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "postings.json").write_text(
+            json.dumps({"jobs": [_posting(i) for i in range(n)]}), encoding="utf-8")
+
+    def test_a_run_already_in_the_marker_is_still_re_read(self):
+        self._artifact("20260904T130130Z-13b44a0c", 30)
+        # Simulate the state the bug left: marked imported, only part taken.
+        pending_work.adopt_from_artifacts(self.root, self.store, limit=10)
+        marker = self.store / "_imported_from_artifacts.json"
+        marker.write_text(json.dumps(
+            {"schema": pending_work.SCHEMA,
+             "runs": ["20260904T130130Z-13b44a0c"]}), encoding="utf-8")
+
+        again = pending_work.adopt_from_artifacts(self.root, self.store, limit=100)
+        self.assertGreater(again["postings_imported"], 0,
+                           "a stale marker must not strand the remainder")
+        self.assertEqual(pending_work.summary(self.store)["pending_postings"], 30)
+
+    def test_a_fully_taken_run_adds_nothing_and_costs_no_run_budget(self):
+        self._artifact("20260904T130130Z-13b44a0c", 5)
+        pending_work.adopt_from_artifacts(self.root, self.store)
+        again = pending_work.adopt_from_artifacts(self.root, self.store)
+        self.assertEqual(again["postings_imported"], 0)
+        self.assertEqual(again["runs_imported"], 0)
+        self.assertEqual(again["already_imported"], 1)
+
+    def test_terminal_work_is_never_re_adopted(self):
+        self._artifact("20260904T130130Z-13b44a0c", 5)
+        terminal = {f"j{i}" for i in range(5)}
+        out = pending_work.adopt_from_artifacts(self.root, self.store,
+                                                exclude_keys=terminal)
+        self.assertEqual(out["postings_imported"], 0)
+        self.assertEqual(pending_work.summary(self.store)["pending_postings"], 0)
