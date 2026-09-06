@@ -136,7 +136,13 @@ def _account_recovery_cohort(cohort, leads, delivery) -> None:
         if opp:
             cohort["attempted_opportunity_keys"].add(opp)
         contact_key = str(getattr(lead, "contact_key", "") or "")
-        if contact_key:
+        # A CONTACT IS AN ADDRESS, not a key. `_build_no_contact_lead` still carries a
+        # `contact_key`, so counting the key reported `with_contact 26` on a
+        # calibration that found TWO contacts -- and printed `opp->contact 1.0`, a
+        # 100% conversion, on a run whose own funnel said `contacts_found 2`.
+        contact = getattr(lead, "contact", None) or {}
+        email = str((contact.get("email") if isinstance(contact, dict) else "") or "").strip()
+        if email:
             cohort["with_contact"] += 1
         disposition = str(getattr(getattr(lead, "disposition", None), "value", "") or "")
         if disposition == "FINAL_PASS":

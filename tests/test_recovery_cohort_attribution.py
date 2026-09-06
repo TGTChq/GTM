@@ -31,8 +31,13 @@ def _cohort(ids=()):
             "opportunity_keys": set(), "attempted_opportunity_keys": set()}
 
 
-def _lead(posting_id, *, contact_key="", disposition="FINAL_PASS", related=()):
+def _lead(posting_id, *, contact_key="", disposition="FINAL_PASS", related=(),
+          email=None):
+    # `email` defaults to following contact_key so existing cases keep their meaning;
+    # a no-contact lead is written explicitly as email="".
+    address = contact_key if email is None else email
     return SimpleNamespace(posting_id=posting_id, contact_key=contact_key,
+                           contact={"email": address},
                            disposition=SimpleNamespace(value=disposition),
                            related_posting_ids=list(related))
 
@@ -500,3 +505,32 @@ class AZeroGovernorGrantDoesNotEndARunWithQueuedWork(unittest.TestCase):
                              "a starved run with no queue must not loop")
         self.assertEqual(result["run"]["status"], "complete",
                          "a zero-budget run is a clean stop, never a failure")
+
+
+class AContactIsAnAddressNotAKey(unittest.TestCase):
+    """The 50-call calibration printed `with_contact 26` and `opp->contact 1.0` -- a
+    100% conversion -- on a run whose own funnel said `contacts_found 2`.
+
+    `_build_no_contact_lead` still carries a `contact_key`, so counting the key
+    counted every no-contact lead as a contact. The one number the calibration existed
+    to produce was the one it got wrong, and it got it wrong in the flattering
+    direction."""
+
+    def test_a_no_contact_lead_is_not_counted_as_a_contact(self):
+        cohort = _cohort({"p1", "p2"})
+        _account_recovery_cohort(cohort, [
+            _lead("p1", contact_key="acme.example|bucket", email=""),
+            _lead("p2", contact_key="beta.example|bucket", email="hm@beta.example"),
+        ], _delivery())
+        self.assertEqual(cohort["leads"], 2)
+        self.assertEqual(cohort["with_contact"], 1)
+
+    def test_the_calibration_shape_no_longer_reports_full_conversion(self):
+        """26 leads, 2 with an address -- not 26."""
+        cohort = _cohort({f"p{i}" for i in range(26)})
+        leads = [_lead(f"p{i}", contact_key=f"c{i}|b", email="") for i in range(24)]
+        leads += [_lead(f"p{i}", contact_key=f"c{i}|b", email=f"hm{i}@x.com")
+                  for i in (24, 25)]
+        _account_recovery_cohort(cohort, leads, _delivery())
+        self.assertEqual(cohort["leads"], 26)
+        self.assertEqual(cohort["with_contact"], 2)
