@@ -605,3 +605,82 @@ class ARateNeedsADenominatorFromTheStageThatIssuesTheSearch(unittest.TestCase):
         row = out["runs"][0]
         self.assertIsNone(row["hiring_manager_stage"])
         self.assertTrue(any("no hiring_manager stage" in u for u in row["unavailable"]))
+
+
+class TheStageIdentityIsRestatedAndEmailUnverifiedIsItsOwnOutcome(unittest.TestCase):
+    """Two corrections the 2026-09-04 reconciliation forced.
+
+    `email_unverified` was filed under provider errors. It means a person WAS found
+    and their address could not be promoted to verified -- neither "nobody there" nor
+    "the provider broke", and the largest single outcome on that run at 740 of 2,410.
+    Its remedy is nothing like the other two, so conflating them would have pointed
+    the next fix at the wrong stage.
+
+    And the buckets must add up to what the stage sealed. A classification that
+    silently drops a reason is worse than no classification, because it reads as
+    completeness."""
+
+    def _run(self, reasons, **stage):
+        import json as _json
+        import tempfile as _tempfile
+        from pathlib import Path as _Path
+
+        root = _Path(_tempfile.mkdtemp())
+        d = root / "run_artifacts" / "r1"
+        (d / "enrichment").mkdir(parents=True, exist_ok=True)
+        (d / "orchestrator_result.json").write_text("{}", encoding="utf-8")
+        (d / "run_status.json").write_text("{}", encoding="utf-8")
+        (d / "enrichment" / "postings.json").write_text(
+            _json.dumps({"jobs": []}), encoding="utf-8")
+        base = {"stage": "hiring_manager", "unit": "lead", "entered": 0, "passed": 0,
+                "rejected": 0, "deferred": 0, "errored": 0, "primary_reasons": reasons}
+        base.update(stage)
+        (d / "waterfall.json").write_text(_json.dumps({"stages": [base]}),
+                                          encoding="utf-8")
+        return run_maintenance.execution_reconcile(root, ["r1"])["runs"][0]
+
+    def test_email_unverified_is_not_a_provider_error(self):
+        row = self._run({"email_unverified": 740}, entered=740, deferred=740)
+        self.assertEqual(row["contact_found_email_unverified"], 740)
+        self.assertEqual(row["provider_errors"], 0)
+        self.assertEqual(row["genuine_no_match"], 0)
+
+    def test_the_production_shape_reconciles_against_the_sealed_stage(self):
+        """The real 2026-09-04 numbers: 712 rejected + 987 deferred, and the four
+        reasons that produced them."""
+        row = self._run({"not_icp": 606, "company_unresolved": 106,
+                         "hiring_manager_not_found": 247, "email_unverified": 740},
+                        entered=2410, passed=711, rejected=712, deferred=987)
+        self.assertEqual(row["internal_skips"], 712)
+        self.assertEqual(row["genuine_no_match"], 247)
+        self.assertEqual(row["contact_found_email_unverified"], 740)
+        self.assertTrue(row["reasons_reconcile"])
+
+    def test_a_dropped_reason_makes_the_identity_fail_loudly(self):
+        row = self._run({"not_icp": 10}, entered=100, rejected=50)
+        self.assertFalse(row["reasons_reconcile"])
+
+    def test_leads_the_stage_never_produced_are_counted_as_a_lower_bound(self):
+        import json as _json
+        import tempfile as _tempfile
+        from pathlib import Path as _Path
+
+        root = _Path(_tempfile.mkdtemp())
+        d = root / "run_artifacts" / "r1"
+        (d / "enrichment").mkdir(parents=True, exist_ok=True)
+        (d / "orchestrator_result.json").write_text("{}", encoding="utf-8")
+        (d / "run_status.json").write_text("{}", encoding="utf-8")
+        jobs = [{"job_id": f"j{i}", "job_title": "Head of Sales",
+                 "title": "Head of Sales", "employer_name": f"Co{i}",
+                 "company_name": f"Co{i}", "_employer_domain_input": f"c{i}.example"}
+                for i in range(5)]
+        (d / "enrichment" / "postings.json").write_text(
+            _json.dumps({"jobs": jobs}), encoding="utf-8")
+        (d / "waterfall.json").write_text(_json.dumps({"stages": [
+            {"stage": "hiring_manager", "unit": "lead", "entered": 2, "passed": 2,
+             "rejected": 0, "deferred": 0, "errored": 0, "primary_reasons": {}}]}),
+            encoding="utf-8")
+        row = run_maintenance.execution_reconcile(root, ["r1"])["runs"][0]
+        self.assertEqual(row["opportunities_never_reaching_the_stage"], 3)
+        self.assertIsNone(row["opportunity_to_contact_rate"],
+                          "a lower bound is still not a denominator")

@@ -127,3 +127,105 @@ class TheRunResultCarriesItInAJoinableShape(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ARunThatBuysNOTHINGStillDrainsCustody(unittest.TestCase):
+    """The recovery-first acceptance depends on one behaviour: a run with acquisition
+    DISABLED must still hand back what custody is owed and enrich it.
+
+    That is the whole shape of the first post-Apollo run -- `FANTASTIC_JOBS_ENABLED=0`
+    keeps it from buying anything, `MAINTENANCE_ONLY=0` lets the pipeline run, and the
+    3,595 recovered postings are processed against a budget instead of new inventory.
+    It was asserted from reading the code; this executes it.
+    """
+
+    def _pipeline_bits(self):
+        import tempfile
+        from unittest import mock
+
+        from orchestrator.lanes import LaneResult
+        from orchestrator.modes import ExecutionMode as EM
+        from orchestrator.modes import policy_for as pf
+        from orchestrator.pipeline import Orchestrator
+        from orchestrator.runcontrol import RunContext
+        from orchestrator.state import StateManager
+        from tests.test_pipeline_run_ledger import (TOPUP_CONFIG, _Budget, _Engine,
+                                                    _plan)
+        return (tempfile, mock, EM, LaneResult, pf, RunContext, Orchestrator,
+                StateManager, TOPUP_CONFIG, _Budget, _Engine, _plan)
+
+    def test_custody_is_handed_back_when_the_lane_acquires_nothing(self):
+        import json
+        from pathlib import Path
+
+        (tempfile, mock, EM, LaneResult, pf, RunContext, Orchestrator,
+         StateManager, TOPUP_CONFIG, _Budget, _Engine, _plan) = self._pipeline_bits()
+        import config
+        from orchestrator import pending_work
+
+        tmp = tempfile.mkdtemp()
+        # Work an EARLIER run is still owed, exactly as the production store holds it.
+        pending_work.record(Path(tmp) / pending_work.STORE, "20260904T130130Z-earlier", [
+            {"job_id": "owed1", "posting_id": "owed1", "employer_name": "Acme",
+             "company_name": "Acme", "job_title": "Head of Sales"},
+            {"job_id": "owed2", "posting_id": "owed2", "employer_name": "Beta",
+             "company_name": "Beta", "job_title": "Head of Sales"},
+        ])
+
+        def acquires_nothing(_manager):
+            return LaneResult(lane="fantastic", status="complete", jobs=[],
+                              physical_requests=0)
+
+        ctx = RunContext.create(EM.LIVE_ACQUISITION_AND_ENRICHMENT,
+                                {"mode": "live_acquisition_and_enrichment"},
+                                run_id="20260907T030000Z-recovery1")
+        state = StateManager(tmp, pf(EM.LIVE_ACQUISITION_AND_ENRICHMENT),
+                             run_id=ctx.run_id)
+        engine = _Engine()
+        cfg = dict(TOPUP_CONFIG, PENDING_WORK_ENABLED=True,
+                   PENDING_WORK_RESUME_MAX_PER_RUN=2000)
+        with mock.patch.multiple(config, **cfg):
+            result = Orchestrator(ctx, state, _Budget()).run(
+                _plan(acquires_nothing, engine), resume=False)
+
+        acq = (result.get("acquisition") or {}).get("cumulative") or {}
+        self.assertEqual(acq.get("net_new_jobs_captured"), 0,
+                         "a run that bought nothing must capture nothing")
+        self.assertEqual((acq.get("pending_work_resumed") or {}).get("adopted"), 2,
+                         "...and must still be handed what custody is owed")
+        # The resumed rows reached the enrichment engine rather than being counted
+        # and dropped -- the failure that would make the whole exercise theatre.
+        self.assertGreaterEqual(engine.calls, 1)
+
+    def test_the_cohort_is_reported_on_such_a_run(self):
+        import tempfile
+        from pathlib import Path
+        from unittest import mock
+
+        (tempfile_, mock_, EM, LaneResult, pf, RunContext, Orchestrator,
+         StateManager, TOPUP_CONFIG, _Budget, _Engine, _plan) = self._pipeline_bits()
+        import config
+        from orchestrator import pending_work
+
+        tmp = tempfile.mkdtemp()
+        pending_work.record(Path(tmp) / pending_work.STORE, "earlier", [
+            {"job_id": "owed1", "posting_id": "owed1", "employer_name": "Acme",
+             "company_name": "Acme", "job_title": "Head of Sales"}])
+
+        ctx = RunContext.create(EM.LIVE_ACQUISITION_AND_ENRICHMENT,
+                                {"mode": "live_acquisition_and_enrichment"},
+                                run_id="20260907T030000Z-recovery2")
+        state = StateManager(tmp, pf(EM.LIVE_ACQUISITION_AND_ENRICHMENT),
+                             run_id=ctx.run_id)
+        cfg = dict(TOPUP_CONFIG, PENDING_WORK_ENABLED=True,
+                   PENDING_WORK_RESUME_MAX_PER_RUN=2000)
+        with mock.patch.multiple(config, **cfg):
+            result = Orchestrator(ctx, state, _Budget()).run(
+                _plan(lambda _m: LaneResult(lane="fantastic", status="complete",
+                                            jobs=[], physical_requests=0),
+                      _Engine()), resume=False)
+
+        cohort = (result.get("acquisition") or {}).get("recovery_cohort") or {}
+        self.assertEqual(cohort.get("opportunities_resumed"), 1)
+        self.assertGreaterEqual(cohort.get("cohort_postings", 0), 1)
+        self.assertNotIn("posting_ids", cohort, "the identity set is not serialised")

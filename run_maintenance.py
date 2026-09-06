@@ -446,7 +446,13 @@ _HM_INTERNAL_SKIP = ("company_unresolved", "missing_company_domain", "not_icp",
                      "in_crm", "company_size_rejected", "no_search_domain",
                      "zero_apollo_people")
 _HM_PROVIDER_ERROR = ("stage_error", "adapter_error", "apollo_credit_exhausted",
-                      "apollo_error", "email_unverified", "apollo_email_not_verified")
+                      "apollo_error")
+#: A DISTINCT outcome, and the first version of this file wrongly filed it under
+#: provider errors. `email_unverified` means a person WAS found and their address
+#: could not be promoted to verified -- which is neither "nobody there" nor "the
+#: provider broke". It is the largest single outcome on the 2026-09-04 run (740 of
+#: 2,410) and its remedy is nothing like the other two, so it gets its own bucket.
+_HM_CONTACT_UNVERIFIED = ("email_unverified", "apollo_email_not_verified")
 
 
 def execution_reconcile(root: Path, run_ids) -> dict:
@@ -497,6 +503,15 @@ def execution_reconcile(root: Path, run_ids) -> dict:
                 "for the people search, so the number of opportunities actually "
                 "SEARCHED cannot be established from this execution")
 
+        # The retained population, read BEFORE the stage block so the stage can be
+        # compared against it.
+        src = run_dir / "enrichment" / "postings.json"
+        held = None
+        if src.is_file():
+            data = _read_json(src)
+            held = measure_identities([j for j in (data.get("jobs") or [])
+                                       if isinstance(j, dict)])["opportunities"]
+
         # 2. WHAT THE STAGE PRODUCED, from its own sealed record.
         stages = waterfall.get("stages") if isinstance(waterfall, dict) else None
         hm = next((st for st in (stages or [])
@@ -516,24 +531,35 @@ def execution_reconcile(root: Path, run_ids) -> dict:
                                         if k in _HM_INTERNAL_SKIP)
             row["provider_errors"] = sum(v for k, v in reasons.items()
                                          if k in _HM_PROVIDER_ERROR)
-            row["unclassified_reasons"] = {
-                k: v for k, v in reasons.items()
-                if k not in _HM_GENUINE_NO_MATCH + _HM_INTERNAL_SKIP + _HM_PROVIDER_ERROR}
+            row["contact_found_email_unverified"] = sum(
+                v for k, v in reasons.items() if k in _HM_CONTACT_UNVERIFIED)
+            known = (_HM_GENUINE_NO_MATCH + _HM_INTERNAL_SKIP + _HM_PROVIDER_ERROR
+                     + _HM_CONTACT_UNVERIFIED)
+            row["unclassified_reasons"] = {k: v for k, v in reasons.items()
+                                           if k not in known}
+            # The stage seals its own identity; restate it so a bucket that stops
+            # adding up is visible here rather than in a later argument about it.
+            parts = (row["genuine_no_match"] + row["internal_skips"]
+                     + row["provider_errors"] + row["contact_found_email_unverified"]
+                     + sum(row["unclassified_reasons"].values()))
+            outcomes = int(hm.get("rejected") or 0) + int(hm.get("deferred") or 0)                 + int(hm.get("errored") or 0)
+            row["reasons_reconcile"] = (parts == outcomes)
+            # Leads the stage never produced. A LOWER BOUND on never-attempted work:
+            # some of the 2,410 it did produce were also never searched (a bucket
+            # with no domain gets a lead without a people search), so this understates
+            # rather than overstates -- which is the safe direction for a number that
+            # would otherwise be blamed on the provider.
+            if held is not None and isinstance(hm.get("entered"), int):
+                row["opportunities_never_reaching_the_stage"] = max(
+                    0, held - int(hm["entered"]))
         else:
             row["hiring_manager_stage"] = None
             row["unavailable"].append(
                 "waterfall has no hiring_manager stage -- what the stage produced, "
                 "and why, is not recorded by this execution")
 
-        # 3. WORK NEVER ATTEMPTED = held population minus what the stage saw. Only
-        #    computable when the stage recorded what it saw; otherwise it is unknown
-        #    rather than equal to the whole population.
-        src = run_dir / "enrichment" / "postings.json"
-        held = None
-        if src.is_file():
-            data = _read_json(src)
-            held = measure_identities([j for j in (data.get("jobs") or [])
-                                       if isinstance(j, dict)])["opportunities"]
+        # 3. WORK NEVER ATTEMPTED. Only computable when the stage recorded what it
+        #    saw; otherwise unknown rather than equal to the whole population.
         row["opportunities_retained"] = held
         seen = row.get("opportunities_searched")
         if held is not None and isinstance(seen, int):

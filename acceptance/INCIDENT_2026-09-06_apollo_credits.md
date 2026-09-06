@@ -91,7 +91,19 @@ All three, in order:
 
 4. **Then** restore `FANTASTIC_JOBS_ENABLED=1` with the command above.
 
-### What the first resumed run should show
+### The first run after Apollo returns is NOT an acquisition run
+
+`FANTASTIC_JOBS_ENABLED` stays **0**. The recovered cohort — 3,595 postings, 2,998
+company × function opportunities, already paid for — is processed first, against the
+`PENDING_WORK_RESUME_MAX_PER_RUN` budget and at **zero Fantastic credits**. It is the
+only cohort with a known denominator, so it is the only one that can measure the
+`opportunity → contact` rate the interrupted run left unknown.
+
+Full procedure, preconditions and what to read: `RECOVERY_FIRST_ACCEPTANCE.md`.
+Do not propose more acquisition spend until that cohort's path is measured through
+approval and the next Approved Sync.
+
+### What a later resumed ACQUISITION run should show
 
 `cursor: date_created slices` in the RUN SUMMARY, with drained slices and an
 `expired_inventory` line. If the window from 2026-08-30 is still open it will be

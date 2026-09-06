@@ -331,20 +331,85 @@ key `_process_company` itself uses), 2026-09-06T15:16Z:
 | 2026-09-04 | 4,148 | **4,109 (99.06%)** | 39 | 4 |
 | 2026-09-06 | 175 | **173 (98.86%)** | 2 | 0 |
 
-**There is no internal loss here.** 99% of opportunities arrive with their own
-employer domain and reach Apollo able to be searched. Of 4,109 that did, 1,048
-produced a contact — **25.5%** — and that is Apollo's hiring-manager coverage, not a
-data-preparation failure of ours.
+**WITHDRAWN — this table does not say what I claimed it said.** A resolvable
+first-party domain proves an opportunity was ELIGIBLE to be searched. It does not
+prove a search ran. The 2026-09-04 run was interrupted by Apollo partway through
+contact discovery, so an unknown share of those 4,109 were never attempted at all —
+and dividing 1,048 contacts by 4,109 *eligible* opportunities silently counts
+never-attempted work as a hiring-manager failure.
 
-This is a negative result and it is the useful kind: it eliminates the one remaining
-internal hypothesis about the conversion gap. What is left is external by
-measurement rather than by assumption.
+**`25.5% opportunity → contact` is retracted. The rate is UNKNOWN pending
+reconciliation against the original execution's own stage-entry evidence** — not a
+regrouping of retained payloads with current code, which is what the table above is.
+
+What the denominator has to be reconciled into, from the original run:
+
+    opportunities actually SEARCHED        (people search issued)
+      contacts returned
+      genuine no-match                     (searched, nobody found)
+    internal skips                         (never submitted to a search, and why)
+    provider errors                        (attempted, Apollo refused)
+    never attempted                        (the run stopped first)
+
+Until that reconciles, no share of the conversion loss may be called external.
 
 (A real but tiny structural quirk surfaced while testing it: `company_key_for_job` is
 "domain or name", so one employer splits into two groups when only some of its
 postings carry a domain, and the domainless half spends an Apollo organisation enrich
 to return `missing_company_domain` while the domain sits on a sibling posting. It
 affects **3 companies and 4 opportunities** in 4,148. Recorded, not worth a change.)
+
+### Reconciled from the 2026-09-04 execution's own sealed record
+
+Read 2026-09-06T17:39Z from that run's `waterfall.json` — the `hiring_manager` stage
+as the execution sealed it, not a regrouping of payloads with current code.
+
+    opportunities retained                       4,147
+    leads the hiring-manager stage produced      2,410
+      passed                                       711
+      rejected                                     712
+      deferred                                     987
+      errored                                        0
+
+    primary reasons (they sum to rejected + deferred exactly)
+      not_icp                          606   internal skip   (our ICP rule)
+      company_unresolved               106   internal skip
+      hiring_manager_not_found         247   genuine no-match
+      email_unverified                 740   contact FOUND, email unverifiable
+
+    contact_discovery_entered                  ABSENT
+    opportunity -> contact rate                UNKNOWN
+
+**Two conclusions, and the first one corrects me.**
+
+**1. The remaining conversion loss is NOT all external.** 712 of the 2,410 outcomes —
+**29.5%** — are internal skips: 606 rejected by our own ICP rule and 106 whose company
+could not be resolved. Those are decisions and data problems of ours, not Apollo
+coverage. The claim that everything left was external is withdrawn; the run's own
+record refutes it.
+
+**2. The rate is still unknown, and the denominator is still missing.**
+`contact_discovery_entered` — the counter emitted at the people-search decision point
+— is absent from this run, which wrote no enrichment funnel at all. So how many
+searches actually ran cannot be established. What CAN be said is a **lower bound on
+work never attempted**: 4,147 − 2,410 = **1,737 opportunities never produced a lead at
+all.** It is a lower bound because some of the 2,410 were also never searched — a
+bucket with no domain gets a lead without a people search — so the true
+never-attempted figure is higher.
+
+**A third outcome that had been hidden inside "no contact".** `email_unverified` at
+**740** is the largest single result: a person WAS found and their address could not be
+promoted to verified. That is neither "nobody there" (247) nor a provider error (0),
+and its remedy is entirely different — only Apollo can promote an email to verified,
+so 740 opportunities reached a real person and stopped at verification. My first
+classification filed it under provider errors; correcting it moved the largest bucket
+on the run.
+
+**What this does to the earlier decomposition.** `18.8% = 25.3% x 74.5%` was arithmetic
+over incomparable populations and is withdrawn along with its inputs. The honest
+statement is that of 4,147 opportunities the stage reached 2,410, of which 711 passed,
+712 were rejected by us, 247 found nobody and 740 found somebody unverifiable — and
+1,737 were never reached at all.
 
 ### Sending is not the constraint
 
@@ -379,11 +444,15 @@ conversion" to the specific stage that loses it.
 * Reaching 1,000 approved/day needs **~51% opportunity → approved**. Observed 18.8%.
 * That 18.8% is **25.3% opportunity → contact × 74.5% contact → approved**. The
   pre-Apollo gates pass **92.7%** and are not the loss.
-* **99.1% of opportunities already carry a first-party domain**, so they reach Apollo
-  able to be searched. The loss is Apollo's hiring-manager coverage, not our data
-  preparation — measured, not assumed.
-* So the whole remaining question is hiring-manager discovery on Apollo, measured once
-  on a run Apollo truncated.
+* 99.1% of opportunities carry a first-party domain, so they were **eligible** to be
+  searched. That is not evidence that they were searched, and on an interrupted run
+  the two differ. See the reconciliation section.
+* **The opportunity → contact rate is UNKNOWN** — the denominator was never recorded.
+* **The remaining loss is not all external.** The 09-04 stage record shows **712 of
+  2,410 outcomes are internal skips** (606 `not_icp`, 106 `company_unresolved`), and
+  **1,737 opportunities never reached the stage at all**.
+* The largest single outcome is **740 `email_unverified`** — a person found, their
+  email unverifiable. Only Apollo can promote an email to verified.
 * Sustaining full inventory costs ~2,556 Jobs credits/day — about a month's current
   allowance. A budget decision, not a capability one.
 

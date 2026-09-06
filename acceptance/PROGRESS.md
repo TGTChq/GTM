@@ -541,6 +541,51 @@ only some of its postings carry a domain, and the domainless half spends an Apol
 organisation enrich to return `missing_company_domain` while the domain sits on a
 sibling posting. **3 companies, 4 opportunities out of 4,148.** Not worth a change.
 
+### CORRECTION: a domain is not a search (2026-09-06T16:00Z)
+
+`domain_readiness` found 99% of opportunities carried a first-party domain and I read
+it as "they reached Apollo". **It is not what it says.** A domain makes an opportunity
+ELIGIBLE to be searched. The 09-04 run was interrupted partway through contact
+discovery, so an unknown share was never attempted, and dividing 1,048 contacts by
+4,109 eligible opportunities counts never-attempted work as a hiring-manager failure.
+
+**`25.5% opportunity -> contact` is RETRACTED. The rate is UNKNOWN.**
+
+`execution_reconcile` replaces the inference. It takes its denominator ONLY from the
+stage that issues the search -- `enrichment.funnel.contact_discovery_entered`, plus
+the sealed `hiring_manager` stage in `waterfall.json` -- both artifacts of the
+ORIGINAL execution, not a regrouping of retained payloads with current code. It splits
+outcomes into genuine no-match, internal skips, provider errors and never-attempted,
+and surfaces unrecognised reason codes rather than folding them into a bucket. When
+the stage-entry count is absent it reports `rate_status: unknown` and refuses to
+substitute a payload recount -- a recount cannot tell "searched and found nobody" from
+"the run stopped first", which is the whole question.
+
+### Recovery-first acceptance PREPARED (`RECOVERY_FIRST_ACCEPTANCE.md`)
+
+The recovered cohort is processed BEFORE any new acquisition. Three variables:
+`MAINTENANCE_ONLY=0`, `FANTASTIC_JOBS_ENABLED` **stays 0**,
+`PENDING_WORK_RESUME_MAX_PER_RUN=2000`. Zero Fantastic credits; the workload is
+entirely what custody hands back.
+
+Not a new mode -- the ordinary pipeline with an empty lane -- and **verified by
+execution** rather than by reading the code
+(`ARunThatBuysNOTHINGStillDrainsCustody`): a lane returning zero jobs still reaches
+the hand-back, `net_new_jobs_captured` is 0, the cohort is adopted, and the resumed
+rows reach the enrichment engine.
+
+Cohort attribution now runs end to end. `acquisition.recovery_cohort` carries
+resumed -> leads -> with_contact -> final_pass -> delivered, attributed by posting
+identity (the one key the pending store, the leads and the delivery record share),
+counting a recovered posting COLLAPSED into a lead -- which `posting_id` alone would
+have dropped exactly where the collapse fires. `delivered_lead_keys` are kept in FULL
+so the cohort can be joined against the next Approved Sync, which runs in a different
+service; a count cannot be joined to what it enrolled.
+
+**This cohort has a known denominator before the run starts, which is precisely what
+the interrupted run lacked.** `with_contact / resumed` is the first honest
+opportunity -> contact measurement available, and it costs no acquisition credits.
+
 ### Final state — 2026-09-06T15:30Z
 
     origin/main   afd92db, deployed to both services (SUCCESS)
