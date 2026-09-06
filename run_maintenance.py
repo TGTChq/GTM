@@ -669,8 +669,10 @@ def main(argv=None) -> int:
             sys.path.insert(0, str(Path(__file__).resolve().parent / "acceptance"))
             import ats_board_yield
             limit = int(str(config.MAINTENANCE_ATS_BOARD_YIELD).strip() or "200")
-            print(json.dumps(ats_board_yield.measure(max_boards=limit), indent=2,
-                             default=str))
+            seconds = int(getattr(config, "MAINTENANCE_ATS_BOARD_SECONDS", 1500) or 1500)
+            print(json.dumps(ats_board_yield.measure(max_boards=limit,
+                                                     time_budget_seconds=seconds),
+                             indent=2, default=str))
         except Exception as exc:  # noqa: BLE001 - a measurement must not fail the pass
             print(json.dumps({"error": f"{type(exc).__name__}: {exc}"}, indent=2))
 

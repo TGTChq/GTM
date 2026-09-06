@@ -1427,6 +1427,7 @@ MAINTENANCE_WINDOW_START = os.getenv("MAINTENANCE_WINDOW_START", "2026-09-04T07:
 # provider credits (each employer's own public board) and persists nothing, but it
 # is opt-in because it makes ~145 outbound requests.
 MAINTENANCE_ATS_BOARD_YIELD = os.getenv("MAINTENANCE_ATS_BOARD_YIELD", "")
+MAINTENANCE_ATS_BOARD_SECONDS = _env_int("MAINTENANCE_ATS_BOARD_SECONDS", 1500)
 PENDING_WORK_ENABLED = _env_bool("PENDING_WORK_ENABLED", True)
 PENDING_WORK_RESUME_MAX_PER_RUN = _env_int("PENDING_WORK_RESUME_MAX_PER_RUN", 2000)
 PENDING_WORK_MAX_AGE_DAYS = _env_int("PENDING_WORK_MAX_AGE_DAYS", 14)

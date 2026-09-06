@@ -50,8 +50,16 @@ import config  # noqa: E402
 
 
 def _posted_at(job: Dict[str, Any]) -> Optional[datetime]:
-    for key in ("date_posted", "posted_at", "published_at", "created_at",
-                "date_created", "updated_at"):
+    """The posting's own timestamp.
+
+    `job_posted_at_datetime_utc` FIRST, and it is the only one the direct adapters
+    actually emit -- `_direct_job` normalises every provider's date into that key.
+    The first version of this probe guessed at `date_posted`/`posted_at` and dated
+    **0 of 15,272** postings, which silently turned a per-day flow into no answer at
+    all. The others are kept for a foreign corpus.
+    """
+    for key in ("job_posted_at_datetime_utc", "date_posted", "posted_at",
+                "published_at", "created_at", "date_created", "updated_at"):
         raw = job.get(key)
         if not raw:
             continue
@@ -90,6 +98,7 @@ def measure(max_boards: int = 200, recent_days: int = 7,
         stats = per_provider.setdefault(provider, {"boards": 0, "postings": 0, "failed": 0})
         stats["boards"] += 1
         scanned += 1
+        t0 = time.monotonic()
         try:
             found, err = fetch_board_jobs(board, default_fetcher)
         except Exception as exc:  # noqa: BLE001 - one bad board must not stop the sweep
@@ -105,6 +114,9 @@ def measure(max_boards: int = 200, recent_days: int = 7,
             job.setdefault("company_name", board.get("company_name"))
             job.setdefault("employer_name", board.get("company_name"))
         stats["postings"] += len(found)
+        # Per-provider wall clock, so "36 boards timed out" is attributable to the
+        # provider that ate the budget rather than blamed on the sweep.
+        stats["seconds"] = round(stats.get("seconds", 0.0) + (time.monotonic() - t0), 1)
         jobs.extend(found)
 
     out: Dict[str, Any] = {
