@@ -654,6 +654,26 @@ def main(argv=None) -> int:
         seam_ctx = seam_fake(lambda method, url, **k: FakeResponse(
             {"records": [], "people": [], "contacts": [], "organizations": [], "data": {}}))
 
+    # MAINTENANCE-ONLY: do the recovery/reporting pass and stop. Reached before any
+    # lane, engine or delivery manager is used, so nothing downstream can run. The
+    # point is that the volume is only reachable from inside a scheduled container:
+    # this lets the EXISTING schedule carry the maintenance instead of the pipeline,
+    # without touching the start command.
+    if bool(getattr(config, "MAINTENANCE_ONLY", False)):
+        if bool(getattr(config, "FANTASTIC_JOBS_ENABLED", False)):
+            print("MAINTENANCE_ONLY refused: acquisition is still armed "
+                  "(FANTASTIC_JOBS_ENABLED). Pause it first.", file=sys.stderr)
+            return 2
+        import run_maintenance
+        print("MAINTENANCE_ONLY: delegating to run_maintenance; no lane, engine or "
+              "delivery manager is constructed.")
+        return run_maintenance.main([
+            "--artifact-root", str(a.artifact_root),
+            "--window-start", str(getattr(a, "maintenance_window_start", "")
+                                  or "2026-09-04T07:00:00Z"),
+            "--instantly",
+        ])
+
     from orchestrator.runlock import RunLockHeld
     try:
         with seam_ctx:

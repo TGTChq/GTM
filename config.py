@@ -1393,6 +1393,12 @@ SEEN_JOBS_RETENTION_DAYS = _env_int("SEEN_JOBS_RETENTION_DAYS", 30)
 # bound the store that now keeps it. ON by default -- a correctness fix that is off
 # fixes nothing -- but the RESUME is bounded, because a long outage must not hand a
 # single run more enrichment than its budget can serve.
+# MAINTENANCE-ONLY MODE. When true, `run_orchestrator` delegates to
+# `run_maintenance` and NEVER constructs a lane, an enrichment engine or a delivery
+# manager -- so the scheduled container does the recovery/reporting pass instead of
+# a pipeline run, on the existing schedule and with no start-command change. It is
+# refused unless acquisition is already paused, so it can never mask a live run.
+MAINTENANCE_ONLY = _env_bool("MAINTENANCE_ONLY", False)
 PENDING_WORK_ENABLED = _env_bool("PENDING_WORK_ENABLED", True)
 PENDING_WORK_RESUME_MAX_PER_RUN = _env_int("PENDING_WORK_RESUME_MAX_PER_RUN", 2000)
 PENDING_WORK_MAX_AGE_DAYS = _env_int("PENDING_WORK_MAX_AGE_DAYS", 14)
