@@ -700,11 +700,11 @@ def outcome_forensics(root: Path, run_ids) -> dict:
                            "primary_reason"))
                 streamed.append({"file": str(path.relative_to(enr)),
                                  "bytes": size, "counts": counts})
-                for field_name, values in counts.items():
-                    target = (hm_reason if field_name in ("hm_reason", "primary_reason")
-                              else apollo_status)
-                    for value, n in values.items():
-                        target[value] += n
+                # DELIBERATELY NOT folded into the aggregate counters. The 09-04 run
+                # writes the same leads into `enrichment_progress.json` AND
+                # `jobs_enriched_*.json`, so summing across files reported
+                # `verified: 2068` for 1,034 leads counted twice. Per-file counts are
+                # the honest form, and the reader can see which file each came from.
                 continue
             data = _read_json(path)
             _walk_stats(data)

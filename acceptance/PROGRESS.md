@@ -611,6 +611,57 @@ The reconciler checks its buckets against the stage's own sealed identity
 (`reasons_reconcile`), because a classification that drops a reason reads as
 completeness.
 
+### Focused work before recovery-first enrichment (2026-09-06T18:58Z)
+
+**1. Cohort units corrected.** `resumed` counted POSTINGS and was named
+`opportunities_resumed`. Now three fields -- `postings_resumed`,
+`opportunities_resumed` (distinct company x function), `leads` -- and the rate divides
+by `opportunities_attempted` with `rate_denominator` naming it. The remainder is
+`opportunities_without_reconciled_outcome`, and the 1,737 is described that way rather
+than as never-attempted: an absent outcome is not evidence of an absent attempt.
+
+**2. The three outcomes, decomposed from the run's own corpus.** The first forensics
+attempt skipped the 143 MB enriched corpus and the 90 MB progress file for being large,
+then reported "no per-lead rows" as a property of the RUN. Streamed instead:
+
+    apollo_email_status   verified 1,034   extrapolated 14
+    unverified_no_valid_contact  532    unverified_email 109
+    reroute_email_identity_mismatch 96   hunter_status (absent) 452
+    reject_company_too_large 596   reject_excluded_industry 326
+    reject_company_too_small 126   reject_government 66
+    reject_staffing 44             reject_healthcare 30
+
+* **740 email_unverified: the bottleneck is COVERAGE, not verification.** Apollo
+  verified 1,034 of the addresses obtained and left **14** unverified. A second
+  verification provider would address ~14 leads, so it is **not worth a contract** --
+  the proposal is recorded as considered and DECLINED on evidence. 96 are our own
+  domain-identity rule, and no second opinion ran at all (452 absent).
+* **606 not_icp: named families, no demonstrated false rejection.** The dominant
+  exclusion is `company_too_large`, a headcount bound that is ours and deliberate. The
+  ICP is preserved as agreed.
+* **106 company_unresolved: NOT decomposable from this run** -- no
+  `company_criteria_reason__*` stats. Recorded as such rather than guessed.
+
+Also corrected: the aggregate double-counted, because the run writes the same leads
+into two files -- 2,068 for 1,034 leads. Per-file counts only.
+
+**3. A budget that bounds spend, not workload.** `orchestrator/apollo_budget.py`:
+every chargeable path including retries, durable across runs, and an unset budget is
+ZERO. Deferral needed no new mechanism -- unfinished work never goes terminal and
+custody keeps it. Default OFF. Recommended first grant **1,000 calls** against a
+worst case of ~8,400-12,000 for the whole cohort.
+
+**4. Retrospective for the LAST COMPLETED period** -- Aug 28 - Sep 03, 2026
+(2026-W36), Friday-Friday `America/Los_Angeles`, computed by `weekly_window`. It is
+the ten-day outage week; `partial` and `unavailable` are preserved exactly.
+`BRETT_RETROSPECTIVE_2026-W36.md`.
+
+**Process note.** I pushed while a maintenance window was open and the new deployment
+superseded the one the cron was waiting on -- the exact trap my own runbook documents.
+The pass produced a 2-line log and was rerun. The pass script is now a single
+parameterised `pass.sh` rather than a chain of sed-edited copies, which is how the
+broken one got written.
+
 ### Final state — 2026-09-06T15:30Z
 
     origin/main   afd92db, deployed to both services (SUCCESS)

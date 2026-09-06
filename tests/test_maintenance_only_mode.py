@@ -838,3 +838,30 @@ class LargeCorporaAreStreamedNotSkipped(unittest.TestCase):
             encoding="utf-8")
         row = run_maintenance.outcome_forensics(root, ["r1"])["runs"][0]
         self.assertEqual(row["icp_reason_families"], {"headcount": 400})
+
+
+class StreamedCountsAreNotSummedAcrossFiles(unittest.TestCase):
+    """The 2026-09-04 run writes the same leads into `enrichment_progress.json` AND
+    `jobs_enriched_*.json`. Folding both into one aggregate reported
+    `apollo_email_status verified: 2068` for 1,034 leads -- each counted twice, in a
+    number that reads like a population."""
+
+    def test_per_file_counts_are_kept_and_not_aggregated(self):
+        import json as _json
+        import tempfile as _tempfile
+        from pathlib import Path as _Path
+
+        root = _Path(_tempfile.mkdtemp())
+        enr = root / "run_artifacts" / "r1" / "enrichment"
+        enr.mkdir(parents=True, exist_ok=True)
+        payload = {"leads": [{"email_status": "verified"} for _ in range(3)]}
+        blob = _json.dumps(payload) + " " * 26_000_000
+        for name in ("enrichment_progress.json", "jobs_enriched_2026-09-04.json"):
+            (enr / name).write_text(blob, encoding="utf-8")
+
+        row = run_maintenance.outcome_forensics(root, ["r1"])["runs"][0]
+        self.assertEqual(len(row["streamed_large_files"]), 2)
+        for entry in row["streamed_large_files"]:
+            self.assertEqual(entry["counts"]["email_status"], {"verified": 3})
+        self.assertEqual(row["apollo_email_status"], {},
+                         "streamed counts must not inflate the aggregate")

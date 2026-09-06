@@ -411,6 +411,49 @@ statement is that of 4,147 opportunities the stage reached 2,410, of which 711 p
 712 were rejected by us, 247 found nobody and 740 found somebody unverifiable — and
 1,737 were never reached at all.
 
+### The three outcomes, decomposed from the run's own corpus
+
+Streamed 2026-09-06T18:58Z from the 09-04 enriched corpus. Counts are **per file**;
+the run writes the same leads twice and summing reported 2,068 for 1,034.
+
+**740 `email_unverified` — the bottleneck is COVERAGE, not verification.**
+
+    apollo_email_status   verified 1,034   extrapolated 14
+    unverified_no_valid_contact                       532
+    unverified_email                                  109
+    reroute_email_identity_mismatch                    96   <- OUR policy
+    hunter_status (absent)                            452   <- no second opinion ran
+
+Apollo verified 1,034 of the addresses obtained and left only **14** unverified. There
+is no large population of "address present, Apollo would not verify it". The mass is
+`unverified_no_valid_contact` — no usable contact found. **A second verification
+provider would address ~14 leads, so it is not worth a contract**; the finding is
+recorded in `EMAIL_VERIFICATION_DEPENDENCY.md` as considered and declined on evidence.
+
+**606 `not_icp` — named families, and the largest is a headcount rule.**
+
+    reject_company_too_large     596
+    reject_excluded_industry     326
+    reject_company_too_small     126
+    reject_government             66
+    reject_staffing               44
+    reject_healthcare             30
+
+These are posting-level occurrence counts and the stage's 606 is in leads, so they do
+not sum to it and are not presented as a partition of it. What they establish is the
+SHAPE: the dominant ICP exclusion is `company_too_large`, a headcount bound that is
+ours and deliberate. **No demonstrated false rejection was found** — every family
+corresponds to an agreed rule. Whether the headcount bound is set correctly is a
+business decision, not a defect, and the ICP is preserved as agreed.
+
+**106 `company_unresolved` — not decomposable from this run.** The artifacts carry no
+`company_criteria_reason__*` stats, so the failure mechanism cannot be attributed.
+Recorded as not decomposable rather than guessed. The related counters
+`unverified_organization` (112) and `unverified_employer_identity` (82) are in the same
+region and suggest identity resolution rather than a missing domain — consistent with
+the separate finding that **99% of opportunities carry a first-party domain**, which
+rules out "no domain" as the mechanism.
+
 ### Sending is not the constraint
 
 Measured read-only on Instantly: 16 of 18 campaigns ACTIVE, `daily_limit` 550 each,
