@@ -147,8 +147,12 @@ REASON_ACTIONS = {
     "delivery_unreconciled": (
         "The delivery step could not account for these rows: it submitted them, did "
         "not create them, and recorded no skip reason. Its own reconciliation flag "
-        "reports the failure. Read the run's delivery record before treating this as "
-        "a yield problem -- an unnamed skip category looks identical to a loss."
+        "reports the failure. NOTE THE POPULATION -- this count is over the rows "
+        "SUBMITTED to the writer, which includes leads with no contact and is "
+        "therefore larger than the contacts counted upstream; it may exceed the "
+        "difference at this boundary without contradicting it. Read the run's "
+        "delivery record before treating it as a yield problem: an unnamed skip "
+        "category looks identical to a loss."
     ),
 }
 
