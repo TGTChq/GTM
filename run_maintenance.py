@@ -658,6 +658,22 @@ def main(argv=None) -> int:
         ids = [r.strip() for r in a.capacity_runs.split(",") if r.strip()]
         print(json.dumps(capacity(root, ids), indent=2))
 
+    if getattr(config, "MAINTENANCE_ATS_BOARD_YIELD", ""):
+        # The 145 registered boards are scraped from each employer's OWN public job
+        # board, so this costs no provider credits -- and it can only run in here,
+        # because the registry and its seeding history live on the volume. Stateless
+        # by construction (`fetch_board_jobs` persists nothing); no lane, no
+        # checkpoint, no board health update, nothing enters the pipeline.
+        _say("4c1. DIRECT ATS BOARD YIELD (0 provider credits, nothing persisted)")
+        try:
+            sys.path.insert(0, str(Path(__file__).resolve().parent / "acceptance"))
+            import ats_board_yield
+            limit = int(str(config.MAINTENANCE_ATS_BOARD_YIELD).strip() or "200")
+            print(json.dumps(ats_board_yield.measure(max_boards=limit), indent=2,
+                             default=str))
+        except Exception as exc:  # noqa: BLE001 - a measurement must not fail the pass
+            print(json.dumps({"error": f"{type(exc).__name__}: {exc}"}, indent=2))
+
     _say("4c2. LEDGER REFRESH: carry today's corrections into the durable record")
     print(json.dumps(refresh_ledger(root), indent=2, default=str))
 

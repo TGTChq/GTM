@@ -1423,6 +1423,10 @@ MAINTENANCE_CAPACITY_RUNS = os.getenv("MAINTENANCE_CAPACITY_RUNS", "")
 MAINTENANCE_DROP_EMPTY_RUN = os.getenv("MAINTENANCE_DROP_EMPTY_RUN", "")
 MAINTENANCE_REIMPORT_RUN = os.getenv("MAINTENANCE_REIMPORT_RUN", "")
 MAINTENANCE_WINDOW_START = os.getenv("MAINTENANCE_WINDOW_START", "2026-09-04T07:00:00Z")
+# Board count for the direct-ATS yield measurement, or "" to skip it. Costs no
+# provider credits (each employer's own public board) and persists nothing, but it
+# is opt-in because it makes ~145 outbound requests.
+MAINTENANCE_ATS_BOARD_YIELD = os.getenv("MAINTENANCE_ATS_BOARD_YIELD", "")
 PENDING_WORK_ENABLED = _env_bool("PENDING_WORK_ENABLED", True)
 PENDING_WORK_RESUME_MAX_PER_RUN = _env_int("PENDING_WORK_RESUME_MAX_PER_RUN", 2000)
 PENDING_WORK_MAX_AGE_DAYS = _env_int("PENDING_WORK_MAX_AGE_DAYS", 14)
