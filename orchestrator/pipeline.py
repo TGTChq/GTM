@@ -43,7 +43,7 @@ from orchestrator.runcontrol import RunContext, RunStatus
 from orchestrator.runlock import RunLock, RunLockHeld
 from orchestrator.state import StateManager
 from orchestrator.suppression import SuppressionStore
-from orchestrator import pending_work
+from orchestrator import daily_target, pending_work
 from orchestrator.topup import TopUpController
 from orchestrator.waterfall import WaterfallReport, reconcile_stage
 
@@ -1006,6 +1006,8 @@ class Orchestrator:
         #: back to itself. Custody deliberately keeps non-terminal work, so without
         #: this the loop re-adopts the same rows on every iteration.
         run_adopted_keys: set = set()
+        daily_on = bool(getattr(config, "DAILY_APPROVED_TARGET_ENABLED", False))
+        daily_dir = self.state.store_path("daily_target") if daily_on else None
         recovery_cohort: Dict[str, Any] = {
             "postings_resumed": 0, "opportunities_resumed": 0,
             "leads": 0, "with_contact": 0,
@@ -1065,6 +1067,22 @@ class Orchestrator:
                         if str(r.get("run_id")) != self.ctx.run_id) - len(run_adopted_keys))
                 except Exception:  # noqa: BLE001
                     owed_now = 0
+            # THE DAY'S GOAL IS THE OUTPUT CONDITION, checked before spending more.
+            # `NET_NEW_SEND_SAFE_TARGET` is a per-run send-safe counter and was never
+            # the business objective; this is distinct new APPROVED leads for the
+            # business day, carried across runs, plus whatever the rolling reserve is
+            # short so a strong day banks what a weak one draws down.
+            if daily_on:
+                goal = daily_target.goal_for_today(
+                    daily_dir,
+                    target=int(getattr(config, "DAILY_APPROVED_TARGET", 0) or 0),
+                    reserve_floor=int(getattr(config, "APPROVED_RESERVE_FLOOR", 0) or 0),
+                    reserve_on_hand=int(acq_cum.get("approved_reserve_on_hand") or 0))
+                acq_cum["daily_goal"] = goal
+                if goal["met"] and goal["goal_today"] > 0:
+                    stop_reason = "daily_approved_target_met"
+                    break
+
             decision = controller.decide(
                 quota_remaining=last_quota, apollo_circuit_open=last_circuit,
                 inventory_exhausted=last_inventory, pending_owed=owed_now)
@@ -1296,6 +1314,22 @@ class Orchestrator:
                 known_delivered=supp.delivered_leads(), **deliver_kwargs)
 
             _account_recovery_cohort(recovery_cohort, enrichment.leads, delivery)
+
+            # THE OUTPUT TARGET. Approved leads -- not postings reviewed, not Apollo
+            # calls, not leads attempted. Recorded per BUSINESS DAY and deduplicated
+            # across every run of that day, so the several runs a day may take sum to
+            # the size of their union rather than to the sum of their counters.
+            #
+            # Created rows are the approved set only while send-safe auto-approval is
+            # on, which is what makes a created row Approved rather than Pending. If
+            # that flag is off the day's approved count is not derivable here, and
+            # recording created rows as approved would overstate it.
+            if daily_on and bool(getattr(config, "FANTASTIC_AUTO_APPROVE_SEND_SAFE", False)):
+                created_keys = ((getattr(delivery, "detail", {}) or {}).get("airtable")
+                                or {}).get("created_lead_keys") or []
+                if created_keys:
+                    acq_cum["daily_approved"] = daily_target.record_approved(
+                        daily_dir, created_keys)
 
             net_new = self._count_net_new_send_safe(enrichment.leads, delivery)
             last_circuit = bool(getattr(enrichment, "enrichment_incomplete", False)

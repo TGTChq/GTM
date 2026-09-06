@@ -1416,6 +1416,14 @@ FANTASTIC_WINDOW_SLICE_HOURS = _env_int("FANTASTIC_WINDOW_SLICE_HOURS", 6)
 # provider credits. Resolved before the strict preflight so an added lane is held
 # to the same dependency checks as a requested one.
 ACQUISITION_EXTRA_LANES = os.getenv("ACQUISITION_EXTRA_LANES", "")
+# THE OUTPUT TARGET: distinct NEW approved leads per business day, carried across
+# every run of that day. Default OFF so enabling the permanent operating model is a
+# deliberate act; with it off the loop behaves exactly as before.
+DAILY_APPROVED_TARGET_ENABLED = _env_bool("DAILY_APPROVED_TARGET_ENABLED", False)
+DAILY_APPROVED_TARGET = _env_int("DAILY_APPROVED_TARGET", 1000)
+# Inventory varies -- the measured weekend window held a fifth of a weekday's
+# postings -- so a strong day banks the shortfall a weak day draws down.
+APPROVED_RESERVE_FLOOR = _env_int("APPROVED_RESERVE_FLOOR", 0)
 MAINTENANCE_ONLY = _env_bool("MAINTENANCE_ONLY", False)
 # Optional steps for a maintenance pass, settable without a code change so a single
 # scheduled container can be pointed at a specific job.

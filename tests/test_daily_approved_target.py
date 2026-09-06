@@ -140,3 +140,103 @@ class TheStoreStaysBounded(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TheLoopStopsOnTheDAILYAPPROVEDGoal(unittest.TestCase):
+    """`NET_NEW_SEND_SAFE_TARGET` is a per-run send-safe counter and was never the
+    business objective. The output condition is distinct new APPROVED leads for the
+    business day, carried across every run of that day."""
+
+    def _run(self, *, approved_per_slice, target, run_id, reserve_floor=0):
+        import tempfile
+        from unittest import mock
+
+        import config
+        from orchestrator.enrichment import Disposition, EnrichmentReport, Lead
+        from orchestrator.lanes import LaneResult
+        from orchestrator.modes import ExecutionMode as EM, policy_for as pf
+        from orchestrator.pipeline import Orchestrator, OrchestratorPlan
+        from orchestrator.reasons import ReasonCode
+        from orchestrator.runcontrol import RunContext
+        from orchestrator.state import StateManager
+        from tests.test_pipeline_run_ledger import TOPUP_CONFIG, _Budget
+
+        tmp = tempfile.mkdtemp()
+        counter = {"n": 0}
+
+        class _Engine:
+            def run(self, opportunities, **kw):
+                if not opportunities:
+                    return EnrichmentReport(leads=[], stages=[])
+                leads = []
+                for i in range(approved_per_slice):
+                    counter["n"] += 1
+                    key = f"lead{counter['n']}@x.com"
+                    leads.append(Lead(posting_id=f"p{counter['n']}",
+                                      company={"name": "Acme"},
+                                      contact={"email": key},
+                                      disposition=Disposition.FINAL_PASS,
+                                      primary_reason=ReasonCode.OK,
+                                      contact_key=key))
+                return EnrichmentReport(leads=leads, stages=[], funnel={})
+
+        class _Delivery:
+            def deliver(self, leads, **kw):
+                from orchestrator.adapters_real import RealDeliveryReport
+                keys = [l.contact_key for l in leads]
+                return RealDeliveryReport(
+                    mode="auto_approve", entered=len(leads),
+                    reviewable_submitted=len(leads), created=len(leads),
+                    delivered_lead_keys=keys,
+                    detail={"airtable": {"created_lead_keys": keys},
+                            "withheld_before_submit": 0})
+
+        def runner(_m):
+            return LaneResult(lane="fantastic", status="complete",
+                              jobs=[{"job_id": f"j{counter['n']}x",
+                                     "posting_id": f"j{counter['n']}x"}],
+                              physical_requests=1)
+
+        ctx = RunContext.create(EM.LIVE_ACQUISITION_AND_ENRICHMENT,
+                                {"mode": "live_acquisition_and_enrichment"},
+                                run_id=run_id)
+        state = StateManager(tmp, pf(EM.LIVE_ACQUISITION_AND_ENRICHMENT),
+                             run_id=ctx.run_id)
+        cfg = dict(TOPUP_CONFIG, DAILY_APPROVED_TARGET_ENABLED=True,
+                   DAILY_APPROVED_TARGET=target,
+                   APPROVED_RESERVE_FLOOR=reserve_floor,
+                   FANTASTIC_AUTO_APPROVE_SEND_SAFE=True,
+                   NET_NEW_SEND_SAFE_TARGET=10_000_000,
+                   PENDING_WORK_ENABLED=False)
+        plan = OrchestratorPlan(lanes=["fantastic"], lane_runners={"fantastic": runner},
+                                enrichment_engine=_Engine(), delivery_manager=_Delivery())
+        with mock.patch.multiple(config, **cfg):
+            return Orchestrator(ctx, state, _Budget()).run(plan, resume=False), tmp
+
+    def test_the_run_continues_past_one_batch_until_the_day_target_is_met(self):
+        result, _tmp = self._run(approved_per_slice=3, target=9,
+                                 run_id="20260907T030000Z-daily01")
+        self.assertEqual(result["topup"]["final_stop_reason"],
+                         "daily_approved_target_met")
+        self.assertGreaterEqual(result["topup"]["iterations"], 3,
+                                "one batch is not a day")
+
+    def test_the_day_total_is_durable_and_distinct(self):
+        result, tmp = self._run(approved_per_slice=4, target=8,
+                                run_id="20260907T030000Z-daily02")
+        approved = ((result.get("acquisition") or {}).get("cumulative")
+                    or {}).get("daily_approved") or {}
+        self.assertGreaterEqual(approved.get("approved_today", 0), 8)
+
+    def test_a_short_reserve_raises_the_days_goal(self):
+        """A strong day banks what a weak day draws down."""
+        result, _tmp = self._run(approved_per_slice=2, target=4, reserve_floor=6,
+                                 run_id="20260907T030000Z-daily03")
+        goal = ((result.get("acquisition") or {}).get("cumulative")
+                or {}).get("daily_goal") or {}
+        self.assertEqual(goal.get("reserve_shortfall"), 6)
+        self.assertEqual(goal.get("goal_today"), 10)
+
+    def test_disabled_by_default_leaves_the_loop_unchanged(self):
+        import config
+        self.assertFalse(getattr(config, "DAILY_APPROVED_TARGET_ENABLED"))

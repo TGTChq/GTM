@@ -51,6 +51,11 @@ STORES = (
     # run_artifacts: prune only ever deletes under run_artifacts, so
     # custody of paid-for work survives retention.
     "pending_work",
+    # The day's distinct approved leads, and the lifetime set that makes "new"
+    # meaningful. A SIBLING of run_artifacts for the same reason as pending_work:
+    # retention must never be able to reset the day's output count or let a lead
+    # already approved be counted a second time.
+    "daily_target",
 )
 
 
