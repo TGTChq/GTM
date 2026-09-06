@@ -40,6 +40,7 @@ import sys
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any, Dict
 
 import config
 
@@ -437,6 +438,128 @@ def refresh_ledger(root: Path) -> dict:
             "unreadable_entries": sorted(set(problems_before) | set(problems_after))}
 
 
+#: Hiring-manager stage reason codes grouped by WHO owns the outcome. Only codes the
+#: original execution actually wrote are classified; anything else is surfaced under
+#: `unclassified_reasons` rather than folded into a bucket that flatters the total.
+_HM_GENUINE_NO_MATCH = ("hiring_manager_not_found", "contact_not_found")
+_HM_INTERNAL_SKIP = ("company_unresolved", "missing_company_domain", "not_icp",
+                     "in_crm", "company_size_rejected", "no_search_domain",
+                     "zero_apollo_people")
+_HM_PROVIDER_ERROR = ("stage_error", "adapter_error", "apollo_credit_exhausted",
+                      "apollo_error", "email_unverified", "apollo_email_not_verified")
+
+
+def execution_reconcile(root: Path, run_ids) -> dict:
+    """Reconcile ONE run's contact discovery from ITS OWN stage-entry evidence.
+
+    WHY THIS IS NOT `domain_readiness`. That function regrouped retained payloads with
+    TODAY's code and found 99% carried a first-party domain -- which establishes that
+    they were ELIGIBLE to be searched and nothing more. The 2026-09-04 run was
+    interrupted by Apollo partway through contact discovery, so an unknown share was
+    never attempted, and dividing contacts by eligible opportunities counts
+    never-attempted work as a hiring-manager failure.
+
+    The denominator can only come from the stage that issues the search.
+    `contact_discovery_entered` is emitted by `hiring_manager` at the people-search
+    decision point, and `waterfall.json`'s `hiring_manager` stage records what the
+    stage actually produced. Both are artifacts of the ORIGINAL execution.
+
+    **If those are absent, the rate is UNKNOWN and this says so.** It never falls back
+    to a payload recount, because a recount cannot distinguish "searched and found
+    nobody" from "the run stopped before reaching it" -- which is the entire question.
+    """
+    out = {"unit_note": "contact discovery, reconciled from the original execution",
+           "runs": []}
+    for run_id in run_ids:
+        run_dir = root / "run_artifacts" / run_id
+        row: Dict[str, Any] = {"run_id": run_id, "evidence": {}, "unavailable": []}
+        result = _read_json(run_dir / "orchestrator_result.json")
+        waterfall = _read_json(run_dir / "waterfall.json") or (
+            result.get("waterfall") if isinstance(result, dict) else {}) or {}
+        status = _read_json(run_dir / "run_status.json")
+        funnel = ((result.get("enrichment") or {}).get("funnel")
+                  if isinstance(result, dict) else {}) or {}
+
+        row["evidence"]["run_status"] = str(status.get("status") or "")
+        row["evidence"]["stop_reason"] = str(status.get("stop_reason") or "")
+        row["evidence"]["funnel_keys_present"] = sorted(funnel)
+
+        # 1. THE DENOMINATOR. Only the stage that issues the search may supply it.
+        entered = funnel.get("contact_discovery_entered")
+        if isinstance(entered, int):
+            row["opportunities_searched"] = entered
+            row["denominator_source"] = "enrichment.funnel.contact_discovery_entered"
+        else:
+            row["opportunities_searched"] = None
+            row["denominator_source"] = ""
+            row["unavailable"].append(
+                "contact_discovery_entered absent -- the run recorded no stage entry "
+                "for the people search, so the number of opportunities actually "
+                "SEARCHED cannot be established from this execution")
+
+        # 2. WHAT THE STAGE PRODUCED, from its own sealed record.
+        stages = waterfall.get("stages") if isinstance(waterfall, dict) else None
+        hm = next((st for st in (stages or [])
+                   if isinstance(st, dict) and str(st.get("stage")) == "hiring_manager"), None)
+        if hm:
+            reasons = {k: v for k, v in (hm.get("primary_reasons") or {}).items()
+                       if isinstance(v, int) and v > 0}
+            row["hiring_manager_stage"] = {
+                "entered": hm.get("entered"), "passed": hm.get("passed"),
+                "rejected": hm.get("rejected"), "deferred": hm.get("deferred"),
+                "errored": hm.get("errored"), "unit": hm.get("unit"),
+                "primary_reasons": reasons,
+            }
+            row["genuine_no_match"] = sum(v for k, v in reasons.items()
+                                          if k in _HM_GENUINE_NO_MATCH)
+            row["internal_skips"] = sum(v for k, v in reasons.items()
+                                        if k in _HM_INTERNAL_SKIP)
+            row["provider_errors"] = sum(v for k, v in reasons.items()
+                                         if k in _HM_PROVIDER_ERROR)
+            row["unclassified_reasons"] = {
+                k: v for k, v in reasons.items()
+                if k not in _HM_GENUINE_NO_MATCH + _HM_INTERNAL_SKIP + _HM_PROVIDER_ERROR}
+        else:
+            row["hiring_manager_stage"] = None
+            row["unavailable"].append(
+                "waterfall has no hiring_manager stage -- what the stage produced, "
+                "and why, is not recorded by this execution")
+
+        # 3. WORK NEVER ATTEMPTED = held population minus what the stage saw. Only
+        #    computable when the stage recorded what it saw; otherwise it is unknown
+        #    rather than equal to the whole population.
+        src = run_dir / "enrichment" / "postings.json"
+        held = None
+        if src.is_file():
+            data = _read_json(src)
+            held = measure_identities([j for j in (data.get("jobs") or [])
+                                       if isinstance(j, dict)])["opportunities"]
+        row["opportunities_retained"] = held
+        seen = row.get("opportunities_searched")
+        if held is not None and isinstance(seen, int):
+            row["never_attempted"] = max(0, held - seen)
+        else:
+            row["never_attempted"] = None
+            row["unavailable"].append(
+                "never-attempted work cannot be counted without a stage-entry count")
+
+        # 4. THE RATE. Emitted ONLY on a denominator from stage-entry evidence.
+        contacts = None
+        for source in (waterfall, result.get("delivery") if isinstance(result, dict) else {}):
+            if isinstance(source, dict) and isinstance(source.get("contacts_found"), int):
+                contacts = source["contacts_found"]
+                break
+        row["contacts_returned"] = contacts
+        if isinstance(seen, int) and seen > 0 and isinstance(contacts, int):
+            row["opportunity_to_contact_rate"] = round(contacts / seen, 4)
+            row["rate_status"] = "measured"
+        else:
+            row["opportunity_to_contact_rate"] = None
+            row["rate_status"] = "unknown"
+        out["runs"].append(row)
+    return out
+
+
 def domain_readiness(root: Path, run_ids) -> dict:
     """How much of contact discovery fails BEFORE Apollo is ever asked.
 
@@ -820,6 +943,9 @@ def main(argv=None) -> int:
 
         _say("4c0b. DOMAIN READINESS (which opportunities can reach Apollo at all)")
         print(json.dumps(domain_readiness(root, ids), indent=2, default=str))
+
+        _say("4c0c. EXECUTION RECONCILE (stage-entry evidence, not a payload recount)")
+        print(json.dumps(execution_reconcile(root, ids), indent=2, default=str))
 
     if getattr(config, "MAINTENANCE_ATS_BOARD_YIELD", ""):
         # The 145 registered boards are scraped from each employer's OWN public job

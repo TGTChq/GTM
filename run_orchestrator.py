@@ -840,6 +840,15 @@ def _print_run_summary(ctx, mode, result, state) -> None:
         # WINDOW CURSOR: the acceptance evidence for the persisted per-source
         # offset. "Resumed from where the last run stopped" is only provable by
         # printing the offset read at open next to the one written at close.
+        rec = ((result.get("acquisition") or {}).get("recovery_cohort") or {})
+        if int(rec.get("opportunities_resumed") or 0):
+            # A recovery-first run's whole point is this line: the cohort's complete
+            # path, in one place, so "we reprocessed the backlog" is a measurement
+            # rather than a claim.
+            line("RECOVERY COHORT",
+                 f"resumed {rec.get('opportunities_resumed')} -> leads {rec.get('leads')} "
+                 f"-> with_contact {rec.get('with_contact')} -> final_pass "
+                 f"{rec.get('final_pass')} -> delivered {rec.get('delivered')}")
         wm = ((result.get("lanes") or {}).get("fantastic") or {}).get(
             "attribution", {}).get("watermark") or {}
         if wm.get("enabled"):

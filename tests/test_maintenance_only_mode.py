@@ -498,3 +498,110 @@ class NotAllOfContactDiscoveryIsApollo(unittest.TestCase):
         for forbidden in ("enrich_organization", "search_people_at_company",
                           "match_person", "request_with_retry"):
             self.assertNotIn(forbidden, called)
+
+
+class ARateNeedsADenominatorFromTheStageThatIssuesTheSearch(unittest.TestCase):
+    """`domain_readiness` found 99% of opportunities carried a first-party domain and
+    that was read as "they reached Apollo". It is not. A domain makes an opportunity
+    ELIGIBLE to be searched; the 2026-09-04 run was interrupted partway through
+    contact discovery, so an unknown share was never attempted -- and dividing
+    contacts by eligible opportunities counts never-attempted work as a
+    hiring-manager failure.
+
+    The denominator can only come from `contact_discovery_entered`, emitted by
+    `hiring_manager` at the people-search decision point. When it is absent the rate
+    is UNKNOWN, and no payload recount may stand in for it: a recount cannot tell
+    "searched and found nobody" from "the run stopped first", which is the whole
+    question.
+    """
+
+    def _root(self, *, funnel=None, waterfall=None, status=None, jobs=None):
+        import json as _json
+        import tempfile as _tempfile
+        from pathlib import Path as _Path
+
+        root = _Path(_tempfile.mkdtemp())
+        d = root / "run_artifacts" / "r1"
+        (d / "enrichment").mkdir(parents=True, exist_ok=True)
+        (d / "orchestrator_result.json").write_text(
+            _json.dumps({"enrichment": {"funnel": funnel or {}}}), encoding="utf-8")
+        if waterfall is not None:
+            (d / "waterfall.json").write_text(_json.dumps(waterfall), encoding="utf-8")
+        (d / "run_status.json").write_text(_json.dumps(status or {}), encoding="utf-8")
+        (d / "enrichment" / "postings.json").write_text(
+            _json.dumps({"jobs": jobs or []}), encoding="utf-8")
+        return root
+
+    def _hm(self, **kw):
+        stage = {"stage": "hiring_manager", "unit": "lead", "entered": 0,
+                 "passed": 0, "rejected": 0, "deferred": 0, "errored": 0,
+                 "primary_reasons": {}}
+        stage.update(kw)
+        return {"stages": [stage]}
+
+    def test_an_absent_stage_entry_makes_the_rate_unknown(self):
+        out = run_maintenance.execution_reconcile(
+            self._root(funnel={}, waterfall=self._hm()), ["r1"])
+        row = out["runs"][0]
+        self.assertEqual(row["rate_status"], "unknown")
+        self.assertIsNone(row["opportunity_to_contact_rate"])
+        self.assertIsNone(row["opportunities_searched"])
+        self.assertTrue(any("contact_discovery_entered absent" in u
+                            for u in row["unavailable"]))
+
+    def test_never_attempted_is_unknown_rather_than_the_whole_population(self):
+        """The tempting wrong answer: held minus contacts. That silently asserts
+        everything not converted was attempted."""
+        job = {"job_id": "j1", "job_title": "Head of Sales", "title": "Head of Sales",
+               "employer_name": "Acme", "company_name": "Acme",
+               "_employer_domain_input": "acme.example"}
+        out = run_maintenance.execution_reconcile(
+            self._root(funnel={}, waterfall=self._hm(), jobs=[job]), ["r1"])
+        row = out["runs"][0]
+        self.assertIsNotNone(row["opportunities_retained"])
+        self.assertIsNone(row["never_attempted"])
+
+    def test_a_recorded_stage_entry_yields_a_measured_rate(self):
+        out = run_maintenance.execution_reconcile(self._root(
+            funnel={"contact_discovery_entered": 2000},
+            waterfall={"contacts_found": 500, "stages": [self._hm()["stages"][0]]},
+        ), ["r1"])
+        row = out["runs"][0]
+        self.assertEqual(row["rate_status"], "measured")
+        self.assertEqual(row["opportunities_searched"], 2000)
+        self.assertEqual(row["opportunity_to_contact_rate"], 0.25)
+        self.assertEqual(row["denominator_source"],
+                         "enrichment.funnel.contact_discovery_entered")
+
+    def test_outcomes_are_split_by_who_owns_them(self):
+        out = run_maintenance.execution_reconcile(self._root(
+            funnel={"contact_discovery_entered": 100},
+            waterfall=self._hm(entered=100, primary_reasons={
+                "hiring_manager_not_found": 40, "not_icp": 20,
+                "stage_error": 5, "some_new_code": 7, "already_delivered": 0}),
+        ), ["r1"])
+        row = out["runs"][0]
+        self.assertEqual(row["genuine_no_match"], 40)
+        self.assertEqual(row["internal_skips"], 20)
+        self.assertEqual(row["provider_errors"], 5)
+        self.assertEqual(row["unclassified_reasons"], {"some_new_code": 7})
+
+    def test_an_unknown_reason_is_surfaced_not_folded_into_a_bucket(self):
+        """A code this file has not seen must not be silently counted as somebody
+        else's fault."""
+        out = run_maintenance.execution_reconcile(self._root(
+            funnel={"contact_discovery_entered": 10},
+            waterfall=self._hm(primary_reasons={"brand_new_reason": 3}),
+        ), ["r1"])
+        row = out["runs"][0]
+        self.assertEqual(row["genuine_no_match"], 0)
+        self.assertEqual(row["internal_skips"], 0)
+        self.assertEqual(row["provider_errors"], 0)
+        self.assertIn("brand_new_reason", row["unclassified_reasons"])
+
+    def test_a_missing_waterfall_stage_is_reported_as_missing(self):
+        out = run_maintenance.execution_reconcile(
+            self._root(funnel={}, waterfall={"stages": []}), ["r1"])
+        row = out["runs"][0]
+        self.assertIsNone(row["hiring_manager_stage"])
+        self.assertTrue(any("no hiring_manager stage" in u for u in row["unavailable"]))

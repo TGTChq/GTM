@@ -83,6 +83,46 @@ _FUNNEL_TO_LEDGER = (
     ("companies_considered", "companies_considered"),
 )
 
+def _account_recovery_cohort(cohort, leads, delivery) -> None:
+    """Follow the recovered cohort through ONE slice's enrichment and delivery.
+
+    Attribution is by POSTING IDENTITY, which is the only key shared by the pending
+    store, the enrichment leads and the delivery record. A lead belongs to the cohort
+    if its own posting is in it OR any posting collapsed into it is -- a recovered
+    posting folded into a lead alongside fresh work is still recovered work, and
+    dropping it would understate the cohort every time the collapse fired.
+
+    Delivered lead keys are collected rather than counted so the cohort can be
+    reconciled LATER against Airtable and the Approved Sync that enrols it, which
+    runs in a different service on a different schedule. A count cannot be joined to
+    anything; a key can.
+    """
+    ids = cohort.get("posting_ids") or set()
+    if not ids:
+        return
+    delivered = set(getattr(delivery, "delivered_lead_keys", []) or [])
+    for lead in leads or []:
+        own = str(getattr(lead, "posting_id", "") or "")
+        related = [str(r) for r in (getattr(lead, "related_posting_ids", []) or [])]
+        if own not in ids and not any(r in ids for r in related):
+            continue
+        cohort["leads"] += 1
+        contact_key = str(getattr(lead, "contact_key", "") or "")
+        if contact_key:
+            cohort["with_contact"] += 1
+        disposition = str(getattr(getattr(lead, "disposition", None), "value", "") or "")
+        if disposition == "FINAL_PASS":
+            cohort["final_pass"] += 1
+        elif disposition == "NEEDS_CHECK":
+            cohort["needs_check"] += 1
+        elif disposition == "REJECT":
+            cohort["rejected"] += 1
+        else:
+            cohort["other"] += 1
+        if contact_key and contact_key in delivered:
+            cohort["delivered_lead_keys"].append(contact_key)
+
+
 def _accumulate_counts(into: Dict[str, Any], source: Any) -> Dict[str, Any]:
     """Sum one funnel/census mapping into a cumulative one, one level deep.
 
@@ -920,6 +960,13 @@ class Orchestrator:
         last_quota: Optional[int] = None
         last_circuit = False
         last_inventory = False
+        #: The recovered-work cohort, followed through every stage of THIS run. Kept
+        #: as posting identities because that is the one key enrichment, delivery and
+        #: a later Airtable/Instantly reconciliation all share.
+        recovery_cohort: Dict[str, Any] = {
+            "opportunities_resumed": 0, "leads": 0, "with_contact": 0,
+            "final_pass": 0, "needs_check": 0, "rejected": 0, "other": 0,
+            "delivered_lead_keys": [], "posting_ids": set()}
         stop_reason = ""
         acquisition_error = ""  # set on a FAILED acquisition lane (not "no inventory")
 
@@ -1082,6 +1129,21 @@ class Orchestrator:
                             j.setdefault("_resumed_from_pending", True)
                         opportunities = list(opportunities) + resumed
                         resume_info["adopted"] = len(resumed)
+                        # COHORT ATTRIBUTION. Recovered work has to be followable to
+                        # the end -- through enrichment, approval and the Approved
+                        # Sync that runs in a different service -- or "we reprocessed
+                        # the backlog" is a claim with no measurement behind it. The
+                        # posting identity is the only key that survives every stage,
+                        # so the cohort is a set of them and every later counter is
+                        # an intersection with it.
+                        for j in resumed:
+                            key = posting_identity(j)[1]
+                            if key:
+                                recovery_cohort["posting_ids"].add(key)
+                            jid = str(j.get("job_id") or j.get("posting_id") or "")
+                            if jid:
+                                recovery_cohort["posting_ids"].add(jid)
+                        recovery_cohort["opportunities_resumed"] += len(resumed)
                     acq_cum["pending_work_resumed"] = resume_info
 
             enr_kwargs: Dict[str, Any] = {}
@@ -1103,6 +1165,8 @@ class Orchestrator:
             delivery = plan.delivery_manager.deliver(
                 enrichment.leads, run_id=self.ctx.run_id,
                 known_delivered=supp.delivered_leads(), **deliver_kwargs)
+
+            _account_recovery_cohort(recovery_cohort, enrichment.leads, delivery)
 
             net_new = self._count_net_new_send_safe(enrichment.leads, delivery)
             last_circuit = bool(getattr(enrichment, "enrichment_incomplete", False)
@@ -1251,8 +1315,16 @@ class Orchestrator:
         topup_dict["acquisition_error"] = acquisition_error
         # CUMULATIVE acquisition block (additive; result["lanes"] stays the last
         # slice so the f27ccf1 failure observability is byte-for-byte preserved).
+        # RECOVERED-WORK COHORT. Serialisable form: the identity SET becomes a count
+        # (it can run to thousands and the ids are already in the pending store), and
+        # the delivered lead keys are kept in full because they are the join a later
+        # Airtable / Approved Sync reconciliation needs. A count cannot be joined.
+        recovery_block = {k: v for k, v in recovery_cohort.items() if k != "posting_ids"}
+        recovery_block["cohort_postings"] = len(recovery_cohort.get("posting_ids") or ())
+        recovery_block["delivered"] = len(recovery_block.get("delivered_lead_keys") or [])
         acquisition_block = {
             "iterations": controller.iterations,
+            "recovery_cohort": recovery_block,
             "final_stop_reason": stop_reason,
             "acquisition_error": acquisition_error,
             "budget_source": controller.budget_source,
