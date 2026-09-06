@@ -3,7 +3,7 @@
 Living record. Survives compaction. Reopen a closed item only on contradictory
 evidence.
 
-**Deployed:** `origin/main = 2a2fc44`.
+**Deployed:** `origin/main = 515b66b`.
 **Acquisition:** PAUSED (`FANTASTIC_JOBS_ENABLED=False` on GTM). Billing untouched.
 **Cron:** GTM `0 3 * * *`, Approved Sync `0 0 * * *` — both verified after every pass.
 
@@ -273,7 +273,7 @@ everything terminal, so re-reading the files each pass is both safe and cheap, a
 ANY pass now picks up a remainder. `MAINTENANCE_REIMPORT_RUN` is no longer needed
 and has been cleared.
 
-### Final state
+### State after the third pass (superseded; kept for the record)
 
     origin/main   51b4ed8, deployed
     GTM cron      0 3 * * *   (restored; verified)
@@ -352,6 +352,57 @@ Combinator were skipped on 09-06 on flags the offset path wrote, and — worse �
 `window_drained` counted them, which would advance the watermark past a window no
 slice ever paged.
 
+### Sixth production maintenance pass -- 2026-09-06T12:28Z: where the 900 rows went
+
+The pass printed the 2026-09-04 delivery record for the first time:
+
+    entered 2,410     reviewable_submitted 1,681     created 781     failed 0
+    already_delivered 0     person_employer_duplicate 0
+    skip_breakdown  all zero
+    withheld_before_submit  ABSENT
+    airtable_reconciles     true
+    reviewable_reconciles   FALSE
+
+**900 rows were submitted, not created, and given no reason.** The run said so in its
+own flag; nothing read it. So Brett's report said "no reason code was recorded there"
+-- weaker, and less true, than "the run cannot account for 900 rows".
+
+`delivery_unreconciled` is now a reason code, counted as
+`submitted - created - failed - named skips` and admissible at that boundary. Its
+action tells the reader to open the delivery record before calling it a yield
+problem, because an unnamed skip category looks exactly like a loss.
+
+**And the `true` above was worth nothing.** `reconciles()` documents itself as *"NOT
+tautological (Gate D)"* while defaulting the withheld count to
+`entered - reviewable_submitted` -- making the comparison
+`entered == submitted + entered - submitted`, true for every input. An absent count is
+an unverifiable identity, not a satisfied one; it now fails, with exemptions for
+`dry_no_write` and for a run that entered nothing. Two test doubles were passing only
+because the check was vacuous.
+
+**What the 900 ARE — traced, and already fixed.** `git show 8291a09:orchestrator/pipeline.py`
+settles it. That build's delivery aggregation summed exactly ten fields:
+
+    entered, reviewable_submitted, created, skipped, skipped_existing,
+    failed, enrolled, final_pass, needs_check, other_reviewable
+
+`updated_existing`, `company_function_suppressed`, `account_suppressed`, `no_contact`,
+`other_unreconciled`, `send_safe_withheld`, `person_employer_duplicate` and `detail`
+were **not** summed. The per-slice delivery reports carried the reasons; the run-level
+aggregate threw them away, which is why the artifact shows 1,681 submitted and 781
+created with every reason at zero and `withheld_before_submit` absent.
+
+It is fixed in the current build — the accumulation now walks the full field list and
+sums `withheld_before_submit` — and the pipeline's own comment names this exact
+incident. The 09-04 composition is not recoverable, because only the aggregate is
+persisted.
+
+That makes **three** unexplained numbers in this window, and all three are the same
+thing: an instrumentation defect fixed within hours of the run that suffered it —
+`jobs_reviewed` (`b332577`), the send-safe category (`54a0265`), and this
+aggregation. None is a pipeline yield problem, and the reporting layer now names them
+rather than inventing causes for them.
+
 ### Final state
 
     origin/main   2a2fc44, deployed to both services
@@ -359,4 +410,4 @@ slice ever paged.
     Approved Sync 0 0 * * *   (untouched throughout)
     acquisition   PAUSED      MAINTENANCE_ONLY=1 (must be 0 before resuming)
     custody       3,595 postings = 2,998 opportunities, resumable
-    gates         3208 passed, 1 skipped, 1001 subtests; integrity 27/0/0
+    gates         3223 passed, 1 skipped, 1001 subtests; integrity 27/0/0

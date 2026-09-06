@@ -212,3 +212,40 @@ class AFailedReconciliationIsTheStrongestThingSayable(unittest.TestCase):
         plan = " ".join(str(getattr(s, "text", s))
                         for s in bn.action_plan(found, metrics))
         self.assertIn("could not account for", plan)
+
+
+class TheDerivedReasonSurvivesAWinningLedger(unittest.TestCase):
+    """The compact ledger's `loss_reasons` wins over the artifacts, and rightly so --
+    reading both double-counts, because the ledger copy IS the same merge. But
+    `delivery_unreconciled` is DERIVED from counters rather than merged from a
+    source, so a ledger written before the reason existed cannot contain it. Letting
+    the ledger win over it would leave the question permanently unanswered on exactly
+    the runs that need it -- which is what happened on the seventh production pass:
+    the report was unchanged because the 09-04 ledger block won.
+    """
+
+    def _run(self, ledger, delivery):
+        return _Run(**{mx.LEDGER_STEM: {"loss_reasons": ledger}, "delivery": delivery})
+
+    DELIVERY = {"reviewable_submitted": 1681, "created": 781, "failed": 0,
+                "skip_breakdown": {"other": 0}, "reviewable_reconciles": False}
+
+    def test_a_winning_ledger_does_not_suppress_it(self):
+        census = mx.reason_census([self._run({"not_icp": 12}, self.DELIVERY)])
+        self.assertEqual(census["not_icp"], 12)
+        self.assertEqual(census["delivery_unreconciled"], 900)
+
+    def test_a_ledger_that_already_carries_it_is_not_double_counted(self):
+        census = mx.reason_census([self._run(
+            {"not_icp": 12, "delivery_unreconciled": 900}, self.DELIVERY)])
+        self.assertEqual(census["delivery_unreconciled"], 900)
+
+    def test_it_is_added_once_when_the_artifacts_answer(self):
+        census = mx.reason_census([self._run({}, self.DELIVERY)])
+        self.assertEqual(census["delivery_unreconciled"], 900)
+
+    def test_a_negative_or_zero_gap_adds_nothing(self):
+        census = mx.reason_census([self._run({"not_icp": 3}, {
+            "reviewable_submitted": 10, "created": 10, "failed": 0,
+            "skip_breakdown": {"no_contact": 5}, "reviewable_reconciles": False})])
+        self.assertNotIn("delivery_unreconciled", census)

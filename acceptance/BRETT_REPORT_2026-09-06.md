@@ -44,26 +44,46 @@ The census reconciles against the ledger on every measured metric
 run artifacts and from the compact ledger alone — `ACCEPTED: True` — so it will keep
 saying this after retention has evicted the artifacts.
 
-## Two things this report deliberately does NOT say
+## Where the numbers that look missing actually went
 
-**It does not name a bottleneck.** It did, an hour earlier: *"781 of 1,048 contacts
-found became sent to airtable (74.5%), the largest observed drop"*, with an action
-telling the reader to verify that account-level suppression is deliberately on.
-Account-level suppression is **off** and had suppressed nothing. The delivery skip
-breakdown is a fixed-shape record — every bucket is written on every run — so a
-policy that never fired still contributed its name with a count of **zero**, and
-those zeros were being read as causes. Worse, `contacts_found → sent_to_airtable` is
-not a nested pair, so it may be named the bottleneck only when a reason code
-attributes it: an all-zero set was satisfying that gate. Zeros are now dropped. The
-difference between 1,048 and 781 is real and remains unexplained — which is what the
-report now says.
+Three figures in this window read as gaps. All three are the same thing: an
+instrumentation defect that was fixed within hours of the run that suffered it. None
+is a pipeline yield problem, and the report now names them instead of inventing
+causes.
 
-**It does not report a review rate.** `jobs_reviewed` is partial because the
-2026-09-04 run wrote no enrichment funnel at all. It ran on commit `8291a09`, seven
-hours before `b332577` fixed the topup path that was writing `enrichment.funnel =
-{}` unconditionally. That is a data gap, not a reporting gap: it cannot be recovered
-from any payload because it was never written, and every run from 2026-09-05 onward
-carries the field.
+**1,048 contacts, 781 Airtable rows — and 900 rows nobody could account for.** The
+2026-09-04 delivery record reads `entered 2,410`, `reviewable_submitted 1,681`,
+`created 781`, `failed 0`, every skip reason **zero**, and its own
+`reviewable_reconciles` flag **false**. Traced to the build: that day's delivery
+aggregation summed ten counters and dropped the rest, so the per-slice reports carried
+the reasons and the run-level total threw them away. Fixed since; the accumulation now
+walks the whole field list. The 09-04 composition is unrecoverable because only the
+aggregate is kept.
+
+**No review rate.** `jobs_reviewed` is partial because the 09-04 run wrote no
+enrichment funnel at all. It ran on `8291a09`, seven hours before `b332577` fixed the
+top-up path writing an empty funnel unconditionally. Every run since carries the
+field.
+
+**A reconciliation flag that could not fail.** The same record reported
+`airtable_reconciles: true`. That check defaulted its withheld count to
+`entered − reviewable_submitted`, making the comparison `entered == submitted +
+entered − submitted` — true for every input, on a method whose own docstring says it
+is not tautological. An absent count is now a failure, not a pass.
+
+## One claim this report withdrew today
+
+An earlier rendering said: *"781 of 1,048 contacts found became sent to airtable
+(74.5%), the largest observed drop"*, and told the reader to verify that account-level
+suppression was deliberately on. It is **off**, and it had suppressed nothing. The
+delivery skip breakdown is a fixed-shape record — every bucket is written on every run
+— so a policy that never fired still contributed its name with a count of **zero**,
+and those zeros were being read as causes.
+
+The harm went past one wrong sentence. `contacts_found` and `sent_to_airtable` are not
+a nested pair, so that boundary may be named the bottleneck only when a reason code
+attributes it — and an all-zero set was satisfying that gate. Zeros are now dropped,
+and the real attribution above took their place.
 
 ## Context Brett will want that is not in the report
 

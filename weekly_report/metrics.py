@@ -649,39 +649,48 @@ def reason_census(runs: Sequence[RunRecord]) -> Dict[str, int]:
         # the absence of a record. Treating it as authoritative masked the artifacts
         # that were still on disk and could answer, which is the difference between
         # "nothing was lost here" and "nobody wrote down what was".
-        if isinstance(from_ledger, dict) and any(
-                (as_count(v) or 0) > 0 for v in from_ledger.values()):
-            _add(from_ledger)
-            continue
-        waterfall = run.artifact("waterfall") or dig(run.artifact("orchestrator_result"), "waterfall") or {}
-        for stage in (waterfall.get("stages") or []) if isinstance(waterfall, dict) else []:
-            if isinstance(stage, dict):
-                _add(stage.get("primary_reasons"))
+        ledger_wins = isinstance(from_ledger, dict) and any(
+            (as_count(v) or 0) > 0 for v in from_ledger.values())
         result = run.artifact("orchestrator_result")
-        _add(dig(result, "enrichment.funnel.qual_reason_counts"))
-        _add(dig(result, "enrichment.loss_census"))
         delivery = run.artifact("delivery") or dig(result, "delivery") or {}
-        if isinstance(delivery, dict):
-            _add(delivery.get("skip_breakdown"))
-            # WITHHELD BEFORE SUBMISSION -- and therefore absent from the skip
-            # breakdown, which partitions only submitted-but-not-created rows. Both
-            # names are already admissible at `airtable_delivery`; nothing was
-            # reading them, so a window whose whole difference was idempotency or
-            # person-employer collapse reported "no reason code was recorded" while
-            # the counts sat in the artifact.
-            _add({"already_delivered": delivery.get("skipped_already_delivered"),
-                  "person_employer_duplicate": delivery.get("person_employer_duplicate")})
-            # THE RUN'S OWN IDENTITY CHECK, when it fails. `reviewable_reconciles`
-            # asserts submitted - created - failed == sum(skip_breakdown); when that
-            # is false the remainder is rows the writer did not create and did not
-            # say why. It is recorded AT this boundary and is the strongest thing
-            # that can be said about the difference, so it belongs in the census --
-            # "the run cannot account for 900 rows" beats "no reason was recorded".
-            if delivery.get("reviewable_reconciles") is False:
-                named = sum(v for v in (delivery.get("skip_breakdown") or {}).values()
-                            if isinstance(v, int))
-                gap = (as_count(delivery.get("reviewable_submitted")) or 0)                     - (as_count(delivery.get("created")) or 0)                     - (as_count(delivery.get("failed")) or 0) - named
-                _add({"delivery_unreconciled": max(0, gap)})
+        if ledger_wins:
+            _add(from_ledger)
+        else:
+            waterfall = run.artifact("waterfall") or dig(result, "waterfall") or {}
+            for stage in (waterfall.get("stages") or []) if isinstance(waterfall, dict) else []:
+                if isinstance(stage, dict):
+                    _add(stage.get("primary_reasons"))
+            _add(dig(result, "enrichment.funnel.qual_reason_counts"))
+            _add(dig(result, "enrichment.loss_census"))
+            if isinstance(delivery, dict):
+                _add(delivery.get("skip_breakdown"))
+                # WITHHELD BEFORE SUBMISSION -- and therefore absent from the skip
+                # breakdown, which partitions only submitted-but-not-created rows.
+                # Both names are already admissible at `airtable_delivery`; nothing
+                # was reading them, so a window whose whole difference was idempotency
+                # or person-employer collapse reported "no reason code was recorded"
+                # while the counts sat in the artifact.
+                _add({"already_delivered": delivery.get("skipped_already_delivered"),
+                      "person_employer_duplicate": delivery.get("person_employer_duplicate")})
+        # THE RUN'S OWN IDENTITY CHECK, when it fails -- DERIVED, and deliberately
+        # outside the ledger-wins branch. `reviewable_reconciles` asserts
+        # submitted - created - failed == sum(skip_breakdown); when it is false the
+        # remainder is rows the writer did not create and did not say why, and that
+        # is the strongest thing sayable about the difference. It is not one of the
+        # merged sources, so a ledger written before this reason existed cannot
+        # contain it -- and letting the ledger win would leave the question
+        # permanently unanswered on exactly the runs that need it. Guarded so a
+        # ledger that DOES carry the key is not counted twice.
+        if (isinstance(delivery, dict)
+                and delivery.get("reviewable_reconciles") is False
+                and not (ledger_wins and "delivery_unreconciled" in from_ledger)):
+            named = sum(v for v in (delivery.get("skip_breakdown") or {}).values()
+                        if isinstance(v, int))
+            gap = ((as_count(delivery.get("reviewable_submitted")) or 0)
+                   - (as_count(delivery.get("created")) or 0)
+                   - (as_count(delivery.get("failed")) or 0) - named)
+            if gap > 0:
+                _add({"delivery_unreconciled": gap})
     # A REASON RECORDED AS ZERO EXPLAINS NOTHING. The delivery skip breakdown is a
     # fixed-shape dataclass: every bucket is emitted every run, so a policy that is
     # switched off still contributes its name with a count of 0. Left in, those keys

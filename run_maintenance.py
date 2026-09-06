@@ -426,6 +426,12 @@ def provenance_probe(root: Path) -> dict:
         return {"runs": rows}
     for run_dir in sorted(d for d in artifacts.iterdir() if d.is_dir()):
         result = _read_json(run_dir / "orchestrator_result.json")
+        # WHICH SOURCE THE REPORT WILL ACTUALLY READ. The compact ledger's
+        # `loss_reasons` wins over the artifacts when it holds anything, so a run
+        # whose ledger block is populated never has its delivery record consulted --
+        # which is why adding a new reason code changed nothing on the first try.
+        ledger = _read_json(root / "reporting_ledger" / f"{run_dir.name}.json")
+        ledger_reasons = (ledger.get("loss_reasons") if isinstance(ledger, dict) else {}) or {}
         enrichment = result.get("enrichment") if isinstance(result, dict) else {}
         funnel = (enrichment or {}).get("funnel") if isinstance(enrichment, dict) else {}
         delivery = result.get("delivery") if isinstance(result, dict) else {}
@@ -458,6 +464,8 @@ def provenance_probe(root: Path) -> dict:
                 "withheld_before_submit"),
             "delivery_reconciles": (delivery or {}).get("airtable_reconciles"),
             "delivery_reviewable_reconciles": (delivery or {}).get("reviewable_reconciles"),
+            "ledger_loss_reasons_nonzero": {k: v for k, v in ledger_reasons.items()
+                                            if isinstance(v, int) and v > 0},
         })
     return {"runs": rows}
 
