@@ -120,6 +120,9 @@ CFG = dict(
     FANTASTIC_DATE_CREATED_OVERLAP_MINUTES=60,
     FANTASTIC_MAX_CONSECUTIVE_DUPLICATE_PAGES=40,
     FANTASTIC_WATERMARK_AUDIT_ENABLED=False,
+    # These cases describe the OFFSET cursor under a moving floor. Slicing is
+    # the default now and is measured separately, at the bottom of this file.
+    FANTASTIC_WINDOW_SLICING_ENABLED=False,
 )
 
 LABEL = "fantastic_jobs_linkedin"
@@ -130,11 +133,16 @@ class _Result:
         self.jobs = []
 
 
-def _run(state_path, feed, now, cap, seen=None):
-    """One invocation: a fresh engine on the shared state file, as a restart is."""
+def _run(state_path, feed, now, cap, seen=None, **over):
+    """One invocation: a fresh engine on the shared state file, as a restart is.
+
+    ``over`` lets a caller select the cursor shape; without it these cases pin the
+    offset path, which is what they were written to describe.
+    """
     metrics = {"segments": {}, "watermark": {}}
     seen = seen if seen is not None else set()
-    with mock.patch.multiple(config, FANTASTIC_WATERMARK_STATE_PATH=state_path, **CFG):
+    with mock.patch.multiple(config, FANTASTIC_WATERMARK_STATE_PATH=state_path,
+                             **dict(CFG, **over)):
         feed.now = now
         eng = fja.DateCreatedWatermarkEngine(
             result=_Result(), quota=fja._QuotaState(), http_get=feed,

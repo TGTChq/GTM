@@ -71,6 +71,7 @@ def _multi_feed(rows_by_source, *, fail=None, status=None, malformed=()):
 
 
 BASE_CFG = dict(
+    FANTASTIC_WINDOW_SLICING_ENABLED=False,
     FANTASTIC_JOBS_ENABLED=True, FANTASTIC_JOBS_API_KEY="k",
     FANTASTIC_JOBS_BASE_URL="https://data.fantastic.jobs",
     FANTASTIC_JOBS_TIME_FRAME="24h", FANTASTIC_JOBS_MAX_PAGES_PER_SEGMENT=50,

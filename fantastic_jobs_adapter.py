@@ -2198,6 +2198,10 @@ class DateCreatedWatermarkEngine:
         # transition where the set demonstrably changed, which is what makes the
         # cursor safe to carry across runs -- not any inherent stability of offset
         # paging.
+        if bool(getattr(config, "FANTASTIC_WINDOW_SLICING_ENABLED", True)):
+            self._run_sliced(endpoint, base_params, label, cap_limit, accept)
+            return
+
         base = int(self.window_offsets().get(str(label), 0) or 0)
         # The bound this offset was measured against, read BEFORE this pass
         # re-stamps it. Read afterwards it always equals the current bound,
@@ -2513,6 +2517,69 @@ class DateCreatedWatermarkEngine:
         m = self.state.get("window_offset_basis")
         return {str(k): str(v or "") for k, v in m.items()} if isinstance(m, dict) else {}
 
+    #: Slices of the window, by `date_created`, that a source has DRAINED.
+    #:
+    #: This is the cursor that replaces a cross-run offset. An offset is an index
+    #: into a result set, and the provider documents it only for draining a set in
+    #: ONE pass -- "keep making requests until the API returns less jobs than the
+    #: limit". Nothing documents that an index still addresses the same row on a
+    #: later day, and the rising 7-day frame floor guarantees it does not. A
+    #: `date_created` boundary has no such problem: a row's `date_created` never
+    #: changes, so a drained slice is drained forever and a slice never revisits
+    #: rows another slice already took.
+    def window_slices_done(self) -> Dict[str, List[str]]:
+        m = self.state.get("window_slices")
+        if not isinstance(m, dict):
+            return {}
+        return {str(k): [str(x) for x in (v or [])] for k, v in m.items()}
+
+    #: Progress WITHIN a slice that a run could not finish. Safe where a
+    #: whole-window offset is not: a slice is a narrow `date_created` range, so a
+    #: row leaves it only when the entire slice drops below the frame floor -- at
+    #: which point the slice is unreachable anyway and its offset is moot. Without
+    #: this an unfinished slice restarts from zero every run and re-buys what it
+    #: already took, which is exactly how a starved budget stops making progress.
+    def window_slice_offsets(self) -> Dict[str, Dict[str, int]]:
+        m = self.state.get("window_slice_offsets")
+        if not isinstance(m, dict):
+            return {}
+        return {str(k): {str(kk): int(vv or 0) for kk, vv in (v or {}).items()}
+                for k, v in m.items()}
+
+    def record_slice_offset(self, label: str, key: str, value: int) -> None:
+        m = self.window_slice_offsets()
+        per = m.setdefault(str(label), {})
+        per[key] = max(int(per.get(key, 0) or 0), int(value or 0))
+        self.state["window_slice_offsets"] = m
+
+    def mark_slice_done(self, label: str, key: str) -> None:
+        m = self.window_slices_done()
+        done = m.setdefault(str(label), [])
+        if key not in done:
+            done.append(key)
+        self.state["window_slices"] = m
+
+    def window_slice_bounds(self) -> List[Tuple[str, str]]:
+        """`[lower, upper)` cut into fixed `date_created` slices, OLDEST FIRST.
+
+        Oldest first is not cosmetic: the rows closest to the frame floor are the
+        ones about to become permanently unreachable, so they are the ones a limited
+        budget should buy before they expire.
+        """
+        hours = max(1, int(getattr(config, "FANTASTIC_WINDOW_SLICE_HOURS", 6) or 6))
+        try:
+            lo = datetime.fromisoformat(self.lower.replace("Z", "+00:00"))
+            hi = datetime.fromisoformat(self.upper.replace("Z", "+00:00"))
+        except (TypeError, ValueError):
+            return []
+        out: List[Tuple[str, str]] = []
+        cur = lo
+        while cur < hi and len(out) < 400:
+            nxt = min(cur + timedelta(hours=hours), hi)
+            out.append((self._iso(cur), self._iso(nxt)))
+            cur = nxt
+        return out
+
     def coverage_rewinds(self) -> Dict[str, int]:
         """How many times each source was sent back to the head of THIS window."""
         m = self.state.get("window_coverage_rewinds")
@@ -2582,6 +2649,92 @@ class DateCreatedWatermarkEngine:
             return False
         drained = self.drained_sources()
         return all(bool(drained.get(str(lbl))) for lbl in enabled_labels)
+
+    def _run_sliced(self, endpoint: str, base_params: Dict[str, Any], label: str,
+                    cap_limit: int, accept: Optional[Tuple[str, ...]]) -> None:
+        """Drain the window one `date_created` slice at a time, oldest first.
+
+        Each slice is paged from offset 0 WITHIN THIS RUN, which is exactly the
+        documented usage. Nothing about a slice's position is carried between runs;
+        what persists is the fact that the slice is finished, and that fact stays
+        true however the feed reorders itself.
+        """
+        done = set(self.window_slices_done().get(str(label), []))
+        slices = self.window_slice_bounds()
+        # NOT `setdefault(label, {})`: `_fetch_segment` initialises the segment with
+        # its full counter shape only when the key is absent, so pre-creating an
+        # empty dict here left it without `attempted` and the first call raised.
+        stats = self.metrics["watermark"].setdefault("slices", {}).setdefault(str(label), {
+            "total": len(slices), "already_done": 0, "drained_now": 0,
+            "attempted": 0, "billed": 0, "kept": 0, "budget_exhausted": False})
+        stats["total"] = len(slices)
+        stats["already_done"] = sum(1 for lo, hi in slices if f"{lo}|{hi}" in done)
+
+        for lo, hi in slices:
+            key = f"{lo}|{hi}"
+            if key in done:
+                continue
+            room = min(cap_limit, self.run_cap - self.quota.jobs_consumed)
+            if room <= 0:
+                stats["budget_exhausted"] = True
+                seg = self.metrics["segments"].get(label)
+                if seg is not None:
+                    seg["stop_reason"] = seg.get("stop_reason") or "cap_reached"
+                break
+            params = dict(base_params)
+            params["date_created_gte"] = lo
+            params["date_created_lt"] = hi
+            resume = int(self.window_slice_offsets().get(str(label), {}).get(key, 0) or 0)
+            # Read this slice's OWN stop reason: `_fetch_segment` only ever sets the
+            # segment's reason if it is empty, so an earlier slice's reason would
+            # otherwise mask every later one.
+            seg_key = self.metrics["segments"].get(label)
+            carried = (seg_key.get("stop_reason") or "") if seg_key else ""
+            if seg_key is not None:
+                seg_key["stop_reason"] = ""
+            before = self.quota.jobs_consumed
+            got = _fetch_segment(endpoint, params, label, room, self.quota,
+                                 self.http_get, self.seen_ids, self.metrics,
+                                 accept_source=accept, start_offset=resume,
+                                 durable_cursor=True)
+            seg_key = self.metrics["segments"].get(label) or {}
+            slice_stop = str(seg_key.get("stop_reason") or "")
+            if seg_key:
+                seg_key["stop_reason"] = carried or slice_stop
+            billed = self.quota.jobs_consumed - before
+            stats["attempted"] += 1
+            stats["billed"] += billed
+            stats["kept"] += len(got)
+            self.acquired.extend(got)
+            self.result.jobs.extend(got)
+            self.metrics["watermark"]["acquired"] = (
+                self.metrics["watermark"].get("acquired", 0) + len(got))
+            # A slice is finished only when the FEED ran out inside it. Stopping on
+            # budget, a repeated page or a quota breach proves nothing about the
+            # slice, and marking it done would strand whatever it still holds.
+            if slice_stop in ("empty_page", "short_page"):
+                self.mark_slice_done(label, key)
+                done.add(key)
+                stats["drained_now"] += 1
+            elif billed:
+                # Unfinished: remember how far into THIS slice we got, so the next
+                # run continues rather than re-buying the prefix.
+                self.record_slice_offset(label, key, resume + billed)
+
+        if len(done) >= len(slices) and slices:
+            self.mark_source_drained_from_slices(label)
+        self._save()
+
+    def mark_source_drained_from_slices(self, label: str) -> None:
+        """Every slice of this window drained -- the source is genuinely finished.
+
+        This is a stronger statement than the offset path could ever make: it means
+        every `date_created` sub-range was paged to exhaustion, not that one index
+        stopped returning rows.
+        """
+        m = self.drained_sources()
+        m[str(label)] = True
+        self.state["window_drained_sources"] = m
 
     def checkpoint(self, enabled_labels: Tuple[str, ...]) -> None:
         """After this adapter call: persist the IDs acquired so far in the OPEN window

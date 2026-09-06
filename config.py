@@ -1398,6 +1398,16 @@ SEEN_JOBS_RETENTION_DAYS = _env_int("SEEN_JOBS_RETENTION_DAYS", 30)
 # manager -- so the scheduled container does the recovery/reporting pass instead of
 # a pipeline run, on the existing schedule and with no start-command change. It is
 # refused unless acquisition is already paused, so it can never mask a live run.
+# ACQUISITION CURSOR SHAPE. The provider documents offset paging only for draining
+# a result set in ONE pass ("keep making requests until the API returns less jobs
+# than the limit"); nothing documents that an index still addresses the same row on
+# a later day, and the rising 7-day frame floor guarantees it does not. Slicing the
+# window by `date_created` replaces the index with a boundary that cannot move: a
+# row's date_created never changes, so a drained slice stays drained and no budget
+# is ever spent re-walking one. Set FANTASTIC_WINDOW_SLICING_ENABLED=0 to fall back
+# to the cross-run offset cursor.
+FANTASTIC_WINDOW_SLICING_ENABLED = _env_bool("FANTASTIC_WINDOW_SLICING_ENABLED", True)
+FANTASTIC_WINDOW_SLICE_HOURS = _env_int("FANTASTIC_WINDOW_SLICE_HOURS", 6)
 MAINTENANCE_ONLY = _env_bool("MAINTENANCE_ONLY", False)
 # Optional steps for a maintenance pass, settable without a code change so a single
 # scheduled container can be pointed at a specific job.

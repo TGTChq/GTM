@@ -45,6 +45,9 @@ class WindowCursorTests(unittest.TestCase):
         self.path = os.path.join(self.tmp, "wm.json")
         self.cfg = dict(
             _PROD,
+            # Pins the OFFSET cursor: slicing is the default now, and these cases
+            # describe the offset path's own guarantees.
+            FANTASTIC_WINDOW_SLICING_ENABLED=False,
             FANTASTIC_DATE_CREATED_WATERMARK_ENABLED=True,
             FANTASTIC_DATE_CREATED_LAG_MINUTES=180,
             FANTASTIC_DATE_CREATED_OVERLAP_MINUTES=60,
