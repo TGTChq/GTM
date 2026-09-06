@@ -273,3 +273,67 @@ class ThreeRunsOverAMovingFloor(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CoverageConvergesWithoutANewStrategy(unittest.TestCase):
+    """Does a budget-stopped run whose lower bound changed ever reach the rows it
+    skipped? Measured, not argued.
+
+    Seven consecutive runs over a rising floor, each granted less than the window
+    holds. The sequence that emerges:
+
+        day 0  cap_reached   120 kept, offset -> 120        300 unseen
+        day 1  cap_reached   120 kept, offset -> 240        120 unseen
+        day 2  short_page     60 kept, REWIND offset -> 0    28 unseen
+        day 3  cap_reached     0 kept, offset -> 120         21 unseen
+        day 4  short_page     15 kept, offset -> 180          0 unseen
+        day 5+ already_drained_this_window
+
+    So the recovery already exists and it is the rewind on a DRAINED stop. A budget
+    stop means "keep going forward"; a drained stop means "I think I am finished --
+    check whether the floor moved under me", and that is exactly when re-reading
+    from the head is worth paying for. Gating the rewind on a drained stop is
+    correct, and the coverage-doubt recording added alongside it is DIAGNOSTIC: it
+    neither prevents nor recovers anything on its own.
+
+    The limitation that remains, stated: the rewind is once per source per window.
+    One sufficed here. Whether one always suffices when the floor keeps moving is
+    not established by this replay.
+    """
+
+    def test_unseen_inventory_reaches_zero_without_a_new_acquisition_strategy(self):
+        state = os.path.join(tempfile.mkdtemp(), "wm.json")
+        feed = MovingFloorFeed()
+        seen: set = set()
+        unseen_by_day = []
+        for day in range(7):
+            _e, _m, _ = _run(state, feed, BASE + timedelta(days=day), cap=120, seen=seen)
+            in_frame = {f"fantastic_{r['id']}" for r in feed.visible()}
+            unseen_by_day.append(len(in_frame - seen))
+
+        self.assertGreater(unseen_by_day[0], 0, "there was inventory to miss")
+        self.assertEqual(unseen_by_day[-1], 0,
+                         "every row inside the frame was eventually inspected")
+        self.assertEqual(unseen_by_day, sorted(unseen_by_day, reverse=True),
+                         "and the backlog only ever shrinks")
+
+    def test_the_recovery_is_the_rewind_and_it_fires_once(self):
+        state = os.path.join(tempfile.mkdtemp(), "wm.json")
+        feed = MovingFloorFeed()
+        seen: set = set()
+        for day in range(7):
+            _run(state, feed, BASE + timedelta(days=day), cap=120, seen=seen)
+        with open(state, encoding="utf-8") as fh:
+            rewinds = (json.load(fh).get("window_coverage_rewinds") or {})
+        self.assertEqual(int(rewinds.get(LABEL, 0)), 1,
+                         "one rewind per source per window, and one was enough here")
+
+    def test_the_window_then_closes_as_genuinely_drained(self):
+        state = os.path.join(tempfile.mkdtemp(), "wm.json")
+        feed = MovingFloorFeed()
+        seen: set = set()
+        last = None
+        for day in range(7):
+            _e, last, _ = _run(state, feed, BASE + timedelta(days=day), cap=120, seen=seen)
+        self.assertEqual(last["segments"][LABEL].get("stop_reason"),
+                         "already_drained_this_window")
