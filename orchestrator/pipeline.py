@@ -996,6 +996,10 @@ class Orchestrator:
         #: emits LEADS. The first version called the posting count
         #: `opportunities_resumed`, which is the same conflation that produced every
         #: bad capacity number this week.
+        #: Everything THIS run has already handed back, so a batch is never handed
+        #: back to itself. Custody deliberately keeps non-terminal work, so without
+        #: this the loop re-adopts the same rows on every iteration.
+        run_adopted_keys: set = set()
         recovery_cohort: Dict[str, Any] = {
             "postings_resumed": 0, "opportunities_resumed": 0,
             "leads": 0, "with_contact": 0,
@@ -1012,7 +1016,6 @@ class Orchestrator:
 
         pending_on = bool(getattr(config, "PENDING_WORK_ENABLED", True))
         pending_dir = self.state.store_path("pending_work") if pending_on else None
-        pending_adopted = False
         if pending_on:
             # Custody must be durable BEFORE the acquisition cursor is. The adapter
             # persists per-source offsets at the end of acquisition -- before the
@@ -1028,9 +1031,20 @@ class Orchestrator:
 
             _fja_custody.set_custody_hook(_hold)
         while not stop_reason:
+            # `pending_owed` is what tells the controller an acquisition budget must
+            # not end a run that still has queued work to do.
+            owed_now = 0
+            if pending_on:
+                try:
+                    owed_now = max(0, sum(
+                        int(r.get("postings") or 0)
+                        for r in (pending_work.summary(pending_dir).get("runs") or [])
+                        if str(r.get("run_id")) != self.ctx.run_id) - len(run_adopted_keys))
+                except Exception:  # noqa: BLE001
+                    owed_now = 0
             decision = controller.decide(
                 quota_remaining=last_quota, apollo_circuit_open=last_circuit,
-                inventory_exhausted=last_inventory)
+                inventory_exhausted=last_inventory, pending_owed=owed_now)
             if not decision.should_continue:
                 stop_reason = decision.stop_reason
                 break
@@ -1039,10 +1053,18 @@ class Orchestrator:
             # later slice is DEEP only, so the top-of-feed head query is billed at
             # most once per run and top-up never re-runs the fresh-edge query.
             slice_mode = "head_then_deep" if controller.iterations == 0 else "deep"
-            with self._FantasticSliceCap(decision.next_slice), \
-                    self._FantasticAcquireMode(slice_mode):
-                iter_lanes = self._acquire(plan, resume=(resume and controller.iterations == 0))
-            lane_results = iter_lanes  # last slice's lanes surface in the result
+            if decision.next_slice <= 0:
+                # A ZERO SLICE IS A DELIBERATE INSTRUCTION, not an empty result:
+                # the acquisition budget is spent and the queue still owes work, so
+                # this iteration drains the queue and contacts no provider. Calling
+                # the lanes with a cap of zero would still open a session and could
+                # still bill -- the opposite of what the decision means.
+                iter_lanes = {}
+            else:
+                with self._FantasticSliceCap(decision.next_slice), \
+                        self._FantasticAcquireMode(slice_mode):
+                    iter_lanes = self._acquire(plan, resume=(resume and controller.iterations == 0))
+                lane_results = iter_lanes  # last slice's lanes surface in the result
 
             # A FAILED acquisition lane is an operational error (config/provider/parse
             # crash), NOT "inventory exhausted". Stop immediately and mark the run
@@ -1081,7 +1103,26 @@ class Orchestrator:
             acq_cum["jobs_unique_kept"] += kept
             acq_cum["jobs_returned_billed"] += billed
             acq_cum["physical_requests"] += sum(int(r.physical_requests or 0) for r in iter_lanes.values())
-            last_inventory = (kept == 0)
+            # INVENTORY IS NOT EXHAUSTED WHILE CUSTODY STILL OWES WORK. `kept == 0`
+            # means ACQUISITION found nothing new -- which is permanently true on a
+            # recovery run, where acquisition is deliberately off. Reading that as
+            # "inventory exhausted" stopped the loop after one batch and left 3,595
+            # paid-for postings sitting in the store.
+            pending_owed = 0
+            if pending_on:
+                try:
+                    # THIS RUN'S OWN entries are not adoptable -- `load` excludes them
+                    # by `exclude_run_id`, because they are the work in flight right
+                    # now, not a debt from an earlier run. Counting them made
+                    # "inventory exhausted" unreachable and the loop ran until the
+                    # iteration guard.
+                    owed = sum(int(r.get("postings") or 0)
+                               for r in (pending_work.summary(pending_dir).get("runs") or [])
+                               if str(r.get("run_id")) != self.ctx.run_id)
+                    pending_owed = max(0, owed - len(run_adopted_keys))
+                except Exception:  # noqa: BLE001 - observability, never a run blocker
+                    pending_owed = 0
+            last_inventory = (kept == 0 and pending_owed <= 0)
             for j in iter_postings:
                 j.setdefault("_acquisition_mode", slice_mode)
             ledger.record_acquired(iter_postings, mode=slice_mode)
@@ -1146,19 +1187,34 @@ class Orchestrator:
                 # AFTER net_new_jobs_captured is accumulated, so re-entered work is
                 # never counted as newly captured -- it was bought and counted once,
                 # by the run that acquired it.
-                if not pending_adopted:
-                    pending_adopted = True
+                # ONE BATCH PER ITERATION, not one per run. `PENDING_WORK_RESUME_MAX_PER_RUN`
+                # bounds a BATCH -- it protects memory and keeps a failure small -- and
+                # it used to bound the day, because adoption ran once and then never
+                # again however much work custody still owed. A backlog of 3,595
+                # postings would have taken two days to drain at 2,000 a run, for no
+                # reason but a one-shot guard.
+                #
+                # `run_adopted_keys` is what stops a batch being handed back to
+                # itself: work that did not reach a terminal disposition stays in
+                # custody by design, so without it the next iteration would load the
+                # same rows for ever.
+                if True:
                     resumed, resume_info = pending_work.load(
                         pending_dir,
                         exclude_run_id=self.ctx.run_id,
                         limit=int(getattr(config, "PENDING_WORK_RESUME_MAX_PER_RUN", 0) or 0) or None,
-                        exclude_keys=[k for k in (posting_identity(o)[1] for o in opportunities) if k],
+                        exclude_keys=([k for k in (posting_identity(o)[1] for o in opportunities) if k]
+                                      + sorted(run_adopted_keys)),
                     )
                     # Anything a previous run already finished is in suppression;
                     # re-entering it would redo settled work.
                     already = supp.seen_postings()
                     resumed = [j for j in resumed
                                if posting_identity(j)[1] not in (already or set())]
+                    for j in resumed:
+                        key = posting_identity(j)[1]
+                        if key:
+                            run_adopted_keys.add(key)
                     if resumed:
                         for j in resumed:
                             j.setdefault("_resumed_from_pending", True)
@@ -1187,6 +1243,13 @@ class Orchestrator:
                         recovery_cohort["postings_resumed"] += len(resumed)
                         recovery_cohort["opportunities_resumed"] = len(
                             recovery_cohort["opportunity_keys"])
+                    # ACCUMULATED across iterations. Overwriting reported the LAST
+                    # batch, and the last batch of a drained queue adopts nothing --
+                    # so a run that handed back 3,595 postings reported 0.
+                    prior = acq_cum.get("pending_work_resumed") or {}
+                    resume_info["adopted"] = (int(prior.get("adopted") or 0)
+                                              + int(resume_info.get("adopted") or 0))
+                    resume_info["batches"] = int(prior.get("batches") or 0) + 1
                     acq_cum["pending_work_resumed"] = resume_info
 
             enr_kwargs: Dict[str, Any] = {}

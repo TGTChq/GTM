@@ -29,10 +29,30 @@ class CaptureIsCountedBeforeCustodyIsAdopted(unittest.TestCase):
         self.assertLess(captured, adopted,
                         "resumed work must not inflate net-new capture")
 
-    def test_adoption_happens_once_per_run(self):
+    def test_adoption_happens_once_per_BATCH_and_never_repeats_a_batch(self):
+        """It used to be once per RUN, so `PENDING_WORK_RESUME_MAX_PER_RUN` bounded
+        the day as well as the batch: a 3,595-posting backlog would have taken two
+        days to drain at 2,000 a run, for no reason but a one-shot guard.
+
+        What must not change is that a batch is never handed back to itself. Custody
+        deliberately keeps non-terminal work, so the loop needs a run-level record of
+        what it has already adopted or it re-loads the same rows for ever."""
         source = inspect.getsource(pipeline)
-        self.assertIn("if not pending_adopted:", source)
-        self.assertIn("pending_adopted = True", source)
+        self.assertIn("run_adopted_keys: set = set()", source)
+        self.assertIn("+ sorted(run_adopted_keys)", source)
+        self.assertIn("run_adopted_keys.add(key)", source)
+
+    def test_the_run_own_custody_is_not_counted_as_adoptable_inventory(self):
+        """`load` excludes this run's entries by `exclude_run_id` -- they are the work
+        in flight, not a debt. Counting them made "inventory exhausted" unreachable."""
+        source = inspect.getsource(pipeline)
+        self.assertIn('if str(r.get("run_id")) != self.ctx.run_id', source)
+
+    def test_inventory_is_not_exhausted_while_custody_owes_work(self):
+        """`kept == 0` means ACQUISITION found nothing -- permanently true on a
+        recovery run, where acquisition is deliberately off."""
+        source = inspect.getsource(pipeline)
+        self.assertIn("last_inventory = (kept == 0 and pending_owed <= 0)", source)
 
     def test_resumed_rows_are_marked_so_they_are_identifiable(self):
         source = inspect.getsource(pipeline)

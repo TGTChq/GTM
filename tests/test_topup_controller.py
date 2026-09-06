@@ -236,3 +236,75 @@ class TopUpLoopTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AnAcquisitionBudgetStopsAcquisitionNotTheRun(unittest.TestCase):
+    """The 2026-09-06 calibration: acquisition deliberately off, 3,595 paid-for
+    postings owed by custody, the entire workload meant to come from the queue -- and
+    the run stopped on `governor_zero_budget` before adopting anything and delivered
+    nothing.
+
+    A zero Fantastic budget makes `billed >= safety_cap_jobs` true on the first
+    iteration, and that was a RUN-level stop. A credit ceiling for work the run was
+    not doing ended a run that had work to do."""
+
+    def _controller(self, **kw):
+        from orchestrator.topup import TopUpController
+
+        base = dict(target_net_new=1000, safety_cap_jobs=0, slice_jobs=500)
+        base.update(kw)
+        return TopUpController(**base)
+
+    def test_a_zero_acquisition_budget_continues_when_the_queue_owes_work(self):
+        c = self._controller()
+        d = c.decide(pending_owed=3595)
+        self.assertTrue(d.should_continue)
+        self.assertEqual(d.next_slice, 0, "continue, but acquire nothing")
+        self.assertEqual(c.acquisition_suppressed, "acquisition_safety_cap")
+
+    def test_a_zero_acquisition_budget_stops_when_nothing_is_owed(self):
+        c = self._controller()
+        d = c.decide(pending_owed=0)
+        self.assertFalse(d.should_continue)
+        self.assertEqual(d.stop_reason, "acquisition_safety_cap")
+
+    def test_the_governor_stop_is_labelled_as_the_governor(self):
+        c = self._controller(budget_source="governor")
+        self.assertEqual(c.decide(pending_owed=0).stop_reason, "governor_run_budget")
+
+    def test_a_quota_floor_also_only_suppresses_acquisition(self):
+        c = self._controller(safety_cap_jobs=10_000, min_quota_remaining=100)
+        d = c.decide(quota_remaining=50, pending_owed=10)
+        self.assertTrue(d.should_continue)
+        self.assertEqual(d.next_slice, 0)
+        self.assertEqual(c.acquisition_suppressed, "fantastic_quota_floor")
+
+    def test_hard_stops_still_end_the_run_whatever_is_owed(self):
+        """A provider circuit or a runtime budget is not a source starvation."""
+        c = self._controller(safety_cap_jobs=10_000)
+        self.assertFalse(c.decide(apollo_circuit_open=True,
+                                  pending_owed=9999).should_continue)
+        c2 = self._controller(safety_cap_jobs=10_000, runtime_budget_seconds=0)
+        self.assertFalse(c2.decide(pending_owed=9999).should_continue)
+
+    def test_the_target_still_wins_over_a_full_queue(self):
+        c = self._controller(target_net_new=1, safety_cap_jobs=10_000)
+        c.record(billed=0, net_new_send_safe=5)
+        self.assertEqual(c.decide(pending_owed=9999).stop_reason, "target_reached")
+
+    def test_suppression_is_recorded_so_it_is_not_read_as_doing_nothing(self):
+        c = self._controller()
+        c.decide(pending_owed=10)
+        self.assertEqual(c.to_dict()["acquisition_suppressed"],
+                         "acquisition_safety_cap")
+
+    def test_a_zero_slice_never_calls_the_lanes(self):
+        """Calling the lanes with a cap of zero would still open a session and could
+        still bill -- the opposite of what the decision means."""
+        import inspect
+
+        from orchestrator import pipeline
+
+        source = inspect.getsource(pipeline)
+        self.assertIn("if decision.next_slice <= 0:", source)
+        self.assertIn("iter_lanes = {}", source)

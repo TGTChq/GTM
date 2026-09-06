@@ -70,6 +70,9 @@ class TopUpController:
         self.billed = 0
         self.iterations = 0
         self.last_stop_reason = ""
+        #: Set when the acquisition budget is spent but the run continues on queued
+        #: work. Recorded so "acquired nothing" is never confused with "did nothing".
+        self.acquisition_suppressed = ""
 
     @property
     def enabled(self) -> bool:
@@ -85,6 +88,7 @@ class TopUpController:
         quota_remaining: Optional[int] = None,
         apollo_circuit_open: bool = False,
         inventory_exhausted: bool = False,
+        pending_owed: int = 0,
     ) -> TopUpDecision:
         """Decide whether to acquire ANOTHER slice, and how big it may be. Called
         BEFORE each acquisition. Order matters: target satisfaction wins first, then
@@ -94,20 +98,44 @@ class TopUpController:
             return self._stop("target_reached")
         if self.iterations >= self.max_iterations:
             return self._stop("max_iterations_guard")
-        if self.billed >= self.safety_cap_jobs:
-            return self._stop(self._cap_reason())
-        if quota_remaining is not None and quota_remaining <= self.min_quota_remaining:
-            return self._stop("fantastic_quota_floor")
+        # HARD stops first: these end the run whatever else is outstanding.
         if apollo_circuit_open:
             return self._stop("apollo_circuit_open")
         if (self.runtime_budget_seconds is not None
                 and self.elapsed_seconds >= self.runtime_budget_seconds):
             return self._stop("runtime_budget")
+
+        # AN ACQUISITION BUDGET STOPS ACQUISITION, NOT THE RUN.
+        #
+        # The 2026-09-06 calibration was a recovery run: acquisition deliberately
+        # off, 3,595 paid-for postings owed by custody, and the entire workload was
+        # supposed to come from the queue. It stopped on `governor_zero_budget`
+        # BEFORE adopting anything and delivered nothing -- because a zero Fantastic
+        # budget makes `billed >= safety_cap_jobs` true on the first iteration, and
+        # that was a run-level stop. A credit ceiling for work the run is not doing
+        # ended a run that had work to do.
+        #
+        # So when a source budget is spent but the QUEUE still owes work, the
+        # iteration continues with a slice of zero: acquire nothing, drain the queue.
+        starved = ""
+        if self.billed >= self.safety_cap_jobs:
+            starved = self._cap_reason()
+        elif quota_remaining is not None and quota_remaining <= self.min_quota_remaining:
+            starved = "fantastic_quota_floor"
+        if starved:
+            if int(pending_owed) > 0:
+                self.acquisition_suppressed = starved
+                return TopUpDecision(True, "", 0)
+            return self._stop(starved)
+
         if inventory_exhausted:
             return self._stop("inventory_exhausted")
         remaining_cap = self.safety_cap_jobs - self.billed
         nxt = min(self.slice_jobs, remaining_cap)
         if nxt <= 0:
+            if int(pending_owed) > 0:
+                self.acquisition_suppressed = self._cap_reason()
+                return TopUpDecision(True, "", 0)
             return self._stop(self._cap_reason())
         return TopUpDecision(True, "", nxt)
 
@@ -137,4 +165,5 @@ class TopUpController:
             "iterations": self.iterations,
             "stop_reason": self.last_stop_reason,
             "target_reached": self.net_new >= self.target_net_new,
+            "acquisition_suppressed": self.acquisition_suppressed,
         }

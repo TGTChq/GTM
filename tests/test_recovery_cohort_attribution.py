@@ -287,3 +287,146 @@ class ThreeUnitsAreThreeNumbers(unittest.TestCase):
         _account_recovery_cohort(cohort, [lead_a, lead_b], _delivery())
         self.assertEqual(cohort["leads"], 2)
         self.assertEqual(len(cohort["attempted_opportunity_keys"]), 1)
+
+
+class TheLoopDrainsCustodyAcrossBATCHESNotJustOne(unittest.TestCase):
+    """`PENDING_WORK_RESUME_MAX_PER_RUN` bounds a BATCH -- memory and blast radius --
+    and must not bound the day. Adoption used to run once per run, so a 3,595-posting
+    backlog needed two days at 2,000 a run for no reason but a one-shot guard.
+
+    Executed rather than asserted from the source: a lane that acquires nothing, a
+    custody store holding more than one batch, and a check that the run drains it."""
+
+    def test_more_than_one_batch_is_adopted_in_a_single_run(self):
+        import tempfile
+        from pathlib import Path
+        from unittest import mock
+
+        import config
+        from orchestrator import pending_work
+        from orchestrator.lanes import LaneResult
+        from orchestrator.modes import ExecutionMode as EM, policy_for as pf
+        from orchestrator.pipeline import Orchestrator
+        from orchestrator.runcontrol import RunContext
+        from orchestrator.state import StateManager
+        from tests.test_pipeline_run_ledger import TOPUP_CONFIG, _Budget, _Engine, _plan
+
+        tmp = tempfile.mkdtemp()
+        owed = [{"job_id": f"owed{i}", "posting_id": f"owed{i}",
+                 "employer_name": f"Co{i}", "company_name": f"Co{i}",
+                 "job_title": "Head of Sales"} for i in range(7)]
+        pending_work.record(Path(tmp) / pending_work.STORE, "earlier-run", owed)
+
+        ctx = RunContext.create(EM.LIVE_ACQUISITION_AND_ENRICHMENT,
+                                {"mode": "live_acquisition_and_enrichment"},
+                                run_id="20260907T030000Z-drain01")
+        state = StateManager(tmp, pf(EM.LIVE_ACQUISITION_AND_ENRICHMENT),
+                             run_id=ctx.run_id)
+        # A batch of THREE against seven owed: three batches, then exhaustion.
+        cfg = dict(TOPUP_CONFIG, PENDING_WORK_ENABLED=True,
+                   PENDING_WORK_RESUME_MAX_PER_RUN=3)
+        with mock.patch.multiple(config, **cfg):
+            result = Orchestrator(ctx, state, _Budget()).run(
+                _plan(lambda _m: LaneResult(lane="fantastic", status="complete",
+                                            jobs=[], physical_requests=0),
+                      _Engine()), resume=False)
+
+        acq = (result.get("acquisition") or {}).get("cumulative") or {}
+        resumed = acq.get("pending_work_resumed") or {}
+        self.assertGreater(resumed.get("batches", 0), 1,
+                           "one batch per run is the bug, not the contract")
+        self.assertEqual(resumed.get("adopted"), 7,
+                         "every owed posting is handed back within the run")
+        self.assertEqual(acq.get("net_new_jobs_captured"), 0,
+                         "and none of it is counted as newly captured")
+
+    def test_the_loop_stops_once_custody_is_actually_drained(self):
+        """Not exhausted while work is owed -- and exhausted once it is not, or the
+        run spins until the iteration guard."""
+        import tempfile
+        from pathlib import Path
+        from unittest import mock
+
+        import config
+        from orchestrator import pending_work
+        from orchestrator.lanes import LaneResult
+        from orchestrator.modes import ExecutionMode as EM, policy_for as pf
+        from orchestrator.pipeline import Orchestrator
+        from orchestrator.runcontrol import RunContext
+        from orchestrator.state import StateManager
+        from tests.test_pipeline_run_ledger import TOPUP_CONFIG, _Budget, _Engine, _plan
+
+        tmp = tempfile.mkdtemp()
+        pending_work.record(Path(tmp) / pending_work.STORE, "earlier-run", [
+            {"job_id": "owed1", "posting_id": "owed1", "employer_name": "Acme",
+             "company_name": "Acme", "job_title": "Head of Sales"}])
+        ctx = RunContext.create(EM.LIVE_ACQUISITION_AND_ENRICHMENT,
+                                {"mode": "live_acquisition_and_enrichment"},
+                                run_id="20260907T030000Z-drain02")
+        state = StateManager(tmp, pf(EM.LIVE_ACQUISITION_AND_ENRICHMENT),
+                             run_id=ctx.run_id)
+        cfg = dict(TOPUP_CONFIG, PENDING_WORK_ENABLED=True,
+                   PENDING_WORK_RESUME_MAX_PER_RUN=2000)
+        with mock.patch.multiple(config, **cfg):
+            result = Orchestrator(ctx, state, _Budget()).run(
+                _plan(lambda _m: LaneResult(lane="fantastic", status="complete",
+                                            jobs=[], physical_requests=0),
+                      _Engine()), resume=False)
+        self.assertEqual(result["topup"]["final_stop_reason"], "inventory_exhausted")
+
+
+class AZeroAcquisitionBudgetDoesNotEndARecoveryRun(unittest.TestCase):
+    """Executed end to end, with the production shape my earlier offline test missed.
+
+    That test gave the controller `FANTASTIC_JOBS_MAX_JOBS_PER_RUN=1000`, so the
+    acquisition cap was never zero and the run reached adoption. Production has the
+    governor at ZERO while acquisition is off -- and the real calibration on
+    2026-09-06 stopped at `governor_zero_budget` with `acquisition_entered: false`,
+    having adopted nothing and delivered nothing. The fixture was wrong, not the
+    conclusion it supported."""
+
+    def test_the_queue_is_drained_with_a_zero_acquisition_cap(self):
+        import tempfile
+        from pathlib import Path
+        from unittest import mock
+
+        import config
+        from orchestrator import pending_work
+        from orchestrator.lanes import LaneResult
+        from orchestrator.modes import ExecutionMode as EM, policy_for as pf
+        from orchestrator.pipeline import Orchestrator
+        from orchestrator.runcontrol import RunContext
+        from orchestrator.state import StateManager
+        from tests.test_pipeline_run_ledger import TOPUP_CONFIG, _Budget, _Engine, _plan
+
+        tmp = tempfile.mkdtemp()
+        pending_work.record(Path(tmp) / pending_work.STORE, "earlier", [
+            {"job_id": f"owed{i}", "posting_id": f"owed{i}",
+             "employer_name": f"Co{i}", "company_name": f"Co{i}",
+             "job_title": "Head of Sales"} for i in range(4)])
+
+        ctx = RunContext.create(EM.LIVE_ACQUISITION_AND_ENRICHMENT,
+                                {"mode": "live_acquisition_and_enrichment"},
+                                run_id="20260907T030000Z-zerobudget")
+        state = StateManager(tmp, pf(EM.LIVE_ACQUISITION_AND_ENRICHMENT),
+                             run_id=ctx.run_id)
+        # THE PRODUCTION SHAPE: acquisition budget zero.
+        cfg = dict(TOPUP_CONFIG, PENDING_WORK_ENABLED=True,
+                   PENDING_WORK_RESUME_MAX_PER_RUN=2,
+                   FANTASTIC_JOBS_MAX_JOBS_PER_RUN=0,
+                   FANTASTIC_TOPUP_SLICE_JOBS=0)
+
+        def never_called(_manager):
+            raise AssertionError("a zero slice must not call the lanes")
+
+        with mock.patch.multiple(config, **cfg):
+            result = Orchestrator(ctx, state, _Budget()).run(
+                _plan(never_called, _Engine()), resume=False)
+
+        acq = (result.get("acquisition") or {}).get("cumulative") or {}
+        resumed = acq.get("pending_work_resumed") or {}
+        self.assertEqual(resumed.get("adopted"), 4,
+                         "the queue is drained despite a zero acquisition budget")
+        self.assertTrue(result["topup"].get("acquisition_suppressed"),
+                        "and the suppression is recorded, not silent")
+        self.assertEqual(acq.get("net_new_jobs_captured"), 0)
