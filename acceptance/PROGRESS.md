@@ -175,3 +175,30 @@ established any of them.
     pending_postings 2000 across 2 runs
       20260906T030230Z-2f74ac7c   226   <- the interrupted work, recovered
       20260904T130130Z-13b44a0c 1,774   <- truncated + wrongly included; fixed above
+
+
+### Delivery: the 769 leads are queued, not stuck (2026-09-06)
+
+Worth recording because "0 emailed" looked like a delivery failure and is not.
+
+Measured read-only against Instantly:
+
+    created in the window   769   status 1, ZERO with an executed step
+    created before it     3,157   3,142 (99.5%) have an executed step
+
+16 of 18 campaigns are ACTIVE (the two COMPLETED ones are the ECOMMERCE pair --
+"completed" means drained of leads, not disabled). The field probe was not at fault:
+older leads carry `status_summary.lastStep.timestamp_executed` exactly where it was
+being read.
+
+The cause is the campaign schedule:
+
+    days   {"0": false, "1": true ... "5": true, "6": false}   Sun and Sat OFF
+    timing 08:00-18:00  America/Chicago      daily_limit 550   33 sending accounts
+
+Approved Sync delivered the 769 at 2026-09-05T00:02Z = Friday 19:02 Chicago, after
+that day's window closed; Saturday and Sunday are off. **First send is Monday
+2026-09-07 08:00 America/Chicago.** Nothing is wrong and nothing needs fixing.
+
+Also relevant to capacity: 16 active campaigns x 550/day is far above current lead
+volume, so SENDING is not the constraint on approved-lead throughput.

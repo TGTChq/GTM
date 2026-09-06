@@ -2205,6 +2205,13 @@ class DateCreatedWatermarkEngine:
         # cursor safe to carry across runs -- not any inherent stability of offset
         # paging.
         if bool(getattr(config, "FANTASTIC_WINDOW_SLICING_ENABLED", True)):
+            # ``start_offset`` is deliberately IGNORED here. Callers pass it to make
+            # a reclamation pass resume where the segment left off inside this run;
+            # under slicing that is already the behaviour and better expressed --
+            # the pass simply continues with slices that are not yet drained, and
+            # cannot redo a finished one. The bootstrap path does not come through
+            # here at all (it calls `_fetch_segment` with its own
+            # ``source_bootstrap`` offsets against a different window).
             self._run_sliced(endpoint, base_params, label, cap_limit, accept)
             return
 
