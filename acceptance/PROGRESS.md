@@ -259,13 +259,16 @@ from custody**:
       20260904T130130Z-13b44a0c   1,774 -> 742
       20260906T030230Z-2f74ac7c     226 ->  226   (the recovered work, intact)
 
-**One residue, scheduled.** The truncated-import bug had already set the "imported"
-marker for the 09-04 run, and the marker is consulted before the file is opened, so
-4,431 of its 6,205 retained opportunities remain outside custody.
-`--reimport-run` clears one run from the marker; `MAINTENANCE_REIMPORT_RUN` is set
-to that run, so **tonight's 03:00Z pass takes the remainder in automatically**. It
-can only add genuinely pending work -- adoption skips what custody holds and filters
-everything terminal.
+**One residue, then removed at the root.** The truncated-import bug had already set
+the "imported" marker for the 09-04 run, and the marker was consulted before the
+file was opened, so 4,431 of its 6,205 retained opportunities were outside custody.
+
+Rather than clear the marker for one run and leave a variable set that would
+re-clear it on every future pass, **the gate itself was removed**: the marker is now
+a record, not a gate. Adoption already skips what custody holds and filters out
+everything terminal, so re-reading the files each pass is both safe and cheap, and
+ANY pass now picks up a remainder. `MAINTENANCE_REIMPORT_RUN` is no longer needed
+and has been cleared.
 
 ### Final state
 
