@@ -80,6 +80,20 @@ Steady state is bounded by **daily inflow**, not by budget once the cursor is fi
 
     ≤881 postings/day  ÷  1.3 postings/opportunity  ≈  ≤678 opportunities/day
 
+The 1.3 comes from the 2026-09-06 daily cohort (226 → 174). The backlog cohort gives
+1.496 (6,205 → 4,147), which would yield ~589. Taking the smaller divisor is the
+CONSERVATIVE choice -- it produces MORE opportunities per posting and therefore the
+most favourable estimate. The conclusion below holds at either ratio.
+
+Three conversions from the 09-04 run, kept apart because they are different stages
+and all three are floors (Apollo truncated it at 2,170 of 2,410 leads):
+
+    posting     -> approved   781 / 6,205 = 12.6%
+    opportunity -> approved   781 / 4,147 = 18.8%
+    lead        -> approved   781 / 2,410 = 32.4%
+
+The projection below uses the opportunity ratio, matching the unit it projects from.
+
 **Even at a perfect 100% opportunity → approved conversion, the two currently active
 sources cannot sustain 1,000 approved leads/day.** The shortfall is on the correct
 unit, from measured identities, on a matched window.
