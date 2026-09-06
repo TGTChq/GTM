@@ -214,6 +214,106 @@ is the one thing still unmeasured, and item 1 below is the bounded way to find o
   established, and a title-selected corpus cannot estimate it. Functional discovery
   is the mechanism built to measure exactly this, and it is off.
 
+### The 145 direct ATS boards — MEASURED, and they cost nothing
+
+Swept 2026-09-06T14:40Z inside the production container: **all 145 boards, none timed
+out, 0 provider credits** (each employer's own public board), nothing persisted —
+`acceptance/ats_board_yield.py` calls the stateless `fetch_board_jobs`, so no lane,
+checkpoint, board-health update or pipeline entry is involved.
+
+| | |
+|---|---|
+| postings currently open | **20,293** |
+| distinct companies | 134 |
+| **company × function opportunities (stock)** | **615** |
+| postings carrying a date | 7,953 |
+| posted in the last 7 days | 3,251 → **464/day** |
+| opportunities in that 7-day cohort | **308** (~44/day) |
+| role-relevant under the production catalog | **21.84%** |
+
+Two things follow, and they point in opposite directions.
+
+**It is a fixed employer set, so it saturates.** 145 boards is 134 companies. Their
+whole open inventory is 615 company × function opportunities; after the first sweep,
+cross-run suppression means only genuinely new roles count, and that flow is ~44
+opportunities/day. Real and free, but not a path to 1,000 on its own.
+
+**Its relevance rate is the free half of authorization item 1.** These 20,293
+postings arrive with **no title query at all** — it is the title-unfiltered sample
+that the Fantastic corpus cannot provide. **21.84%** of them match the production
+role catalog. Against that, the Fantastic titled/untitled ratio is 2,134/30,736 =
+**6.9%**.
+
+The two populations are not the same — the board registry is 134 hand-picked ICP
+employers, the Fantastic untitled feed is every employer passing the firmographic
+filters — so this does not settle the question. But it is the first evidence that the
+title expression may be selecting well below the rate at which real ICP employers
+actually hire for catalogue roles, and that is precisely what item 1 is for.
+
+Per-provider, so a slow or broken adapter is visible rather than averaged away:
+
+    workday          68 boards  12,857 postings   903.1s   1 failed (HTTP 422)
+    smartrecruiters  31 boards   5,163 postings   204.7s
+    ashby            22 boards     943 postings    12.2s
+    greenhouse       13 boards     664 postings
+    lever             6 boards     425 postings              1 failed (HTTP 404)
+    workable          4 boards     241 postings     2.7s
+    cornerstone       1 board        0 postings              1 failed (invalid JSON)
+
+Workday is 63% of the postings and 78% of the wall clock. Three boards fail; they are
+named here rather than smoothed into an average.
+
+### Where conversion is actually lost — the pre-Apollo half, measured
+
+Replayed 2026-09-06T14:52Z inside the production container over the retained
+payloads: `run_precontact_qualification(..., fetch_sources=False)` — JobGate and
+RoleGate, **no provider contacted, nothing spent, nothing written to production
+state**.
+
+| cohort | input | contact-eligible | rate | rejected | unverified |
+|---|---|---|---|---|---|
+| 2026-09-04 (6,205) | 6,205 | **5,753** | **92.7%** | 452 | 472 |
+| 2026-09-06 (226) | 226 | **194** | **85.8%** | 32 | 13 |
+
+**The pre-Apollo gates are not the loss.** They pass 93% of what acquisition brings
+in. Every rejection reason that fired, on the 09-04 cohort:
+
+    REJECT_QUALITY_GUARD_OTHER            288
+    REJECT_ROLE_MISMATCH                   87
+    REJECT_ROLE_NOT_GLOBALLY_COVERABLE     28
+    REJECT_SECURITY_CLEARANCE_REQUIRED     23
+    REJECT_EXCLUDED_SENIORITY              13
+    REJECT_INTERNSHIP                      11
+    REJECT_NON_PAYING                       1
+    REJECT_FIELD_WORK_REQUIRED              1
+
+So the 18.8% opportunity → approved decomposes as:
+
+    4,147 opportunities
+      -> 1,048 contacts found        25.3%   <-- the loss, and it is the APOLLO stage
+      ->   781 Airtable rows         74.5%   of contacts
+      -------------------------------------
+                                     18.8%   overall  (0.253 x 0.745)
+
+**Reaching ~51% therefore means moving `opportunity -> contact`, which is hiring-
+manager discovery on Apollo.** At the observed 74.5% downstream rate it would need
+about **68% opportunity → contact** against 25.3% observed — and that 25.3% comes
+from a run Apollo truncated at 2,170 of 2,410 leads, so it is a floor of unknown
+tightness.
+
+**This makes the Apollo billing blocker the critical path, not a side issue.** Every
+remaining question about the target — is 25.3% real or an artefact of truncation, does
+the alternate-contact cascade or the org-ID fallback move it, what does an untruncated
+run convert at — is downstream of Apollo answering. Nothing else in this document is
+blocked; this is.
+
+**One observability defect found in passing.** `REJECT_QUALITY_GUARD_OTHER` is 288 of
+452 rejections — the single largest pre-Apollo rejection reason is literally "other".
+It is 7% of postings so the volume at stake is small, but a catch-all cannot be acted
+on, and this is the second time a fallback label has hidden the real reason (the first
+was `REJECT_UNRESOLVABLE_POSTING`, 704 misattributed, fixed in PR #55). Recorded as a
+finding, not fixed here: it changes no number in this assessment.
+
 ### Sending is not the constraint
 
 Measured read-only on Instantly: 16 of 18 campaigns ACTIVE, `daily_limit` 550 each,
@@ -234,17 +334,21 @@ truncated backlog run and should not be treated as the steady-state rate.
 ## Conclusion
 
 **The target is inventory-feasible from the sources already active, and
-conversion-bound.** Corrected from this morning's opposite conclusion, which was
-built on a single weekend window.
+conversion-bound — and the conversion loss is Apollo-bound.** Corrected twice today:
+first from "not achievable" (built on a weekend window), then narrowed from "raise
+conversion" to the specific stage that loses it.
 
-* Business-day addressable inventory: **2,362–2,897 postings/day**, measured over
-  five matched windows at zero credits.
+* Business-day addressable inventory: **2,362–2,897 postings/day**, five matched
+  windows, zero credits.
 * That is **~1,700–2,200 company × function opportunities/day** on the production
   identity functions — above the 1,000/day target before conversion.
-* Reaching 1,000 approved/day therefore needs **~51% opportunity → approved**. The
-  only observed figure is 18.8%, and it is a floor from a run Apollo truncated.
-* If real conversion is far below that, **14.4x more inventory** sits behind the
-  title filter, unmeasured.
+* Plus **615 opportunities of free stock** on the 145 direct boards, ~44/day
+  thereafter.
+* Reaching 1,000 approved/day needs **~51% opportunity → approved**. Observed 18.8%.
+* That 18.8% is **25.3% opportunity → contact × 74.5% contact → approved**. The
+  pre-Apollo gates pass **92.7%** and are not the loss.
+* So the whole remaining question is hiring-manager discovery on Apollo, measured once
+  on a run Apollo truncated.
 * Sustaining full inventory costs ~2,556 Jobs credits/day — about a month's current
   allowance. A budget decision, not a capability one.
 
@@ -262,19 +366,27 @@ each with its design and its cost, so they can be approved or declined once.
 
 ### 1. Measure relevance among title-excluded inventory — **500 Fantastic Jobs credits, 0 Apollo**
 
-The single largest identified lever: the production title expression admits 361
-postings/24h on LinkedIn while the same firmographic filters without it admit
-**5,511**. Whether any of that 15× is commercially relevant is unmeasured, and the
-title-selected corpus we hold cannot estimate it.
+**The single largest identified lever, and now the only one still unmeasured.** The
+production title expression admits ~2,134 postings/day; the same firmographic filters
+without it admit **30,736/day — 14.4×**. Whether any of that is commercially relevant
+is unmeasured, and a title-selected corpus cannot estimate it.
+
+*What the free work already established.* The 145 direct boards give a
+title-unfiltered corpus of 20,293 real postings at ICP employers, of which **21.84%**
+match the production role catalog — against a Fantastic titled/untitled ratio of
+**6.9%**. Different populations, so it does not settle the question; but it is
+evidence that the title expression may select well below the rate at which ICP
+employers actually hire for catalogue roles, which raises rather than lowers the value
+of measuring it properly.
 
 *Design.* One bounded pass: fetch 500 rows on the production firmographic filters
 with the title expression removed, classify every row offline with the production
 `_classify`, and report the role-relevant fraction with its confidence interval. 500
 rows gives roughly ±4 points at 95% confidence — enough to tell "a few percent" from
-"a third" and therefore to decide whether widening the catalog is worth anything.
+"a fifth", which is exactly the range in dispute.
 
-*Cost.* 500 Jobs credits, ~0.6% of the 77,642 remaining. No Apollo, no enrichment,
-no delivery. The rows are classified and counted, not enriched.
+*Cost.* 500 Jobs credits, ~0.6% of the ~77,600 remaining. No Apollo, no enrichment, no
+delivery. The rows are classified and counted, never enriched.
 
 *Decision it informs.* Whether to widen the role catalog — the only lever of the
 right order of magnitude for the 1,000/day target.
@@ -292,27 +404,23 @@ to be genuinely different work. That makes a guess a bad instrument and a
 measurement a cheap one, which is exactly why this is the request rather than a
 catalog patch.
 
-### 2. Activate the 145 direct ATS boards — **0 credits, one variable**
+### 2. Activate the 145 direct ATS boards — **0 credits, one variable** — MEASURED
 
-`ATS_DIRECT_ACQUISITION_ENABLED` is already true, but the lane is built only when
-`"ats"` is in `--lanes` and the production start command passes `--lanes fantastic`.
-The boards are scraped directly, so they cost no provider credits.
+No longer a request to measure something; it is now a decision with the number
+attached. Swept 2026-09-06: **20,293 open postings, 134 companies, 615 company ×
+function opportunities, ~464 postings/day and ~44 opportunities/day** in the trailing
+7 days, at **zero provider cost**. See the measurement section above.
 
-*This no longer needs an access I do not have.* It previously did — the
-start-command mutation is denied — so `ACQUISITION_EXTRA_LANES` was added
-(`6369bd9`): a comma list that is **added** to `--lanes` and can only widen it, so
-the deployed start command remains the floor of what runs. It is resolved before the
-strict preflight, so the added lane faces the same dependency checks as a requested
-one. Today's production preflight already reads `boards 145 from ats_board_registry
-(145 tracked) err=none`, so that dependency is met.
+*What it does not do.* 145 boards is a fixed employer set, so it saturates: the first
+sweep takes the 615, and after that only new roles count. It is a modest, permanent,
+free addition — not a route to 1,000/day.
 
-*Design.* Set `ACQUISITION_EXTRA_LANES=ats` on GTM — an authorized `variableUpsert`.
-One run then measures the boards' yield in postings and company × function
-opportunities using the `capacity()` step already built.
+*What it costs downstream.* Nothing at the provider, but every opportunity it finds
+consumes Apollo enrichment like any other, so it waits on the same prerequisite.
 
-*Cost.* Zero provider credits. It does consume Apollo enrichment for whatever it
-finds, so it waits on the same Apollo prerequisite as everything else — which is why
-it is listed as a decision rather than already done.
+*Design.* `ACQUISITION_EXTRA_LANES=ats` on GTM — an authorized `variableUpsert`; the
+start-command change is no longer needed (`6369bd9`). Today's production preflight
+already reads `boards 145 from ats_board_registry (145 tracked) err=none`.
 
 ### 3. Historical backfill — **a row budget, to be chosen**
 

@@ -479,6 +479,45 @@ the obstacle is now identified and bounded rather than asserted.
 Cost of running at full measured inventory: ~2,556 Jobs credits/day, ~77,000/month
 against ~77,600 remaining. A budget decision, not a capability one.
 
+### The two unmeasured sources, measured — and conversion located (2026-09-06 14:40-14:52Z)
+
+**145 direct ATS boards, all of them, 0 provider credits, nothing persisted:**
+20,293 open postings / 134 companies / **615 company x function opportunities**;
+3,251 posted in the trailing 7 days = **464 postings/day, ~44 opportunities/day**.
+Three boards fail and are named (lever 404, workday 422, cornerstone invalid JSON);
+workday is 63% of postings and 78% of the wall clock.
+
+A defect in my own probe first: it dated **0 of 15,272** postings because it guessed
+`date_posted` when `_direct_job` normalises everything into
+`job_posted_at_datetime_utc`. A confident stock figure was printed beside a flow of
+zero. Fixed, then re-swept -- 145/145 boards, none timed out.
+
+**Role-relevant fraction on that title-UNFILTERED corpus: 21.84%.** Against a
+Fantastic titled/untitled ratio of 6.9%. Different populations, so it does not settle
+authorization item 1 -- but it is the first evidence that the title expression may
+select well below the rate at which ICP employers actually hire for catalogue roles.
+
+**Pre-Apollo conversion, replayed offline over the retained payloads** (JobGate +
+RoleGate, `fetch_sources=False`, no provider contacted):
+
+    09-04:  6,205 in -> 5,753 contact-eligible  92.7%   452 rejected, 472 unverified
+    09-06:    226 in ->   194 contact-eligible  85.8%    32 rejected,  13 unverified
+
+**The gates are not the loss.** The 18.8% decomposes as **25.3% opportunity ->
+contact** (the Apollo stage) x **74.5% contact -> approved**. Reaching ~51% means
+moving opportunity->contact from 25.3% to ~68%, and that 25.3% comes from a run
+Apollo truncated at 2,170 of 2,410 leads.
+
+**Consequence for sequencing: the Apollo billing blocker is the critical path.** Every
+remaining question about the 1,000/day target is downstream of Apollo answering.
+Nothing else is blocked; this is.
+
+**Found in passing, recorded not fixed:** `REJECT_QUALITY_GUARD_OTHER` is 288 of 452
+pre-Apollo rejections -- the largest single reason is a catch-all. 7% of postings, so
+no number here changes, but a catch-all cannot be acted on, and this is the second
+fallback label to hide a real reason (the first was `REJECT_UNRESOLVABLE_POSTING`,
+704 misattributed, PR #55).
+
 ### Final state
 
     origin/main   6b0d117, deployed to both services
