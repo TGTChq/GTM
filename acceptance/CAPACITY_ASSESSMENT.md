@@ -92,6 +92,17 @@ scenario.
   matched 24h window.
 * **The source union** is unmeasured, so ≤881 is an upper bound, not the figure.
 
+### Sending is not the constraint
+
+Measured read-only on Instantly: 16 of 18 campaigns ACTIVE, `daily_limit` 550 each,
+33 sending accounts, 3-step (control) and 4-step (challenger) sequences. That is
+roughly 8,800 sends/day of capacity against a target of 1,000 approved leads/day, so
+nothing downstream of approval limits throughput.
+
+(The 769 leads showing zero executed steps are queued, not stuck: campaigns run
+Mon-Fri 08:00-18:00 America/Chicago and the leads landed Friday 19:02 CT, so the
+first send is Monday 08:00 CT.)
+
 ### Still dependent on Apollo
 
 The opportunity → contact → send-safe → approved conversion cannot be re-measured
