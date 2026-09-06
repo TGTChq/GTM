@@ -314,6 +314,38 @@ on, and this is the second time a fallback label has hidden the real reason (the
 was `REJECT_UNRESOLVABLE_POSTING`, 704 misattributed, fixed in PR #55). Recorded as a
 finding, not fixed here: it changes no number in this assessment.
 
+### Is any of the contact-discovery loss ours? Measured: no.
+
+The 25.3% opportunity → contact was being attributed wholesale to Apollo. Part of
+that stage never reaches Apollo: `_process_company` computes `_best_input_domain(job)`
+offline, and an opportunity with no resolvable search domain is recorded
+`missing_company_domain` without a people search ever running. If a large share
+arrived domainless, that would be an **internal** loss fixable by domain resolution
+rather than by billing — and it would be fixable today.
+
+Measured offline over the retained payloads, grouped by `company_key_for_job` (the
+key `_process_company` itself uses), 2026-09-06T15:16Z:
+
+| cohort | opportunities | with first-party domain | depending on Apollo for one | recoverable from a sibling posting |
+|---|---|---|---|---|
+| 2026-09-04 | 4,148 | **4,109 (99.06%)** | 39 | 4 |
+| 2026-09-06 | 175 | **173 (98.86%)** | 2 | 0 |
+
+**There is no internal loss here.** 99% of opportunities arrive with their own
+employer domain and reach Apollo able to be searched. Of 4,109 that did, 1,048
+produced a contact — **25.5%** — and that is Apollo's hiring-manager coverage, not a
+data-preparation failure of ours.
+
+This is a negative result and it is the useful kind: it eliminates the one remaining
+internal hypothesis about the conversion gap. What is left is external by
+measurement rather than by assumption.
+
+(A real but tiny structural quirk surfaced while testing it: `company_key_for_job` is
+"domain or name", so one employer splits into two groups when only some of its
+postings carry a domain, and the domainless half spends an Apollo organisation enrich
+to return `missing_company_domain` while the domain sits on a sibling posting. It
+affects **3 companies and 4 opportunities** in 4,148. Recorded, not worth a change.)
+
 ### Sending is not the constraint
 
 Measured read-only on Instantly: 16 of 18 campaigns ACTIVE, `daily_limit` 550 each,
@@ -347,6 +379,9 @@ conversion" to the specific stage that loses it.
 * Reaching 1,000 approved/day needs **~51% opportunity → approved**. Observed 18.8%.
 * That 18.8% is **25.3% opportunity → contact × 74.5% contact → approved**. The
   pre-Apollo gates pass **92.7%** and are not the loss.
+* **99.1% of opportunities already carry a first-party domain**, so they reach Apollo
+  able to be searched. The loss is Apollo's hiring-manager coverage, not our data
+  preparation — measured, not assumed.
 * So the whole remaining question is hiring-manager discovery on Apollo, measured once
   on a run Apollo truncated.
 * Sustaining full inventory costs ~2,556 Jobs credits/day — about a month's current

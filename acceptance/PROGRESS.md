@@ -518,6 +518,29 @@ no number here changes, but a catch-all cannot be acted on, and this is the seco
 fallback label to hide a real reason (the first was `REJECT_UNRESOLVABLE_POSTING`,
 704 misattributed, PR #55).
 
+### The last internal hypothesis, tested and dead (2026-09-06T15:16Z)
+
+Before accepting that the conversion gap is external, the one part of contact
+discovery that never touches Apollo had to be ruled out: an opportunity with no
+resolvable search domain is recorded `missing_company_domain` without a people search
+running, and that would be OUR loss to fix.
+
+Measured offline over the retained payloads, grouped by `company_key_for_job`:
+
+    09-04   4,148 opportunities   4,109 with a first-party domain   99.06%
+    09-06     175 opportunities     173 with a first-party domain   98.86%
+
+**No internal loss.** 4,109 opportunities reached Apollo able to be searched and 1,048
+produced a contact -- 25.5% -- which is Apollo's hiring-manager coverage, not data
+preparation. A negative result, and the useful kind: it eliminates the last internal
+hypothesis, so what remains is external by measurement rather than by assumption.
+
+Structural quirk found while writing the test, quantified and left alone:
+`company_key_for_job` is "domain or name", so one employer splits into two groups when
+only some of its postings carry a domain, and the domainless half spends an Apollo
+organisation enrich to return `missing_company_domain` while the domain sits on a
+sibling posting. **3 companies, 4 opportunities out of 4,148.** Not worth a change.
+
 ### Final state
 
     origin/main   6b0d117, deployed to both services
