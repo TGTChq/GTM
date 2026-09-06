@@ -437,6 +437,61 @@ def refresh_ledger(root: Path) -> dict:
             "unreadable_entries": sorted(set(problems_before) | set(problems_after))}
 
 
+def qualify_offline(root: Path, run_ids) -> dict:
+    """Replay the PRE-APOLLO half of the funnel over retained payloads.
+
+    Conversion is now the binding constraint on the 1,000/day target -- inventory is
+    not -- and the only observed figure, 18.8%, comes from a run Apollo truncated.
+    Apollo cannot be re-run. But the first half of that funnel never calls Apollo:
+    `run_precontact_qualification` is JobGate + RoleGate over the postings, and with
+    `fetch_sources=False` it makes no network request at all.
+
+    So the question "where are opportunities lost BEFORE a credit is ever spent" is
+    answerable today, on the real production cohort, for nothing. If a large share is
+    rejected here, that is a conversion lever that does not wait on billing.
+
+    Output goes to a throwaway directory: the gates write their filtered corpus, and
+    none of it may land in production state.
+    """
+    import tempfile
+
+    from qualification_pipeline import run_precontact_qualification
+
+    out = {"unit_note": "postings -> pre-contact qualification outcome", "runs": []}
+    for run_id in run_ids:
+        src = root / "run_artifacts" / run_id / "enrichment" / "postings.json"
+        row = {"run_id": run_id, "unavailable": ""}
+        if not src.is_file():
+            row["unavailable"] = "postings.json absent"
+            out["runs"].append(row)
+            continue
+        work = Path(tempfile.mkdtemp(prefix="qual_replay_"))
+        try:
+            result = run_precontact_qualification(str(src), output_dir=str(work),
+                                                  fetch_sources=False)
+        except Exception as exc:  # noqa: BLE001 - a replay must not fail the pass
+            row["unavailable"] = f"{type(exc).__name__}: {exc}"
+            out["runs"].append(row)
+            continue
+        stats = dict(getattr(result, "stats", {}) or {})
+        row.update({
+            "input_jobs": int(getattr(result, "input_jobs", 0) or 0),
+            "contact_eligible_jobs": int(getattr(result, "contact_eligible_jobs", 0) or 0),
+            "rejected_jobs": int(getattr(result, "rejected_jobs", 0) or 0),
+            "needs_check_jobs": int(getattr(result, "needs_check_jobs", 0) or 0),
+            "unverified_jobs": int(getattr(result, "unverified_jobs", 0) or 0),
+            # Only reasons that FIRED -- a zero explains nothing, the same rule the
+            # weekly report now applies.
+            "reasons": {k[len("reason__"):]: v for k, v in stats.items()
+                        if str(k).startswith("reason__") and isinstance(v, int) and v > 0},
+        })
+        if row["input_jobs"]:
+            row["contact_eligible_rate"] = round(
+                row["contact_eligible_jobs"] / row["input_jobs"], 4)
+        out["runs"].append(row)
+    return out
+
+
 def provenance_probe(root: Path) -> dict:
     """Why each headline metric is measured, partial or unavailable -- per run.
 
@@ -657,6 +712,11 @@ def main(argv=None) -> int:
         _say("4c. CAPACITY: company x function opportunities from retained payloads")
         ids = [r.strip() for r in a.capacity_runs.split(",") if r.strip()]
         print(json.dumps(capacity(root, ids), indent=2))
+
+    if getattr(config, "MAINTENANCE_QUALIFY_RUNS", ""):
+        _say("4c0. PRE-APOLLO QUALIFICATION REPLAY (offline, no provider contacted)")
+        ids = [r.strip() for r in str(config.MAINTENANCE_QUALIFY_RUNS).split(",") if r.strip()]
+        print(json.dumps(qualify_offline(root, ids), indent=2, default=str))
 
     if getattr(config, "MAINTENANCE_ATS_BOARD_YIELD", ""):
         # The 145 registered boards are scraped from each employer's OWN public job

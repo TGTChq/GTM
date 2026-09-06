@@ -345,3 +345,66 @@ class TheDurableRecordIsRefreshedWhileTheEvidenceExists(unittest.TestCase):
         from orchestrator.run_ledger import LEDGER_STORE
         (root / LEDGER_STORE / "not-an-entry.json").write_text("{{{", encoding="utf-8")
         self.assertTrue(run_maintenance.refresh_ledger(root)["unreadable_entries"])
+
+
+class ThePreApolloHalfOfTheFunnelIsMeasurableWithoutApollo(unittest.TestCase):
+    """Conversion is the binding constraint on 1,000 approved/day -- inventory is
+    not -- and the only observed figure comes from a run Apollo truncated. Apollo
+    cannot be re-run, but the first half of that funnel never calls it: JobGate and
+    RoleGate over the retained postings, with `fetch_sources=False` making no network
+    request at all. So "where are opportunities lost before a credit is spent" is
+    answerable today, on the real cohort, for nothing."""
+
+    def _root(self, jobs):
+        import json as _json
+        import tempfile as _tempfile
+        from pathlib import Path as _Path
+
+        root = _Path(_tempfile.mkdtemp())
+        d = root / "run_artifacts" / "r1" / "enrichment"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "postings.json").write_text(_json.dumps({"jobs": jobs}), encoding="utf-8")
+        return root
+
+    def _job(self, jid, title="Head of Sales", employer="Acme Robotics"):
+        return {"job_id": jid, "posting_id": jid, "job_title": title, "title": title,
+                "employer_name": employer, "company_name": employer,
+                "employer_website": "acme.example",
+                "job_apply_link": f"https://acme.example/{jid}"}
+
+    def test_a_missing_payload_is_reported_not_crashed(self):
+        out = run_maintenance.qualify_offline(self._root([]), ["absent-run"])
+        self.assertEqual(out["runs"][0]["unavailable"], "postings.json absent")
+
+    def test_it_reports_the_gate_outcome_for_a_real_payload(self):
+        out = run_maintenance.qualify_offline(self._root(
+            [self._job("j1"), self._job("j2")]), ["r1"])
+        row = out["runs"][0]
+        self.assertEqual(row.get("unavailable", ""), "")
+        self.assertEqual(row["input_jobs"], 2)
+        for key in ("contact_eligible_jobs", "rejected_jobs", "needs_check_jobs"):
+            self.assertIsInstance(row[key], int)
+
+    def test_zero_count_reasons_are_omitted(self):
+        """Same rule the weekly report now applies: a reason that did not fire
+        explains nothing, and a fixed-shape stats dict emits them all."""
+        out = run_maintenance.qualify_offline(self._root([self._job("j1")]), ["r1"])
+        self.assertTrue(all(v > 0 for v in out["runs"][0]["reasons"].values()))
+
+    def test_nothing_is_written_under_the_artifact_root(self):
+        """The gates write a filtered corpus; none of it may land in production
+        state, so the output goes to a throwaway directory."""
+        root = self._root([self._job("j1")])
+        before = {p.name for p in (root / "run_artifacts" / "r1").iterdir()}
+        run_maintenance.qualify_offline(root, ["r1"])
+        after = {p.name for p in (root / "run_artifacts" / "r1").iterdir()}
+        self.assertEqual(before, after)
+
+    def test_it_makes_no_network_request(self):
+        """Pinned on the call: `fetch_sources=False` is what guarantees it, and a
+        replay that fetched sources would be an acquisition run wearing a
+        measurement's name."""
+        import inspect
+
+        source = inspect.getsource(run_maintenance.qualify_offline)
+        self.assertIn("fetch_sources=False", source)
