@@ -586,6 +586,31 @@ service; a count cannot be joined to what it enrolled.
 the interrupted run lacked.** `with_contact / resumed` is the first honest
 opportunity -> contact measurement available, and it costs no acquisition credits.
 
+### Reconciled from the original execution (2026-09-06T17:39Z)
+
+From the 09-04 run's sealed `hiring_manager` stage, not a payload recount:
+
+    4,147 opportunities retained
+    2,410 leads produced       711 passed / 712 rejected / 987 deferred / 0 errored
+      not_icp                    606   internal skip (our ICP rule)
+      company_unresolved         106   internal skip
+      hiring_manager_not_found   247   genuine no-match
+      email_unverified           740   contact FOUND, email unverifiable
+    contact_discovery_entered    ABSENT   ->   rate UNKNOWN
+
+**712 of 2,410 outcomes are INTERNAL.** "All remaining conversion loss is external" is
+withdrawn -- the run's own record refutes it. And **1,737 opportunities never produced
+a lead at all**, a lower bound on never-attempted work.
+
+`email_unverified` at 740 is the largest single outcome and had been filed under
+provider errors by my first classification, which pointed the remedy at the wrong
+stage. A person was found; the email could not be promoted to verified, and only
+Apollo can do that.
+
+The reconciler checks its buckets against the stage's own sealed identity
+(`reasons_reconcile`), because a classification that drops a reason reads as
+completeness.
+
 ### Final state — 2026-09-06T15:30Z
 
     origin/main   afd92db, deployed to both services (SUCCESS)
@@ -607,9 +632,18 @@ opportunity -> contact measurement available, and it costs no acquisition credit
 | A2 | `ACQUISITION_EXTRA_LANES=ats` | a variable, once Apollo serves | activates 615 free opportunities + ~44/day |
 | A3 | historical backfill row budget | a spend decision | only worth deciding after A1 |
 
-**Nothing internal is outstanding.** The last internal hypothesis — that part of the
-contact-discovery loss was our own missing domains — was tested and is dead at 99.1%
-first-party domain coverage.
+**Internal work is NOT closed.** The reconciliation reopened it: 712 internal skips
+(606 `not_icp`, 106 `company_unresolved`) and 1,737 opportunities that never reached
+the stage are ours, not the provider's. What cannot be done without Apollo is
+*measuring* whether the remaining outcomes improve — which is why the first run after
+Apollo returns is the recovered cohort and not new acquisition.
+
+| # | internal item reopened by the reconciliation | state |
+|---|---|---|
+| I1 | 606 `not_icp` rejections at the hiring-manager stage — is the ICP rule right, and is it being applied to Apollo org data that was itself degraded? | open, needs Apollo to re-measure |
+| I2 | 106 `company_unresolved` | open |
+| I3 | 1,737 opportunities never reaching the stage on an interrupted run | open; the recovered cohort is exactly this work |
+| I4 | 740 `email_unverified` — a person found, email unpromotable | open; Apollo-only remedy |
 
 ### Resumable checkpoint
 
