@@ -774,3 +774,67 @@ class OutcomeForensicsDecomposesOnlyWhatTheArtifactsSupport(unittest.TestCase):
                            "leads.json": {"leads": [{"hm_reason": "not_icp"}]}})
         row = run_maintenance.outcome_forensics(root, ["r1"])["runs"][0]
         self.assertEqual(row["rows_scanned"], 1)
+
+
+class LargeCorporaAreStreamedNotSkipped(unittest.TestCase):
+    """The first forensics run reported "no per-lead rows" for a run whose enrichment
+    directory holds a 143 MB enriched-lead corpus and a 90 MB progress file. It had
+    skipped both for being large -- discarding the only evidence that could answer
+    the question, and then reporting the absence as a property of the run.
+
+    Large files are counted by a chunked scan for literal `"field": "value"`
+    occurrences: no parser, bounded memory. It counts FIELD OCCURRENCES rather than
+    objects and is labelled that way, which makes it an upper bound per lead -- the
+    safe direction for "this outcome exists in quantity"."""
+
+    def _file(self, payload):
+        import json as _json
+        import tempfile as _tempfile
+        from pathlib import Path as _Path
+
+        path = _Path(_tempfile.mkdtemp()) / "big.json"
+        path.write_text(_json.dumps(payload), encoding="utf-8")
+        return path
+
+    def test_it_counts_values_without_parsing(self):
+        path = self._file({"leads": [{"email_status": "verified"},
+                                     {"email_status": "extrapolated"},
+                                     {"email_status": "verified"}]})
+        counts = run_maintenance._stream_field_counts(path, ("email_status",))
+        self.assertEqual(counts["email_status"], {"verified": 2, "extrapolated": 1})
+
+    def test_a_match_split_across_a_chunk_boundary_is_not_lost(self):
+        """The bug a naive chunked scanner has, and the reason for the carry window."""
+        path = self._file({"leads": [{"email_status": "verified"} for _ in range(40)]})
+        whole = run_maintenance._stream_field_counts(path, ("email_status",))
+        tiny = run_maintenance._stream_field_counts(path, ("email_status",), chunk=17)
+        self.assertEqual(whole["email_status"]["verified"], 40)
+        self.assertEqual(tiny["email_status"]["verified"], 40)
+
+    def test_an_absent_field_yields_no_entry_rather_than_a_zero(self):
+        path = self._file({"leads": [{"other": "x"}]})
+        self.assertEqual(run_maintenance._stream_field_counts(path, ("email_status",)),
+                         {})
+
+    def test_an_unreadable_file_returns_empty_rather_than_raising(self):
+        from pathlib import Path as _Path
+
+        self.assertEqual(
+            run_maintenance._stream_field_counts(_Path("no-such-file.json"),
+                                                 ("email_status",)), {})
+
+    def test_icp_reason_families_are_found_when_nested(self):
+        """`hiring_manager_summary.json` is 936 bytes and was reported as carrying no
+        ICP stats because the first version looked only at the top level."""
+        import json as _json
+        import tempfile as _tempfile
+        from pathlib import Path as _Path
+
+        root = _Path(_tempfile.mkdtemp())
+        enr = root / "run_artifacts" / "r1" / "enrichment"
+        enr.mkdir(parents=True, exist_ok=True)
+        (enr / "hiring_manager_summary.json").write_text(_json.dumps(
+            {"stats": {"nested": {"company_criteria_reason__headcount": 400}}}),
+            encoding="utf-8")
+        row = run_maintenance.outcome_forensics(root, ["r1"])["runs"][0]
+        self.assertEqual(row["icp_reason_families"], {"headcount": 400})

@@ -586,6 +586,48 @@ def execution_reconcile(root: Path, run_ids) -> dict:
     return out
 
 
+def _stream_field_counts(path: Path, fields, chunk: int = 4 << 20) -> dict:
+    """Count literal `"field": "value"` occurrences in a large JSON file.
+
+    Deliberately not a parser. The 2026-09-04 enriched-lead corpus is 143 MB and the
+    progress file 90 MB; loading either to answer "how many leads had which Apollo
+    email status" would need more memory than the container has for a question that
+    is really about counting strings.
+
+    It counts FIELD OCCURRENCES, not objects, and the caller labels them that way. A
+    lead carrying the field twice is counted twice -- so these are an upper bound per
+    lead, which is the safe direction for a number used to say "this outcome exists in
+    quantity" rather than to compute a rate.
+    """
+    import re
+    from collections import Counter as _Counter
+
+    patterns = {f: re.compile(rf'"{re.escape(f)}"\s*:\s*"([^"]{{0,64}})"') for f in fields}
+    found = {f: _Counter() for f in fields}
+    tail = ""
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+            while True:
+                block = fh.read(chunk)
+                if not block:
+                    break
+                text = tail + block
+                # A match wholly inside the carried tail was counted on the previous
+                # pass; one that STARTS in the tail and ends past it was split and was
+                # not. `end() > len(tail)` is exactly that distinction -- and getting
+                # it wrong double-counts, which a 3-lead fixture at a 32-byte chunk
+                # size showed as 4 before this line was written.
+                boundary = len(tail)
+                for field_name, pattern in patterns.items():
+                    for match in pattern.finditer(text):
+                        if match.end() > boundary:
+                            found[field_name][match.group(1).lower()] += 1
+                tail = text[-200:]
+    except OSError:
+        return {}
+    return {f: dict(c.most_common(20)) for f, c in found.items() if c}
+
+
 def outcome_forensics(root: Path, run_ids) -> dict:
     """Decompose the hiring-manager outcomes from whatever the run actually wrote.
 
@@ -617,28 +659,60 @@ def outcome_forensics(root: Path, run_ids) -> dict:
         apollo_status: Counter = Counter()
         hunter_status: Counter = Counter()
         hm_reason: Counter = Counter()
+        streamed: list = []
+
+        def _walk_stats(obj) -> None:
+            """ICP reason families, wherever they are nested.
+
+            The first version looked only at the TOP level and reported "no
+            company_criteria_reason__* stats" for a run whose
+            `hiring_manager_summary.json` is 936 bytes and sitting right there.
+            """
+            if isinstance(obj, dict):
+                for key, value in obj.items():
+                    if isinstance(value, int) and str(key).startswith(
+                            "company_criteria_reason__"):
+                        icp[str(key)[len("company_criteria_reason__"):]] += value
+                    else:
+                        _walk_stats(value)
+            elif isinstance(obj, list):
+                for item in obj[:5000]:
+                    _walk_stats(item)
+
         for path in sorted(enr.rglob("*.json")):
             try:
                 size = path.stat().st_size
             except OSError:
                 continue
             row["files"].append({"name": str(path.relative_to(enr)), "bytes": size})
-            if path.name == "postings.json" or size > 80_000_000:
+            if path.name == "postings.json":
+                continue
+            # A 143 MB enriched-lead corpus is exactly where the per-lead detail
+            # lives, so skipping it -- which the first version did, and then reported
+            # "no per-lead rows" -- discards the only evidence that can answer the
+            # question. Large files are COUNTED BY STREAMING instead: chunked scans
+            # for literal `"field": "value"` occurrences, which needs no parser and
+            # bounded memory. It counts field occurrences, not objects, and is
+            # labelled as such rather than presented as a parsed census.
+            if size > 25_000_000:
+                counts = _stream_field_counts(
+                    path, ("email_status", "apollo_email_status", "hm_reason",
+                           "primary_reason"))
+                streamed.append({"file": str(path.relative_to(enr)),
+                                 "bytes": size, "counts": counts})
+                for field_name, values in counts.items():
+                    target = (hm_reason if field_name in ("hm_reason", "primary_reason")
+                              else apollo_status)
+                    for value, n in values.items():
+                        target[value] += n
                 continue
             data = _read_json(path)
-            # Stats dicts: the hiring-manager stage counts its own company decisions.
-            if isinstance(data, dict):
-                for key, value in data.items():
-                    if not isinstance(value, int):
-                        continue
-                    if str(key).startswith("company_criteria_reason__"):
-                        icp[str(key)[len("company_criteria_reason__"):]] += value
-            # Row collections: per-lead detail, wherever it lives.
+            _walk_stats(data)
             candidates = []
             if isinstance(data, list):
                 candidates = data
             elif isinstance(data, dict):
-                for key in ("leads", "rows", "records", "results", "contacts"):
+                for key in ("leads", "rows", "records", "results", "contacts", "jobs"):
                     if isinstance(data.get(key), list):
                         candidates = data[key]
                         break
@@ -662,6 +736,7 @@ def outcome_forensics(root: Path, run_ids) -> dict:
                               "unverified_email_deliverability"):
                     email["no_address" if not addr else
                           f"address_apollo_status={st or 'absent'}"] += 1
+        row["streamed_large_files"] = streamed
         row["rows_scanned"] = rows_scanned
         row["icp_reason_families"] = dict(icp.most_common())
         row["apollo_email_status"] = dict(apollo_status.most_common())
@@ -897,6 +972,93 @@ def provenance_probe(root: Path) -> dict:
     return {"runs": rows}
 
 
+def retrospective_report(root: Path, use_instantly: bool = False) -> dict:
+    """Brett's report for the LAST COMPLETED weekly period, not the partial week.
+
+    Every rendering so far has covered `2026-09-04 -> now`: the days since the last
+    anchor, which is the current partial week. A retrospective is a different
+    question, and the answer to it is a CLOSED window on the established schedule --
+    Friday to Friday, `America/Los_Angeles`, computed by the production
+    `weekly_window` rather than by me picking dates.
+
+    Rendered from whatever evidence survives for that week, with missing metrics
+    preserved as missing. The window in question contains the ten-day
+    zero-acquisition outage, so "not measured" is the correct answer for much of it
+    and the report must be allowed to say so.
+    """
+
+    from weekly_report.render import render_stakeholder_summary
+    from weekly_report.report import build_report
+    from weekly_report.timewindow import weekly_window
+
+    now = datetime.now(timezone.utc)
+    window = weekly_window(now, tz_name="America/Los_Angeles")
+
+    work = _report_copy(root)
+    from orchestrator.run_ledger import backfill_from_artifacts
+    backfill_from_artifacts(work)
+
+    instantly = None
+    if use_instantly:
+        from weekly_report.external import collect_instantly
+        instantly = collect_instantly(window, cfg=config)
+
+    report = build_report(window, artifact_roots=[str(work)], instantly=instantly,
+                          now=now)
+    text = render_stakeholder_summary(report)
+    keys = ("jobs_captured", "jobs_reviewed", "qualified_opportunities",
+            "contacts_found", "sent_to_airtable", "sent_to_instantly")
+    print(text)
+    print()
+    print("---- period ----")
+    print(f"label        {window.label}")
+    print(f"iso_week     {window.iso_week}")
+    print(f"timezone     {window.timezone_name} ({window.timezone_source})")
+    print(f"start_utc    {window.start_utc.isoformat()}")
+    print(f"end_utc      {window.end_utc.isoformat()}")
+    print(f"runs         {sorted(report.run_ids)}")
+    print("---- provenance ----")
+    for key in keys:
+        metric = report.metrics.get(key)
+        if metric is None:
+            print(f"  {key:26} ABSENT")
+            continue
+        print(f"  {key:26} {str(metric.value):>8}  {metric.status:<12} "
+              f"unit={metric.counted_unit or '-'}")
+    return {"label": window.label, "iso_week": window.iso_week,
+            "start_utc": window.start_utc.isoformat(),
+            "end_utc": window.end_utc.isoformat(),
+            "timezone": window.timezone_name,
+            "runs": sorted(report.run_ids),
+            "metrics": {k: {"value": report.metrics[k].value,
+                            "status": report.metrics[k].status,
+                            "unit": report.metrics[k].counted_unit}
+                        for k in keys if k in report.metrics},
+            "text": text}
+
+
+def _report_copy(root: Path) -> Path:
+    """The SELECTIVE isolated copy the report needs -- ledger plus top-level run json.
+
+    Copying the whole root drags in every `enrichment/postings.json` payload and every
+    previous maintenance backup, into container temp space, growing with each pass.
+    The report reads neither.
+    """
+    work = Path(tempfile.mkdtemp(prefix="report_")) / "orchestrator_v2"
+    work.mkdir(parents=True, exist_ok=True)
+    if (root / "reporting_ledger").is_dir():
+        shutil.copytree(root / "reporting_ledger", work / "reporting_ledger",
+                        dirs_exist_ok=True)
+    src_runs = root / "run_artifacts"
+    if src_runs.is_dir():
+        for run_dir in sorted(d for d in src_runs.iterdir() if d.is_dir()):
+            for artifact in run_dir.glob("*.json"):
+                dst = work / "run_artifacts" / run_dir.name / artifact.name
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(artifact, dst)
+    return work
+
+
 def ab_and_report(root: Path, window_start: str, use_instantly: bool) -> int:
     """The real artifacts+ledger vs ledger-only comparison, on production files."""
     from orchestrator.run_ledger import (LEDGER_STORE, backfill_from_artifacts,
@@ -1096,6 +1258,13 @@ def main(argv=None) -> int:
 
     _say("4e. PROVENANCE PROBE: which reported fields each run actually carries")
     print(json.dumps(provenance_probe(root), indent=2, default=str))
+
+    if getattr(config, "MAINTENANCE_RETROSPECTIVE", ""):
+        _say("4z. RETROSPECTIVE: the LAST COMPLETED weekly period (not this partial week)")
+        try:
+            retrospective_report(root, use_instantly=bool(a.instantly))
+        except Exception as exc:  # noqa: BLE001 - a report must not fail the pass
+            print(json.dumps({"error": f"{type(exc).__name__}: {exc}"}, indent=2))
 
     _say("5. REPORTING: artifacts+ledger VS ledger-only, on production files")
     rc = ab_and_report(root, a.window_start, a.instantly)

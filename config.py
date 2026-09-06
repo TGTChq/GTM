@@ -1431,6 +1431,9 @@ MAINTENANCE_ATS_BOARD_SECONDS = _env_int("MAINTENANCE_ATS_BOARD_SECONDS", 1500)
 # Run ids whose retained postings should be replayed through the PRE-APOLLO gates.
 # Offline (`fetch_sources=False`): no provider is contacted and nothing is spent.
 MAINTENANCE_QUALIFY_RUNS = os.getenv("MAINTENANCE_QUALIFY_RUNS", "")
+# Render Brett's report for the LAST COMPLETED weekly period (Friday-Friday,
+# America/Los_Angeles) rather than the current partial week. Read-only.
+MAINTENANCE_RETROSPECTIVE = os.getenv("MAINTENANCE_RETROSPECTIVE", "")
 PENDING_WORK_ENABLED = _env_bool("PENDING_WORK_ENABLED", True)
 PENDING_WORK_RESUME_MAX_PER_RUN = _env_int("PENDING_WORK_RESUME_MAX_PER_RUN", 2000)
 PENDING_WORK_MAX_AGE_DAYS = _env_int("PENDING_WORK_MAX_AGE_DAYS", 14)
