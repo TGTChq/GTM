@@ -237,3 +237,40 @@ volume, so SENDING is not the constraint on approved-lead throughput.
   watch the first run's `cursor: date_created slices` line.
 * The four items in `CAPACITY_ASSESSMENT.md`'s consolidated request need a decision;
   nothing is spent without one.
+
+
+### Third production maintenance pass — 2026-09-06T11:24Z
+
+`MAINTENANCE COMPLETE rc=0`, A/B **ACCEPTED** (text, values, statuses, units all
+identical). Brett's report unchanged and correct:
+
+    Jobs: 6,431 captured / reviewed not measured for the full period
+    Contacts found: 1,048        sent to Instantly: 769
+
+    jobs_captured     6431  measured     jobs_reviewed  226  partial
+    contacts_found    1048  measured     sent_to_airtable 781 measured
+    sent_to_instantly  769  measured     qualified_opportunities unavailable
+
+**The suppression fix landed.** `terminal_ids_known` went from 0 (the wrong-path bug
+found nothing) to **17,684**, and **1,032 already-finished postings were released
+from custody**:
+
+    pending 2,000  ->  released 1,032  ->  968 still held
+      20260904T130130Z-13b44a0c   1,774 -> 742
+      20260906T030230Z-2f74ac7c     226 ->  226   (the recovered work, intact)
+
+**One residue, scheduled.** The truncated-import bug had already set the "imported"
+marker for the 09-04 run, and the marker is consulted before the file is opened, so
+4,431 of its 6,205 retained opportunities remain outside custody.
+`--reimport-run` clears one run from the marker; `MAINTENANCE_REIMPORT_RUN` is set
+to that run, so **tonight's 03:00Z pass takes the remainder in automatically**. It
+can only add genuinely pending work -- adoption skips what custody holds and filters
+everything terminal.
+
+### Final state
+
+    origin/main   51b4ed8, deployed
+    GTM cron      0 3 * * *   (restored; verified)
+    Approved Sync 0 0 * * *   (untouched)
+    acquisition   PAUSED      MAINTENANCE_ONLY=1 (must be 0 before resuming)
+    gates         3172 passed, 1 skipped, 1001 subtests; integrity 27/0/0
