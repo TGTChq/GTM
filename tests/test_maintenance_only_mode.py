@@ -38,16 +38,25 @@ class MaintenanceOnlyIsRefusedWhileAcquisitionIsArmed(unittest.TestCase):
 
 
 class MaintenanceOnlyReachesNoPipelineCode(unittest.TestCase):
-    def test_delegation_happens_before_any_engine_is_built(self):
-        """Asserted on the source: the branch must precede the run-lock import, which
-        is the last statement before the pipeline is entered."""
+    def test_delegation_happens_before_any_lane_runner_is_built(self):
+        """The branch must precede `lane_runners` construction, not merely the
+        pipeline entry.
+
+        The first version of this test asserted only that the branch came before the
+        run-lock import -- which it did, while sitting AFTER
+        `lane_runners["fantastic"] = real_fantastic_runner()`. The runners are lazy
+        closures so nothing was contacted, but "no acquisition code is reachable" was
+        not what the code did. The assertion now matches the claim.
+        """
         import inspect
 
         source = inspect.getsource(run_orchestrator)
         branch = source.index('getattr(config, "MAINTENANCE_ONLY"')
+        lanes = source.index("lane_runners: Dict[str, Any] = {}")
         entry = source.index("from orchestrator.runlock import RunLockHeld")
-        self.assertLess(branch, entry,
-                        "maintenance must return before the pipeline is entered")
+        self.assertLess(branch, lanes,
+                        "maintenance must return before any lane runner is built")
+        self.assertLess(branch, entry)
 
     def test_it_delegates_to_the_narrow_entry_point(self):
         import inspect

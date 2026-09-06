@@ -590,6 +590,30 @@ def main(argv=None) -> int:
         if gate != 0:
             return gate
 
+    # MAINTENANCE-ONLY: do the recovery/reporting pass and stop.
+    #
+    # Placed BEFORE RunContext/StateManager. That is not tidiness: constructing a
+    # StateManager with a run_id CREATES A RUN DIRECTORY, and the ledger backfill
+    # then lifts that empty directory into the reporting ledger as an INTERRUPTED
+    # RUN. The 2026-09-06 maintenance pass did exactly that, and the resulting
+    # phantom run degraded every headline metric in Brett's report from `measured`
+    # to `partial` -- "1 of 4 runs did not record net-new captured postings" was
+    # the maintenance pass itself. A maintenance pass is not a pipeline run and
+    # must leave no trace that can be mistaken for one.
+    if bool(getattr(config, "MAINTENANCE_ONLY", False)):
+        if bool(getattr(config, "FANTASTIC_JOBS_ENABLED", False)):
+            print("MAINTENANCE_ONLY refused: acquisition is still armed "
+                  "(FANTASTIC_JOBS_ENABLED). Pause it first.", file=sys.stderr)
+            return 2
+        import run_maintenance
+        print("MAINTENANCE_ONLY: delegating to run_maintenance; no run directory, "
+              "lane runner, engine or delivery manager is created.")
+        return run_maintenance.main([
+            "--artifact-root", str(a.artifact_root),
+            "--window-start", "2026-09-04T07:00:00Z",
+            "--instantly",
+        ])
+
     ctx = RunContext.create(mode, _identity_arguments(a), run_id=a.run_id)
     state = StateManager(a.artifact_root, policy, run_id=ctx.run_id)
     budget = build_budget(a)
@@ -653,26 +677,6 @@ def main(argv=None) -> int:
         config.INSTANTLY_RATE_LIMIT_DELAY = 0
         seam_ctx = seam_fake(lambda method, url, **k: FakeResponse(
             {"records": [], "people": [], "contacts": [], "organizations": [], "data": {}}))
-
-    # MAINTENANCE-ONLY: do the recovery/reporting pass and stop. Reached before any
-    # lane, engine or delivery manager is used, so nothing downstream can run. The
-    # point is that the volume is only reachable from inside a scheduled container:
-    # this lets the EXISTING schedule carry the maintenance instead of the pipeline,
-    # without touching the start command.
-    if bool(getattr(config, "MAINTENANCE_ONLY", False)):
-        if bool(getattr(config, "FANTASTIC_JOBS_ENABLED", False)):
-            print("MAINTENANCE_ONLY refused: acquisition is still armed "
-                  "(FANTASTIC_JOBS_ENABLED). Pause it first.", file=sys.stderr)
-            return 2
-        import run_maintenance
-        print("MAINTENANCE_ONLY: delegating to run_maintenance; no lane, engine or "
-              "delivery manager is constructed.")
-        return run_maintenance.main([
-            "--artifact-root", str(a.artifact_root),
-            "--window-start", str(getattr(a, "maintenance_window_start", "")
-                                  or "2026-09-04T07:00:00Z"),
-            "--instantly",
-        ])
 
     from orchestrator.runlock import RunLockHeld
     try:

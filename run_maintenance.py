@@ -182,6 +182,51 @@ def adopt(root: Path) -> dict:
             "terminal_ids_excluded": len(seen_terminal)}
 
 
+def drop_empty_run(root: Path, run_id: str) -> dict:
+    """Remove a PHANTOM run: an artifact directory with no artifacts, plus its
+    ledger entry. Refuses on anything that carries evidence.
+
+    A maintenance pass used to construct a StateManager, which creates a run
+    directory; the ledger backfill then lifted that empty directory in as an
+    INTERRUPTED RUN, and the report counted it as an eligible run that had failed
+    to record its metrics. That single phantom degraded every headline metric in
+    Brett's report from `measured` to `partial`. The entry point no longer creates
+    one; this removes the one already written.
+
+    Guarded three ways: the directory must contain no files at all, the ledger
+    entry must carry no metrics, and its state must not be complete.
+    """
+    out = {"run_id": run_id, "removed_dir": False, "removed_ledger": False,
+           "refused": ""}
+    run_dir = root / "run_artifacts" / run_id
+    files = [f for f in run_dir.rglob("*") if f.is_file()] if run_dir.is_dir() else []
+    if files:
+        out["refused"] = f"directory holds {len(files)} file(s); not a phantom"
+        return out
+
+    from orchestrator.run_ledger import ledger_dir
+
+    entry_path = ledger_dir(root) / f"{run_id}.json"
+    if entry_path.is_file():
+        try:
+            entry = json.loads(entry_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            out["refused"] = f"ledger entry unreadable: {type(exc).__name__}"
+            return out
+        if entry.get("metrics"):
+            out["refused"] = "ledger entry carries metrics; not a phantom"
+            return out
+        if str(entry.get("state") or "").lower() == "complete":
+            out["refused"] = "ledger entry is complete; not a phantom"
+            return out
+        entry_path.unlink()
+        out["removed_ledger"] = True
+    if run_dir.is_dir():
+        shutil.rmtree(run_dir, ignore_errors=True)
+        out["removed_dir"] = not run_dir.is_dir()
+    return out
+
+
 def ab_and_report(root: Path, window_start: str, use_instantly: bool) -> int:
     """The real artifacts+ledger vs ledger-only comparison, on production files."""
     from orchestrator.run_ledger import (LEDGER_STORE, backfill_from_artifacts,
@@ -278,6 +323,9 @@ def main(argv=None) -> int:
     ap.add_argument("--instantly", action="store_true",
                     help="read-only Instantly count for the report window")
     ap.add_argument("--backup-dir", default="")
+    ap.add_argument("--drop-empty-run", default="",
+                    help="remove a phantom run dir + ledger entry "
+                         "(refuses if either carries evidence)")
     a = ap.parse_args(argv)
 
     _refuse_if_acquisition_is_live()
@@ -302,6 +350,10 @@ def main(argv=None) -> int:
 
     _say("4. ADOPT INTERRUPTED WORK INTO pending_work")
     print(json.dumps(adopt(root), indent=2, default=str))
+
+    if a.drop_empty_run:
+        _say(f"4b. DROP PHANTOM RUN {a.drop_empty_run}")
+        print(json.dumps(drop_empty_run(root, a.drop_empty_run), indent=2))
 
     _say("5. REPORTING: artifacts+ledger VS ledger-only, on production files")
     rc = ab_and_report(root, a.window_start, a.instantly)
