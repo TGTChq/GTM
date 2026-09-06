@@ -1,0 +1,68 @@
+ledger entries before backfill : []
+ledger entries after backfill  : ['20260904T130130Z-13b44a0c', '20260905T030439Z-1d102bec', '20260906T030230Z-2f74ac7c']
+written by backfill            : ['20260904T130130Z-13b44a0c', '20260905T030439Z-1d102bec', '20260906T030230Z-2f74ac7c']
+marked as reconstructed        : ['20260904T130130Z-13b44a0c', '20260905T030439Z-1d102bec', '20260906T030230Z-2f74ac7c']
+period                         : 2026-09-04T07:00:00+00:00 -> 2026-09-06T06:54:24.323914+00:00
+A runs                         : ['20260904T130130Z-13b44a0c', '20260905T030439Z-1d102bec', '20260906T030230Z-2f74ac7c']
+B runs (ledger only)           : ['20260904T130130Z-13b44a0c', '20260905T030439Z-1d102bec', '20260906T030230Z-2f74ac7c']
+stakeholder text identical     : True
+values/status/units identical  : True
+ACCEPTED                       : True
+
+========================================================================
+Period: Sep 04 00:00 - Sep 05 23:54 PDT (2.0 days)
+Jobs: captured not measured for the full period / reviewed not measured
+Qualified opportunities: not measured
+Contacts found: 1,048
+sent to Instantly: 769
+
+Biggest bottleneck from past week
+1 of 3 runs in this period did not record net-new captured postings, so the
+period's entry total is not established and no downstream rate can be read
+against it. The runs that did record it are in the report document.
+
+Action plan for the following week
+1. Some runs in this period did not record net-new captured postings, so the
+   period total cannot be stated. Confirm every run in the window is on a
+   build that emits it before reading this report's rates.
+2. jobs_reviewed comes from
+   orchestrator_result.json:enrichment.funnel.qualification_input. A run that
+   stopped before enrichment never produced it -- check that run's
+   stop_reason.
+3. Both jobs_captured and jobs_reviewed must be measurable for a rate to
+   exist. A rate of 100% means every captured posting entered review; below
+   100 means a run stopped between acquiring postings and reviewing them.
+========================================================================
+
+RUN CENSUS (A)
+  all_reconcile: True
+  2026-09-04: 2 run(s) -> ['20260904T130130Z-13b44a0c', '20260905T030439Z-1d102bec']
+  2026-09-05: 1 run(s) -> ['20260906T030230Z-2f74ac7c']
+  20260904T130130Z-13b44a0c  complete  included evidence=ledger+artifacts reconstructed=True
+        contributes {'jobs_captured': None, 'jobs_reviewed': None, 'qualified_opportunities': None, 'contacts_found': 1048, 'sent_to_airtable': 781}
+  20260905T030439Z-1d102bec  complete  included evidence=ledger+artifacts reconstructed=True
+        contributes {'jobs_captured': 0, 'jobs_reviewed': None, 'qualified_opportunities': None, 'contacts_found': 0, 'sent_to_airtable': 0}
+  20260906T030230Z-2f74ac7c  complete  included evidence=ledger+artifacts reconstructed=True
+        contributes {'jobs_captured': 226, 'jobs_reviewed': None, 'qualified_opportunities': None, 'contacts_found': 0, 'sent_to_airtable': 0}
+  reconciliation:
+    jobs_captured              census=   226 reported=   226 agrees=True
+    jobs_reviewed              census=  None reported=  None agrees=True
+    qualified_opportunities    census=  None reported=  None agrees=True
+    contacts_found             census=  1048 reported=  1048 agrees=True
+    sent_to_airtable           census=   781 reported=   781 agrees=True
+  census(B) all_reconcile: True  included=3
+
+PROVENANCE (A)
+  jobs_captured                 226  partial    unit=posting
+        <- reporting_ledger:metrics.net_new_jobs_captured
+        silent runs: ['20260904T130130Z-13b44a0c']
+  jobs_reviewed                None  unavailable unit=posting
+        silent runs: ['20260904T130130Z-13b44a0c', '20260905T030439Z-1d102bec', '20260906T030230Z-2f74ac7c']
+  qualified_opportunities      None  unavailable unit=company_role_bucket_opportunity
+        silent runs: ['20260904T130130Z-13b44a0c', '20260905T030439Z-1d102bec', '20260906T030230Z-2f74ac7c']
+  contacts_found               1048  measured   unit=company_role_bucket_opportunity
+        <- reporting_ledger:metrics.contacts_found
+  sent_to_airtable              781  measured   unit=company_role_bucket_opportunity
+        <- reporting_ledger:metrics.sent_to_airtable
+  sent_to_instantly             769  measured   unit=instantly_lead
+        <- instantly:POST /leads/list -> item.timestamp_created

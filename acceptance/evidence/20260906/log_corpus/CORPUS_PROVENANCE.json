@@ -1,0 +1,14 @@
+{
+  "built_from": "railway deployment logs (RUN SUMMARY blocks)",
+  "runs": [
+    "20260904T130130Z-13b44a0c",
+    "20260905T030439Z-1d102bec",
+    "20260906T030230Z-2f74ac7c"
+  ],
+  "fields_the_summary_never_prints": [
+    "enrichment.funnel.qualification_input",
+    "enrichment.funnel.contact_discovery_entered",
+    "waterfall.stages[acquisition_dedup].passed"
+  ],
+  "caveat": "A lower bound on production's reporting capability. Metrics reading fields the summary does not print read UNAVAILABLE here even where production measures them."
+}

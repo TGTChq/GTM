@@ -1,0 +1,25 @@
+Period: Sep 04 00:00 - Sep 05 23:59 PDT (America/Los_Angeles) - week in progress,
+        closes Fri Sep 11 00:00 PDT
+Jobs: 226 captured / 226 reviewed (100%)
+Qualified opportunities: not recorded this week
+Contacts found: 1,048
+sent to Instantly: 769
+
+Biggest bottleneck from past week
+Apollo's shared credits are exhausted. Two of the three runs this week stopped
+enrichment on an Apollo "credit_exhausted" error - Thursday's after 2,170
+companies, Saturday's after zero - so Saturday captured 226 jobs, reviewed all
+226, and produced no contacts and no Airtable rows at all. Nothing downstream of
+Apollo can move until credits are restored. The 1,048 contacts and 769 Instantly
+imports above all come from Thursday's run, before its credits ran out.
+
+Action plan for the following week
+1. Restore Apollo credits. This is the only thing gating the funnel right now:
+   acquisition, review and delivery all worked this week; enrichment stopped on
+   the first company it tried.
+2. Turn off or re-filter the ATS job source. Saturday's run spent 2,722 of its
+   5,444 provider credits there and kept zero new postings from it - half the
+   acquisition budget bought nothing. LinkedIn returned all 226.
+3. Clear the 211 approved contacts still held for review. They are not a delivery
+   failure - the sync is working - but 142 are held on company review and 46 on
+   unverified email, so none of them can be sent.
