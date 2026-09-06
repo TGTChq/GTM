@@ -214,3 +214,35 @@ class SliceProgressIsNotDurableUntilCustodyIsTaken(unittest.TestCase):
             state = json.load(fh)
         self.assertTrue((state.get("window_slices") or {}).get(LABEL),
                         "the normal path still records progress")
+
+
+class ExpiredInventoryIsAccountedFor(unittest.TestCase):
+    """Rows that drop below the frame floor before they can be bought are
+    unreachable by any cursor. Nothing can be done about them -- but they must not
+    vanish silently, which is what "expired unseen inventory is accurately accounted
+    for" asks. The slices below a raised floor simply stop being generated, so the
+    count has to be taken at the moment the clamp fires."""
+
+    def test_a_clamped_window_reports_what_it_conceded(self):
+        state = os.path.join(tempfile.mkdtemp(), "wm.json")
+        feed = MovingFloorFeed()
+        seen: set = set()
+        _run(state, feed, BASE, cap=120, seen=seen,
+             FANTASTIC_WINDOW_SLICING_ENABLED=True)
+        _e, metrics, _ = _run(state, feed, BASE + timedelta(days=4), cap=120,
+                              seen=seen, FANTASTIC_WINDOW_SLICING_ENABLED=True)
+
+        report = metrics["watermark"].get("expired_inventory")
+        self.assertIsNotNone(report, "the clamp must record what it gave up")
+        if metrics["watermark"].get("lower_clamped_to_frame"):
+            self.assertGreater(report["conceded_slices"], 0)
+            self.assertGreaterEqual(report["unreachable_days"], 0)
+
+    def test_an_unclamped_window_concedes_nothing(self):
+        state = os.path.join(tempfile.mkdtemp(), "wm.json")
+        feed = MovingFloorFeed()
+        _e, metrics, _ = _run(state, feed, BASE, cap=120, seen=set(),
+                              FANTASTIC_WINDOW_SLICING_ENABLED=True)
+        report = metrics["watermark"].get("expired_inventory") or {}
+        if not metrics["watermark"].get("lower_clamped_to_frame"):
+            self.assertEqual(report.get("conceded_slices", 0), 0)

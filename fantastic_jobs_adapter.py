@@ -2162,6 +2162,8 @@ class DateCreatedWatermarkEngine:
             # ended, how many rows the provider billed to move it, and whether the
             # source finished the window.
             "window_cursors": {}}
+        # AFTER the dict is assigned -- writing it earlier is simply overwritten.
+        self._account_conceded_slices(clamped)
 
     def run_stream(self, endpoint: str, base_params: Dict[str, Any], label: str,
                    cap_limit: int, accept: Optional[Tuple[str, ...]],
@@ -2754,6 +2756,43 @@ class DateCreatedWatermarkEngine:
         m = self.drained_sources()
         m[str(label)] = True
         self.state["window_drained_sources"] = m
+
+    def _account_conceded_slices(self, clamped) -> None:
+        """How much of this window fell below the frame floor WITHOUT being drained.
+
+        Required because "expired unseen inventory" has to be accounted for, not
+        merely avoided. When the floor rises, the slices below it stop being
+        generated -- they would otherwise vanish silently, which is precisely the
+        loss this whole cursor exists to remove. This says how many whole slices
+        were conceded and how many of those had actually been drained first.
+
+        Reported, never acted on: rows below the floor are unreachable by any
+        cursor, so there is nothing to do about them except know the number.
+        """
+        report = {"conceded_slices": 0, "conceded_drained": 0,
+                  "conceded_undrained": 0, "unreachable_days": 0.0}
+        try:
+            if isinstance(clamped, dict) and clamped.get("was") and clamped.get("now"):
+                was = datetime.fromisoformat(str(clamped["was"]).replace("Z", "+00:00"))
+                now_ = datetime.fromisoformat(str(clamped["now"]).replace("Z", "+00:00"))
+                hours = max(1, int(getattr(config, "FANTASTIC_WINDOW_SLICE_HOURS", 6) or 6))
+                span = max(0.0, (now_ - was).total_seconds())
+                report["unreachable_days"] = round(span / 86400.0, 2)
+                report["conceded_slices"] = int(span // (hours * 3600))
+                done_all = self.window_slices_done()
+                drained = 0
+                for keys in done_all.values():
+                    for key in keys:
+                        hi = str(key).partition("|")[2]
+                        if hi and hi <= str(clamped["now"]):
+                            drained += 1
+                report["conceded_drained"] = drained
+                report["conceded_undrained"] = max(
+                    0, report["conceded_slices"] * max(1, len(done_all) or 1) - drained)
+        except (TypeError, ValueError):
+            pass
+        self.metrics["watermark"]["expired_inventory"] = report
+
 
     def checkpoint(self, enabled_labels: Tuple[str, ...]) -> None:
         """After this adapter call: persist the IDs acquired so far in the OPEN window

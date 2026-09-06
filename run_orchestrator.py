@@ -830,6 +830,15 @@ def _print_run_summary(ctx, mode, result, state) -> None:
             # of drained date ranges, not an index -- so print whichever cursor the
             # run actually used. An empty offset pair would otherwise read as "no
             # progress" on a run that drained the window completely.
+            exp = wm.get("expired_inventory") or {}
+            if exp.get("conceded_slices"):
+                # Inventory that dropped below the frame floor before it could be
+                # bought. Unreachable by any cursor once gone -- printed because it
+                # has to be accounted for, not because anything can be done about it.
+                line("expired_inventory",
+                     f"{exp.get('conceded_slices')} slice(s) conceded over "
+                     f"{exp.get('unreachable_days')} day(s); "
+                     f"{exp.get('conceded_drained')} had been drained first")
             slices = wm.get("slices") or {}
             if slices:
                 line("cursor", "date_created slices")
