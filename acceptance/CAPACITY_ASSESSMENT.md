@@ -53,6 +53,27 @@ Every row bought is a row not already held. Applied to the 09-06 run's own budge
 inventory for the same spend**. That is the largest internal loss found, and it is
 corrected. It has **not** yet run in production: acquisition is paused.
 
+### The slice boundaries were validated against the live feed
+
+Counted 2026-09-06T11:15Z with the count endpoint (0 Jobs credits, 5 requests), same
+production query:
+
+    whole 24h window            350
+      slice 11:00Z->17:00Z      164
+      slice 17:00Z->23:00Z       82
+      slice 23:00Z->05:00Z       57
+      slice 05:00Z->11:00Z       47
+      -------------------------------
+      sum of 4 slices           350      MATCH
+
+The slices tile the window exactly against the provider's own `date_created`
+semantics -- no gap, no double count. That is the property the whole cursor rests
+on, and it is now confirmed on the real API rather than only in a fixture.
+
+Note also that this day's LinkedIn count is **350** where 2026-09-06 earlier gave
+**361**: these are observations of a moving feed, not a stable ceiling, exactly as
+stated above.
+
 ## What that implies for 1,000/day
 
 Steady state is bounded by **daily inflow**, not by budget once the cursor is fixed:

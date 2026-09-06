@@ -34,3 +34,26 @@ functional discovery and the 145 direct ATS boards — are switched off, and the
 historical backfill has no budget.
 
 None of those are claimed as contributing to production output.
+
+
+## One transition cost, so it is not a surprise
+
+The window in flight (`2026-08-30T03:03:20Z` → `2026-09-04T10:02:11Z`) was paged by
+the OFFSET cursor and is largely acquired already, but nothing records WHICH
+`date_created` ranges were covered — an offset cannot be translated into slices.
+
+So if acquisition were resumed **while that window is still open**, the slice cursor
+would re-page it slice by slice and `seen_ids` would dedupe essentially all of it:
+one window's worth of spend for near-zero net-new. The run summary would show it
+plainly (`cursor: date_created slices`, slices drained, `kept` ≈ 0).
+
+It resolves itself if acquisition stays paused. The window's upper bound is
+2026-09-04T10:02Z, so once the 7-day frame floor passes it — **2026-09-11T10:02Z** —
+the window is unreachable, `open()` starts a fresh one, and the slice cursor begins
+on a window it owns from the first request. Apollo's own next billing date is
+2026-09-18, so on the current trajectory the transition is free.
+
+If acquisition must resume sooner, the cheapest options are to accept the one-time
+re-walk (bounded by the governor) or to run with
+`FANTASTIC_WINDOW_SLICING_ENABLED=0` until the window expires. Both are fine; the
+first is simpler and self-correcting.
