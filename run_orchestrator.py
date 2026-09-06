@@ -246,7 +246,26 @@ def _preflight_checks(a):
                      f"replica={lk['replica_id']} service={lk['service']} "
                      f"boot={(str(lk['boot_id'])[:8] + '...') if lk['boot_id'] else 'none'} "
                      f"token={'yes' if lk['has_ownership_token'] else 'legacy-none'}")
-    lines.append("delivery             airtable=review-staging(Pending) auto_approve=OFF instantly=OFF")
+    # READ THE CONFIG, do not assert a mode. This line was a hardcoded literal:
+    # every run printed "review-staging(Pending) auto_approve=OFF" whatever the
+    # settings were. Two different things are called auto-approve --
+    #   * the `--auto-approve` CLI flag, which picks WHICH leads are submitted
+    #     (FINAL_PASS only) and whether they enrol directly, and
+    #   * FANTASTIC_AUTO_APPROVE_SEND_SAFE, which creates a send-safe Fantastic
+    #     record at Status=Approved instead of Pending,
+    # -- and the fixed string described the first while reading as though it
+    # described the second. It is why the 2026-09-04 run was reported as creating
+    # 781 Pending rows when fact-based auto-approval was on the whole time.
+    send_safe_auto = bool(getattr(config, "FANTASTIC_AUTO_APPROVE_SEND_SAFE", False))
+    lines.append(
+        f"delivery             airtable={getattr(a, 'airtable_write', False) and 'write' or 'off'}"
+        f" submit_set={'final_pass_only' if getattr(a, 'auto_approve', False) else 'reviewable'}"
+        f" instantly={'ON' if getattr(a, 'instantly', False) else 'OFF'}")
+    lines.append(
+        f"  record_status      send_safe_auto_approve={'ON' if send_safe_auto else 'OFF'}"
+        f" -> new send-safe Fantastic rows are created "
+        f"{config.AIRTABLE_STATUS_APPROVED if send_safe_auto else config.AIRTABLE_STATUS_PENDING}"
+        f"; everything else {config.AIRTABLE_STATUS_PENDING}")
     return res, lines
 
 
@@ -822,7 +841,12 @@ def _print_run_summary(ctx, mode, result, state) -> None:
     line("FINAL_PASS", fp)
     line("NEEDS_CHECK", nc)
     line("UNVERIFIED", uv)
-    print("---- Airtable (review-staging, Status=Pending) ----")
+    # Not "Status=Pending": with FANTASTIC_AUTO_APPROVE_SEND_SAFE on (the default),
+    # a send-safe Fantastic row is CREATED Approved. Naming one status in the header
+    # made the created set look manually gated when it was not.
+    _ssa = bool(getattr(config, "FANTASTIC_AUTO_APPROVE_SEND_SAFE", False))
+    print(f"---- Airtable (review-staging; send-safe auto-approve "
+          f"{'ON' if _ssa else 'OFF'}) ----")
     line("airtable_submitted", at_submitted)
     line("airtable_created", at_created)
     line("airtable_existing", at_existing)
