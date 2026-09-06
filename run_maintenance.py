@@ -343,6 +343,45 @@ def capacity(root: Path, run_ids) -> dict:
     return out
 
 
+def provenance_probe(root: Path) -> dict:
+    """Why each headline metric is measured, partial or unavailable -- per run.
+
+    The provenance table says a metric is `partial`; it cannot say whether the
+    missing contribution is RECOVERABLE from a payload nobody read or genuinely
+    never recorded. Those need opposite responses, and guessing between them is how
+    a reporting gap gets called a data gap. This reads the exact fields the metric
+    specs read, on the runs that actually exist, and reports which are present.
+
+    Read-only, and small: funnel counters and a skip breakdown are a few dozen
+    integers per run. The heavy `postings.json` is never opened here.
+    """
+    rows = []
+    artifacts = root / "run_artifacts"
+    if not artifacts.is_dir():
+        return {"runs": rows}
+    for run_dir in sorted(d for d in artifacts.iterdir() if d.is_dir()):
+        result = _read_json(run_dir / "orchestrator_result.json")
+        enrichment = result.get("enrichment") if isinstance(result, dict) else {}
+        funnel = (enrichment or {}).get("funnel") if isinstance(enrichment, dict) else {}
+        delivery = result.get("delivery") if isinstance(result, dict) else {}
+        skips = (delivery or {}).get("skip_breakdown") if isinstance(delivery, dict) else {}
+        rows.append({
+            "run_id": run_dir.name,
+            # The two fields `jobs_reviewed` and `qualified_opportunities` are read
+            # from, named so a missing one is attributable rather than mysterious.
+            "funnel_qualification_input": (funnel or {}).get("qualification_input"),
+            "funnel_contact_discovery_entered": (funnel or {}).get("contact_discovery_entered"),
+            "funnel_keys": sorted(funnel or {}),
+            # Zero-valued buckets are omitted for the same reason the report now
+            # omits them: a policy that did not fire explains nothing.
+            "skip_breakdown_nonzero": {k: v for k, v in (skips or {}).items()
+                                       if isinstance(v, int) and v > 0},
+            "skip_breakdown_all_zero": bool(skips) and not any(
+                isinstance(v, int) and v > 0 for v in (skips or {}).values()),
+        })
+    return {"runs": rows}
+
+
 def ab_and_report(root: Path, window_start: str, use_instantly: bool) -> int:
     """The real artifacts+ledger vs ledger-only comparison, on production files."""
     from orchestrator.run_ledger import (LEDGER_STORE, backfill_from_artifacts,
@@ -501,6 +540,9 @@ def main(argv=None) -> int:
         _say("4c. CAPACITY: company x function opportunities from retained payloads")
         ids = [r.strip() for r in a.capacity_runs.split(",") if r.strip()]
         print(json.dumps(capacity(root, ids), indent=2))
+
+    _say("4d. PROVENANCE PROBE: which reported fields each run actually carries")
+    print(json.dumps(provenance_probe(root), indent=2, default=str))
 
     _say("5. REPORTING: artifacts+ledger VS ledger-only, on production files")
     rc = ab_and_report(root, a.window_start, a.instantly)

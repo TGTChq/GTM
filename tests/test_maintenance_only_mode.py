@@ -21,6 +21,7 @@ import unittest
 from unittest import mock
 
 import config
+import run_maintenance
 import run_orchestrator
 
 
@@ -144,3 +145,60 @@ class TheMaintenancePassIsOrderedBackupFirst(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TheProvenanceProbeExplainsAPartialMetric(unittest.TestCase):
+    """A `partial` status says a contribution is missing; it cannot say whether the
+    field is RECOVERABLE from an unread payload or was never recorded. Those need
+    opposite responses -- read it, or say why it cannot be read -- and guessing
+    between them is how a reporting gap gets reported as a data gap."""
+
+    def _root(self, **runs):
+        import json as _json
+        import tempfile as _tempfile
+        from pathlib import Path as _Path
+
+        root = _Path(_tempfile.mkdtemp())
+        for run_id, result in runs.items():
+            d = root / "run_artifacts" / run_id
+            d.mkdir(parents=True, exist_ok=True)
+            (d / "orchestrator_result.json").write_text(_json.dumps(result),
+                                                        encoding="utf-8")
+        return root
+
+    def test_a_recorded_field_is_reported_present(self):
+        root = self._root(**{"r1": {"enrichment": {"funnel": {
+            "qualification_input": 226, "contact_discovery_entered": 100}}}})
+        row = run_maintenance.provenance_probe(root)["runs"][0]
+        self.assertEqual(row["funnel_qualification_input"], 226)
+        self.assertEqual(row["funnel_contact_discovery_entered"], 100)
+
+    def test_an_absent_field_is_reported_absent_with_what_the_run_does_carry(self):
+        """`funnel_keys` is the actionable half: it distinguishes "the funnel was
+        never written" from "the funnel was written without this counter"."""
+        root = self._root(**{"r1": {"enrichment": {"funnel": {"captured": 6205}}}})
+        row = run_maintenance.provenance_probe(root)["runs"][0]
+        self.assertIsNone(row["funnel_qualification_input"])
+        self.assertEqual(row["funnel_keys"], ["captured"])
+
+    def test_a_run_with_no_result_at_all_still_reports_a_row(self):
+        root = self._root()
+        (root / "run_artifacts" / "empty").mkdir(parents=True, exist_ok=True)
+        row = run_maintenance.provenance_probe(root)["runs"][0]
+        self.assertEqual(row["run_id"], "empty")
+        self.assertIsNone(row["funnel_qualification_input"])
+
+    def test_zero_only_skip_buckets_are_flagged_not_listed(self):
+        root = self._root(**{"r1": {"delivery": {"skip_breakdown": {
+            "account_suppressed": 0, "not_final_pass": 0}}}})
+        row = run_maintenance.provenance_probe(root)["runs"][0]
+        self.assertEqual(row["skip_breakdown_nonzero"], {})
+        self.assertTrue(row["skip_breakdown_all_zero"])
+
+    def test_a_firing_skip_bucket_is_listed(self):
+        root = self._root(**{"r1": {"delivery": {"skip_breakdown": {
+            "account_suppressed": 0, "company_function_suppressed": 200}}}})
+        row = run_maintenance.provenance_probe(root)["runs"][0]
+        self.assertEqual(row["skip_breakdown_nonzero"],
+                         {"company_function_suppressed": 200})
+        self.assertFalse(row["skip_breakdown_all_zero"])
