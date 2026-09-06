@@ -2,33 +2,38 @@
 
 THE FAILURE THIS EXISTS FOR. On 2026-09-06 a run bought 5,444 provider rows, kept
 226 net-new postings, qualified them, and then hit Apollo's
-``BILLING.LIMIT.CREDITS_EXHAUSTED``. The circuit opened and the run stopped -- and
-every safeguard behaved exactly as designed:
+``BILLING.LIMIT.CREDITS_EXHAUSTED``. Every safeguard behaved as designed: nothing
+was committed to suppression (``terminal_posting_ids()`` is empty when no lead
+reaches FINAL_PASS/REJECT) and the watermark stayed in flight.
 
-* nothing was committed to suppression (``terminal_posting_ids()`` is empty when no
-  lead reaches FINAL_PASS/REJECT), so the postings were not blacklisted;
-* the watermark was not committed, so the window stayed in flight.
+The work was lost anyway. "Not suppressed" only means a posting MAY be processed
+again; it does not mean anything hands it back. The window's per-source offsets had
+already advanced (100 -> 2822) and are replayed FORWARD, so the next run resumes
+past the rows it already bought.
 
-And the work was still lost. "Not suppressed" only means a posting MAY be processed
-again; it does not mean anything will ever hand it back. The window's per-source
-offsets had already advanced (100 -> 2822) and are replayed FORWARD, so the next run
-resumes past the rows it already bought. The postings existed only in memory and in
-``run_artifacts/<run_id>/enrichment/postings.json`` -- which no later run reads and
-which retention deletes after four runs.
+FOUR PROPERTIES, and the third is the one that is easy to get wrong.
 
-So this store keeps custody of acquired-but-unfinished work:
+1. Custody is taken BEFORE the continuation is irreversibly advanced -- not merely
+   "before enrichment". The offsets become durable inside
+   ``DateCreatedWatermarkEngine.checkpoint()``, which runs at the END of acquisition
+   and therefore BEFORE the pipeline has even seen the postings. So the adapter
+   calls a custody hook first and refuses to persist offsets if it fails: re-billing
+   a page is recoverable, losing it is not.
 
-* it is written at the acquisition checkpoint, BEFORE enrichment runs and before the
-  process can exit;
-* it lives beside ``run_artifacts``, not inside it, so ``StateStore.prune`` cannot
-  remove it -- prune only ever deletes under ``run_artifacts``;
-* a later run loads it and re-enters the postings into the SAME enrichment and
-  delivery path, so every existing gate, idempotency rule and budget still applies;
-* an entry is released only when its posting reaches a TERMINAL disposition, on the
-  identical id set that is committed to suppression. Terminal means finished, and
-  finished is the only thing that ends custody.
+2. The store is a SIBLING of ``run_artifacts``, because ``StateStore.prune`` only
+   ever deletes under ``run_artifacts``. Retention cannot destroy paid-for work.
 
-It never re-acquires and never re-bills: these are rows already purchased.
+3. Work never leaves custody silently. Every departure is written to an append-only
+   audit with an explicit outcome, and the three outcomes are kept apart:
+   ``terminal`` (finished, the only success), ``deduped`` (the row was not new work
+   in the first place), and ``expired_unresolved`` (custody aged out with the work
+   STILL UNDONE). An expiry is not a completion and must never read as one, so the
+   payloads are moved to ``expired/`` rather than deleted -- the outcome is
+   auditable and the data is still recoverable.
+
+4. Adoption re-enters postings into the SAME enrichment and delivery path, so every
+   existing gate, idempotency rule and budget still applies. It never re-acquires
+   and never re-bills: these rows are already bought.
 """
 
 from __future__ import annotations
@@ -38,16 +43,32 @@ import logging
 import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 from retrieval_measurement.accounting import posting_identity
 
 logger = logging.getLogger(__name__)
 
-#: Store name. Registered in ``StateStore.STORES`` so the directory exists and,
-#: crucially, sits OUTSIDE ``run_artifacts`` where prune cannot reach it.
+#: Registered in ``StateStore.STORES``: the directory exists and, crucially, sits
+#: OUTSIDE ``run_artifacts`` where prune cannot reach it.
 STORE = "pending_work"
 SCHEMA = "pending-work/1"
+
+#: Where custody ends. Only ``OUTCOME_TERMINAL`` means the work was done.
+OUTCOME_TERMINAL = "terminal"
+OUTCOME_DEDUPED = "deduped"
+OUTCOME_EXPIRED = "expired_unresolved"
+
+AUDIT = "_audit.jsonl"
+EXPIRED_DIR = "expired"
+IMPORTED = "_imported_from_artifacts.json"
+
+#: Where a completed run leaves the opportunity list it handed to enrichment.
+#: NOTE THE UNIT: these are NORMALIZED OPPORTUNITIES (post-dedupe, one dict per
+#: surviving posting), not the raw provider payloads and not necessarily every row
+#: the run billed. Recovery counts them and reports the count; it never asserts
+#: that the file contains everything the run acquired.
+ARTIFACT_RELPATH = ("enrichment", "postings.json")
 
 
 def _key(job: Any) -> str:
@@ -76,13 +97,34 @@ def _write(path: Path, payload: Dict[str, Any]) -> None:
     os.replace(tmp, path)  # atomic: a torn file would lose the very work we hold
 
 
-def record(store: str | Path, run_id: str, opportunities: Sequence[Any]) -> Dict[str, Any]:
-    """Take custody of one slice's deduped opportunities.
+def _entry_files(base: Path) -> List[Path]:
+    """Custody files only -- never the audit, and never the expired archive."""
+    return sorted(p for p in base.glob("*.json") if not p.name.startswith("_"))
 
-    Idempotent per posting identity, so a re-run of the same slice does not double
-    the file, and additive across slices of one run.
+
+def _audit(base: Path, rows: Sequence[Dict[str, Any]]) -> None:
+    if not rows:
+        return
+    try:
+        base.mkdir(parents=True, exist_ok=True)
+        with (base / AUDIT).open("a", encoding="utf-8") as handle:
+            for row in rows:
+                handle.write(json.dumps(row, default=str) + "\n")
+    except OSError as exc:
+        logger.warning("Could not append pending-work audit: %s", exc)
+
+
+# -- taking custody ----------------------------------------------------------
+
+
+def record(store: str | Path, run_id: str, opportunities: Sequence[Any]) -> Dict[str, Any]:
+    """Take custody of postings. Idempotent per posting identity.
+
+    Returns ``{"ok": bool, ...}``. ``ok`` is what the adapter's pre-checkpoint hook
+    checks before it allows the continuation to advance.
     """
-    result = {"recorded": 0, "already_held": 0, "unidentifiable": 0, "path": ""}
+    result: Dict[str, Any] = {"ok": True, "recorded": 0, "already_held": 0,
+                              "unidentifiable": 0, "path": ""}
     if not opportunities:
         return result
     base = Path(store)
@@ -104,16 +146,17 @@ def record(store: str | Path, run_id: str, opportunities: Sequence[Any]) -> Dict
             known.add(key)
             jobs.append(job)
             result["recorded"] += 1
-        _write(path, {
-            "schema": SCHEMA,
-            "run_id": run_id,
-            "recorded_at": _now().isoformat(),
-            "jobs": jobs,
-        })
+        _write(path, {"schema": SCHEMA, "run_id": run_id,
+                      "recorded_at": _now().isoformat(), "jobs": jobs})
         result["path"] = str(path)
-    except Exception as exc:  # noqa: BLE001 - custody is never allowed to fail a run
-        logger.warning("Could not record pending work for %s: %s", run_id, exc)
+    except Exception as exc:  # noqa: BLE001
+        logger.error("Could not take custody of acquired work for %s: %s", run_id, exc)
+        result["ok"] = False
+        result["error"] = f"{type(exc).__name__}: {exc}"
     return result
+
+
+# -- handing it back ---------------------------------------------------------
 
 
 def load(
@@ -121,30 +164,28 @@ def load(
     *,
     exclude_run_id: str = "",
     limit: Optional[int] = None,
-    max_age_days: Optional[int] = None,
     exclude_keys: Iterable[str] = (),
 ) -> Tuple[List[Any], Dict[str, Any]]:
     """Postings still owed work, oldest run first.
 
-    ``exclude_keys`` is the current run's own opportunity keys: a posting that this
-    run re-acquired anyway must not be handed back a second time. ``limit`` bounds
-    how much unfinished work one run adopts -- unbounded resume would let a long
-    outage hand a single run more enrichment than its budget can serve.
+    ``exclude_keys`` is the current run's own opportunity keys: a posting this run
+    re-acquired anyway must not be handed back twice. ``limit`` bounds how much
+    unfinished work one run adopts -- unbounded resume would let a long outage hand
+    a single run more enrichment than its budget can serve.
+
+    Expiry is NOT applied here: it is a separate, audited step, so nothing ever
+    disappears as a side effect of a read.
     """
     info: Dict[str, Any] = {"files": 0, "offered": 0, "adopted": 0,
-                            "skipped_current_run": 0, "expired": 0, "runs": []}
+                            "skipped_current_run": 0, "runs": []}
     base = Path(store)
     if not base.is_dir():
         return [], info
 
     skip = {str(k) for k in exclude_keys if k}
-    cutoff = None
-    if max_age_days:
-        cutoff = _now() - timedelta(days=int(max_age_days))
-
     out: List[Any] = []
-    seen_keys: set = set()
-    for path in sorted(base.glob("*.json")):
+    seen_keys: Set[str] = set()
+    for path in _entry_files(base):
         held = _read(path)
         if held.get("schema") != SCHEMA:
             continue
@@ -153,16 +194,6 @@ def load(
             info["skipped_current_run"] += 1
             continue
         info["files"] += 1
-        if cutoff is not None:
-            try:
-                stamp = datetime.fromisoformat(str(held.get("recorded_at")))
-                if stamp.tzinfo is None:
-                    stamp = stamp.replace(tzinfo=timezone.utc)
-                if stamp < cutoff:
-                    info["expired"] += 1
-                    continue
-            except (TypeError, ValueError):
-                pass
         adopted_here = 0
         for job in held.get("jobs") or []:
             info["offered"] += 1
@@ -182,24 +213,34 @@ def load(
     return out, info
 
 
-def release(store: str | Path, terminal_ids: Iterable[str]) -> Dict[str, Any]:
-    """Drop postings that reached a terminal disposition; delete emptied files.
+def release(
+    store: str | Path,
+    ids: Iterable[str],
+    *,
+    outcome: str = OUTCOME_TERMINAL,
+    run_id: str = "",
+) -> Dict[str, Any]:
+    """Remove postings from custody, recording WHY.
 
-    Takes the SAME id set the pipeline commits to suppression, so custody ends
-    exactly when the posting is genuinely finished -- never on a deferred outcome,
-    which is the distinction that makes a provider outage survivable.
+    ``OUTCOME_TERMINAL`` takes the same id set the pipeline commits to suppression,
+    so custody ends exactly when the posting is genuinely finished -- never on a
+    deferred outcome, which is the distinction that makes a provider outage
+    survivable. ``OUTCOME_DEDUPED`` retires rows that dedupe proved were not new
+    work.
     """
-    info = {"released": 0, "files_emptied": 0, "still_held": 0}
+    info = {"released": 0, "files_emptied": 0, "still_held": 0, "outcome": outcome}
     base = Path(store)
     if not base.is_dir():
         return info
-    done = {str(i) for i in terminal_ids if i}
+    done = {str(i) for i in ids if i}
     if not done:
-        for path in base.glob("*.json"):
+        for path in _entry_files(base):
             info["still_held"] += len(_read(path).get("jobs") or [])
         return info
 
-    for path in sorted(base.glob("*.json")):
+    stamp = _now().isoformat()
+    trail: List[Dict[str, Any]] = []
+    for path in _entry_files(base):
         held = _read(path)
         if held.get("schema") != SCHEMA:
             continue
@@ -210,6 +251,9 @@ def release(store: str | Path, terminal_ids: Iterable[str]) -> Dict[str, Any]:
             pid = str((job or {}).get("posting_id") or "") if isinstance(job, dict) else ""
             if (key and key in done) or (pid and pid in done):
                 info["released"] += 1
+                trail.append({"ts": stamp, "run_id": str(held.get("run_id") or path.stem),
+                              "released_by": run_id, "key": key or pid,
+                              "outcome": outcome})
             else:
                 keep.append(job)
         if not keep:
@@ -222,9 +266,172 @@ def release(store: str | Path, terminal_ids: Iterable[str]) -> Dict[str, Any]:
         info["still_held"] += len(keep)
         if len(keep) != len(jobs):
             held["jobs"] = keep
-            held["recorded_at"] = held.get("recorded_at") or _now().isoformat()
             _write(path, held)
+    _audit(base, trail)
     return info
+
+
+def expire(store: str | Path, *, max_age_days: int, run_id: str = "") -> Dict[str, Any]:
+    """Age out custody WITHOUT pretending the work got done.
+
+    An expiry is not a completion. The payloads are moved to ``expired/`` and the
+    outcome is written to the audit as ``expired_unresolved``, so the work remains
+    recoverable and the record shows plainly that it was never finished. Deleting
+    it -- or letting a read silently skip it -- would turn a retention policy into
+    invisible data loss, which is the failure this whole store exists to prevent.
+    """
+    info = {"expired_postings": 0, "expired_runs": 0, "archive": ""}
+    base = Path(store)
+    if not base.is_dir() or not max_age_days:
+        return info
+    cutoff = _now() - timedelta(days=int(max_age_days))
+    stamp = _now().isoformat()
+    archive = base / EXPIRED_DIR
+    trail: List[Dict[str, Any]] = []
+
+    for path in _entry_files(base):
+        held = _read(path)
+        if held.get("schema") != SCHEMA:
+            continue
+        try:
+            recorded = datetime.fromisoformat(str(held.get("recorded_at")))
+            if recorded.tzinfo is None:
+                recorded = recorded.replace(tzinfo=timezone.utc)
+        except (TypeError, ValueError):
+            continue
+        if recorded >= cutoff:
+            continue
+        jobs = list(held.get("jobs") or [])
+        if not jobs:
+            continue
+        held_run = str(held.get("run_id") or path.stem)
+        try:
+            archive.mkdir(parents=True, exist_ok=True)
+            _write(archive / f"{held_run}.json", {
+                "schema": SCHEMA, "run_id": held_run,
+                "recorded_at": held.get("recorded_at"),
+                "expired_at": stamp, "expired_by": run_id,
+                "outcome": OUTCOME_EXPIRED,
+                "note": "Custody aged out with the work UNFINISHED. Not a terminal "
+                        "disposition and not delivered. Payloads retained here so "
+                        "the work stays recoverable.",
+                "jobs": jobs,
+            })
+            path.unlink()
+        except OSError as exc:
+            logger.warning("Could not archive expired pending work %s: %s", held_run, exc)
+            continue
+        info["expired_postings"] += len(jobs)
+        info["expired_runs"] += 1
+        trail.append({"ts": stamp, "run_id": held_run, "released_by": run_id,
+                      "count": len(jobs), "outcome": OUTCOME_EXPIRED})
+    if info["expired_runs"]:
+        info["archive"] = str(archive)
+    _audit(base, trail)
+    return info
+
+
+# -- recovering work that predates the store ---------------------------------
+
+
+def adopt_from_artifacts(
+    root: str | Path,
+    store: str | Path,
+    *,
+    limit: Optional[int] = None,
+    max_runs: int = 8,
+    exclude_keys: Iterable[str] = (),
+) -> Dict[str, Any]:
+    """Import opportunity lists left by runs that finished before custody existed.
+
+    The 2026-09-06 run wrote its 226 postings to
+    ``run_artifacts/<run_id>/enrichment/postings.json`` and nothing ever read them
+    back; retention deletes that file after four runs. This lifts such files into
+    custody BEFORE prune can remove them -- the same ordering the reporting ledger's
+    backfill already relies on.
+
+    Idempotent: a run is marked imported once, and ``record`` dedupes by identity
+    besides. Bounded by ``max_runs`` and ``limit``.
+
+    COUNTING UNIT: ``postings.json`` holds NORMALIZED OPPORTUNITIES -- the deduped
+    list handed to enrichment. It is not the raw provider payload set and is not
+    guaranteed to contain every row the run billed. The per-run counts are reported
+    so the difference stays visible instead of being assumed away.
+    """
+    info: Dict[str, Any] = {"runs_scanned": 0, "runs_imported": 0,
+                            "postings_imported": 0, "runs": [], "already_imported": 0}
+    base_root, base_store = Path(root), Path(store)
+    artifacts = base_root / "run_artifacts"
+    if not artifacts.is_dir():
+        return info
+
+    marker_path = base_store / IMPORTED
+    marker = _read(marker_path)
+    done: Set[str] = set(marker.get("runs") or [])
+    skip = {str(k) for k in exclude_keys if k}
+    budget = None if limit is None else int(limit)
+
+    for run_dir in sorted((d for d in artifacts.iterdir() if d.is_dir()), reverse=True):
+        if info["runs_imported"] >= int(max_runs):
+            break
+        run_id = run_dir.name
+        if run_id in done:
+            info["already_imported"] += 1
+            continue
+        source = run_dir.joinpath(*ARTIFACT_RELPATH)
+        if not source.is_file():
+            continue
+        info["runs_scanned"] += 1
+        payload = _read(source)
+        jobs = [j for j in (payload.get("jobs") or []) if isinstance(j, dict)]
+        found = len(jobs)
+        jobs = [j for j in jobs if _key(j) and _key(j) not in skip]
+        if budget is not None:
+            jobs = jobs[:max(0, budget)]
+        outcome = record(base_store, run_id, jobs) if jobs else {"ok": True, "recorded": 0}
+        if not outcome.get("ok"):
+            continue
+        done.add(run_id)
+        info["runs_imported"] += 1
+        info["postings_imported"] += int(outcome.get("recorded", 0))
+        if budget is not None:
+            budget -= int(outcome.get("recorded", 0))
+        info["runs"].append({
+            "run_id": run_id,
+            "opportunities_in_artifact": found,
+            "eligible_after_exclusions": len(jobs),
+            "newly_held": int(outcome.get("recorded", 0)),
+            "already_held": int(outcome.get("already_held", 0)),
+            "unit": "normalized_opportunity",
+        })
+        if budget is not None and budget <= 0:
+            break
+
+    if info["runs_imported"]:
+        try:
+            base_store.mkdir(parents=True, exist_ok=True)
+            _write(marker_path, {"schema": SCHEMA, "runs": sorted(done),
+                                 "updated_at": _now().isoformat()})
+        except OSError as exc:
+            logger.warning("Could not persist pending-work import marker: %s", exc)
+    return info
+
+
+# -- observability -----------------------------------------------------------
+
+
+def pending_run_ids(store: str | Path) -> Set[str]:
+    """Runs whose artifacts must survive retention: they still owe work, or their
+    opportunity list has not been imported yet."""
+    base = Path(store)
+    out: Set[str] = set()
+    if not base.is_dir():
+        return out
+    for path in _entry_files(base):
+        held = _read(path)
+        if held.get("schema") == SCHEMA and (held.get("jobs") or []):
+            out.add(str(held.get("run_id") or path.stem))
+    return out
 
 
 def summary(store: str | Path) -> Dict[str, Any]:
@@ -233,7 +440,7 @@ def summary(store: str | Path) -> Dict[str, Any]:
     runs: List[Dict[str, Any]] = []
     total = 0
     if base.is_dir():
-        for path in sorted(base.glob("*.json")):
+        for path in _entry_files(base):
             held = _read(path)
             if held.get("schema") != SCHEMA:
                 continue
@@ -242,4 +449,11 @@ def summary(store: str | Path) -> Dict[str, Any]:
             runs.append({"run_id": str(held.get("run_id") or path.stem),
                          "postings": count,
                          "recorded_at": str(held.get("recorded_at") or "")})
-    return {"pending_postings": total, "pending_runs": len(runs), "runs": runs}
+    expired_total = 0
+    archive = base / EXPIRED_DIR
+    if archive.is_dir():
+        for path in sorted(archive.glob("*.json")):
+            expired_total += len(_read(path).get("jobs") or [])
+    return {"pending_postings": total, "pending_runs": len(runs), "runs": runs,
+            "expired_unresolved_postings": expired_total,
+            "unit": "normalized_opportunity"}

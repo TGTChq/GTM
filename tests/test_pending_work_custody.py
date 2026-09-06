@@ -201,6 +201,13 @@ class CustodySurvivesRetention(unittest.TestCase):
 
 
 class TheStoreItself(unittest.TestCase):
+    @staticmethod
+    def _age(store, when="2020-01-01T00:00:00+00:00"):
+        path = next(p for p in store.glob("*.json") if not p.name.startswith("_"))
+        held = pending_work._read(path)
+        held["recorded_at"] = when
+        path.write_text(__import__("json").dumps(held), encoding="utf-8")
+
     def setUp(self):
         self.store = Path(tempfile.mkdtemp()) / "pending_work"
 
@@ -223,15 +230,13 @@ class TheStoreItself(unittest.TestCase):
         jobs, _info = pending_work.load(self.store, exclude_run_id="now", limit=10)
         self.assertEqual(len(jobs), 10)
 
-    def test_stale_debt_expires_rather_than_accumulating_forever(self):
+    def test_a_read_never_makes_work_disappear(self):
+        """Expiry is a separate, audited step. If ``load`` quietly skipped aged
+        entries, the debt would vanish from every report while still existing."""
         pending_work.record(self.store, "run-a", [_posting(1)])
-        path = next(self.store.glob("*.json"))
-        text = path.read_text(encoding="utf-8").replace(
-            pending_work._read(path)["recorded_at"], "2020-01-01T00:00:00+00:00")
-        path.write_text(text, encoding="utf-8")
-        jobs, info = pending_work.load(self.store, exclude_run_id="now", max_age_days=14)
-        self.assertEqual(jobs, [])
-        self.assertEqual(info["expired"], 1)
+        self._age(self.store)
+        jobs, _info = pending_work.load(self.store, exclude_run_id="now")
+        self.assertEqual(len(jobs), 1, "a read must not apply retention")
 
     def test_release_takes_the_same_ids_suppression_does(self):
         pending_work.record(self.store, "run-a", [_posting(1), _posting(2)])
