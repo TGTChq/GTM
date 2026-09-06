@@ -430,3 +430,73 @@ class AZeroAcquisitionBudgetDoesNotEndARecoveryRun(unittest.TestCase):
         self.assertTrue(result["topup"].get("acquisition_suppressed"),
                         "and the suppression is recorded, not silent")
         self.assertEqual(acq.get("net_new_jobs_captured"), 0)
+
+
+class AZeroGovernorGrantDoesNotEndARunWithQueuedWork(unittest.TestCase):
+    """The SECOND place the same mistake lived. Fixing the top-up controller was not
+    enough: the pipeline sets `stop_reason = governor_zero_budget` BEFORE the loop, so
+    `while not stop_reason` never ran an iteration at all.
+
+    The 2026-09-06 calibration exited there with `acquisition_entered: false`, having
+    adopted none of the 3,595 paid-for postings custody was holding, because the
+    FANTASTIC daily allowance was spent. A credit ceiling for the source the run is
+    deliberately not using must not decide whether queued work gets done."""
+
+    def _run(self, owed_count, *, run_id):
+        import tempfile
+        from pathlib import Path
+        from unittest import mock
+
+        import config
+        from orchestrator import pending_work
+        from orchestrator.lanes import LaneResult
+        from orchestrator.modes import ExecutionMode as EM, policy_for as pf
+        from orchestrator.pipeline import Orchestrator
+        from orchestrator.runcontrol import RunContext
+        from orchestrator.state import StateManager
+        from tests.test_pipeline_run_ledger import TOPUP_CONFIG, _Budget, _Engine, _plan
+
+        tmp = tempfile.mkdtemp()
+        if owed_count:
+            pending_work.record(Path(tmp) / pending_work.STORE, "earlier", [
+                {"job_id": f"o{i}", "posting_id": f"o{i}", "employer_name": f"C{i}",
+                 "company_name": f"C{i}", "job_title": "Head of Sales"}
+                for i in range(owed_count)])
+        ctx = RunContext.create(EM.LIVE_ACQUISITION_AND_ENRICHMENT,
+                                {"mode": "live_acquisition_and_enrichment"},
+                                run_id=run_id)
+        state = StateManager(tmp, pf(EM.LIVE_ACQUISITION_AND_ENRICHMENT),
+                             run_id=ctx.run_id)
+        cfg = dict(TOPUP_CONFIG, PENDING_WORK_ENABLED=True,
+                   PENDING_WORK_RESUME_MAX_PER_RUN=100,
+                   FANTASTIC_MONTHLY_GOVERNOR_ENABLED=True,
+                   FANTASTIC_JOBS_MAX_JOBS_PER_RUN=0,
+                   FANTASTIC_TOPUP_SLICE_JOBS=0)
+        with mock.patch.multiple(config, **cfg):
+            return Orchestrator(ctx, state, _Budget()).run(
+                _plan(lambda _m: LaneResult(lane="fantastic", status="complete",
+                                            jobs=[], physical_requests=0),
+                      _Engine()), resume=False)
+
+    def test_queued_work_is_processed_despite_a_zero_grant(self):
+        result = self._run(3, run_id="20260907T030000Z-gov01")
+        acq = (result.get("acquisition") or {}).get("cumulative") or {}
+        self.assertEqual((acq.get("pending_work_resumed") or {}).get("adopted"), 3)
+        self.assertNotEqual(result["topup"]["final_stop_reason"],
+                            "governor_zero_budget")
+
+    def test_with_nothing_owed_it_stops_cleanly_on_the_budget(self):
+        """The guard is right when there is genuinely nothing to do: a run with no
+        acquisition budget AND no queued work must stop on a budget reason -- cleanly,
+        immediately, and never by looping to the iteration guard.
+
+        The label is whichever budget authority bound first (the pre-loop governor
+        grant, or the controller's cap); what must not happen is a run that spins."""
+        result = self._run(0, run_id="20260907T030000Z-gov02")
+        stop = result["topup"]["final_stop_reason"]
+        self.assertIn(stop, {"governor_zero_budget", "acquisition_safety_cap",
+                             "governor_run_budget"})
+        self.assertLessEqual(result["topup"]["iterations"], 1,
+                             "a starved run with no queue must not loop")
+        self.assertEqual(result["run"]["status"], "complete",
+                         "a zero-budget run is a clean stop, never a failure")

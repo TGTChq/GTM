@@ -1009,13 +1009,30 @@ class Orchestrator:
         stop_reason = ""
         acquisition_error = ""  # set on a FAILED acquisition lane (not "no inventory")
 
-        # A zero governor grant is a CLEAN, distinct stop before any acquisition
-        # (Gate-E D8) -- never a failed run, never an acquisition attempt.
-        if gov.run_budget is not None and gov.run_budget <= 0:
-            stop_reason = "governor_zero_budget"
-
         pending_on = bool(getattr(config, "PENDING_WORK_ENABLED", True))
         pending_dir = self.state.store_path("pending_work") if pending_on else None
+
+        # A zero governor grant is a CLEAN, distinct stop before any acquisition
+        # (Gate-E D8) -- never a failed run, never an acquisition attempt.
+        #
+        # ...but it is a stop for ACQUISITION, and this guard ended the whole run.
+        # The 2026-09-06 calibration was a recovery run with 3,595 paid-for postings
+        # owed by custody, and it exited here with `acquisition_entered: false` before
+        # adopting a single row -- because the FANTASTIC daily allowance was spent.
+        # A credit ceiling for the source the run is deliberately not using must not
+        # decide whether queued work gets done.
+        if gov.run_budget is not None and gov.run_budget <= 0:
+            owed_at_start = 0
+            if pending_on:
+                try:
+                    owed_at_start = sum(
+                        int(r.get("postings") or 0)
+                        for r in (pending_work.summary(pending_dir).get("runs") or [])
+                        if str(r.get("run_id")) != self.ctx.run_id)
+                except Exception:  # noqa: BLE001 - never a run blocker
+                    owed_at_start = 0
+            if owed_at_start <= 0:
+                stop_reason = "governor_zero_budget"
         if pending_on:
             # Custody must be durable BEFORE the acquisition cursor is. The adapter
             # persists per-source offsets at the end of acquisition -- before the
