@@ -386,12 +386,25 @@ def adopt_from_artifacts(
         jobs = [j for j in (payload.get("jobs") or []) if isinstance(j, dict)]
         found = len(jobs)
         jobs = [j for j in jobs if _key(j) and _key(j) not in skip]
+        # Skip what custody ALREADY holds for this run before truncating, or a
+        # budget-limited pass slices the same prefix every time and never advances.
+        held = {_key(j) for j in (_read(base_store / f"{run_id}.json").get("jobs") or [])}
+        held.discard("")
+        eligible = [j for j in jobs if _key(j) not in held]
         if budget is not None:
-            jobs = jobs[:max(0, budget)]
+            jobs = eligible[:max(0, budget)]
+        else:
+            jobs = eligible
+        truncated = budget is not None and len(jobs) < len(eligible)
         outcome = record(base_store, run_id, jobs) if jobs else {"ok": True, "recorded": 0}
         if not outcome.get("ok"):
             continue
-        done.add(run_id)
+        # A run is only FINISHED importing when its whole eligible set was taken.
+        # Marking a budget-truncated import complete stranded the remainder for
+        # good: the marker is checked before the file is even opened, so a later
+        # pass would never come back for it.
+        if not truncated:
+            done.add(run_id)
         info["runs_imported"] += 1
         info["postings_imported"] += int(outcome.get("recorded", 0))
         if budget is not None:

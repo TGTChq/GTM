@@ -1417,6 +1417,9 @@ MAINTENANCE_WINDOW_START = os.getenv("MAINTENANCE_WINDOW_START", "2026-09-04T07:
 PENDING_WORK_ENABLED = _env_bool("PENDING_WORK_ENABLED", True)
 PENDING_WORK_RESUME_MAX_PER_RUN = _env_int("PENDING_WORK_RESUME_MAX_PER_RUN", 2000)
 PENDING_WORK_MAX_AGE_DAYS = _env_int("PENDING_WORK_MAX_AGE_DAYS", 14)
+# Adoption is a RECOVERY sweep, not a per-run workload, so it is bounded
+# separately and far more generously than the resume limit.
+PENDING_WORK_ADOPT_MAX_PER_PASS = _env_int("PENDING_WORK_ADOPT_MAX_PER_PASS", 10000)
 CRM_MIN_MATCH_LENGTH = _env_int("CRM_MIN_MATCH_LENGTH", 4)
 
 # ---------- Firmographics ----------

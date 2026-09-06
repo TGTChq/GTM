@@ -155,29 +155,54 @@ def reconcile(root: Path, run_id: str) -> dict:
     return out
 
 
+def terminal_posting_keys(root: Path) -> set:
+    """Postings already committed to cross-run suppression.
+
+    The file is ``seen_suppression/postings.json`` and the ids live under ``keys``
+    -- read from `orchestrator.suppression.SuppressionStore`, whose constants these
+    are. An earlier version of this function guessed ``seen.json`` and a top-level
+    ``postings`` list; it silently found nothing, so nothing was excluded from
+    adoption and finished work was taken into custody.
+    """
+    try:
+        from orchestrator.suppression import SuppressionStore
+
+        path = root / "seen_suppression" / SuppressionStore.POSTINGS
+        if not path.is_file():
+            return set()
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            return set()
+        return {str(k) for k in (data.get("keys") or [])}
+    except (OSError, ValueError, ImportError):
+        return set()
+
+
 def adopt(root: Path) -> dict:
-    """Lift retained opportunity lists into custody. Idempotent and bounded."""
+    """Lift retained opportunity lists into custody, and retire finished work.
+
+    Two directions, both necessary. Adoption takes in postings a run bought and
+    never finished. The release afterwards removes anything that HAS since reached a
+    terminal disposition -- self-healing the state left by the earlier version,
+    which excluded nothing because it read the wrong suppression path.
+    """
     from orchestrator import pending_work
 
     store = root / pending_work.STORE
-    seen_terminal: set = set()
-    try:
-        seen_path = root / "seen_suppression" / "seen.json"
-        if seen_path.is_file():
-            data = json.loads(seen_path.read_text(encoding="utf-8"))
-            ids = data.get("postings") if isinstance(data, dict) else data
-            seen_terminal = {str(i) for i in (ids or [])}
-    except (OSError, ValueError):
-        seen_terminal = set()
+    terminal = terminal_posting_keys(root)
 
     before = pending_work.summary(store)
     result = pending_work.adopt_from_artifacts(
         root, store,
-        limit=int(getattr(config, "PENDING_WORK_RESUME_MAX_PER_RUN", 2000) or 2000),
-        exclude_keys=seen_terminal)
+        limit=int(getattr(config, "PENDING_WORK_ADOPT_MAX_PER_PASS", 10000) or 10000),
+        exclude_keys=terminal)
+    released = pending_work.release(
+        store, terminal, outcome=pending_work.OUTCOME_TERMINAL,
+        run_id="maintenance")
     after = pending_work.summary(store)
-    return {"before": before, "adoption": result, "after": after,
-            "terminal_ids_excluded": len(seen_terminal)}
+    return {"before": before, "adoption": result,
+            "released_already_terminal": released, "after": after,
+            "terminal_ids_known": len(terminal)}
 
 
 def drop_empty_run(root: Path, run_id: str) -> dict:

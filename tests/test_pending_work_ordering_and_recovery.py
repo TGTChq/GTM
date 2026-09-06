@@ -236,3 +236,70 @@ class RunsThatOweWorkKeepTheirEvidence(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AdoptionMustNotStrandTheRemainder(unittest.TestCase):
+    """A budget-truncated import used to be marked FINISHED.
+
+    `adopt_from_artifacts` checks its marker before it even opens the file, so a run
+    marked imported is never revisited. Marking a truncated import complete
+    therefore stranded the remainder permanently -- on production it left 4,431 of
+    the 2026-09-04 run's 6,205 retained opportunities outside custody, with the run
+    recorded as done.
+    """
+
+    def setUp(self):
+        self.root = Path(tempfile.mkdtemp())
+        self.store = self.root / "pending_work"
+
+    def _artifact(self, run_id, n):
+        d = self.root / "run_artifacts" / run_id / "enrichment"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "postings.json").write_text(
+            json.dumps({"jobs": [_posting(i) for i in range(n)]}), encoding="utf-8")
+
+    def test_a_truncated_import_is_not_marked_finished(self):
+        self._artifact("20260904T130130Z-13b44a0c", 50)
+        first = pending_work.adopt_from_artifacts(self.root, self.store, limit=20)
+        self.assertEqual(first["postings_imported"], 20)
+
+        second = pending_work.adopt_from_artifacts(self.root, self.store, limit=20)
+        self.assertGreater(second["postings_imported"], 0,
+                           "the remainder must still be reachable")
+        self.assertEqual(second["already_imported"], 0)
+
+    def test_repeated_passes_eventually_take_everything(self):
+        self._artifact("20260904T130130Z-13b44a0c", 50)
+        for _ in range(5):
+            pending_work.adopt_from_artifacts(self.root, self.store, limit=20)
+        self.assertEqual(pending_work.summary(self.store)["pending_postings"], 50)
+
+    def test_a_complete_import_is_marked_finished(self):
+        self._artifact("20260904T130130Z-13b44a0c", 10)
+        pending_work.adopt_from_artifacts(self.root, self.store, limit=1000)
+        again = pending_work.adopt_from_artifacts(self.root, self.store, limit=1000)
+        self.assertEqual(again["already_imported"], 1)
+
+
+class TerminalWorkIsReadFromTheRealSuppressionStore(unittest.TestCase):
+    """The maintenance pass guessed `seen_suppression/seen.json` and a top-level
+    `postings` list. The real file is `seen_suppression/postings.json` with the ids
+    under `keys`, so the guess silently excluded nothing and finished work was taken
+    into custody."""
+
+    def test_it_reads_the_path_and_shape_the_store_actually_writes(self):
+        import run_maintenance
+        from orchestrator.suppression import SuppressionStore
+
+        root = Path(tempfile.mkdtemp())
+        d = root / "seen_suppression"
+        d.mkdir(parents=True)
+        (d / SuppressionStore.POSTINGS).write_text(
+            json.dumps({"schema_version": 1, "count": 2, "keys": ["k1", "k2"]}),
+            encoding="utf-8")
+        self.assertEqual(run_maintenance.terminal_posting_keys(root), {"k1", "k2"})
+
+    def test_a_missing_store_is_empty_not_an_error(self):
+        import run_maintenance
+        self.assertEqual(run_maintenance.terminal_posting_keys(Path(tempfile.mkdtemp())),
+                         set())
