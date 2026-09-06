@@ -1408,6 +1408,14 @@ SEEN_JOBS_RETENTION_DAYS = _env_int("SEEN_JOBS_RETENTION_DAYS", 30)
 # to the cross-run offset cursor.
 FANTASTIC_WINDOW_SLICING_ENABLED = _env_bool("FANTASTIC_WINDOW_SLICING_ENABLED", True)
 FANTASTIC_WINDOW_SLICE_HOURS = _env_int("FANTASTIC_WINDOW_SLICE_HOURS", 6)
+# LANE SELECTION WITHOUT A START-COMMAND CHANGE. `--lanes` is baked into the
+# deployed start command; this is a comma list ADDED to it. It can only widen the
+# set -- a lane the start command asked for cannot be switched off here -- so the
+# deployed command stays the floor of what runs. Empty means no change at all.
+# Intended use: "ats", to activate the 145 registered direct boards, which cost no
+# provider credits. Resolved before the strict preflight so an added lane is held
+# to the same dependency checks as a requested one.
+ACQUISITION_EXTRA_LANES = os.getenv("ACQUISITION_EXTRA_LANES", "")
 MAINTENANCE_ONLY = _env_bool("MAINTENANCE_ONLY", False)
 # Optional steps for a maintenance pass, settable without a code change so a single
 # scheduled container can be pointed at a specific job.

@@ -342,6 +342,28 @@ def _recover_run_lock(a) -> int:
     return 2
 
 
+def _resolved_lanes(a) -> List[str]:
+    """The lanes this run will actually build.
+
+    `--lanes` lives in the service start command, and changing a start command is
+    not always available to whoever needs a lane switched on -- which is how 145
+    registered ATS boards ended up costing nothing and yielding nothing for weeks.
+    `ACQUISITION_EXTRA_LANES` adds to the list without contradicting it: it can only
+    ever WIDEN the set, never silence a lane the start command asked for, so the
+    deployed command remains the floor of what runs.
+
+    Resolved HERE, in one place, because the strict preflight must check the same
+    list the runner builds. A lane added after preflight would let an ats run start
+    with no board registry -- exactly the class of gap this file exists to refuse.
+    """
+    lanes = [x.strip() for x in (a.lanes or "").split(",") if x.strip()]
+    for lane in str(getattr(config, "ACQUISITION_EXTRA_LANES", "") or "").split(","):
+        lane = lane.strip()
+        if lane and lane not in lanes:
+            lanes.append(lane)
+    return lanes
+
+
 def _strict_preflight(a, policy) -> int:
     """Strict gate for a live run: refuse (exit 2) BEFORE any external call if a
     mandatory dependency is missing. Hunter is optional (fallback-only)."""
@@ -349,7 +371,7 @@ def _strict_preflight(a, policy) -> int:
     print("=== strict preflight (before any external call) ===")
     for line in lines:
         print(line)
-    lanes = [x.strip() for x in a.lanes.split(",") if x.strip()] or ["ats"]
+    lanes = _resolved_lanes(a) or ["ats"]
     problems: List[str] = []
     if not res.get("integrity_ok"):
         problems.append("package integrity")
@@ -630,7 +652,7 @@ def main(argv=None) -> int:
     state = StateManager(a.artifact_root, policy, run_id=ctx.run_id)
     budget = build_budget(a)
 
-    requested = [x.strip() for x in a.lanes.split(",") if x.strip()]
+    requested = _resolved_lanes(a)
     lane_runners: Dict[str, Any] = {}
     if mode in OFFLINE_MODES:
         postings = _synthetic(a.dry_postings)
