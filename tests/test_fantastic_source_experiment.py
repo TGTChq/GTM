@@ -53,12 +53,26 @@ def _seg(engine, label, stop_reason="", error_code=""):
 # Per-source drain state machine
 # --------------------------------------------------------------------------
 class DrainStateTest(unittest.TestCase):
+    """The OFFSET cursor's per-source drain state.
+
+    Pinned to `FANTASTIC_WINDOW_SLICING_ENABLED=False` because that is the cursor
+    these assertions describe. `mark_source_drained` reads a segment's stop reason,
+    and the sliced branch returns before ever reaching it -- under slicing the only
+    marker is `mark_source_drained_from_slices`, which requires every slice drained.
+    Drain credibility under the slice cursor is covered in
+    `test_window_slice_cursor.py`; leaving these to run in whichever mode happened to
+    be the default tested neither cursor deliberately.
+    """
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.sp = str(Path(self.tmp.name) / "wm.json")
         _orig = config.FANTASTIC_WATERMARK_STATE_PATH
         self.addCleanup(lambda: setattr(config, "FANTASTIC_WATERMARK_STATE_PATH", _orig))
+        _sl = mock.patch.object(config, "FANTASTIC_WINDOW_SLICING_ENABLED", False)
+        _sl.start()
+        self.addCleanup(_sl.stop)
 
     # -- A: all sources drain -> window advances ------------------------------
     def test_a_all_sources_drained_advances(self):

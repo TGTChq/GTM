@@ -27,9 +27,22 @@ railway volume files  ->  Failed to initialize SFTP session / Timeout   (~23s, C
 railway ssh           ->  Your service's container is not running (status: created)
 ```
 
-Both are **expected between runs**, not defects, and neither may be worked around
-by restarting or redeploying the service: the start command is
-`sh -c 'report || true; exec <pipeline>'`, so *any* start is a paid acquisition run.
+Both are **expected between runs**, not defects.
+
+**How this was resolved.** Restarting the service was not an option: the start
+command is `sh -c 'report || true; exec <pipeline>'`, so any start used to be a paid
+acquisition run, and the start command itself cannot be changed from here. The route
+around it is `MAINTENANCE_ONLY=1` — an authorized variable and a reviewed code path.
+`run_orchestrator` reads it and delegates to `run_maintenance` **before** a
+`RunContext` or a run directory exists, so the container starts, does bounded
+read-mostly work on the volume, and exits without acquiring, enriching or
+delivering anything. It refuses outright unless acquisition is already paused, so it
+can never mask a live run.
+
+    | method | needs a live container | gets you |
+    | MAINTENANCE_ONLY=1 + a cron a few minutes ahead | it CREATES one | the volume, safely |
+
+That is how the A/B below finally ran on production files.
 
 **Capture window.** 03:00 UTC, for as long as the run lasts. With Apollo credits
 exhausted a run finishes in ~14 minutes (2026-09-06: 03:02:30Z → 03:16:33Z). With
@@ -113,6 +126,12 @@ email). Exit code 0 means accepted; non-zero prints the differing metric.
 
 ## What a full acceptance still needs
 
-The A/B on **production files** — A and B both drawn from `gtm-volume` — has not
-run. It needs a capture during a live run. Everything else in this directory works
-between runs.
+**Nothing. It ran.** The A/B on production files — A and B both drawn from
+`gtm-volume` — was executed inside the production container on 2026-09-06 and
+returned `ACCEPTED: True` on every pass: text, values, completeness statuses and
+counted units all identical between artifacts+ledger and ledger-only. Raw logs are
+in `evidence/20260906-maintenance/`.
+
+What remains is not acceptance but authorization: the decisions listed at the end of
+`CAPACITY_ASSESSMENT.md`, and Apollo's billing state (`INCIDENT_2026-09-06_apollo_credits.md`).
+Acquisition stays paused until those are settled.

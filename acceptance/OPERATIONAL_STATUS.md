@@ -20,8 +20,8 @@ Effective values read from GTM and GTM Approved Sync on 2026-09-06.
 | Overall paid-match ceiling | `APOLLO_MAX_PERSON_MATCH_CALLS_PER_RUN` | 0 | off by design — it would limit already-authorized work |
 | Functional discovery | `FANTASTIC_FUNCTIONAL_DISCOVERY_ENABLED` | **False** | **NOT OPERATIONAL.** Implemented and tested; classification integration verified; live incremental yield unmeasured |
 | Historical recovery (6m cursor) | `FANTASTIC_HISTORICAL_RECOVERY_ENABLED` / `..._MAX_ROWS_PER_RUN` | **False / 0** | **NOT OPERATIONAL.** Implemented and offline-verified; needs a flag *and* a row budget, neither granted |
-| Direct ATS boards (145) | `ATS_DIRECT_ACQUISITION_ENABLED` = True | — | **NOT OPERATIONAL.** The lane is built only `if "ats" in lanes`, and the start command passes `--lanes fantastic`. Registered ≠ active |
-| Wellfound / Y Combinator | enabled | — | **ON**, but reported `already_drained_this_window` on 2026-09-06, so they contributed nothing that day |
+| Direct ATS boards (145) | `ATS_DIRECT_ACQUISITION_ENABLED` = True; `ACQUISITION_EXTRA_LANES` = **unset** | — | **NOT OPERATIONAL.** The lane is built only `if "ats" in lanes` and the start command passes `--lanes fantastic`; registered ≠ active. As of `6369bd9` this no longer needs a start-command change — setting `ACQUISITION_EXTRA_LANES=ats` adds the lane, and today's production preflight already reads `boards 145 from ats_board_registry err=none`. Still off: it is acquisition, and acquisition is paused |
+| Wellfound / Y Combinator | enabled | — | **ON**, but reported `already_drained_this_window` on 2026-09-06, so they contributed nothing that day. That flag was set by the OFFSET path and is no longer honoured without slice evidence — see the transition note below |
 | Weekly report → Slack | start command `--slack --if-due friday` | — | **ON**; next due Friday 2026-09-11 |
 | Maintenance mode | `MAINTENANCE_ONLY` | set to 1 for the passes on 2026-09-06 | **must be returned to 0** before normal acquisition resumes |
 
@@ -46,6 +46,16 @@ So if acquisition were resumed **while that window is still open**, the slice cu
 would re-page it slice by slice and `seen_ids` would dedupe essentially all of it:
 one window's worth of spend for near-zero net-new. The run summary would show it
 plainly (`cursor: date_created slices`, slices drained, `kept` ≈ 0).
+
+The same window also carries `window_drained_sources` entries the offset path wrote
+— which is why Wellfound and Y Combinator contributed nothing on 09-06. Those flags
+assert only that one index stopped returning rows, the exact claim the slice cursor
+exists because it cannot be trusted; honoured as-is they would silence a source for
+a window no slice ever paged, and its inventory would expire unexamined. In sliced
+mode a `drained` flag with **no recorded slice for the window** is therefore treated
+as stale. It can only cause more inspection, never less, and it applies to exactly
+one window: slices record from the first sliced pass, and the state is cleared
+whenever a window opens.
 
 It resolves itself if acquisition stays paused. The window's upper bound is
 2026-09-04T10:02Z, so once the 7-day frame floor passes it — **2026-09-11T10:02Z** —

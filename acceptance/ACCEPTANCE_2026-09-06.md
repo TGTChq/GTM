@@ -188,7 +188,33 @@ Both were attempted. Logs are not a substitute: a RUN SUMMARY omits
 09-04 run's capture. Those three gaps are why this window's report reads
 `not measured` where production may well read a number.
 
-Concrete next action: run
-`bash acceptance/capture_production_evidence.sh` **during** the 03:00Z run — with
-Apollo exhausted that is a ~14-minute window. Do not restart the service to obtain
-a container; the start command makes any start a paid acquisition run.
+## RESOLVED, same day — 2026-09-06T10:20Z onwards
+
+The blocker above was the assumption in its own last sentence: *"do not restart the
+service to obtain a container; the start command makes any start a paid acquisition
+run."* True of the start command, and the start command cannot be changed from here
+— but a container's BEHAVIOUR is not fixed by its start command alone.
+
+`MAINTENANCE_ONLY=1` (an authorized variable) makes `run_orchestrator` delegate to
+`run_maintenance` **before** a `RunContext`, run directory, lane runner, enrichment
+engine or delivery manager is constructed. It refuses unless acquisition is already
+paused. Setting a cron a few minutes ahead then produces a live container that
+acquires nothing, enriches nothing, delivers nothing, and gives full access to the
+volume.
+
+Five passes have run this way. Results, from `evidence/20260906-maintenance/`:
+
+* **A/B on production files: `ACCEPTED: True`** — text, values, completeness
+  statuses and counted units identical between artifacts+ledger and ledger-only.
+* The 09-06 run reconciles exactly: `net_new_jobs_captured 226`,
+  `opportunities_retained 226`, `identities_distinct 226`, `unavailable []`.
+* `jobs_captured` is **6,431 measured**, not "not measured": the artifacts hold the
+  09-04 run's 6,205 postings, which no log could show.
+* `contacts_found 1,048` and `sent_to_airtable 781` are **measured**, and the census
+  reconciles on all of them.
+
+`jobs_reviewed` remains **partial** for the period: the 09-04 run contributes
+nothing to it. Whether that field was never written or merely never read is the
+difference between a data gap and a reporting gap, and it must not be guessed, so
+the maintenance pass now prints a per-run provenance probe that names the exact
+field. The answer is recorded below once that pass has run.

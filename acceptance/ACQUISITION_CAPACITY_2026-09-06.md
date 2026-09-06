@@ -245,9 +245,20 @@ not establish record identity, and nothing here claims it does.
 | `AIRTABLE_SUPPRESS_ACCOUNT_LEVEL` | False | False |
 | `ENROLLMENT_PERSON_EMPLOYER_UNIQUENESS` | True | True |
 
-**One approved row per company x function, and one enrolled person per employer.**
+> **WITHDRAWN — see Addendum 2 below.** What follows reasons from the flag NAMES.
+> The second half is false: `ENROLLMENT_PERSON_EMPLOYER_UNIQUENESS` enforces one
+> enrollment per person-employer PAIR, and `_collapse_person_employer` keeps distinct
+> emails at the same employer as distinct buyers. No rule caps an employer at one
+> lead. The binding unit is company x **function**, not employer.
+
+~~**One approved row per company x function, and one enrolled person per employer.**
 That makes the binding unit **distinct new employers per day** -- not postings. A
-company advertising five roles does not become five leads.
+company advertising five roles does not become five leads.~~
+
+The surviving half is real and is the bound used everywhere downstream: one active
+Airtable row per company x role bucket. A company advertising five roles in ONE
+function does not become five leads; a company advertising in three functions
+becomes three.
 
 ## Which acquisition paths are actually ACTIVE
 
@@ -257,20 +268,33 @@ company advertising five roles does not become five leads.
 | Fantastic ATS source | yes | **yes** | 28 requests on 09-06 |
 | Fantastic Wellfound | yes | yes, when not drained | 160 rows on 09-04 |
 | Fantastic Y Combinator | yes | yes, when not drained | 45 rows on 09-04 |
-| **Direct ATS boards (145)** | `ATS_DIRECT_ACQUISITION_ENABLED=True` | **NO** | the lane is built only `if "ats" in lanes`, and the start command passes `--lanes fantastic` |
+| **Direct ATS boards (145)** | `ATS_DIRECT_ACQUISITION_ENABLED=True`, `ACQUISITION_EXTRA_LANES` unset | **NO** | the lane is built only `if "ats" in lanes`, and the start command passes `--lanes fantastic`. Since `6369bd9` an authorized variable can add it — see `CAPACITY_ASSESSMENT.md` item 2 |
 
 The 145 registered boards contribute **zero**, and not because they are unproductive
--- the lane is never invoked. Registered is not active. Enabling it is a start-command
-change, and its yield is unmeasured.
+-- the lane is never invoked. Registered is not active. Their yield is unmeasured.
+Activating them needed a start-command change I am not permitted to make; since
+`6369bd9` it needs one authorized variable instead (`ACQUISITION_EXTRA_LANES=ats`),
+and the production preflight already loads all 145 boards without error.
 
 ## What this implies for 1,000 new approved leads/day
 
+**CORRECTED 2026-09-06.** This section originally bounded the day by saying approved
+leads are capped at "one per company x function and one enrolled person per
+employer". The second half is **false** and was withdrawn: `ENROLLMENT_PERSON_EMPLOYER_UNIQUENESS`
+enforces one enrollment per person-employer PAIR, and `_collapse_person_employer`
+keeps distinct emails at the same employer as distinct buyers. No rule caps an
+employer at one lead. The bound below now rests only on the rule that does exist.
+
 **Bounded for the day measured, not in general.** On 2026-09-06 the two active
 Fantastic sources matched 361 and 520 postings in one 24h window; the union is
-unmeasured, so at most 881 postings. Since approved leads are capped at one per
-company x function and one enrolled person per employer, distinct employers <=
-postings, so those two sources could not have yielded 1,000 new approved leads that
-day. Wellfound and Y Combinator added ~205 rows on 09-04. Direct ATS is inactive.
+unmeasured, so at most 881 postings. Approved rows are capped at one active row per
+company x **function** (`AIRTABLE_SUPPRESS_EXISTING_COMPANY_FUNCTION`), and the
+measured ratio is ~1.3 postings per company x function opportunity, so at most ~678
+opportunities that day -- short of 1,000 even before any conversion loss. Wellfound
+and Y Combinator added ~205 rows on 09-04. Direct ATS is inactive.
+
+The unit and the arithmetic are set out in `CAPACITY_ASSESSMENT.md`, which supersedes
+this file wherever the two disagree.
 
 That is a statement about **one observed day and the currently active paths**. It is
 not a permanent ceiling: inventory varies day to day, the direct-ATS path exists and
@@ -284,8 +308,12 @@ truncated at 2,170 of 2,410 opportunities and its cohort was a ten-day backlog.
 
 1. The **union** of LinkedIn and ATS inventory, plus Wellfound/YC and a direct-ATS
    board sweep, over several days rather than one.
-2. Distinct **employers** per day behind those postings -- the actual binding unit,
-   which no count has yet measured.
+2. ~~Distinct **employers** per day behind those postings -- the actual binding unit,
+   which no count has yet measured.~~ **ANSWERED, and the unit was wrong.** The
+   binding unit is company x **function**, not employer. Measured on the retained
+   payloads with the production identity functions: 226 postings -> 170 companies ->
+   **174 opportunities** on the 09-06 daily cohort; 6,205 -> 3,819 -> **4,147** on the
+   09-04 backlog. See `CAPACITY_ASSESSMENT.md`.
 3. Why the 09-06 window was re-paged: partly answered below.
 
 ## Why the window was re-paged (continuation)

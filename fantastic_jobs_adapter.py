@@ -2626,8 +2626,39 @@ class DateCreatedWatermarkEngine:
         Lets a re-opened (reused) window continue only the sources that still owe
         inventory, instead of re-billing sources that already finished -- the
         failure mode that made a shared window unsafe with 3-4 sources.
+
+        Uses ``drain_is_credible`` rather than the raw flag -- see there for why a
+        flag alone is not evidence once the cursor is sliced.
         """
-        return bool(self.drained_sources().get(str(label)))
+        return self.drain_is_credible(label)
+
+    def drain_is_credible(self, label: str) -> bool:
+        """Is this source's ``drained`` flag EVIDENCE, or just a leftover?
+
+        A window open across the cursor change carries flags the OFFSET path wrote,
+        and those assert only that one index stopped returning rows -- the very
+        claim the slice cursor exists because it cannot be trusted. In sliced mode
+        the flag can legitimately be set only by ``mark_source_drained_from_slices``,
+        which requires every slice drained and therefore always leaves a slice
+        record; the offset marker is unreachable, because the sliced branch returns
+        before it.
+
+        So in sliced mode a flag with NO recorded slice for this window is a
+        leftover, and honouring it would do real harm in two places: the source is
+        skipped for the rest of the window, AND ``window_drained`` counts it, which
+        advances the watermark past inventory no slice ever paged. That is the loss
+        the cursor was built to remove, surviving the fix that removed it.
+
+        Disbelieving it can only ever cause MORE inspection, never less. It costs
+        nothing after the changeover -- slices record from the first sliced pass, and
+        the whole state is cleared when a window opens -- so it applies to exactly
+        one window.
+        """
+        if not bool(self.drained_sources().get(str(label))):
+            return False
+        if not bool(getattr(config, "FANTASTIC_WINDOW_SLICING_ENABLED", False)):
+            return True
+        return bool(self.window_slices_done().get(str(label)))
 
     def mark_source_drained(self, label: str) -> None:
         """Record whether a source exhausted the window, from ITS OWN segment stats.
@@ -2662,8 +2693,10 @@ class DateCreatedWatermarkEngine:
             return True                                   # empty interval: trivially drained
         if not enabled_labels:
             return False
-        drained = self.drained_sources()
-        return all(bool(drained.get(str(lbl))) for lbl in enabled_labels)
+        # `drain_is_credible`, not the raw flag: an offset-era flag would otherwise
+        # close a window the slice cursor never paged, which is strictly worse than
+        # skipping one source -- it advances the watermark past the whole window.
+        return all(self.drain_is_credible(str(lbl)) for lbl in enabled_labels)
 
     def _run_sliced(self, endpoint: str, base_params: Dict[str, Any], label: str,
                     cap_limit: int, accept: Optional[Tuple[str, ...]]) -> None:

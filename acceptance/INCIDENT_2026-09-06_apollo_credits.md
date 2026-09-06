@@ -79,7 +79,25 @@ All three, in order:
 2. **Custody is deployed.** `orchestrator/pending_work.py` present on the running
    commit (PR #100, `main` ≥ `b173a3c`), so a second billing stop retains the work
    instead of dropping it.
-3. **Then** restore `FANTASTIC_JOBS_ENABLED=1` with the command above.
+3. **Maintenance mode is cleared.** `MAINTENANCE_ONLY` must be `0` **first**. It was
+   set to `1` on 2026-09-06 so the nightly container does a maintenance pass instead
+   of a no-op pipeline run. With both set the run exits 2 and acquires nothing every
+   night — the guard is fail-safe, so it costs nothing, but it is silent unless the
+   exit code is read:
+
+   ```bash
+   railway api 'mutation { variableUpsert(input: {projectId: "898f2e3a-1c1e-4b00-b9a6-686cf0432282", environmentId: "bae427bd-64a6-4f4e-8f56-fbd406985434", serviceId: "3a41d0d7-cd66-4f53-baa6-886266ddbbed", name: "MAINTENANCE_ONLY", value: "0"}) }'
+   ```
+
+4. **Then** restore `FANTASTIC_JOBS_ENABLED=1` with the command above.
+
+### What the first resumed run should show
+
+`cursor: date_created slices` in the RUN SUMMARY, with drained slices and an
+`expired_inventory` line. If the window from 2026-08-30 is still open it will be
+re-walked slice by slice for near-zero net-new — one transition cost, explained in
+`OPERATIONAL_STATUS.md`. It self-resolves if acquisition stays paused past
+2026-09-11T10:02Z.
 
 ## Still unverified — needs the Apollo web app
 

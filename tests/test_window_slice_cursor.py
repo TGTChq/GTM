@@ -246,3 +246,64 @@ class ExpiredInventoryIsAccountedFor(unittest.TestCase):
         report = metrics["watermark"].get("expired_inventory") or {}
         if not metrics["watermark"].get("lower_clamped_to_frame"):
             self.assertEqual(report.get("conceded_slices", 0), 0)
+
+
+class AnOffsetEraDrainedFlagIsNotSliceEvidence(unittest.TestCase):
+    """The changeover case, and it is the one that could have re-created the loss.
+
+    A window open across the cursor change carries `window_drained_sources` entries
+    the OFFSET path wrote. Those assert only that one index stopped returning rows --
+    exactly the claim the slice cursor exists because it cannot be trusted. Honoured
+    as-is, the source is skipped for the rest of a window no slice ever paged, and
+    its inventory expires unexamined.
+
+    On 2026-09-06 production carried precisely this state: Wellfound and Y Combinator
+    both reported `already_drained_this_window` and contributed nothing, on flags set
+    by the offset path.
+    """
+
+    def _engine(self, drained, slices, sliced=True):
+        import os as _os
+        import tempfile as _tempfile
+        from unittest import mock as _mock
+
+        import config as _config
+        import fantastic_jobs_adapter as fja
+
+        eng = fja.DateCreatedWatermarkEngine.__new__(fja.DateCreatedWatermarkEngine)
+        eng.state = {"window_drained_sources": drained, "window_slices": slices}
+        eng.path = _os.path.join(_tempfile.mkdtemp(), "wm.json")
+        return eng, _mock.patch.object(_config, "FANTASTIC_WINDOW_SLICING_ENABLED", sliced)
+
+    def test_a_flag_without_a_slice_record_is_ignored(self):
+        eng, patched = self._engine({"linkedin": True}, {})
+        with patched:
+            self.assertFalse(eng.source_already_drained("linkedin"),
+                             "an offset-era flag must not silence a source")
+
+    def test_a_flag_with_slice_evidence_is_honoured(self):
+        eng, patched = self._engine({"linkedin": True},
+                                    {"linkedin": ["2026-09-01T00:00:00Z|2026-09-01T06:00:00Z"]})
+        with patched:
+            self.assertTrue(eng.source_already_drained("linkedin"),
+                            "a slice-drained source must not be re-billed")
+
+    def test_an_undrained_source_is_never_made_drained_by_this(self):
+        eng, patched = self._engine({"linkedin": False}, {"linkedin": ["a|b"]})
+        with patched:
+            self.assertFalse(eng.source_already_drained("linkedin"))
+
+    def test_with_slicing_off_the_old_behaviour_is_unchanged(self):
+        """The fallback path must keep working exactly as it did."""
+        eng, patched = self._engine({"linkedin": True}, {}, sliced=False)
+        with patched:
+            self.assertTrue(eng.source_already_drained("linkedin"))
+
+    def test_the_leniency_lasts_one_window(self):
+        """Slices are recorded from the first sliced pass, so the second run already
+        has evidence -- and the whole state is cleared when a window opens."""
+        out = _sweep(True, cap=240, days=2)
+        with open(out["state"], encoding="utf-8") as fh:
+            state = json.load(fh)
+        self.assertTrue((state.get("window_slices") or {}).get(LABEL),
+                        "slice evidence exists after a sliced run")
