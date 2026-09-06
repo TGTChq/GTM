@@ -251,6 +251,27 @@ def _unresolved_organization(
     )
 
 
+
+def _charge_recovery_budget(kind: str) -> None:
+    """Draw one chargeable call against the durable recovery budget, if one is set.
+
+    A no-op unless `APOLLO_RECOVERY_BUDGET_ENABLED` is on, so the ordinary path is
+    unchanged byte for byte. When it IS on and the budget is spent, `BudgetExhausted`
+    propagates rather than being swallowed: the caller stops, the work it had not
+    finished never reaches a terminal disposition, and `pending_work` keeps it for a
+    later run. Exhaustion is a pause, not a loss -- which is what makes a hard ceiling
+    safe to set low.
+
+    Charged BEFORE the request. A charge recorded afterwards can be lost by a crash
+    between the two, and an unrecorded paid call is the one error a ceiling cannot
+    make.
+    """
+    from orchestrator import apollo_budget
+
+    if apollo_budget.enabled():
+        apollo_budget.charge(kind)
+
+
 def enrich_organization(
     *,
     domain: str = "",
@@ -259,6 +280,7 @@ def enrich_organization(
 ) -> OrgEnrichment:
     if not any((domain, name, website)):
         return OrgEnrichment(found=False)
+    _charge_recovery_budget("organization_enrich")
 
     normalized_domain = _domain(domain)
     params: Dict[str, str] = {}
@@ -430,6 +452,7 @@ def search_people_at_company(domain: str, titles: List[str]) -> List[Dict[str, A
     domain = _domain(domain)
     if not domain or not titles:
         return []
+    _charge_recovery_budget("people_search")
 
     per_page = 25
     max_pages = max(1, int(getattr(config, "APOLLO_PEOPLE_SEARCH_MAX_PAGES", 1)))
@@ -570,6 +593,7 @@ def search_people_by_org_id(organization_id: str, titles: List[str],
 
 def match_person(person: Dict[str, Any]) -> PersonMatch:
     """Enrich a person while preserving search-result identity for Hunter fallback."""
+    _charge_recovery_budget("person_match")
     person_id = person.get("id") or person.get("person_id")
     org = _organization_from_person(person)
     base = PersonMatch(

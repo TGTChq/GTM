@@ -845,10 +845,19 @@ def _print_run_summary(ctx, mode, result, state) -> None:
             # A recovery-first run's whole point is this line: the cohort's complete
             # path, in one place, so "we reprocessed the backlog" is a measurement
             # rather than a claim.
+            rate = rec.get("opportunity_to_contact_rate")
             line("RECOVERY COHORT",
-                 f"resumed {rec.get('opportunities_resumed')} -> leads {rec.get('leads')} "
-                 f"-> with_contact {rec.get('with_contact')} -> final_pass "
-                 f"{rec.get('final_pass')} -> delivered {rec.get('delivered')}")
+                 f"postings {rec.get('postings_resumed')} / opportunities "
+                 f"{rec.get('opportunities_resumed')} / leads {rec.get('leads')}")
+            line("  attempted",
+                 f"{rec.get('opportunities_attempted')} opportunities -> with_contact "
+                 f"{rec.get('with_contact')} -> final_pass {rec.get('final_pass')} "
+                 f"-> delivered {rec.get('delivered')}")
+            line("  opp->contact",
+                 f"{rate if rate is not None else 'unknown'} "
+                 f"(denominator: {rec.get('rate_denominator') or 'none'})")
+            line("  no reconciled outcome",
+                 rec.get("opportunities_without_reconciled_outcome"))
         wm = ((result.get("lanes") or {}).get("fantastic") or {}).get(
             "attribution", {}).get("watermark") or {}
         if wm.get("enabled"):

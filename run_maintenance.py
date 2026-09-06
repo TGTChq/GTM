@@ -586,6 +586,100 @@ def execution_reconcile(root: Path, run_ids) -> dict:
     return out
 
 
+def outcome_forensics(root: Path, run_ids) -> dict:
+    """Decompose the hiring-manager outcomes from whatever the run actually wrote.
+
+    The stage totals -- 606 `not_icp`, 106 `company_unresolved`, 740
+    `email_unverified` -- are each a bucket of several distinct situations with
+    different owners and different remedies. `email_unverified` alone covers a
+    missing address, an address Apollo returned without verifying, one our own
+    generic-mailbox or domain-identity policy rejected, and one a second opinion
+    called undeliverable.
+
+    This inventories the run's enrichment directory and decomposes only what the
+    files support. Anything the artifacts cannot separate is listed under
+    `not_decomposable` rather than apportioned, because a plausible split is
+    indistinguishable from a measured one once it is written down.
+    """
+    from collections import Counter
+
+    out = {"runs": []}
+    for run_id in run_ids:
+        enr = root / "run_artifacts" / run_id / "enrichment"
+        row: Dict[str, Any] = {"run_id": run_id, "files": [], "not_decomposable": []}
+        if not enr.is_dir():
+            row["not_decomposable"].append("no enrichment directory")
+            out["runs"].append(row)
+            continue
+        rows_scanned = 0
+        icp: Counter = Counter()
+        email: Counter = Counter()
+        apollo_status: Counter = Counter()
+        hunter_status: Counter = Counter()
+        hm_reason: Counter = Counter()
+        for path in sorted(enr.rglob("*.json")):
+            try:
+                size = path.stat().st_size
+            except OSError:
+                continue
+            row["files"].append({"name": str(path.relative_to(enr)), "bytes": size})
+            if path.name == "postings.json" or size > 80_000_000:
+                continue
+            data = _read_json(path)
+            # Stats dicts: the hiring-manager stage counts its own company decisions.
+            if isinstance(data, dict):
+                for key, value in data.items():
+                    if not isinstance(value, int):
+                        continue
+                    if str(key).startswith("company_criteria_reason__"):
+                        icp[str(key)[len("company_criteria_reason__"):]] += value
+            # Row collections: per-lead detail, wherever it lives.
+            candidates = []
+            if isinstance(data, list):
+                candidates = data
+            elif isinstance(data, dict):
+                for key in ("leads", "rows", "records", "results", "contacts"):
+                    if isinstance(data.get(key), list):
+                        candidates = data[key]
+                        break
+            for rec in candidates:
+                if not isinstance(rec, dict):
+                    continue
+                rows_scanned += 1
+                st = str(rec.get("apollo_email_status") or rec.get("email_status")
+                         or (rec.get("metadata") or {}).get("apollo_status") or "").lower()
+                if st:
+                    apollo_status[st] += 1
+                hs = str((rec.get("metadata") or {}).get("hunter_status")
+                         or rec.get("hunter_status") or "").lower()
+                hunter_status[hs or "(absent)"] += 1
+                reason = str(rec.get("hm_reason") or rec.get("primary_reason")
+                             or rec.get("reason") or "").lower()
+                if reason:
+                    hm_reason[reason] += 1
+                addr = str(rec.get("email") or rec.get("contact_email") or "").strip()
+                if reason in ("email_unverified", "unverified_email",
+                              "unverified_email_deliverability"):
+                    email["no_address" if not addr else
+                          f"address_apollo_status={st or 'absent'}"] += 1
+        row["rows_scanned"] = rows_scanned
+        row["icp_reason_families"] = dict(icp.most_common())
+        row["apollo_email_status"] = dict(apollo_status.most_common())
+        row["hunter_status"] = dict(hunter_status.most_common())
+        row["hm_reasons"] = dict(hm_reason.most_common(15))
+        row["email_unverified_breakdown"] = dict(email.most_common())
+        if not rows_scanned:
+            row["not_decomposable"].append(
+                "no per-lead rows in the enrichment artifacts -- the stage totals "
+                "cannot be split from this run's evidence")
+        if not icp:
+            row["not_decomposable"].append(
+                "no company_criteria_reason__* stats -- the not_icp total cannot be "
+                "attributed to an ICP rule from this run's evidence")
+        out["runs"].append(row)
+    return out
+
+
 def domain_readiness(root: Path, run_ids) -> dict:
     """How much of contact discovery fails BEFORE Apollo is ever asked.
 
@@ -972,6 +1066,9 @@ def main(argv=None) -> int:
 
         _say("4c0c. EXECUTION RECONCILE (stage-entry evidence, not a payload recount)")
         print(json.dumps(execution_reconcile(root, ids), indent=2, default=str))
+
+        _say("4c0d. OUTCOME FORENSICS (decompose only what the artifacts support)")
+        print(json.dumps(outcome_forensics(root, ids), indent=2, default=str))
 
     if getattr(config, "MAINTENANCE_ATS_BOARD_YIELD", ""):
         # The 145 registered boards are scraped from each employer's OWN public job

@@ -83,6 +83,26 @@ _FUNNEL_TO_LEDGER = (
     ("companies_considered", "companies_considered"),
 )
 
+def _opportunity_key(job) -> str:
+    """company x function -- the unit approvals are capped by, and NOT a posting.
+
+    The same functions the Airtable suppression rule keys on, so a cohort counted
+    here and a cohort counted by `run_maintenance.measure_identities` agree.
+    """
+    try:
+        from airtable_client import _company_identity_keys_from_job
+        from role_mapping import get_bucket_name_for_job
+    except Exception:  # noqa: BLE001 - identity is observability, never a run blocker
+        return ""
+    try:
+        keys = _company_identity_keys_from_job(job)
+        if not keys:
+            return ""
+        return f"{sorted(keys)[0]}|{get_bucket_name_for_job(job) or 'unbucketed'}"
+    except Exception:  # noqa: BLE001
+        return ""
+
+
 def _account_recovery_cohort(cohort, leads, delivery) -> None:
     """Follow the recovered cohort through ONE slice's enrichment and delivery.
 
@@ -107,6 +127,14 @@ def _account_recovery_cohort(cohort, leads, delivery) -> None:
         if own not in ids and not any(r in ids for r in related):
             continue
         cohort["leads"] += 1
+        # ATTEMPTED means the stage produced an outcome for this opportunity. It is
+        # the only honest denominator for a conversion rate: work the run never
+        # reached has no outcome and must not sit in the bottom of a fraction.
+        opp = _opportunity_key(getattr(lead, "company", None) or {})
+        if not opp:
+            opp = str(getattr(lead, "posting_id", "") or "")
+        if opp:
+            cohort["attempted_opportunity_keys"].add(opp)
         contact_key = str(getattr(lead, "contact_key", "") or "")
         if contact_key:
             cohort["with_contact"] += 1
@@ -963,10 +991,17 @@ class Orchestrator:
         #: The recovered-work cohort, followed through every stage of THIS run. Kept
         #: as posting identities because that is the one key enrichment, delivery and
         #: a later Airtable/Instantly reconciliation all share.
+        #: THREE DIFFERENT UNITS, kept apart. Custody stores POSTINGS, approvals are
+        #: capped per company x function OPPORTUNITY, and the hiring-manager stage
+        #: emits LEADS. The first version called the posting count
+        #: `opportunities_resumed`, which is the same conflation that produced every
+        #: bad capacity number this week.
         recovery_cohort: Dict[str, Any] = {
-            "opportunities_resumed": 0, "leads": 0, "with_contact": 0,
+            "postings_resumed": 0, "opportunities_resumed": 0,
+            "leads": 0, "with_contact": 0,
             "final_pass": 0, "needs_check": 0, "rejected": 0, "other": 0,
-            "delivered_lead_keys": [], "posting_ids": set()}
+            "delivered_lead_keys": [], "posting_ids": set(),
+            "opportunity_keys": set(), "attempted_opportunity_keys": set()}
         stop_reason = ""
         acquisition_error = ""  # set on a FAILED acquisition lane (not "no inventory")
 
@@ -1143,7 +1178,15 @@ class Orchestrator:
                             jid = str(j.get("job_id") or j.get("posting_id") or "")
                             if jid:
                                 recovery_cohort["posting_ids"].add(jid)
-                        recovery_cohort["opportunities_resumed"] += len(resumed)
+                            opp = _opportunity_key(j)
+                            if opp:
+                                recovery_cohort["opportunity_keys"].add(opp)
+                        # POSTINGS, named as such. The opportunity count is the
+                        # DISTINCT company x function set, which is smaller and is
+                        # the unit approvals are actually capped by.
+                        recovery_cohort["postings_resumed"] += len(resumed)
+                        recovery_cohort["opportunities_resumed"] = len(
+                            recovery_cohort["opportunity_keys"])
                     acq_cum["pending_work_resumed"] = resume_info
 
             enr_kwargs: Dict[str, Any] = {}
@@ -1319,9 +1362,24 @@ class Orchestrator:
         # (it can run to thousands and the ids are already in the pending store), and
         # the delivered lead keys are kept in full because they are the join a later
         # Airtable / Approved Sync reconciliation needs. A count cannot be joined.
-        recovery_block = {k: v for k, v in recovery_cohort.items() if k != "posting_ids"}
+        _sets = ("posting_ids", "opportunity_keys", "attempted_opportunity_keys")
+        recovery_block = {k: v for k, v in recovery_cohort.items() if k not in _sets}
         recovery_block["cohort_postings"] = len(recovery_cohort.get("posting_ids") or ())
         recovery_block["delivered"] = len(recovery_block.get("delivered_lead_keys") or [])
+        # ATTEMPTED vs UNATTEMPTED, kept apart. A conversion rate divides by the
+        # opportunities the stage actually produced an outcome for; the remainder is
+        # reported beside it as work with NO reconciled outcome -- which is what it
+        # is. Calling it "never attempted" would assert execution evidence this run
+        # may not carry.
+        attempted = len(recovery_cohort.get("attempted_opportunity_keys") or ())
+        resumed_opps = int(recovery_block.get("opportunities_resumed") or 0)
+        recovery_block["opportunities_attempted"] = attempted
+        recovery_block["opportunities_without_reconciled_outcome"] = max(
+            0, resumed_opps - attempted)
+        recovery_block["opportunity_to_contact_rate"] = (
+            round(recovery_block["with_contact"] / attempted, 4) if attempted else None)
+        recovery_block["rate_denominator"] = (
+            "opportunities_attempted" if attempted else "")
         acquisition_block = {
             "iterations": controller.iterations,
             "recovery_cohort": recovery_block,

@@ -72,10 +72,29 @@ class MaintenanceOnlyReachesNoPipelineCode(unittest.TestCase):
         import run_maintenance
 
         source = open(run_maintenance.__file__, encoding="utf-8").read()
-        for forbidden in ("fantastic_jobs_adapter", "apollo_client", "hunter",
+        for forbidden in ("fantastic_jobs_adapter", "apollo_client", "hunter_client",
                           "instantly_client", "real_fantastic_runner", "RealDelivery"):
             self.assertNotIn(forbidden, source,
                              f"maintenance must not reach {forbidden}")
+
+        # The guard is about IMPORTS AND CALLS, not vocabulary. It used to forbid the
+        # bare substring "hunter", which also forbade reading a `hunter_status` FIELD
+        # out of a stored artifact -- a string in a JSON file that contacts nobody.
+        # Checking the import graph says what was meant; checking the word said
+        # something else and would have been "fixed" by renaming a local.
+        import ast
+
+        tree = ast.parse(source)
+        imported = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                imported |= {a.name.split(".")[0] for a in node.names}
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                imported.add(node.module.split(".")[0])
+        for module in ("apollo_client", "hunter_client", "instantly_client",
+                       "fantastic_jobs_adapter"):
+            self.assertNotIn(module, imported,
+                             f"maintenance must not import {module}")
 
     def test_it_calls_no_write_entry_point(self):
         """`airtable_client` IS imported -- for `_company_identity_keys_from_job`,
@@ -684,3 +703,74 @@ class TheStageIdentityIsRestatedAndEmailUnverifiedIsItsOwnOutcome(unittest.TestC
         self.assertEqual(row["opportunities_never_reaching_the_stage"], 3)
         self.assertIsNone(row["opportunity_to_contact_rate"],
                           "a lower bound is still not a denominator")
+
+
+class OutcomeForensicsDecomposesOnlyWhatTheArtifactsSupport(unittest.TestCase):
+    """606 `not_icp`, 106 `company_unresolved` and 740 `email_unverified` are each a
+    bucket of several situations with different owners and different remedies --
+    `email_unverified` alone covers a missing address, one Apollo returned without
+    verifying, one our own generic-mailbox or domain-identity policy rejected, and one
+    a second opinion called undeliverable.
+
+    A plausible split is indistinguishable from a measured one once it is written
+    down, so anything the files cannot separate is listed as not decomposable rather
+    than apportioned."""
+
+    def _root(self, files):
+        import json as _json
+        import tempfile as _tempfile
+        from pathlib import Path as _Path
+
+        root = _Path(_tempfile.mkdtemp())
+        enr = root / "run_artifacts" / "r1" / "enrichment"
+        enr.mkdir(parents=True, exist_ok=True)
+        for name, payload in files.items():
+            (enr / name).write_text(_json.dumps(payload), encoding="utf-8")
+        return root
+
+    def test_a_run_with_no_per_lead_rows_says_so(self):
+        root = self._root({"postings.json": {"jobs": []}})
+        row = run_maintenance.outcome_forensics(root, ["r1"])["runs"][0]
+        self.assertTrue(any("no per-lead rows" in n for n in row["not_decomposable"]))
+        self.assertTrue(any("not_icp total cannot be attributed" in n
+                            for n in row["not_decomposable"]))
+
+    def test_icp_reason_families_are_read_from_the_stage_stats(self):
+        root = self._root({"step3_stats.json": {
+            "company_criteria_reason__headcount": 400,
+            "company_criteria_reason__industry": 206,
+            "unrelated_counter": 9}})
+        row = run_maintenance.outcome_forensics(root, ["r1"])["runs"][0]
+        self.assertEqual(row["icp_reason_families"],
+                         {"headcount": 400, "industry": 206})
+
+    def test_email_outcomes_split_missing_address_from_unverified_one(self):
+        root = self._root({"leads.json": {"leads": [
+            {"hm_reason": "email_unverified", "email": ""},
+            {"hm_reason": "email_unverified", "email": "a@x.com",
+             "email_status": "extrapolated"},
+            {"hm_reason": "email_unverified", "email": "b@x.com",
+             "email_status": "unverified"},
+        ]}})
+        row = run_maintenance.outcome_forensics(root, ["r1"])["runs"][0]
+        self.assertEqual(row["email_unverified_breakdown"]["no_address"], 1)
+        self.assertEqual(
+            row["email_unverified_breakdown"]["address_apollo_status=extrapolated"], 1)
+
+    def test_whether_a_second_opinion_ran_is_reported(self):
+        """`VERIFY_WITH_HUNTER` differs between the two services, so "was there a
+        second opinion at all" is a question the artifacts have to answer."""
+        root = self._root({"leads.json": {"leads": [
+            {"hm_reason": "email_unverified", "email": "a@x.com"},
+            {"hm_reason": "email_unverified", "email": "b@x.com",
+             "metadata": {"hunter_status": "valid"}},
+        ]}})
+        row = run_maintenance.outcome_forensics(root, ["r1"])["runs"][0]
+        self.assertEqual(row["hunter_status"]["(absent)"], 1)
+        self.assertEqual(row["hunter_status"]["valid"], 1)
+
+    def test_the_giant_postings_file_is_not_parsed_as_lead_rows(self):
+        root = self._root({"postings.json": {"jobs": [{"job_id": "j1"}] * 3},
+                           "leads.json": {"leads": [{"hm_reason": "not_icp"}]}})
+        row = run_maintenance.outcome_forensics(root, ["r1"])["runs"][0]
+        self.assertEqual(row["rows_scanned"], 1)

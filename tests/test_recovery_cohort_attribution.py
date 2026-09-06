@@ -25,9 +25,10 @@ from orchestrator.pipeline import _account_recovery_cohort
 
 
 def _cohort(ids=()):
-    return {"opportunities_resumed": 0, "leads": 0, "with_contact": 0,
-            "final_pass": 0, "needs_check": 0, "rejected": 0, "other": 0,
-            "delivered_lead_keys": [], "posting_ids": set(ids)}
+    return {"postings_resumed": 0, "opportunities_resumed": 0, "leads": 0,
+            "with_contact": 0, "final_pass": 0, "needs_check": 0, "rejected": 0,
+            "other": 0, "delivered_lead_keys": [], "posting_ids": set(ids),
+            "opportunity_keys": set(), "attempted_opportunity_keys": set()}
 
 
 def _lead(posting_id, *, contact_key="", disposition="FINAL_PASS", related=()):
@@ -112,7 +113,7 @@ class TheRunResultCarriesItInAJoinableShape(unittest.TestCase):
         from orchestrator import pipeline
 
         source = inspect.getsource(pipeline)
-        self.assertIn('recovery_block = {k: v for k, v in recovery_cohort.items() if k != "posting_ids"}',
+        self.assertIn('recovery_block = {k: v for k, v in recovery_cohort.items() if k not in _sets}',
                       source)
         self.assertIn('recovery_block["cohort_postings"] = len(', source)
 
@@ -226,6 +227,63 @@ class ARunThatBuysNOTHINGStillDrainsCustody(unittest.TestCase):
                       _Engine()), resume=False)
 
         cohort = (result.get("acquisition") or {}).get("recovery_cohort") or {}
-        self.assertEqual(cohort.get("opportunities_resumed"), 1)
+        self.assertEqual(cohort.get("postings_resumed"), 1)
         self.assertGreaterEqual(cohort.get("cohort_postings", 0), 1)
-        self.assertNotIn("posting_ids", cohort, "the identity set is not serialised")
+        for internal in ("posting_ids", "opportunity_keys",
+                         "attempted_opportunity_keys"):
+            self.assertNotIn(internal, cohort, "identity sets are not serialised")
+
+
+class ThreeUnitsAreThreeNumbers(unittest.TestCase):
+    """Custody stores POSTINGS; approvals are capped per company x function
+    OPPORTUNITY; the hiring-manager stage emits LEADS. The first version of this
+    block called the posting count `opportunities_resumed` -- the same conflation
+    that produced every bad capacity figure this week -- so the three are now three
+    fields and the rate names its own denominator."""
+
+    def test_the_posting_count_is_not_called_an_opportunity_count(self):
+        import inspect
+
+        from orchestrator import pipeline
+
+        source = inspect.getsource(pipeline)
+        self.assertIn('recovery_cohort["postings_resumed"] += len(resumed)', source)
+        self.assertIn('recovery_cohort["opportunities_resumed"] = len(', source)
+
+    def test_the_rate_divides_by_attempted_not_by_resumed(self):
+        """Work with no outcome must not sit in the bottom of a fraction."""
+        import inspect
+
+        from orchestrator import pipeline
+
+        source = inspect.getsource(pipeline)
+        self.assertIn('recovery_block["with_contact"] / attempted', source)
+        self.assertIn('recovery_block["rate_denominator"]', source)
+
+    def test_unreconciled_work_is_reported_separately_and_not_as_never_attempted(self):
+        import inspect
+
+        from orchestrator import pipeline
+
+        source = inspect.getsource(pipeline)
+        self.assertIn("opportunities_without_reconciled_outcome", source)
+        self.assertNotIn('recovery_block["never_attempted"]', source,
+                         "an unreconciled outcome is not evidence of no attempt")
+
+    def test_attempted_is_recorded_when_a_lead_carries_an_outcome(self):
+        cohort = _cohort({"p1"})
+        _account_recovery_cohort(cohort, [_lead("p1", contact_key="a@x")], _delivery())
+        self.assertEqual(len(cohort["attempted_opportunity_keys"]), 1)
+
+    def test_two_leads_for_one_opportunity_count_that_opportunity_once(self):
+        """The denominator is DISTINCT eligible opportunities."""
+        cohort = _cohort({"p1", "p2"})
+        lead_a = _lead("p1", contact_key="a@x")
+        lead_b = _lead("p2", contact_key="b@y")
+        lead_a.company = lead_b.company = {"employer_name": "Acme",
+                                           "company_name": "Acme",
+                                           "job_title": "Head of Sales",
+                                           "_employer_domain_input": "acme.example"}
+        _account_recovery_cohort(cohort, [lead_a, lead_b], _delivery())
+        self.assertEqual(cohort["leads"], 2)
+        self.assertEqual(len(cohort["attempted_opportunity_keys"]), 1)

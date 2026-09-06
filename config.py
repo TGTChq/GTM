@@ -1563,6 +1563,23 @@ APOLLO_ORG_ID_FALLBACK_MAX_PAID_MATCHES_PER_RUN = _env_int(
 APOLLO_MAX_PERSON_MATCH_CALLS_PER_RUN = _env_int(
     "APOLLO_MAX_PERSON_MATCH_CALLS_PER_RUN", 0)
 
+# AGGREGATE, DURABLE Apollo spend ceiling for recovery-first processing.
+# Distinct from the setting above in every way that matters: it covers organisation
+# enrich, people search AND person match wherever they are called from (including the
+# alternate cascade, the org-id fallback and any retry); it persists ACROSS runs, so
+# an interrupted run cannot restart its budget by restarting itself; and an unset
+# budget is ZERO rather than unlimited.
+#
+# Spending needs all three: the flag on, a non-empty authorization id, and a positive
+# call count. A NEW id resets the durable counter -- raising the number alone does
+# not, so a fresh grant is deliberate and auditable instead of a config drift.
+APOLLO_RECOVERY_BUDGET_ENABLED = _env_bool("APOLLO_RECOVERY_BUDGET_ENABLED", False)
+APOLLO_RECOVERY_BUDGET_ID = os.getenv("APOLLO_RECOVERY_BUDGET_ID", "")
+APOLLO_RECOVERY_BUDGET_CALLS = _env_int("APOLLO_RECOVERY_BUDGET_CALLS", 0)
+APOLLO_RECOVERY_BUDGET_STATE_PATH = os.getenv(
+    "APOLLO_RECOVERY_BUDGET_STATE_PATH",
+    str(Path(STATE_DIR) / "apollo_recovery_budget.json"))
+
 # Company-level opportunity collapse (company_opportunity_collapse.py): elect ONE
 # posting per trusted employer identity BEFORE paid person enrichment, so an
 # employer advertising eight roles cannot become eight Apollo credits and eight
