@@ -443,6 +443,21 @@ def provenance_probe(root: Path) -> dict:
                                        if isinstance(v, int) and v > 0},
             "skip_breakdown_all_zero": bool(skips) and not any(
                 isinstance(v, int) and v > 0 for v in (skips or {}).values()),
+            # WHERE THE DIFFERENCE WENT. `skip_breakdown` partitions only rows that
+            # were SUBMITTED and not created; anything withheld earlier never
+            # appears in it. These are the counters that close the gap between the
+            # population handed to the writer and the rows it wrote, and the report
+            # reads none of them.
+            "delivery_entered": (delivery or {}).get("entered"),
+            "delivery_reviewable_submitted": (delivery or {}).get("reviewable_submitted"),
+            "delivery_created": (delivery or {}).get("created"),
+            "delivery_failed": (delivery or {}).get("failed"),
+            "delivery_already_delivered": (delivery or {}).get("skipped_already_delivered"),
+            "delivery_person_employer_duplicate": (delivery or {}).get("person_employer_duplicate"),
+            "delivery_withheld_before_submit": ((delivery or {}).get("detail") or {}).get(
+                "withheld_before_submit"),
+            "delivery_reconciles": (delivery or {}).get("airtable_reconciles"),
+            "delivery_reviewable_reconciles": (delivery or {}).get("reviewable_reconciles"),
         })
     return {"runs": rows}
 

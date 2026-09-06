@@ -645,7 +645,12 @@ def reason_census(runs: Sequence[RunRecord]) -> Dict[str, int]:
 
     for run in runs:
         from_ledger = dig(run.artifact(LEDGER_STEM), "loss_reasons")
-        if isinstance(from_ledger, dict):
+        # An EMPTY or all-zero ledger block is not a record of "no reasons"; it is
+        # the absence of a record. Treating it as authoritative masked the artifacts
+        # that were still on disk and could answer, which is the difference between
+        # "nothing was lost here" and "nobody wrote down what was".
+        if isinstance(from_ledger, dict) and any(
+                (as_count(v) or 0) > 0 for v in from_ledger.values()):
             _add(from_ledger)
             continue
         waterfall = run.artifact("waterfall") or dig(run.artifact("orchestrator_result"), "waterfall") or {}
@@ -658,6 +663,14 @@ def reason_census(runs: Sequence[RunRecord]) -> Dict[str, int]:
         delivery = run.artifact("delivery") or dig(result, "delivery") or {}
         if isinstance(delivery, dict):
             _add(delivery.get("skip_breakdown"))
+            # WITHHELD BEFORE SUBMISSION -- and therefore absent from the skip
+            # breakdown, which partitions only submitted-but-not-created rows. Both
+            # names are already admissible at `airtable_delivery`; nothing was
+            # reading them, so a window whose whole difference was idempotency or
+            # person-employer collapse reported "no reason code was recorded" while
+            # the counts sat in the artifact.
+            _add({"already_delivered": delivery.get("skipped_already_delivered"),
+                  "person_employer_duplicate": delivery.get("person_employer_duplicate")})
     # A REASON RECORDED AS ZERO EXPLAINS NOTHING. The delivery skip breakdown is a
     # fixed-shape dataclass: every bucket is emitted every run, so a policy that is
     # switched off still contributes its name with a count of 0. Left in, those keys

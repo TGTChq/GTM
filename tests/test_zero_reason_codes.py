@@ -105,3 +105,55 @@ class TheActionPlanDoesNotAssertAThingThatDidNotHappen(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class WithheldBeforeSubmissionIsAReasonToo(unittest.TestCase):
+    """`skip_breakdown` partitions only rows that WERE submitted and not created.
+    Rows withheld earlier -- already delivered, or a person-employer collapse loser
+    -- never reach it. Both names are already admissible at `airtable_delivery`, and
+    nothing was reading them, so a window whose entire difference was idempotency
+    reported "no reason code was recorded there" while the counts sat in the
+    artifact."""
+
+    def _run(self, delivery):
+        return _Run(delivery=delivery)
+
+    def test_already_delivered_is_counted(self):
+        census = mx.reason_census([self._run({
+            "skip_breakdown": {"account_suppressed": 0},
+            "skipped_already_delivered": 260, "person_employer_duplicate": 0})])
+        self.assertEqual(census["already_delivered"], 260)
+        self.assertNotIn("person_employer_duplicate", census)
+
+    def test_person_employer_collapse_is_counted(self):
+        census = mx.reason_census([self._run({
+            "skip_breakdown": {}, "person_employer_duplicate": 7})])
+        self.assertEqual(census["person_employer_duplicate"], 7)
+
+    def test_it_does_not_double_count_with_the_skip_breakdown(self):
+        """`skip_breakdown` has no bucket for either, so there is nothing to double."""
+        census = mx.reason_census([self._run({
+            "skip_breakdown": {"skipped_existing": 5, "updated_existing": 3},
+            "skipped_already_delivered": 11})])
+        self.assertEqual(census, {"already_delivered": 11,
+                                  "skipped_existing": 5, "updated_existing": 3})
+
+
+class AnEmptyLedgerBlockIsNotAnAnswer(unittest.TestCase):
+    """The compact ledger's copy wins over the artifacts, which is right when it
+    holds something. An EMPTY or all-zero block is not a record that nothing was
+    lost -- it is the absence of a record, and letting it win masked artifacts that
+    were still on disk and could answer."""
+
+    def test_an_all_zero_ledger_block_falls_through_to_the_artifacts(self):
+        run = _Run(**{"reporting_ledger": {"loss_reasons": {"not_icp": 0}},
+                      "delivery": {"skip_breakdown": {"company_function_suppressed": 42}}})
+        run._artifacts[mx.LEDGER_STEM] = run._artifacts.pop("reporting_ledger")
+        self.assertEqual(mx.reason_census([run]),
+                         {"company_function_suppressed": 42})
+
+    def test_a_populated_ledger_block_still_wins(self):
+        """Reading both would double-count: the ledger copy IS the same merge."""
+        run = _Run(**{mx.LEDGER_STEM: {"loss_reasons": {"not_icp": 9}},
+                      "delivery": {"skip_breakdown": {"not_icp": 9}}})
+        self.assertEqual(mx.reason_census([run]), {"not_icp": 9})
