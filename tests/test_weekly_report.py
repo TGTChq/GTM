@@ -635,8 +635,9 @@ def test_zero_capture_names_acquisition_not_clean_throughput(artifact_root, paci
     assert report.bottleneck.kind == "acquisition_entry"
     assert report.bottleneck.boundary == "acquisition"
     assert "captured 0 jobs across 5 runs" in report.bottleneck.statement
-    assert "granted zero budget on 4" in report.bottleneck.statement
-    assert "1 run had budget and reached the provider" in report.bottleneck.statement
+    assert "4 recorded acquisition budget stops" in report.bottleneck.statement
+    assert "Provider request activity is not measured" in report.bottleneck.statement
+    assert "had budget and reached the provider" not in report.bottleneck.statement
     # The old wording must never appear for a zero-capture week.
     assert "clean end to end" not in report.bottleneck.statement
 

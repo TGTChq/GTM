@@ -769,6 +769,15 @@ class OutcomeForensicsDecomposesOnlyWhatTheArtifactsSupport(unittest.TestCase):
         self.assertEqual(row["hunter_status"]["(absent)"], 1)
         self.assertEqual(row["hunter_status"]["valid"], 1)
 
+    def test_reads_the_fields_the_hiring_manager_actually_persists(self):
+        root = self._root({"jobs_enriched_2026-09-06.json": {"jobs": [
+            {"job_id": "j1", "hiring_manager_email": "a@x.com",
+             "apollo_email_status": "unverified", "hunter_email_status": "valid",
+             "_final_primary_reason": "unverified_email_deliverability"}]}})
+        row = run_maintenance.outcome_forensics(root, ["r1"])["runs"][0]
+        self.assertEqual(row["hunter_status"], {"valid": 1})
+        self.assertEqual(row["email_unverified_breakdown"], {"address_apollo_status=unverified": 1})
+
     def test_the_giant_postings_file_is_not_parsed_as_lead_rows(self):
         root = self._root({"postings.json": {"jobs": [{"job_id": "j1"}] * 3},
                            "leads.json": {"leads": [{"hm_reason": "not_icp"}]}})
@@ -865,3 +874,23 @@ class StreamedCountsAreNotSummedAcrossFiles(unittest.TestCase):
             self.assertEqual(entry["counts"]["email_status"], {"verified": 3})
         self.assertEqual(row["apollo_email_status"], {},
                          "streamed counts must not inflate the aggregate")
+
+    def test_small_duplicate_snapshots_are_also_kept_per_file(self):
+        import json
+        import tempfile
+        from pathlib import Path
+
+        root = Path(tempfile.mkdtemp())
+        enr = root / "run_artifacts" / "r1" / "enrichment"
+        enr.mkdir(parents=True)
+        payload = {"stats": {"company_criteria_reason__headcount": 1},
+                   "leads": [{"email_status": "verified", "hm_reason": "email_unverified"}]}
+        for name in ("checkpoint.json", "final.json"):
+            (enr / name).write_text(json.dumps(payload))
+        row = run_maintenance.outcome_forensics(root, ["r1"])["runs"][0]
+        self.assertEqual(row["apollo_email_status"], {})
+        self.assertEqual(row["icp_reason_families"], {})
+        self.assertEqual(len(row["parsed_files"]), 2)
+        for file in row["parsed_files"]:
+            self.assertEqual(file["apollo_email_status"], {"verified": 1})
+        self.assertEqual(row["aggregation_status"]["apollo_email_status"], "multiple_files_unreconciled")

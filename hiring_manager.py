@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import logging
 import os
 import re
@@ -707,7 +708,8 @@ def _process_company_legacy(company_jobs: List[Dict]) -> Tuple[List[Dict], Dict]
             # people before that fallback existed, so its paid matches are additional
             # spend and draw on a separate, default-zero budget.
             _from_fallback = any(bool(j.get("_apollo_org_id_recovered")) for j in bucket_jobs)
-            if not _paid_match_allowed(_from_fallback):
+            person = _cached_verified_person(candidate, search_domain)
+            if person is None and not _paid_match_allowed(_from_fallback):
                 # DEFERRED, not discarded. The bucket is left unprocessed and counted
                 # so a later run with budget can pick it up; marking it processed
                 # would turn a budget stop into permanent loss.
@@ -715,10 +717,14 @@ def _process_company_legacy(company_jobs: List[Dict]) -> Tuple[List[Dict], Dict]
                 stats["paid_match_budget_deferred"] += 1
                 terminal_reason = "paid_match_budget_exhausted"
                 break
-            stats["person_match_attempts"] += 1
-            _record_paid_match(_from_fallback)
-            person = apollo.match_person(candidate)
-            time.sleep(config.APOLLO_RATE_LIMIT_DELAY)
+            if person is None:
+                stats["person_match_attempts"] += 1
+                _record_paid_match(_from_fallback)
+                person = apollo.match_person(candidate)
+                _remember_verified_person(candidate, search_domain, person)
+                time.sleep(config.APOLLO_RATE_LIMIT_DELAY)
+            else:
+                stats["person_match_cache_hits"] += 1
             if not _person_belongs_to_company(person, company_domains, company_name):
                 stats["candidate_organization_domain_mismatch"] += 1
                 terminal_reason = "candidate_organization_domain_mismatch"
@@ -1068,6 +1074,45 @@ def _cached_enrich_organization(input_domain: str, company_name: str, website: s
         except Exception:  # noqa: BLE001
             pass
     return org
+
+
+def _cached_verified_person(candidate: Dict, domain: str):
+    """Reuse paid contact data, never a cached gate decision."""
+    from orchestrator.apollo_cache import normalize_domain
+    person_id = str(candidate.get("id") or candidate.get("person_id") or "")
+    host = normalize_domain(domain)
+    if not person_id or not host:
+        return None
+    hit = _apollo_cache().get("person_match", f"{host}|{person_id}",
+                              fingerprint_sensitive=True)
+    if not hit:
+        return None
+    try:
+        person = apollo.PersonMatch(**hit)
+    except (TypeError, ValueError):
+        return None
+    if (str(person.person_id or "") != person_id
+            or normalize_domain(person.organization_domain) != host
+            or not person.person_found or not person.email
+            or str(person.email_status or "").lower() != "verified"):
+        return None
+    return person
+
+
+def _remember_verified_person(candidate: Dict, domain: str, person) -> None:
+    from orchestrator.apollo_cache import normalize_domain
+    person_id = str(candidate.get("id") or candidate.get("person_id") or "")
+    host = normalize_domain(domain)
+    if (not person_id or not host or str(getattr(person, "person_id", "") or "") != person_id
+            or normalize_domain(getattr(person, "organization_domain", "")) != host
+            or not getattr(person, "person_found", False) or not getattr(person, "email", None)
+            or str(getattr(person, "email_status", "") or "").lower() != "verified"):
+        return
+    cache = _apollo_cache()
+    if cache.enabled:
+        payload = {key: getattr(person, key) for key in apollo.PersonMatch.__dataclass_fields__}
+        cache.put("person_match", f"{host}|{person_id}", payload, trusted=True)
+        cache.save()
 
 
 def _org_is_trusted_for_domain(org, expected_domain: str) -> bool:
@@ -1439,14 +1484,19 @@ def _process_company_strict(company_jobs: List[Dict]) -> Tuple[List[Dict], Dict]
             if candidate_id:
                 attempted_ids.append(candidate_id)
             _from_fallback2 = any(bool(j.get("_apollo_org_id_recovered")) for j in bucket_jobs)
-            if not _paid_match_allowed(_from_fallback2):
+            person = _cached_verified_person(candidate, search_domain)
+            if person is None and not _paid_match_allowed(_from_fallback2):
                 _PAID_MATCH_BUDGET["deferred_buckets"] += 1
                 stats["paid_match_budget_deferred"] += 1
                 break
-            stats["person_match_attempts"] += 1
-            _record_paid_match(_from_fallback2)
             try:
-                person = apollo.match_person(candidate)
+                if person is None:
+                    stats["person_match_attempts"] += 1
+                    _record_paid_match(_from_fallback2)
+                    person = apollo.match_person(candidate)
+                    _remember_verified_person(candidate, search_domain, person)
+                else:
+                    stats["person_match_cache_hits"] += 1
             except apollo.GLOBAL_FATAL_ERRORS:
                 # A whole-account Apollo outage must propagate to open the
                 # run-level circuit, not be masked as a per-candidate match error.
@@ -1826,6 +1876,7 @@ class _EnrichmentProgress:
     instead of re-calling Apollo (no re-consumed credits), while any company that
     failed -- record-level or a whole-account Apollo outage -- is deliberately not
     recorded, so it stays recoverable on the next run.
+    Unreadable or unwritable custody stops the caller before it buys more work.
     """
 
     def __init__(self, path: Path) -> None:
@@ -1837,22 +1888,25 @@ class _EnrichmentProgress:
         path = Path(directory) / _ENRICHMENT_PROGRESS_FILE
         progress = cls(path)
         try:
-            if path.is_file():
-                data = json.loads(path.read_text(encoding="utf-8"))
-                if isinstance(data, dict) and data.get("schema") == _ENRICHMENT_PROGRESS_SCHEMA:
-                    companies = data.get("companies")
-                    if isinstance(companies, dict):
-                        progress.companies = companies
-        except Exception:  # noqa: BLE001 - a corrupt checkpoint just starts fresh
-            logger.warning(
-                "Could not read enrichment progress checkpoint at %s; starting fresh.",
-                path,
-            )
-            progress.companies = {}
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if (not isinstance(data, dict) or data.get("schema") != _ENRICHMENT_PROGRESS_SCHEMA
+                    or not isinstance(data.get("companies"), dict)
+                    or any(not isinstance(entry, dict) for entry in data["companies"].values())):
+                raise ValueError("Invalid enrichment progress schema")
+            progress.companies = data["companies"]
+        except FileNotFoundError:
+            pass
+        except (OSError, ValueError) as exc:
+            raise RuntimeError(f"Unreadable enrichment custody at {path}; refusing new enrichment") from exc
         return progress
 
-    def get(self, company_key: str) -> Optional[Tuple[List[Dict], Dict]]:
+    def get(self, company_key: str, workload_key: str) -> Optional[Tuple[List[Dict], Dict]]:
         entry = self.companies.get(company_key)
+        if not isinstance(entry, dict):
+            return None
+        # A company may appear in several batches with different openings.
+        # Legacy entries lack an input identity and cannot prove reuse is safe.
+        entry = (entry.get("workloads") or {}).get(workload_key)
         if not isinstance(entry, dict):
             return None
         leads = entry.get("leads")
@@ -1861,25 +1915,36 @@ class _EnrichmentProgress:
             return leads, stats
         return None
 
-    def record(self, company_key: str, leads: List[Dict], stats: Dict) -> None:
-        self.companies[company_key] = {"leads": leads, "stats": dict(stats)}
+    def record(self, company_key: str, workload_key: str, leads: List[Dict], stats: Dict) -> None:
+        entry = self.companies.setdefault(company_key, {})
+        entry.setdefault("workloads", {})[workload_key] = {"leads": leads, "stats": dict(stats)}
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             tmp = self.path.with_suffix(self.path.suffix + ".tmp")
-            tmp.write_text(
-                json.dumps(
-                    {"schema": _ENRICHMENT_PROGRESS_SCHEMA, "companies": self.companies},
-                    default=str,
-                ),
-                encoding="utf-8",
-            )
+            with tmp.open("w", encoding="utf-8") as stream:
+                json.dump({"schema": _ENRICHMENT_PROGRESS_SCHEMA, "companies": self.companies},
+                          stream, default=str)
+                stream.flush()
+                os.fsync(stream.fileno())
             os.replace(tmp, self.path)  # atomic
-        except Exception:  # noqa: BLE001 - checkpointing is never fatal
-            logger.warning(
-                "Could not persist enrichment progress checkpoint at %s.",
-                self.path,
-                exc_info=True,
-            )
+        except (OSError, TypeError, ValueError) as exc:
+            # Do not process another company after paid evidence failed to persist.
+            # Leave the previous checkpoint and any staged file for recovery.
+            raise RuntimeError(f"Enrichment custody write failed at {self.path}; stopping") from exc
+
+
+def _enrichment_workload_key(jobs: List[Dict]) -> str:
+    """Exact input evidence plus gate version; computed before enrichment mutates it.
+
+    Row order is immaterial. Different postings, functions or evidence cannot
+    inherit a previous company's outcomes. All workloads remain available for an
+    interrupted caller resuming an earlier batch.
+    """
+    rows = sorted(json.dumps(job, sort_keys=True, default=str) for job in jobs)
+    rules = {key: getattr(config, key, None) for key in (
+        "VALIDATION_VERSION", "MIN_EMPLOYEES", "MAX_EMPLOYEES",
+        "APOLLO_EXCLUDED_INDUSTRY_KEYWORDS", "FINAL_PASS_PIPELINE_ENABLED")}
+    return hashlib.sha256(json.dumps([rows, rules], sort_keys=True, default=str).encode()).hexdigest()
 
 
 def _apollo_circuit_reason(exc: BaseException) -> str:
@@ -1946,6 +2011,7 @@ def run_hiring_manager_identification(
     exclude_company_keys: Optional[set[str]] = None,
     exclude_company_function_keys: Optional[set[str]] = None,
     output_suffix: Optional[str] = None,
+    reset_run_budgets: bool = True,
 ) -> Step3Result:
     """Enrich prequalified accounts under the applicable daily target.
 
@@ -1965,8 +2031,9 @@ def run_hiring_manager_identification(
 
     # One alternate-enrichment budget per RUN, so a pathological batch cannot
     # multiply Apollo spend across companies.
-    reset_alternate_contact_budget()
-    reset_paid_match_budget()
+    if reset_run_budgets:
+        reset_alternate_contact_budget()
+        reset_paid_match_budget()
     input_path = input_path or config.STEP2_KEPT_FILE
     payload = json.loads(Path(input_path).read_text(encoding="utf-8"))
     jobs = payload.get("jobs", [])
@@ -2103,7 +2170,8 @@ def run_hiring_manager_identification(
                 enrichment_budget_seconds, companies_considered, total_candidate_companies,
             )
             break
-        cached = progress.get(company_key)
+        workload_key = _enrichment_workload_key(company_jobs)
+        cached = progress.get(company_key, workload_key)
         if cached is not None:
             leads, stats = cached
             total_stats["enrichment_resume_reused_companies"] += 1
@@ -2144,7 +2212,7 @@ def run_hiring_manager_identification(
                     company_jobs, reason="apollo_record_error"
                 )
             else:
-                progress.record(company_key, leads, stats)
+                progress.record(company_key, workload_key, leads, stats)
         companies_considered += 1
         processed_company_keys.append(company_key)
         processed_jobs.extend(company_jobs)

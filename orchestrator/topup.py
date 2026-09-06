@@ -51,6 +51,7 @@ class TopUpController:
         max_iterations: int = 50,
         clock: Callable[[], float] = time.monotonic,
         budget_source: str = "per_run_ceiling",
+        external_output_target: bool = False,
     ) -> None:
         self.target_net_new = int(target_net_new)
         self.safety_cap_jobs = max(0, int(safety_cap_jobs))
@@ -59,6 +60,7 @@ class TopUpController:
         # (the monthly credit governor's run budget). Determines the stop label so
         # a governor stop is never reported as the generic safety cap.
         self.budget_source = str(budget_source or "per_run_ceiling")
+        self.external_output_target = external_output_target
         self.slice_jobs = max(1, int(slice_jobs))
         self.min_quota_remaining = max(0, int(min_quota_remaining))
         self.runtime_budget_seconds = runtime_budget_seconds
@@ -89,12 +91,13 @@ class TopUpController:
         apollo_circuit_open: bool = False,
         inventory_exhausted: bool = False,
         pending_owed: int = 0,
+        acquisition_closed: bool = False,
     ) -> TopUpDecision:
         """Decide whether to acquire ANOTHER slice, and how big it may be. Called
         BEFORE each acquisition. Order matters: target satisfaction wins first, then
         each hard boundary. ``next_slice`` is always clamped so cumulative billing
         can never exceed the safety cap."""
-        if self.net_new >= self.target_net_new:
+        if not self.external_output_target and self.net_new >= self.target_net_new:
             return self._stop("target_reached")
         if self.iterations >= self.max_iterations:
             return self._stop("max_iterations_guard")
@@ -104,6 +107,11 @@ class TopUpController:
         if (self.runtime_budget_seconds is not None
                 and self.elapsed_seconds >= self.runtime_budget_seconds):
             return self._stop("runtime_budget")
+        if acquisition_closed:
+            if pending_owed > 0:
+                self.acquisition_suppressed = "watermark_single_acquisition"
+                return TopUpDecision(True, "", 0)
+            return self._stop("max_iterations_guard")
 
         # AN ACQUISITION BUDGET STOPS ACQUISITION, NOT THE RUN.
         #
@@ -129,6 +137,8 @@ class TopUpController:
             return self._stop(starved)
 
         if inventory_exhausted:
+            if pending_owed > 0:
+                return TopUpDecision(True, "", 0)
             return self._stop("inventory_exhausted")
         remaining_cap = self.safety_cap_jobs - self.billed
         nxt = min(self.slice_jobs, remaining_cap)
@@ -164,6 +174,8 @@ class TopUpController:
             "jobs_billed": self.billed,
             "iterations": self.iterations,
             "stop_reason": self.last_stop_reason,
-            "target_reached": self.net_new >= self.target_net_new,
+            "target_reached": (not self.external_output_target
+                               and self.net_new >= self.target_net_new),
+            "external_output_target": self.external_output_target,
             "acquisition_suppressed": self.acquisition_suppressed,
         }

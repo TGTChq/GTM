@@ -53,7 +53,10 @@ class _Budget:
 class _Delivery:
     def deliver(self, leads, **k):
         from orchestrator.adapters_real import RealDeliveryReport
-        return RealDeliveryReport(entered=0)
+        # Successful delivery must be evidenced before FINAL_PASS ends custody.
+        keys = [lead.contact_key for lead in leads]
+        return RealDeliveryReport(entered=len(leads), reviewable_submitted=len(leads),
+                                  created=len(keys), delivered_lead_keys=keys)
 
 
 class _ApolloRefuses:
@@ -83,7 +86,7 @@ class _ApolloWorks:
         self.seen.append([o.get("posting_id") for o in opportunities])
         leads = [Lead(posting_id=o["posting_id"], company={"name": "C"},
                       contact={"email": "a@b.co"}, disposition=Disposition.FINAL_PASS,
-                      primary_reason=ReasonCode.OK)
+                      primary_reason=ReasonCode.OK, contact_key=o["posting_id"])
                  for o in opportunities]
         return EnrichmentReport(leads=leads, stages=[], loss_census={})
 

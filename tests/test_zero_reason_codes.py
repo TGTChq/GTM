@@ -99,8 +99,10 @@ class TheActionPlanDoesNotAssertAThingThatDidNotHappen(unittest.TestCase):
 
     def test_the_same_boundary_IS_named_when_a_reason_really_fired(self):
         found, _plan = self._plan({"company_function_suppressed": 200})
-        self.assertEqual(found.kind, "funnel_boundary")
-        self.assertEqual(found.lost, 267)
+        self.assertEqual(found.kind, "delivery_outcomes")
+        self.assertIsNone(found.lost, "a reason code cannot validate 1,048 minus 781")
+        self.assertIsNone(found.loss_pct)
+        self.assertEqual(found.top_reasons[0]["count"], 200)
 
 
 if __name__ == "__main__":
@@ -208,7 +210,11 @@ class AFailedReconciliationIsTheStrongestThingSayable(unittest.TestCase):
             metrics[key] = m
         found = bn.identify(metrics, run_count=1,
                             reasons={"delivery_unreconciled": 900})
-        self.assertEqual(found.kind, "funnel_boundary")
+        self.assertEqual(found.kind, "delivery_outcomes")
+        self.assertIsNone(found.lost)
+        self.assertIsNone(found.loss_pct)
+        self.assertIn("900", found.statement)
+        self.assertNotIn("267", found.statement)
         plan = " ".join(str(getattr(s, "text", s))
                         for s in bn.action_plan(found, metrics))
         self.assertIn("could not account for", plan)

@@ -90,13 +90,22 @@ class EnrichmentReport:
     def final_pass(self) -> List[Lead]:
         return [l for l in self.leads if l.disposition is Disposition.FINAL_PASS]
 
-    def terminal_posting_ids(self) -> set:
+    def terminal_posting_ids(self, *, delivered_lead_keys=None) -> set:
         """Postings that reached a SAFE-TERMINAL outcome and may be committed to
         cross-run suppression. Deferred outcomes are excluded so a provider outage
-        never permanently suppresses an unprocessed posting (Defect B)."""
+        never permanently suppresses an unprocessed posting (Defect B).
+
+        At the delivery boundary, pass its evidenced keys: FINAL_PASS alone is
+        not completion when Airtable failed, withheld the row, or was disabled.
+        Without that argument this remains the enrichment-only disposition census.
+        """
         out: set = set()
+        delivered = None if delivered_lead_keys is None else set(delivered_lead_keys)
         for lead in self.leads:
             if lead.disposition not in TERMINAL_DISPOSITIONS:
+                continue
+            if (lead.disposition is Disposition.FINAL_PASS and delivered is not None
+                    and lead.contact_key not in delivered):
                 continue
             if lead.posting_id:
                 out.add(str(lead.posting_id))

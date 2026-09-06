@@ -751,6 +751,21 @@ def build_run_metrics(runs: Sequence[RunRecord]) -> Dict[str, Metric]:
     metrics: Dict[str, Metric] = {}
     for spec in RUN_METRIC_SPECS + SUPPORTING_METRIC_SPECS:
         metrics[spec.key] = aggregate(spec, runs)
+    recovery_runs = []
+    for run in runs:
+        resumed = dig(run.artifact("ledger"), "metrics.postings_resumed")
+        if resumed is None:
+            resumed = dig(run.artifact("orchestrator_result"),
+                          "acquisition.cumulative.pending_work_resumed.adopted")
+        if (as_count(resumed) or 0) > 0:
+            recovery_runs.append(run.run_id)
+    if recovery_runs:
+        # Review/contact totals include recovered inputs. A shared run ID and
+        # matching units do not make them a subset of NEW capture. Keep both
+        # measured totals, and prevent rates/loss attribution across this boundary.
+        metrics["jobs_captured"].cohort = "new_capture_excluding_recovered_work"
+        metrics["jobs_captured"].notes.append(
+            "Review includes recovered postings in runs: " + ", ".join(sorted(recovery_runs)))
     metrics["review_rate_pct"] = ratio_metric(
         "review_rate_pct",
         "Review rate",

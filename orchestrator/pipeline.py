@@ -583,7 +583,9 @@ class Orchestrator:
         # Adaptive net-new top-up runs a DISTINCT loop; the normal single-pass body
         # below is left byte-for-byte unchanged so it (and every test that exercises
         # it) is unaffected when NET_NEW_SEND_SAFE_TARGET is 0 (the default).
-        if config.NET_NEW_SEND_SAFE_TARGET > 0 and self.ctx.policy.allow_enrichment:
+        if (config.NET_NEW_SEND_SAFE_TARGET > 0
+                or getattr(config, "RUN_APPROVED_TARGET_ENABLED", False)
+                or getattr(config, "DAILY_APPROVED_TARGET_ENABLED", False)) and self.ctx.policy.allow_enrichment:
             return self._run_body_topup(plan, resume=resume, lock=lock)
 
         started = time.perf_counter()
@@ -702,7 +704,8 @@ class Orchestrator:
             # Hunter outage never permanently suppresses an unprocessed posting
             # (Defect B). Failed deliveries are never recorded as delivered
             # (RealDelivery excludes failed_lead_keys).
-            supp.commit_postings(enrichment.terminal_posting_ids())
+            supp.commit_postings(enrichment.terminal_posting_ids(
+                delivered_lead_keys=getattr(delivery, "delivered_lead_keys", []) or []))
             supp.commit_delivered(getattr(delivery, "delivered_lead_keys", []) or [])
 
             capacity = build_capacity_report(
@@ -862,6 +865,7 @@ class Orchestrator:
                 "cross_query_duplicates": acq_cum.get("cross_query_duplicates"),
                 "cross_source_duplicates": acq_cum.get("cross_source_duplicates"),
                 "unique_opportunities": unique_opportunities,
+                "postings_resumed": int((acq_cum.get("pending_work_resumed") or {}).get("adopted") or 0),
             },
             acquisition_entered=bool(requests),
             physical_requests=requests,
@@ -925,8 +929,8 @@ class Orchestrator:
             run_cap, budget_source = int(gov.run_budget), "governor"
         # date_created WATERMARK (Category 2, default OFF) is a SINGLE-WINDOW run:
         # the window is pinned once and the adapter pages within it, so the top-up
-        # loop must run exactly ONE slice sized to the whole run cap (Gate-E D3).
-        # Multi-slice would re-open the same window and re-bill it.
+        # loop must ACQUIRE exactly once, sized to the whole run cap (Gate-E D3).
+        # Subsequent recovery batches do not reopen or repurchase that window.
         watermark_on = bool(getattr(config, "FANTASTIC_DATE_CREATED_WATERMARK_ENABLED", False))
         slice_jobs = run_cap if watermark_on else config.FANTASTIC_TOPUP_SLICE_JOBS
         controller = TopUpController(
@@ -935,8 +939,10 @@ class Orchestrator:
             slice_jobs=max(1, int(slice_jobs)),
             min_quota_remaining=config.FANTASTIC_JOBS_MIN_JOBS_QUOTA_REMAINING,
             runtime_budget_seconds=(config.TOPUP_RUNTIME_BUDGET_SECONDS or None),
-            max_iterations=(1 if watermark_on else config.TOPUP_MAX_ITERATIONS),
+            max_iterations=config.TOPUP_MAX_ITERATIONS,
             budget_source=budget_source,
+            external_output_target=(bool(getattr(config, "RUN_APPROVED_TARGET_ENABLED", False))
+                                    or bool(getattr(config, "DAILY_APPROVED_TARGET_ENABLED", False))),
         )
         ledger = self._build_yield_ledger()
         # Cumulative acquisition accounting across ALL top-up slices (Gate D): the
@@ -1007,7 +1013,8 @@ class Orchestrator:
         #: this the loop re-adopts the same rows on every iteration.
         run_adopted_keys: set = set()
         daily_on = bool(getattr(config, "DAILY_APPROVED_TARGET_ENABLED", False))
-        daily_dir = self.state.store_path("daily_target") if daily_on else None
+        run_target_on = bool(getattr(config, "RUN_APPROVED_TARGET_ENABLED", False))
+        daily_dir = self.state.store_path("daily_target") if daily_on or run_target_on else None
         recovery_cohort: Dict[str, Any] = {
             "postings_resumed": 0, "opportunities_resumed": 0,
             "leads": 0, "with_contact": 0,
@@ -1020,6 +1027,17 @@ class Orchestrator:
         pending_on = bool(getattr(config, "PENDING_WORK_ENABLED", True))
         pending_dir = self.state.store_path("pending_work") if pending_on else None
 
+        def pending_available():
+            if not pending_on:
+                return 0
+            # Ask the actual loader for eligible work. Subtracting all adopted
+            # keys from a shrinking store double-subtracts terminal releases and
+            # can strand the last batches. Suppressed rows must not block the head.
+            rows, _ = pending_work.load(
+                pending_dir, exclude_run_id=self.ctx.run_id, limit=1,
+                exclude_keys=run_adopted_keys | set(supp.seen_postings() or ()))
+            return len(rows)
+
         # A zero governor grant is a CLEAN, distinct stop before any acquisition
         # (Gate-E D8) -- never a failed run, never an acquisition attempt.
         #
@@ -1030,15 +1048,7 @@ class Orchestrator:
         # A credit ceiling for the source the run is deliberately not using must not
         # decide whether queued work gets done.
         if gov.run_budget is not None and gov.run_budget <= 0:
-            owed_at_start = 0
-            if pending_on:
-                try:
-                    owed_at_start = sum(
-                        int(r.get("postings") or 0)
-                        for r in (pending_work.summary(pending_dir).get("runs") or [])
-                        if str(r.get("run_id")) != self.ctx.run_id)
-                except Exception:  # noqa: BLE001 - never a run blocker
-                    owed_at_start = 0
+            owed_at_start = pending_available()
             if owed_at_start <= 0:
                 stop_reason = "governor_zero_budget"
         if pending_on:
@@ -1058,21 +1068,23 @@ class Orchestrator:
         while not stop_reason:
             # `pending_owed` is what tells the controller an acquisition budget must
             # not end a run that still has queued work to do.
-            owed_now = 0
-            if pending_on:
-                try:
-                    owed_now = max(0, sum(
-                        int(r.get("postings") or 0)
-                        for r in (pending_work.summary(pending_dir).get("runs") or [])
-                        if str(r.get("run_id")) != self.ctx.run_id) - len(run_adopted_keys))
-                except Exception:  # noqa: BLE001
-                    owed_now = 0
-            # THE DAY'S GOAL IS THE OUTPUT CONDITION, checked before spending more.
-            # `NET_NEW_SEND_SAFE_TARGET` is a per-run send-safe counter and was never
-            # the business objective; this is distinct new APPROVED leads for the
-            # business day, carried across runs, plus whatever the rolling reserve is
-            # short so a strong day banks what a weak one draws down.
-            if daily_on:
+            owed_now = pending_available()
+            # Per-run approvals take precedence over the legacy daily goal. Neither
+            # previous runs nor the reserve can satisfy this run's objective.
+            if run_target_on:
+                target = max(0, int(config.RUN_APPROVED_TARGET))
+                have = daily_target.approved_for_run(daily_dir, self.ctx.run_id)
+                acq_cum["run_approved_goal"] = {
+                    "run_id": self.ctx.run_id, "target": target,
+                    "approved_this_run": have, "remaining": max(0, target - have),
+                    "measurement": ("partial" if ((agg.detail.get("airtable") or {}).get(
+                        "created_approval_status_unknown", 0)) else "measured"),
+                    "met": target > 0 and have >= target}
+                if (target > 0 and have >= target
+                        and not config.RUN_APPROVED_CONTINUE_AFTER_TARGET):
+                    stop_reason = "run_approved_target_met"
+                    break
+            elif daily_on:
                 goal = daily_target.goal_for_today(
                     daily_dir,
                     target=int(getattr(config, "DAILY_APPROVED_TARGET", 0) or 0),
@@ -1085,7 +1097,8 @@ class Orchestrator:
 
             decision = controller.decide(
                 quota_remaining=last_quota, apollo_circuit_open=last_circuit,
-                inventory_exhausted=last_inventory, pending_owed=owed_now)
+                inventory_exhausted=last_inventory, pending_owed=owed_now,
+                acquisition_closed=watermark_on and controller.iterations > 0)
             if not decision.should_continue:
                 stop_reason = decision.stop_reason
                 break
@@ -1149,20 +1162,7 @@ class Orchestrator:
             # recovery run, where acquisition is deliberately off. Reading that as
             # "inventory exhausted" stopped the loop after one batch and left 3,595
             # paid-for postings sitting in the store.
-            pending_owed = 0
-            if pending_on:
-                try:
-                    # THIS RUN'S OWN entries are not adoptable -- `load` excludes them
-                    # by `exclude_run_id`, because they are the work in flight right
-                    # now, not a debt from an earlier run. Counting them made
-                    # "inventory exhausted" unreachable and the loop ran until the
-                    # iteration guard.
-                    owed = sum(int(r.get("postings") or 0)
-                               for r in (pending_work.summary(pending_dir).get("runs") or [])
-                               if str(r.get("run_id")) != self.ctx.run_id)
-                    pending_owed = max(0, owed - len(run_adopted_keys))
-                except Exception:  # noqa: BLE001 - observability, never a run blocker
-                    pending_owed = 0
+            pending_owed = pending_available()
             last_inventory = (kept == 0 and pending_owed <= 0)
             for j in iter_postings:
                 j.setdefault("_acquisition_mode", slice_mode)
@@ -1245,7 +1245,7 @@ class Orchestrator:
                         exclude_run_id=self.ctx.run_id,
                         limit=int(getattr(config, "PENDING_WORK_RESUME_MAX_PER_RUN", 0) or 0) or None,
                         exclude_keys=([k for k in (posting_identity(o)[1] for o in opportunities) if k]
-                                      + sorted(run_adopted_keys)),
+                                      + sorted(run_adopted_keys | set(supp.seen_postings() or ()))),
                     )
                     # Anything a previous run already finished is in suppression;
                     # re-entering it would redo settled work.
@@ -1315,21 +1315,14 @@ class Orchestrator:
 
             _account_recovery_cohort(recovery_cohort, enrichment.leads, delivery)
 
-            # THE OUTPUT TARGET. Approved leads -- not postings reviewed, not Apollo
-            # calls, not leads attempted. Recorded per BUSINESS DAY and deduplicated
-            # across every run of that day, so the several runs a day may take sum to
-            # the size of their union rather than to the sum of their counters.
-            #
-            # Created rows are the approved set only while send-safe auto-approval is
-            # on, which is what makes a created row Approved rather than Pending. If
-            # that flag is off the day's approved count is not derivable here, and
-            # recording created rows as approved would overstate it.
-            if daily_on and bool(getattr(config, "FANTASTIC_AUTO_APPROVE_SEND_SAFE", False)):
+            # Count explicit Approved statuses returned by Airtable, attributed to
+            # this run and the business day. A created Pending row is not approval.
+            if daily_on or run_target_on:
                 created_keys = ((getattr(delivery, "detail", {}) or {}).get("airtable")
-                                or {}).get("created_lead_keys") or []
+                                or {}).get("created_approved_lead_keys") or []
                 if created_keys:
                     acq_cum["daily_approved"] = daily_target.record_approved(
-                        daily_dir, created_keys)
+                        daily_dir, created_keys, run_id=self.ctx.run_id)
 
             net_new = self._count_net_new_send_safe(enrichment.leads, delivery)
             last_circuit = bool(getattr(enrichment, "enrichment_incomplete", False)
@@ -1337,7 +1330,8 @@ class Orchestrator:
             self._ledger_mark_outcomes(ledger, enrichment.leads, delivery,
                                        covered_at_start=covered_at_start)
 
-            terminal_ids = enrichment.terminal_posting_ids()
+            terminal_ids = enrichment.terminal_posting_ids(
+                delivered_lead_keys=getattr(delivery, "delivered_lead_keys", []) or [])
             supp.commit_postings(terminal_ids)
             supp.commit_delivered(getattr(delivery, "delivered_lead_keys", []) or [])
             # Custody ends where suppression begins, on the IDENTICAL id set: a
@@ -1347,13 +1341,9 @@ class Orchestrator:
                 acq_cum["pending_work_released"] = pending_work.release(
                     pending_dir, terminal_ids,
                     outcome=pending_work.OUTCOME_TERMINAL, run_id=self.ctx.run_id)
-            # Gate-E D12: postings that terminally collapsed into another lead (N->1)
-            # must also be committed, else they are re-billed + re-enriched every run.
-            collapsed_ids = [rid for lead in enrichment.leads
-                             for rid in (getattr(lead, "related_posting_ids", []) or [])
-                             if rid and rid != getattr(lead, "posting_id", None)]
-            if collapsed_ids:
-                supp.commit_postings(collapsed_ids)
+            # terminal_posting_ids already includes related postings for terminal
+            # leads. Related postings on deferred leads remain owed; suppressing
+            # them here would silently discard their recovery on the next run.
             # date_created WATERMARK commit: ONLY now -- after this window's postings
             # were processed AND persisted to the suppression store (Gate-E D4).
             if watermark_on:
@@ -1363,8 +1353,12 @@ class Orchestrator:
                     acq_cum["watermark_commit"] = wm
                 except Exception as exc:  # noqa: BLE001 - leaves the window in-flight (replayed next run)
                     acq_cum["watermark_commit"] = {"committed": False, "error": type(exc).__name__}
-            # Feed created company+function keys forward so later slices skip them.
+            # Only delivered companies are satisfied for later batches. A withheld
+            # or failed lead must not block another opening at the same employer.
+            delivered_keys = set(getattr(delivery, "delivered_lead_keys", []) or [])
             for lead in enrichment.leads:
+                if lead.contact_key not in delivered_keys:
+                    continue
                 import airtable_client
                 live_function_keys |= airtable_client.company_function_keys_for_job(
                     lead.contact.get("_airtable_row") or {})
@@ -1395,6 +1389,18 @@ class Orchestrator:
             # otherwise the fallback (entered - submitted) is used and the check
             # becomes tautological.
             _slice_detail = dict(getattr(delivery, "detail", {}) or {})
+            _slice_airtable = _slice_detail.get("airtable") or {}
+            _agg_airtable = agg.detail.setdefault("airtable", {})
+            _agg_airtable["created_approval_status_unknown"] = (
+                int(_agg_airtable.get("created_approval_status_unknown") or 0)
+                + int(_slice_airtable.get("created_approval_status_unknown") or 0))
+            _accumulate_counts(
+                _agg_airtable.setdefault("not_written_send_safe_reasons", {}),
+                _slice_airtable.get("not_written_send_safe_reasons") or {})
+            for _key_field in ("created_lead_keys", "created_approved_lead_keys"):
+                _agg_airtable[_key_field] = sorted(
+                    set(_agg_airtable.get(_key_field) or [])
+                    | set(_slice_airtable.get(_key_field) or []))
             if "withheld_before_submit" in _slice_detail:
                 agg.detail["withheld_before_submit"] = (
                     int(agg.detail.get("withheld_before_submit", 0) or 0)
@@ -1462,7 +1468,6 @@ class Orchestrator:
 
         all_reconcile = (report.all_reconcile() and agg.reconciles()
                          and agg.enrollment_reconciles())
-        target_reached = controller.net_new >= controller.target_net_new
         if acquisition_error:
             # A failed acquisition lane overrides everything: the run is FAILED, never
             # a silent "complete" with raw_postings=0.
@@ -1474,6 +1479,12 @@ class Orchestrator:
             self.ctx.finish(status, stop or f"topup:{stop_reason}")
 
         topup_dict = controller.to_dict()
+        if run_target_on:
+            topup_dict["target_metric"] = "distinct_new_approved_airtable_leads_this_run"
+            topup_dict["target_reached"] = bool((acq_cum.get("run_approved_goal") or {}).get("met"))
+        elif daily_on:
+            topup_dict["target_metric"] = "distinct_new_approved_airtable_leads_business_day"
+            topup_dict["target_reached"] = bool((acq_cum.get("daily_goal") or {}).get("met"))
         topup_dict["final_stop_reason"] = stop_reason
         topup_dict["acquisition_error"] = acquisition_error
         # CUMULATIVE acquisition block (additive; result["lanes"] stays the last

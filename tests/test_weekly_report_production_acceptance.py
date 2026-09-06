@@ -243,7 +243,7 @@ def test_the_message_is_exactly_the_agreed_shape(heavy_root):
     text = _stakeholder(heavy_root)
     lines = text.splitlines()
 
-    assert lines[0].startswith("Week of "), "one short period label, then the numbers"
+    assert lines[0].startswith("Period: ") and "PDT" in lines[0], "actual boundaries and timezone, then the numbers"
     assert lines[1].startswith("Jobs: ") and " captured / " in lines[1]
     assert lines[2].startswith("Qualified opportunities: ")
     assert lines[3].startswith("Contacts found: ")
@@ -394,8 +394,25 @@ def test_an_incomplete_review_population_yields_no_rate(tmp_path):
 # 6. the period label must be the period
 # --------------------------------------------------------------------------
 
-def test_a_seven_day_period_is_called_a_week(heavy_root, tmp_path):
-    assert _stakeholder(heavy_root).splitlines()[0].startswith("Week of ")
+def test_a_seven_day_period_has_exact_boundaries_and_timezone(heavy_root, tmp_path):
+    label = _stakeholder(heavy_root).splitlines()[0]
+    assert label.startswith("Period: Sep 05, 2026 00:00 PDT - Sep 12, 2026 00:00 PDT")
+    assert "7.0 days" in label
+
+
+def test_missing_metrics_keep_technical_remedies_out_of_bretts_actions(tmp_path):
+    from datetime import datetime, timezone
+    from orchestrator.run_ledger import RunLedger
+
+    ledger = RunLedger(tmp_path, "20260906T100000Z-missing")
+    ledger.begin(started_at=datetime(2026, 9, 6, 10, tzinfo=timezone.utc),
+                 mode="live_acquisition_and_enrichment", lanes=("fantastic",))
+    ledger.record("acquisition", {"net_new_jobs_captured": 2})
+    ledger.finalize(state="complete", status="complete",
+                    finished_at=datetime(2026, 9, 6, 11, tzinfo=timezone.utc))
+    text = _stakeholder(tmp_path)
+    assert "orchestrator_result.json" not in text
+    assert "qualification_input" not in text
 
 
 def test_a_partial_period_is_not_labelled_as_a_completed_week(heavy_root):

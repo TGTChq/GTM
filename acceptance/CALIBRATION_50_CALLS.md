@@ -1,9 +1,14 @@
-# Recovery-first calibration — 50 chargeable Apollo calls
+# Recovery-first calibration — 50 internal budget reservations
+
+**Correction, 2026-09-06:** the deployed counter charged free People API Search
+calls, and reserved before wrappers rather than each physical paid request. The
+50-counter stop is preserved as execution evidence; it does not establish 50
+billable requests or credits. See `THROUGHPUT_FIX_2026-09-06.md`.
 
 Run `20260906T202534Z-0395cf0a`, 2026-09-06T20:25Z, inside the production container.
 Acquisition disabled, external test delivery off, Instantly off. **Apollo is serving
 again** — `acceptance/apollo_readiness.py` returned HTTP 200 on a credit-consuming
-call (which itself spent one lead credit).
+call (its billed credit amount has not been independently reconciled here).
 
 ## What it measured
 
@@ -11,9 +16,9 @@ call (which itself spent one lead credit).
 |---|---|
 | postings adopted from custody | **2,000** (the batch limit) |
 | distinct company × function opportunities | **1,660** |
-| chargeable Apollo calls consumed | **50 of 50** |
+| internal Apollo budget reservations consumed | **50 of 50** |
 | companies actually reached | **5** |
-| **chargeable calls per company** | **10.0** |
+| internal reservations per company | **10.0**, including free searches |
 | ICP-eligible companies | 5 of 5 (0 rejected) |
 | hiring managers found | **2 of 5 (40%)** |
 | contacts with an email | 2 |
@@ -27,7 +32,7 @@ call (which itself spent one lead credit).
 
 `reviewable_reconciles: True` — 26 submitted − 0 created − 0 failed = 24 + 2.
 
-The budget behaved exactly as designed:
+The run stopped at its internal counter:
 
     Apollo unavailable for the whole run (apollo_budget_exhausted) after 5 companies;
     opening the Apollo circuit and preserving completed work:
@@ -42,22 +47,20 @@ a **budget** stop rather than a credit stop.
 Extrapolating a cost-per-approved from zero successes would be inventing the number
 the exercise exists to measure.
 
-What it does establish, and the bound that follows:
+The earlier **≥8,300 calls/day floor and ~44,000/day extrapolation are withdrawn**.
+The sample average is not a lower bound, its counter included zero-credit searches,
+and the historical 18.8% decomposition was already retracted for incompatible
+populations. No minimum required budget follows from these figures.
 
-* **10.0 chargeable calls per company**, measured (n=5). At 1.2 opportunities per
-  company in this cohort that is ~8.3 calls per opportunity.
-* A **floor** on the cost of 1,000 approved leads: even at an impossible 100%
-  opportunity → approved conversion, 1,000 approved needs ≥1,000 opportunities
-  reached, i.e. **≥8,300 chargeable Apollo calls per day**. Every real conversion
-  rate makes it larger — at the 09-04 run's 18.8% it would be roughly 44,000/day.
-* The binding loss in this sample is **`no_contact` — 24 of 26 leads**, consistent
-  with the separate 09-04 finding that the gap is hiring-manager coverage rather than
-  email verification.
+The recorded outcomes include 24 `no_contact` and two `send_safe_withheld` rows.
+On an interrupted run those labels alone cannot distinguish natural absence from
+an incomplete search/cascade. The two withheld verified contacts need their original
+gate evidence inspected; increasing the budget does not explain that withholding.
 
-**n = 5 companies is too small to conclude anything about conversion.** Two of five
-yielding a verified email could be 40% or could be noise. The honest output of a
-50-call calibration is the per-company cost and the shape of the loss, and that is
-what is claimed here.
+Official endpoint contract: [People API Search](https://docs.apollo.io/reference/people-api-search)
+does not consume credits. [API pricing](https://docs.apollo.io/docs/api-pricing)
+depends on endpoint/data and plan. Physical requests, internal reservations,
+provider credits, contacts and approved leads must be reconciled separately.
 
 ## What the run proved about the machinery
 
@@ -82,10 +85,22 @@ said `contacts_found 2`. Fixed; the table above uses the corrected count.
 
 ## What is needed to compute the real number
 
-A larger sample. **1,000 chargeable calls reaches ~100 companies** at the measured
-rate, which is enough to see whether the approval rate is a few percent or a third —
-the range that decides whether 1,000/day is reachable at all.
+A cohort with attributable outcomes, original withheld-gate evidence, endpoint-level
+request accounting and actual provider billing. A larger authorized sample may be
+needed, but 1,000 reservations cannot be promised to reach 100 companies or establish
+the approval rate from this run's counter.
 
 That is a spending decision and is not taken here. The current authorization
 (`calib-2026-09-06-50`) is spent; a larger one requires a new
 `APOLLO_RECOVERY_BUDGET_ID` and count, which is what makes a fresh grant deliberate.
+
+
+## Correction from the original Railway log
+
+The retry recovered 146 original runtime log entries from deployment
+`0c2692c8-e7eb-469f-8069-0f38989671bd`. Its preflight says
+`delivery airtable=write submit_set=reviewable instantly=OFF`, not disabled
+Airtable delivery. All 26 candidates were withheld, so zero rows were created.
+Do not describe this historical run as a test with all external delivery disabled.
+The two `send_safe_withheld` rows still have no per-lead reason in the logs.
+Original evidence: `evidence/railway_calibration_20260906.json`.

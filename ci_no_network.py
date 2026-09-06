@@ -15,8 +15,11 @@ test that binds a local port is not a network call in the sense that matters her
 from __future__ import annotations
 
 import socket
+import sys
 
 _ALLOWED_HOSTS = frozenset({"localhost", "127.0.0.1", "::1", "0.0.0.0", ""})
+_AUDIT_ACTIVE = False
+_AUDIT_INSTALLED = False
 
 
 class NetworkUseInTests(RuntimeError):
@@ -29,7 +32,27 @@ def _host_of(address) -> str:
     return str(address)
 
 
+def _audit_network(event, args):
+    # Python audit hooks survive a test replacing/restoring socket functions.
+    # Refuse DNS too, before any resolver can contact an external nameserver.
+    if not _AUDIT_ACTIVE:
+        return
+    if event == "socket.connect":
+        host = _host_of(args[1])
+    elif event in ("socket.getaddrinfo", "socket.gethostbyname", "socket.gethostbyaddr"):
+        host = str(args[0])
+    else:
+        return
+    if host not in _ALLOWED_HOSTS:
+        raise NetworkUseInTests(f"offline audit refused {event} for {host!r}")
+
+
 def pytest_configure(config) -> None:
+    global _AUDIT_ACTIVE, _AUDIT_INSTALLED
+    if not _AUDIT_INSTALLED:
+        sys.addaudithook(_audit_network)
+        _AUDIT_INSTALLED = True
+    _AUDIT_ACTIVE = True
     real_connect = socket.socket.connect
     real_connect_ex = socket.socket.connect_ex
     real_create = socket.create_connection
@@ -62,6 +85,8 @@ def pytest_configure(config) -> None:
 
 
 def pytest_unconfigure(config) -> None:
+    global _AUDIT_ACTIVE
+    _AUDIT_ACTIVE = False
     restore = getattr(config, "_tgtc_restore_socket", None)
     if restore:
         socket.socket.connect, socket.socket.connect_ex, socket.create_connection = restore

@@ -691,13 +691,16 @@ def push_leads(jobs: List[Dict], batch_size: int = 10,
     # Approved Sync is untouched -- it independently re-runs send_safe_facts before
     # any Instantly enrollment, so this policy never relaxes a downstream safety gate.
     not_written_not_send_safe: List[str] = []
+    not_written_send_safe_reasons: Dict[str, int] = {}
     if config.AIRTABLE_WRITE_SEND_SAFE_ONLY and to_create:
         gated: List[Dict] = []
         for job in to_create:
-            if send_safe_facts(_job_to_fields(job))[0]:
+            safe, reason = send_safe_facts(_job_to_fields(job))
+            if safe:
                 gated.append(job)
             else:
                 not_written_not_send_safe.append(job.get("lead_key"))
+                not_written_send_safe_reasons[reason] = not_written_send_safe_reasons.get(reason, 0) + 1
         to_create = gated
 
     # Repair blank generated fields only. Never overwrite reviewer-edited values
@@ -750,6 +753,8 @@ def push_leads(jobs: List[Dict], batch_size: int = 10,
 
     created = 0
     created_lead_keys: List[str] = []
+    created_approved_lead_keys: List[str] = []
+    created_approval_status_unknown = 0
     updated_missing_role_focus = 0
     updated_missing_job_signals = 0
     failed = 0
@@ -771,6 +776,17 @@ def push_leads(jobs: List[Dict], batch_size: int = 10,
                 raise ValueError("Airtable returned fewer records than submitted")
             created += created_count
             created_lead_keys.extend(job["lead_key"] for job in batch)
+            # Count persisted Approved rows, never infer status from an enable flag.
+            batch_keys = {job["lead_key"] for job in batch}
+            known_status_keys = set()
+            for record in data.get("records", []):
+                fields = record.get("fields") or {}
+                key = fields.get("Lead Key")
+                if key in batch_keys and fields.get("Status"):
+                    known_status_keys.add(key)
+                if key in batch_keys and fields.get("Status") == config.AIRTABLE_STATUS_APPROVED:
+                    created_approved_lead_keys.append(key)
+            created_approval_status_unknown += len(batch_keys - known_status_keys)
         except Exception as exc:
             detail = _sanitize_airtable_error(exc)
             logger.error(
@@ -823,6 +839,8 @@ def push_leads(jobs: List[Dict], batch_size: int = 10,
     return {
         "created": created,
         "created_lead_keys": created_lead_keys,
+        "created_approved_lead_keys": sorted(set(created_approved_lead_keys)),
+        "created_approval_status_unknown": created_approval_status_unknown,
         "persisted_lead_keys": persisted_lead_keys,
         # Rows actually PATCHED in place this run (a row count, unlike the
         # per-field updated_missing_* counters). Delivery derives
@@ -846,6 +864,7 @@ def push_leads(jobs: List[Dict], batch_size: int = 10,
         # are preserved in run artifacts/metrics, never written as Airtable leads.
         "not_written_not_send_safe": len(not_written_not_send_safe),
         "not_written_not_send_safe_lead_keys": not_written_not_send_safe,
+        "not_written_send_safe_reasons": not_written_send_safe_reasons,
         "reviewable": len(unique_by_key),
         "final_pass": sum(job.get("_final_state") == "FINAL_PASS" for job in unique_by_key.values()),
         "needs_check": sum(

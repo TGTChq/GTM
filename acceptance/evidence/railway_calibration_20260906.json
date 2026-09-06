@@ -1,0 +1,1624 @@
+{
+  "retrieved_at": "2026-09-06T22:57:46.374Z",
+  "source": "Railway get_logs",
+  "request": {
+    "deploymentId": "0c2692c8-e7eb-469f-8069-0f38989671bd",
+    "startDate": "2026-09-06T20:25:00Z",
+    "endDate": "2026-09-06T20:37:00Z",
+    "limit": 500
+  },
+  "response": {
+    "deploy": [
+      {
+        "attributes": [
+          {
+            "key": "level",
+            "value": "\"info\""
+          }
+        ],
+        "message": "Mounting volume on: /var/lib/containers/railwayapp/bind-mounts/da1d4a14-2a25-428e-80e3-8621153793d9/vol_dr2tof3c9nl1rhrr",
+        "severity": "info",
+        "timestamp": "2026-09-06T20:25:34.318784202Z"
+      },
+      {
+        "attributes": [
+          {
+            "key": "level",
+            "value": "\"info\""
+          }
+        ],
+        "message": "Starting Container",
+        "severity": "info",
+        "timestamp": "2026-09-06T20:25:34.318944722Z"
+      },
+      {
+        "attributes": [
+          {
+            "key": "level",
+            "value": "\"info\""
+          }
+        ],
+        "message": "artifact_root        /app/data/state/orchestrator_v2 writable=True",
+        "severity": "info",
+        "timestamp": "2026-09-06T20:25:35.535607048Z"
+      },
+      {
+        "attributes": [
+          {
+            "key": "level",
+            "value": "\"info\""
+          }
+        ],
+        "message": "disk_free_gb         14.7 (min 0.26 GB, OK)",
+        "severity": "info",
+        "timestamp": "2026-09-06T20:25:35.535618768Z"
+      },
+      {
+        "attributes": [
+          {
+            "key": "level",
+            "value": "\"info\""
+          }
+        ],
+        "message": "run_lock             free (none)",
+        "severity": "info",
+        "timestamp": "2026-09-06T20:25:35.535626128Z"
+      },
+      {
+        "attributes": [
+          {
+            "key": "level",
+            "value": "\"info\""
+          }
+        ],
+        "message": "=== strict preflight (before any external call) ===",
+        "severity": "info",
+        "timestamp": "2026-09-06T20:25:35.535629808Z"
+      },
+      {
+        "attributes": [
+          {
+            "key": "level",
+            "value": "\"info\""
+          }
+        ],
+        "message": "delivery             airtable=write submit_set=reviewable instantly=OFF",
+        "severity": "info",
+        "timestamp": "2026-09-06T20:25:35.535633368Z"
+      },
+      {
+        "attributes": [
+          {
+            "key": "level",
+            "value": "\"info\""
+          }
+        ],
+        "message": "HUNTER_API_KEY       PRESENT",
+        "severity": "info",
+        "timestamp": "2026-09-06T20:25:35.535634478Z"
+      },
+      {
+        "attributes": [
+          {
+            "key": "level",
+            "value": "\"info\""
+          }
+        ],
+        "message": "  ashby            22",
+        "severity": "info",
+        "timestamp": "2026-09-06T20:25:35.535634618Z"
+      },
+      {
+        "attributes": [
+          {
+            "key": "level",
+            "value": "\"info\""
+          }
+        ],
+        "message": "package_integrity    checked=27 mismatch=0 absent=0 (OK)",
+        "severity": "info",
+        "timestamp": "2026-09-06T20:25:35.535635628Z"
+      },
+      {
+        "attributes": [
+          {
+            "key": "level",
+            "value": "\"info\""
+          }
+        ],
+        "message": "  record_status      send_safe_auto_approve=ON -> new send-safe Fantastic rows are created Approved; everything else Pending",
+        "severity": "info",
+        "timestamp": "2026-09-06T20:25:35.535640938Z"
+      },
+      {
+        "attributes": [
+          {
+            "key": "level",
+            "value": "\"info\""
+          }
+        ],
+        "message": "RAPIDAPI_KEY         PRESENT",
+        "severity": "info",
+        "timestamp": "2026-09-06T20:25:35.535641078Z"
+      },
+      {
+        "attributes": [
+          {
+            "key": "level",
+            "value": "\"info\""
+          }
+        ],
+        "message": "APOLLO_API_KEY       PRESENT",
+        "severity": "info",
+        "timestamp": "2026-09-06T20:25:35.535647379Z"
+      },
+      {
+        "attributes": [
+          {
+            "key": "level",
+            "value": "\"info\""
+          }
+        ],
+        "message": "  cornerstone_ondemand 1",
+        "severity": "info",
+        "timestamp": "2026-09-06T20:25:35.535649739Z"
+      },
+      {
+        "attributes": [
+          {
+            "key": "level",
+            "value": "\"info\""
+          }
+        ],
+        "message": "PREFLIGHT OK — proceeding to the definitive run.",
+        "severity": "info",
+        "timestamp": "2026-09-06T20:25:35.535650389Z"
+      },
+      {
+        "attributes": [
+          {
+            "key": "level",
+            "value": "\"info\""
+          }
+        ],
+        "message": "AIRTABLE_TOKEN       PRESENT",
+        "severity": "info",
+        "timestamp": "2026-09-06T20:25:35.535652419Z"
+      },
+      {
+        "attributes": [
+          {
+            "key": "level",
+            "value": "\"info\""
+          }
+        ],
+        "message": "  greenhouse       13",
+        "severity": "info",
+        "timestamp": "2026-09-06T20:25:35.535657209Z"
+      },
+      {
+        "attributes": [
+          {
+            "key": "level",
+            "value": "\"info\""
+          }
+        ],
+        "message": "AIRTABLE_BASE_ID     PRESENT",
+        "severity": "info",
+        "timestamp": "2026-09-06T20:25:35.535663269Z"
+      },
+      {
+        "attributes": [
+          {
+            "key": "level",
+            "value": "\"info\""
+          }
+        ],
+        "message": "  lever            6",
+        "severity": "info",
+        "timestamp": "2026-09-06T20:25:35.535666029Z"
+      },
+      {
+        "attributes": [
+          {
+            "key": "level",
+            "value": "\"info\""
+          }
+        ],
+        "message": "  smartrecruiters  31",
+        "severity": "info",
+        "timestamp": "2026-09-06T20:25:35.535674268Z"
+      },
+      {
+        "attributes": [
+          {
+            "key": "level",
+            "value": "\"info\""
+          }
+        ],
+        "message": "AIRTABLE_TABLE_NAME  PRESENT",
+        "severity": "info",
+        "timestamp": "2026-09-06T20:25:35.535674998Z"
+      },
+      {
+        "attributes": [
+          {
+            "key": "level",
+            "value": "\"info\""
+          }
+        ],
+        "message": "  workable         4",
+        "severity": "info",
+        "timestamp": "2026-09-06T20:25:35.535680448Z"
+      },
+      {
+        "attributes": [
+          {
+            "key": "level",
+            "value": "\"info\""
+          }
+        ],
+        "message": "  workday          68",
+        "severity": "info",
+        "timestamp": "2026-09-06T20:25:35.535686728Z"
+      },
+      {
+        "attributes": [
+          {
+            "key": "level",
+            "value": "\"info\""
+          }
+        ],
+        "message": "FANTASTIC_JOBS_API_KEY PRESENT",
+        "severity": "info",
+        "timestamp": "2026-09-06T20:25:35.535687598Z"
+      },
+      {
+        "attributes": [
+          {
+            "key": "level",
+            "value": "\"info\""
+          }
+        ],
+        "message": "boards               145 from ats_board_registry (145 tracked) err=none",
+        "severity": "info",
+        "timestamp": "2026-09-06T20:25:35.535695118Z"
+      },
+      {
+        "attributes": [
+          {
+            "key": "level",
+            "value": "\"error\""
+          }
+        ],
+        "message": "Apollo unavailable for the whole run (apollo_budget_exhausted) after 5 companies; opening the Apollo circuit and preserving completed work: apollo recovery budget exhausted: consumed 50 of 50 under authorization calib-2026-09-06-50",
+        "severity": "error",
+        "timestamp": "2026-09-06T20:27:55.901606995Z"
+      },
+      {
+        "attributes": [
+          {
+            "key": "level",
+            "value": "\"info\""
+          }
+        ],
+        "message": "================ RUN SUMMARY ================",
+        "severity": "info",
+        "timestamp": "2026-09-06T20:27:55.901610975Z"
+      },
+      {
+        "attributes": [
+          {
+            "key": "level",
+            "value": "\"info\""
+          }
+        ],
+        "message": "run_id                    20260906T202534Z-0395cf0a",
+        "severity": "info",
+        "timestamp": "2026-09-06T20:27:55.901615265Z"
+      },
+      {
+        "attributes": [
+          {
+            "key": "level",
+            "value": "\"info\""
+          }
+        ],
+        "message": "mode                      live_acquisition_and_enrichment",
+        "severity": "info",
+        "timestamp": "2026-09-06T20:27:55.901618825Z"
+      },
+      {
+        "attributes": [
+          {
+            "key": "level",
+            "value": "\"info\""
+          }
+        ],
+        "message": "status                    complete",
+        "severity": "info",
+        "timestamp": "2026-09-06T20:27:55.901622415Z"
+      },
+      {
+        "attributes": [
+          {
+            "key": "level",
+            "value": "\"info\""
+          }
+        ],
+        "message": "stop_reason               topup:max_iterations_guard",
+        "severity": "info",
+        "timestamp": "2026-09-06T20:27:55.901626475Z"
+      },
+      {
+        "attributes": [
+          {
+            "key": "level",
+            "value": "\"info\""
+          }
+        ],
+        "message": "---- Acquisition (cumulative, all top-up slices) ----",
+        "severity": "info",
+        "timestamp": "2026-09-06T20:27:55.901630605Z"
+      },
+      {
+        "attributes": [
+          {
+            "key": "level",
+            "value": "\"info\""
+          }
+        ],
+        "message": "topup_iterations          1",
+        "severity": "info",
+        "timestamp": "2026-09-06T20:27:55.901634285Z"
+      },
+      {
+        "attributes": [
+          {
+            "key": "level",
+            "value": "\"info\""
+          }
+        ],
+        "message": "run_cap                   0 (source=governor)",
+        "severity": "info",
+        "timestamp": "2026-09-06T20:27:55.901637315Z"
+      },
+      {
+        "attributes": [
+          {
+            "key": "level",
+            "value": "\"info\""
+          }
+        ],
+        "message": "jobs_unique_kept          0",
+        "severity": "info",
+        "timestamp": "2026-09-06T20:27:55.901640805Z"
+      },
+      {
+        "attributes": [
+          {
+            "key": "level",
+            "value": "\"info\""
+          }
+        ],
+        "message": "jobs_returned_billed      0",
+        "severity": "info",
+        "timestamp": "2026-09-06T20:27:55.901644805Z"
+      },
+      {
+        "attributes": [
+          {
+            "key": "level",
+            "value": "\"info\""
+          }
+        ],
+        "message": "jobs_quota_consumed       0",
+        "severity": "info",
+        "timestamp": "2026-09-06T20:27:55.901648255Z"
+      },
+      {
+        "attributes": [
+          {
+            "key": "level",
+            "value": "\"info\""
+          }
+        ],
+        "message": "physical_requests         0",
+        "severity": "info",
+        "timestamp": "2026-09-06T20:27:55.901652175Z"
+      },
+      {
+        "attributes": [
+          {
+            "key": "level",
+            "value": "\"info\""
+          }
+        ],
+        "message": "cross_query_duplicates    0",
+        "severity": "info",
+        "timestamp": "2026-09-06T20:27:55.901655885Z"
+      },
+      {
+        "attributes": [
+          {
+            "key": "level",
+            "value": "\"info\""
+          }
+        ],
+        "message": "cross_source_duplicates   0",
+        "severity": "info",
+        "timestamp": "2026-09-06T20:27:55.901659245Z"
+      },
+      {
+        "attributes": [
+          {
+            "key": "level",
+            "value": "\"info\""
+          }
+        ],
+        "message": "net_new_jobs_captured     0",
+        "severity": "info",
+        "timestamp": "2026-09-06T20:27:55.901662765Z"
+      },
+      {
+        "attributes": [
+          {
+            "key": "level",
+            "value": "\"info\""
+          }
+        ],
+        "message": "historical_previously_seen0",
+        "severity": "info",
+        "timestamp": "2026-09-06T20:27:55.901665975Z"
+      },
+      {
+        "attributes": [
+          {
+            "key": "level",
+            "value": "\"info\""
+          }
+        ],
+        "message": "canonical_duplicates_in_run0",
+        "severity": "info",
+        "timestamp": "2026-09-06T20:27:55.901670115Z"
+      },
+      {
+        "attributes": [
+          {
+            "key": "level",
+            "value": "\"info\""
+          }
+        ],
+        "message": "postings_missing_identity 0",
+        "severity": "info",
+        "timestamp": "2026-09-06T20:27:55.901673625Z"
+      },
+      {
+        "attributes": [
+          {
+            "key": "level",
+            "value": "\"info\""
+          }
+        ],
+        "message": "dedupe_reconciles         True",
+        "severity": "info",
+        "timestamp": "2026-09-06T20:27:55.901677045Z"
+      },
+      {
+        "attributes": [
+          {
+            "key": "level",
+            "value": "\"info\""
+          }
+        ],
+        "message": "jobs_quota_remaining      None",
+        "severity": "info",
+        "timestamp": "2026-09-06T20:27:55.901680475Z"
+      },
+      {
+        "attributes": [
+          {
+            "key": "level",
+            "value": "\"info\""
+          }
+        ],
+        "message": "RECOVERY COHORT           postings 2000 / opportunities 1660 / leads 26",
+        "severity": "info",
+        "timestamp": "2026-09-06T20:27:55.901684045Z"
+      },
+      {
+        "attributes": [
+          {
+            "key": "level",
+            "value": "\"info\""
+          }
+        ],
+        "message": "  attempted               26 opportunities -> with_contact 26 -> final_pass 0 -> delivered 0",
+        "severity": "info",
+        "timestamp": "2026-09-06T20:27:55.901687615Z"
+      },
+      {
+        "attributes": [
+          {
+            "key": "level",
+            "value": "\"info\""
+          }
+        ],
+        "message": "  opp->contact            1.0 (denominator: opportunities_attempted)",
+        "severity": "info",
+        "timestamp": "2026-09-06T20:27:55.902904466Z"
+      },
+      {
+        "attributes": [
+          {
+            "key": "level",
+            "value": "\"info\""
+          }
+        ],
+        "message": "  no reconciled outcome   1634",
+        "severity": "info",
+        "timestamp": "2026-09-06T20:27:55.902913246Z"
+      },
+      {
+        "attributes": [
+          {
+            "key": "level",
+            "value": "\"info\""
+          }
+        ],
+        "message": "companies_considered      5",
+        "severity": "info",
+        "timestamp": "2026-09-06T20:27:55.902914046Z"
+      },
+      {
+        "attributes": [
+          {
+            "key": "level",
+            "value": "\"info\""
+          }
+        ],
+        "message": "airtable_existing         0",
+        "severity": "info",
+        "timestamp": "2026-09-06T20:27:55.902915206Z"
+      },
+      {
+        "attributes": [
+          {
+            "key": "level",
+            "value": "\"info\""
+          }
+        ],
+        "message": "final_stop_reason         max_iterations_guard",
+        "severity": "info",
+        "timestamp": "2026-09-06T20:27:55.902919016Z"
+      },
+      {
+        "attributes": [
+          {
+            "key": "level",
+            "value": "\"info\""
+          }
+        ],
+        "message": "governor_budget           0 reason=daily_allowance_spent remaining=77642 reserve=10000",
+        "severity": "info",
+        "timestamp": "2026-09-06T20:27:55.902925076Z"
+      },
+      {
+        "attributes": [
+          {
+            "key": "level",
+            "value": "\"info\""
+          }
+        ],
+        "message": "icp_eligible_companies    5",
+        "severity": "info",
+        "timestamp": "2026-09-06T20:27:55.902925616Z"
+      },
+      {
+        "attributes": [
+          {
+            "key": "level",
+            "value": "\"info\""
+          }
+        ],
+        "message": "---- Brett's daily metrics ----",
+        "severity": "info",
+        "timestamp": "2026-09-06T20:27:55.902931176Z"
+      },
+      {
+        "attributes": [
+          {
+            "key": "level",
+            "value": "\"info\""
+          }
+        ],
+        "message": "icp_rejected_companies    0",
+        "severity": "info",
+        "timestamp": "2026-09-06T20:27:55.902933336Z"
+      },
+      {
+        "attributes": [
+          {
+            "key": "level",
+            "value": "\"info\""
+          }
+        ],
+        "message": "JOBS_ANALYZED             0",
+        "severity": "info",
+        "timestamp": "2026-09-06T20:27:55.902937676Z"
+      },
+      {
+        "attributes": [
+          {
+            "key": "level",
+            "value": "\"info\""
+          }
+        ],
+        "message": "hiring_managers_found     2",
+        "severity": "info",
+        "timestamp": "2026-09-06T20:27:55.902940086Z"
+      },
+      {
+        "attributes": [
+          {
+            "key": "level",
+            "value": "\"info\""
+          }
+        ],
+        "message": "QUALIFIED                 1701",
+        "severity": "info",
+        "timestamp": "2026-09-06T20:27:55.902943716Z"
+      },
+      {
+        "attributes": [
+          {
+            "key": "level",
+            "value": "\"info\""
+          }
+        ],
+        "message": "contacts_with_email       2",
+        "severity": "info",
+        "timestamp": "2026-09-06T20:27:55.902946026Z"
+      },
+      {
+        "attributes": [
+          {
+            "key": "level",
+            "value": "\"info\""
+          }
+        ],
+        "message": "CONTACTS_FOUND            2",
+        "severity": "info",
+        "timestamp": "2026-09-06T20:27:55.902949016Z"
+      },
+      {
+        "attributes": [
+          {
+            "key": "level",
+            "value": "\"info\""
+          }
+        ],
+        "message": "verified_emails           2",
+        "severity": "info",
+        "timestamp": "2026-09-06T20:27:55.902953526Z"
+      },
+      {
+        "attributes": [
+          {
+            "key": "level",
+            "value": "\"info\""
+          }
+        ],
+        "message": "SENT_TO_AIRTABLE          0",
+        "severity": "info",
+        "timestamp": "2026-09-06T20:27:55.902955756Z"
+      },
+      {
+        "attributes": [
+          {
+            "key": "level",
+            "value": "\"info\""
+          }
+        ],
+        "message": "---- Funnel ----",
+        "severity": "info",
+        "timestamp": "2026-09-06T20:27:55.902961886Z"
+      },
+      {
+        "attributes": [
+          {
+            "key": "level",
+            "value": "\"info\""
+          }
+        ],
+        "message": "unverified_emails         0",
+        "severity": "info",
+        "timestamp": "2026-09-06T20:27:55.902962376Z"
+      },
+      {
+        "attributes": [
+          {
+            "key": "level",
+            "value": "\"info\""
+          }
+        ],
+        "message": "FINAL_PASS                0",
+        "severity": "info",
+        "timestamp": "2026-09-06T20:27:55.902969796Z"
+      },
+      {
+        "attributes": [
+          {
+            "key": "level",
+            "value": "\"info\""
+          }
+        ],
+        "message": "raw_postings              0",
+        "severity": "info",
+        "timestamp": "2026-09-06T20:27:55.902970096Z"
+      },
+      {
+        "attributes": [
+          {
+            "key": "level",
+            "value": "\"info\""
+          }
+        ],
+        "message": "NEEDS_CHECK               2",
+        "severity": "info",
+        "timestamp": "2026-09-06T20:27:55.902977166Z"
+      },
+      {
+        "attributes": [
+          {
+            "key": "level",
+            "value": "\"info\""
+          }
+        ],
+        "message": "unique_opportunities      26",
+        "severity": "info",
+        "timestamp": "2026-09-06T20:27:55.902977316Z"
+      },
+      {
+        "attributes": [
+          {
+            "key": "level",
+            "value": "\"info\""
+          }
+        ],
+        "message": "target_role_eligible      1701",
+        "severity": "info",
+        "timestamp": "2026-09-06T20:27:55.902985226Z"
+      },
+      {
+        "attributes": [
+          {
+            "key": "level",
+            "value": "\"info\""
+          }
+        ],
+        "message": "UNVERIFIED                24",
+        "severity": "info",
+        "timestamp": "2026-09-06T20:27:55.902986096Z"
+      },
+      {
+        "attributes": [
+          {
+            "key": "level",
+            "value": "\"info\""
+          }
+        ],
+        "message": "---- Airtable (review-staging; send-safe auto-approve ON) ----",
+        "severity": "info",
+        "timestamp": "2026-09-06T20:27:55.902991046Z"
+      },
+      {
+        "attributes": [
+          {
+            "key": "level",
+            "value": "\"info\""
+          }
+        ],
+        "message": "airtable_submitted        26",
+        "severity": "info",
+        "timestamp": "2026-09-06T20:27:55.902995686Z"
+      },
+      {
+        "attributes": [
+          {
+            "key": "level",
+            "value": "\"info\""
+          }
+        ],
+        "message": "airtable_created          0",
+        "severity": "info",
+        "timestamp": "2026-09-06T20:27:55.903000506Z"
+      },
+      {
+        "attributes": [
+          {
+            "key": "level",
+            "value": "\"info\""
+          }
+        ],
+        "message": "airtable_failed           0",
+        "severity": "info",
+        "timestamp": "2026-09-06T20:27:55.903676251Z"
+      },
+      {
+        "attributes": [
+          {
+            "key": "level",
+            "value": "\"info\""
+          }
+        ],
+        "message": "  skip.skipped_existing   0",
+        "severity": "info",
+        "timestamp": "2026-09-06T20:27:55.903688561Z"
+      },
+      {
+        "attributes": [
+          {
+            "key": "level",
+            "value": "\"info\""
+          }
+        ],
+        "message": "  skip.updated_existing   0",
+        "severity": "info",
+        "timestamp": "2026-09-06T20:27:55.903693171Z"
+      },
+      {
+        "attributes": [
+          {
+            "key": "level",
+            "value": "\"info\""
+          }
+        ],
+        "message": "  skip.company_function_suppressed0",
+        "severity": "info",
+        "timestamp": "2026-09-06T20:27:55.903697331Z"
+      },
+      {
+        "attributes": [
+          {
+            "key": "level",
+            "value": "\"info\""
+          }
+        ],
+        "message": "  skip.account_suppressed 0",
+        "severity": "info",
+        "timestamp": "2026-09-06T20:27:55.903701811Z"
+      },
+      {
+        "attributes": [
+          {
+            "key": "level",
+            "value": "\"info\""
+          }
+        ],
+        "message": "  skip.no_contact         24",
+        "severity": "info",
+        "timestamp": "2026-09-06T20:27:55.903708941Z"
+      },
+      {
+        "attributes": [
+          {
+            "key": "level",
+            "value": "\"info\""
+          }
+        ],
+        "message": "  skip.send_safe_withheld 2",
+        "severity": "info",
+        "timestamp": "2026-09-06T20:27:55.903712911Z"
+      },
+      {
+        "attributes": [
+          {
+            "key": "level",
+            "value": "\"info\""
+          }
+        ],
+        "message": "  skip.other              0",
+        "severity": "info",
+        "timestamp": "2026-09-06T20:27:55.903716381Z"
+      },
+      {
+        "attributes": [
+          {
+            "key": "level",
+            "value": "\"info\""
+          }
+        ],
+        "message": "  person_employer_duplicate (withheld pre-submit)0",
+        "severity": "info",
+        "timestamp": "2026-09-06T20:27:55.903720051Z"
+      },
+      {
+        "attributes": [
+          {
+            "key": "level",
+            "value": "\"info\""
+          }
+        ],
+        "message": "  skip.UNEXPLAINED        0",
+        "severity": "info",
+        "timestamp": "2026-09-06T20:27:55.903723631Z"
+      },
+      {
+        "attributes": [
+          {
+            "key": "level",
+            "value": "\"info\""
+          }
+        ],
+        "message": "  reviewable_reconciles   True",
+        "severity": "info",
+        "timestamp": "2026-09-06T20:27:55.903727331Z"
+      },
+      {
+        "attributes": [
+          {
+            "key": "level",
+            "value": "\"info\""
+          }
+        ],
+        "message": "---- Top rejection reasons ----",
+        "severity": "info",
+        "timestamp": "2026-09-06T20:27:55.903730201Z"
+      },
+      {
+        "attributes": [
+          {
+            "key": "level",
+            "value": "\"info\""
+          }
+        ],
+        "message": "  REJECT_QUALITY_GUARD_OTHER = 192",
+        "severity": "info",
+        "timestamp": "2026-09-06T20:27:55.903734081Z"
+      },
+      {
+        "attributes": [
+          {
+            "key": "level",
+            "value": "\"info\""
+          }
+        ],
+        "message": "  REJECT_ROLE_MISMATCH = 62",
+        "severity": "info",
+        "timestamp": "2026-09-06T20:27:55.903737411Z"
+      },
+      {
+        "attributes": [
+          {
+            "key": "level",
+            "value": "\"info\""
+          }
+        ],
+        "message": "  hiring_manager_not_found = 26",
+        "severity": "info",
+        "timestamp": "2026-09-06T20:27:55.903740931Z"
+      },
+      {
+        "attributes": [
+          {
+            "key": "level",
+            "value": "\"info\""
+          }
+        ],
+        "message": "  email_unverified = 24",
+        "severity": "info",
+        "timestamp": "2026-09-06T20:27:55.903744521Z"
+      },
+      {
+        "attributes": [
+          {
+            "key": "level",
+            "value": "\"info\""
+          }
+        ],
+        "message": "  unverified = 24",
+        "severity": "info",
+        "timestamp": "2026-09-06T20:27:55.903747681Z"
+      },
+      {
+        "attributes": [
+          {
+            "key": "level",
+            "value": "\"info\""
+          }
+        ],
+        "message": "---- Hiring Manager Coverage ----",
+        "severity": "info",
+        "timestamp": "2026-09-06T20:27:55.903751561Z"
+      },
+      {
+        "attributes": [
+          {
+            "key": "level",
+            "value": "\"info\""
+          }
+        ],
+        "message": "eligible_companies              5",
+        "severity": "info",
+        "timestamp": "2026-09-06T20:27:55.903754771Z"
+      },
+      {
+        "attributes": [
+          {
+            "key": "level",
+            "value": "\"info\""
+          }
+        ],
+        "message": "eligible_company_buckets        26",
+        "severity": "info",
+        "timestamp": "2026-09-06T20:27:55.903759581Z"
+      },
+      {
+        "attributes": [
+          {
+            "key": "level",
+            "value": "\"info\""
+          }
+        ],
+        "message": "hm_searches                     26",
+        "severity": "info",
+        "timestamp": "2026-09-06T20:27:55.903762931Z"
+      },
+      {
+        "attributes": [
+          {
+            "key": "level",
+            "value": "\"info\""
+          }
+        ],
+        "message": "hm_found                        2",
+        "severity": "info",
+        "timestamp": "2026-09-06T20:27:55.903767011Z"
+      },
+      {
+        "attributes": [
+          {
+            "key": "level",
+            "value": "\"info\""
+          }
+        ],
+        "message": "hm_not_found                    24",
+        "severity": "info",
+        "timestamp": "2026-09-06T20:27:55.903770391Z"
+      },
+      {
+        "attributes": [
+          {
+            "key": "level",
+            "value": "\"info\""
+          }
+        ],
+        "message": "distinct_companies_without_hm   4",
+        "severity": "info",
+        "timestamp": "2026-09-06T20:27:55.903774231Z"
+      },
+      {
+        "attributes": [
+          {
+            "key": "level",
+            "value": "\"info\""
+          }
+        ],
+        "message": "HM coverage by role bucket:",
+        "severity": "info",
+        "timestamp": "2026-09-06T20:27:55.903777711Z"
+      },
+      {
+        "attributes": [
+          {
+            "key": "level",
+            "value": "\"info\""
+          }
+        ],
+        "message": "---- Employer / Domain Resolution ----",
+        "severity": "info",
+        "timestamp": "2026-09-06T20:27:55.905445839Z"
+      },
+      {
+        "attributes": [
+          {
+            "key": "level",
+            "value": "\"info\""
+          }
+        ],
+        "message": "  marketing            0.0%  (not_found=3)",
+        "severity": "info",
+        "timestamp": "2026-09-06T20:27:55.905446499Z"
+      },
+      {
+        "attributes": [
+          {
+            "key": "level",
+            "value": "\"info\""
+          }
+        ],
+        "message": "postings_evaluated                26",
+        "severity": "info",
+        "timestamp": "2026-09-06T20:27:55.905453109Z"
+      },
+      {
+        "attributes": [
+          {
+            "key": "level",
+            "value": "\"info\""
+          }
+        ],
+        "message": "  gtm_revenue          0.0%  (not_found=2)",
+        "severity": "info",
+        "timestamp": "2026-09-06T20:27:55.905454519Z"
+      },
+      {
+        "attributes": [
+          {
+            "key": "level",
+            "value": "\"info\""
+          }
+        ],
+        "message": "  engineering          0.0%  (not_found=5)",
+        "severity": "info",
+        "timestamp": "2026-09-06T20:27:55.905460908Z"
+      },
+      {
+        "attributes": [
+          {
+            "key": "level",
+            "value": "\"info\""
+          }
+        ],
+        "message": "direct_employer                   26",
+        "severity": "info",
+        "timestamp": "2026-09-06T20:27:55.905461098Z"
+      },
+      {
+        "attributes": [
+          {
+            "key": "level",
+            "value": "\"info\""
+          }
+        ],
+        "message": "  customer_support     0.0%  (not_found=3)",
+        "severity": "info",
+        "timestamp": "2026-09-06T20:27:55.905469718Z"
+      },
+      {
+        "attributes": [
+          {
+            "key": "level",
+            "value": "\"info\""
+          }
+        ],
+        "message": "ats_employer_known                0",
+        "severity": "info",
+        "timestamp": "2026-09-06T20:27:55.905470328Z"
+      },
+      {
+        "attributes": [
+          {
+            "key": "level",
+            "value": "\"info\""
+          }
+        ],
+        "message": "aggregator                        0",
+        "severity": "info",
+        "timestamp": "2026-09-06T20:27:55.905479478Z"
+      },
+      {
+        "attributes": [
+          {
+            "key": "level",
+            "value": "\"info\""
+          }
+        ],
+        "message": "  finance              0.0%  (not_found=2)",
+        "severity": "info",
+        "timestamp": "2026-09-06T20:27:55.905480438Z"
+      },
+      {
+        "attributes": [
+          {
+            "key": "level",
+            "value": "\"info\""
+          }
+        ],
+        "message": "  people_hr           25.0%  (not_found=3)",
+        "severity": "info",
+        "timestamp": "2026-09-06T20:27:55.905488768Z"
+      },
+      {
+        "attributes": [
+          {
+            "key": "level",
+            "value": "\"info\""
+          }
+        ],
+        "message": "intermediary                      0",
+        "severity": "info",
+        "timestamp": "2026-09-06T20:27:55.905488918Z"
+      },
+      {
+        "attributes": [
+          {
+            "key": "level",
+            "value": "\"info\""
+          }
+        ],
+        "message": "  operations          25.0%  (not_found=3)",
+        "severity": "info",
+        "timestamp": "2026-09-06T20:27:55.905495858Z"
+      },
+      {
+        "attributes": [
+          {
+            "key": "level",
+            "value": "\"info\""
+          }
+        ],
+        "message": "  product              0.0%  (not_found=3)",
+        "severity": "info",
+        "timestamp": "2026-09-06T20:27:55.905499568Z"
+      },
+      {
+        "attributes": [
+          {
+            "key": "level",
+            "value": "\"info\""
+          }
+        ],
+        "message": "---- Multi-Function Accounts ----",
+        "severity": "info",
+        "timestamp": "2026-09-06T20:27:55.905502248Z"
+      },
+      {
+        "attributes": [
+          {
+            "key": "level",
+            "value": "\"info\""
+          }
+        ],
+        "message": "multi_function_companies        5",
+        "severity": "info",
+        "timestamp": "2026-09-06T20:27:55.905505078Z"
+      },
+      {
+        "attributes": [
+          {
+            "key": "level",
+            "value": "\"info\""
+          }
+        ],
+        "message": "role_buckets                    26",
+        "severity": "info",
+        "timestamp": "2026-09-06T20:27:55.905508098Z"
+      },
+      {
+        "attributes": [
+          {
+            "key": "level",
+            "value": "\"info\""
+          }
+        ],
+        "message": "separate_searches               26/26",
+        "severity": "info",
+        "timestamp": "2026-09-06T20:27:55.905510898Z"
+      },
+      {
+        "attributes": [
+          {
+            "key": "level",
+            "value": "\"info\""
+          }
+        ],
+        "message": "contacts_found                  2",
+        "severity": "info",
+        "timestamp": "2026-09-06T20:27:55.905513768Z"
+      },
+      {
+        "attributes": [
+          {
+            "key": "level",
+            "value": "\"info\""
+          }
+        ],
+        "message": "search_shortfall                0",
+        "severity": "info",
+        "timestamp": "2026-09-06T20:27:55.905516818Z"
+      },
+      {
+        "attributes": [
+          {
+            "key": "level",
+            "value": "\"info\""
+          }
+        ],
+        "message": "no_search_domain_shortfall      0",
+        "severity": "info",
+        "timestamp": "2026-09-06T20:27:55.905519328Z"
+      },
+      {
+        "attributes": [
+          {
+            "key": "level",
+            "value": "\"info\""
+          }
+        ],
+        "message": "true_collapse_detected          0",
+        "severity": "info",
+        "timestamp": "2026-09-06T20:27:55.905522718Z"
+      },
+      {
+        "attributes": [
+          {
+            "key": "level",
+            "value": "\"info\""
+          }
+        ],
+        "message": "staffing_or_hidden_client         0",
+        "severity": "info",
+        "timestamp": "2026-09-06T20:27:55.906530441Z"
+      },
+      {
+        "attributes": [
+          {
+            "key": "level",
+            "value": "\"info\""
+          }
+        ],
+        "message": "employer_resolved                 26",
+        "severity": "info",
+        "timestamp": "2026-09-06T20:27:55.906534411Z"
+      },
+      {
+        "attributes": [
+          {
+            "key": "level",
+            "value": "\"info\""
+          }
+        ],
+        "message": "employer_unresolved               0",
+        "severity": "info",
+        "timestamp": "2026-09-06T20:27:55.906538481Z"
+      },
+      {
+        "attributes": [
+          {
+            "key": "level",
+            "value": "\"info\""
+          }
+        ],
+        "message": "hm_searches_unlocked_by_recovery  0",
+        "severity": "info",
+        "timestamp": "2026-09-06T20:27:55.906541741Z"
+      },
+      {
+        "attributes": [
+          {
+            "key": "level",
+            "value": "\"info\""
+          }
+        ],
+        "message": "resolution_rate                   1.0",
+        "severity": "info",
+        "timestamp": "2026-09-06T20:27:55.906544901Z"
+      },
+      {
+        "attributes": [
+          {
+            "key": "level",
+            "value": "\"info\""
+          }
+        ],
+        "message": "---- Acquired work still owed enrichment ----",
+        "severity": "info",
+        "timestamp": "2026-09-06T20:27:55.906547981Z"
+      },
+      {
+        "attributes": [
+          {
+            "key": "level",
+            "value": "\"info\""
+          }
+        ],
+        "message": "  pending_postings        3595",
+        "severity": "info",
+        "timestamp": "2026-09-06T20:27:55.906551571Z"
+      },
+      {
+        "attributes": [
+          {
+            "key": "level",
+            "value": "\"info\""
+          }
+        ],
+        "message": "  pending_runs            2",
+        "severity": "info",
+        "timestamp": "2026-09-06T20:27:55.906554741Z"
+      },
+      {
+        "attributes": [
+          {
+            "key": "level",
+            "value": "\"info\""
+          }
+        ],
+        "message": "    20260904T130130Z-13b44a0c  3369 posting(s)",
+        "severity": "info",
+        "timestamp": "2026-09-06T20:27:55.906557891Z"
+      },
+      {
+        "attributes": [
+          {
+            "key": "level",
+            "value": "\"info\""
+          }
+        ],
+        "message": "    20260906T030230Z-2f74ac7c  226 posting(s)",
+        "severity": "info",
+        "timestamp": "2026-09-06T20:27:55.906560381Z"
+      },
+      {
+        "attributes": [
+          {
+            "key": "level",
+            "value": "\"info\""
+          }
+        ],
+        "message": "---- reporting ledger (last 9 of 9) ----",
+        "severity": "info",
+        "timestamp": "2026-09-06T20:27:55.906562781Z"
+      },
+      {
+        "attributes": [
+          {
+            "key": "level",
+            "value": "\"info\""
+          }
+        ],
+        "message": "  LEDGER {\"_path\": \"/app/data/state/orchestrator_v2/reporting_ledger/20260901T130121Z-0cbadbc6.json\", \"artifact_dir\": \"run_artifacts/20260901T130121Z-0cbadbc6\", \"artifacts_written\": true, \"backfilled_from_artifacts\": true, \"finished_at\": \"2026-09-01T13:02:25Z\", \"lane_names\": [], \"loss_reasons\": {\"account_suppressed\": 0, \"company_function_suppressed\": 0, \"no_contact\": 0, \"other\": 0, \"skipped_existing\": 0, \"updated_existing\": 0}, \"metric_sources\": {\"airtable_candidates\": \"pipeline:backfill_from_artifacts\", \"airtable_suppressed\": \"pipeline:backfill_from_artifacts\", \"airtable_write_failures\": \"pipeline:backfill_from_artifacts\", \"contacts_found\": \"pipeline:backfill_from_artifacts\", \"cross_query_duplicates\": \"pipeline:backfill_from_artifacts\", \"final_pass_leads\": \"pipeline:backfill_from_artifacts\", \"jobs_captured\": \"pipeline:backfill_from_artifacts\", \"provider_jobs_billed\": \"pipeline:backfill_from_artifacts\", \"provider_jobs_returned\": \"pipeline:backfill_from_artifacts\", \"sent_to_airtable\": \"pipeline:backfill_from_artifacts\", \"unique_opportunities\": \"pipeline:backfill_from_artifacts\", \"verified_emails\": \"pipeline:backfill_from_artifacts\"}, \"metrics\": {\"airtable_candidates\": 0, \"airtable_suppressed\": 0, \"airtable_write_failures\": 0, \"contacts_found\": 0, \"cross_query_duplicates\": 0, \"final_pass_leads\": 0, \"jobs_captured\": 0, \"provider_jobs_billed\": 0, \"provider_jobs_returned\": 0, \"sent_to_airtable\": 0, \"unique_opportunities\": 0, \"verified_emails\": 0}, \"mode\": \"live_acquisition_and_enrichment\", \"policy\": {\"allow_enrichment\": true, \"allow_instantly_enrollment\": false, \"allow_network\": true}, \"run_id\": \"20260901T130121Z-0cbadbc6\", \"schema\": \"tgtc-run-reporting-ledger/1\", \"stages_recorded\": [\"start\", \"backfill_from_artifacts\", \"final\"], \"started_at\": \"2026-09-01T13:01:21Z\", \"state\": \"complete\", \"status\": \"complete\", \"stop_reason\": \"topup:governor_zero_budget\", \"updated_at\": \"2026-09-05T03:05:59Z\"}",
+        "severity": "info",
+        "timestamp": "2026-09-06T20:27:55.906565521Z"
+      },
+      {
+        "attributes": [
+          {
+            "key": "level",
+            "value": "\"info\""
+          }
+        ],
+        "message": "  LEDGER {\"_path\": \"/app/data/state/orchestrator_v2/reporting_ledger/20260902T130429Z-a54f4f19.json\", \"artifact_dir\": \"run_artifacts/20260902T130429Z-a54f4f19\", \"artifacts_written\": true, \"backfilled_from_artifacts\": true, \"finished_at\": \"2026-09-02T13:05:11Z\", \"lane_names\": [], \"loss_reasons\": {\"account_suppressed\": 0, \"company_function_suppressed\": 0, \"no_contact\": 0, \"other\": 0, \"skipped_existing\": 0, \"updated_existing\": 0}, \"metric_sources\": {\"airtable_candidates\": \"pipeline:backfill_from_artifacts\", \"airtable_suppressed\": \"pipeline:backfill_from_artifacts\", \"airtable_write_failures\": \"pipeline:backfill_from_artifacts\", \"contacts_found\": \"pipeline:backfill_from_artifacts\", \"cross_query_duplicates\": \"pipeline:backfill_from_artifacts\", \"final_pass_leads\": \"pipeline:backfill_from_artifacts\", \"provider_jobs_billed\": \"pipeline:backfill_from_artifacts\", \"provider_jobs_returned\": \"pipeline:backfill_from_artifacts\", \"sent_to_airtable\": \"pipeline:backfill_from_artifacts\", \"unique_opportunities\": \"pipeline:backfill_from_artifacts\", \"verified_emails\": \"pipeline:backfill_from_artifacts\"}, \"metrics\": {\"airtable_candidates\": 0, \"airtable_suppressed\": 0, \"airtable_write_failures\": 0, \"contacts_found\": 0, \"cross_query_duplicates\": 0, \"final_pass_leads\": 0, \"provider_jobs_billed\": 0, \"provider_jobs_returned\": 0, \"sent_to_airtable\": 0, \"unique_opportunities\": 0, \"verified_emails\": 0}, \"mode\": \"live_acquisition_and_enrichment\", \"policy\": {\"allow_enrichment\": true, \"allow_instantly_enrollment\": false, \"allow_network\": true}, \"run_id\": \"20260902T130429Z-a54f4f19\", \"schema\": \"tgtc-run-reporting-ledger/1\", \"stages_recorded\": [\"start\", \"backfill_from_artifacts\", \"final\"], \"started_at\": \"2026-09-02T13:04:29Z\", \"state\": \"complete\", \"status\": \"complete\", \"stop_reason\": \"topup:governor_zero_budget\", \"updated_at\": \"2026-09-06T03:16:31Z\"}",
+        "severity": "info",
+        "timestamp": "2026-09-06T20:27:55.907449545Z"
+      },
+      {
+        "attributes": [
+          {
+            "key": "level",
+            "value": "\"info\""
+          }
+        ],
+        "message": "  LEDGER {\"_path\": \"/app/data/state/orchestrator_v2/reporting_ledger/20260903T130019Z-65ca91e1.json\", \"artifact_dir\": \"run_artifacts/20260903T130019Z-65ca91e1\", \"artifacts_written\": true, \"backfilled_from_artifacts\": true, \"finished_at\": \"2026-09-03T13:01:26Z\", \"lane_names\": [\"fantastic\"], \"metric_sources\": {\"airtable_candidates\": \"pipeline:backfill_from_artifacts\", \"airtable_suppressed\": \"pipeline:backfill_from_artifacts\", \"airtable_write_failures\": \"pipeline:backfill_from_artifacts\", \"contacts_found\": \"pipeline:backfill_from_artifacts\", \"cross_query_duplicates\": \"pipeline:backfill_from_artifacts\", \"final_pass_leads\": \"pipeline:backfill_from_artifacts\", \"jobs_captured\": \"pipeline:backfill_from_artifacts\", \"net_new_jobs_captured\": \"pipeline:backfill_from_artifacts\", \"provider_jobs_billed\": \"pipeline:backfill_from_artifacts\", \"provider_jobs_returned\": \"pipeline:backfill_from_artifacts\", \"sent_to_airtable\": \"pipeline:backfill_from_artifacts\", \"unique_opportunities\": \"pipeline:backfill_from_artifacts\", \"verified_emails\": \"pipeline:backfill_from_artifacts\"}, \"metrics\": {\"airtable_candidates\": 0, \"airtable_suppressed\": 0, \"airtable_write_failures\": 0, \"contacts_found\": 0, \"cross_query_duplicates\": 0, \"final_pass_leads\": 0, \"jobs_captured\": 0, \"net_new_jobs_captured\": 0, \"provider_jobs_billed\": 0, \"provider_jobs_returned\": 0, \"sent_to_airtable\": 0, \"unique_opportunities\": 0, \"verified_emails\": 0}, \"mode\": \"live_acquisition_and_enrichment\", \"policy\": {\"allow_enrichment\": true, \"allow_instantly_enrollment\": false, \"allow_network\": true}, \"run_id\": \"20260903T130019Z-65ca91e1\", \"schema\": \"tgtc-run-reporting-ledger/1\", \"stages_recorded\": [\"start\", \"backfill_from_artifacts\", \"final\"], \"started_at\": \"2026-09-03T13:00:19Z\", \"state\": \"complete\", \"status\": \"complete\", \"stop_reason\": \"topup:max_iterations_guard\", \"updated_at\": \"2026-09-06T13:23:41Z\"}",
+        "severity": "info",
+        "timestamp": "2026-09-06T20:27:55.907454555Z"
+      },
+      {
+        "attributes": [
+          {
+            "key": "level",
+            "value": "\"info\""
+          }
+        ],
+        "message": "  LEDGER {\"_path\": \"/app/data/state/orchestrator_v2/reporting_ledger/20260904T130130Z-13b44a0c.json\", \"artifact_dir\": \"run_artifacts/20260904T130130Z-13b44a0c\", \"artifacts_written\": true, \"backfilled_from_artifacts\": true, \"finished_at\": \"2026-09-04T16:21:19Z\", \"lane_names\": [\"fantastic\"], \"loss_reasons\": {\"company_unresolved\": 106, \"delivery_unreconciled\": 900, \"email_unverified\": 740, \"hiring_manager_not_found\": 247, \"not_icp\": 606}, \"metric_sources\": {\"airtable_candidates\": \"pipeline:backfill_from_artifacts\", \"airtable_suppressed\": \"pipeline:backfill_from_artifacts\", \"airtable_write_failures\": \"pipeline:backfill_from_artifacts\", \"contacts_found\": \"pipeline:backfill_from_artifacts\", \"cross_query_duplicates\": \"pipeline:backfill_from_artifacts\", \"final_pass_leads\": \"pipeline:backfill_from_artifacts\", \"jobs_captured\": \"pipeline:backfill_from_artifacts\", \"net_new_jobs_captured\": \"pipeline:backfill_from_artifacts\", \"provider_jobs_billed\": \"pipeline:backfill_from_artifacts\", \"provider_jobs_returned\": \"pipeline:backfill_from_artifacts\", \"sent_to_airtable\": \"pipeline:backfill_from_artifacts\", \"unique_opportunities\": \"pipeline:backfill_from_artifacts\", \"verified_emails\": \"pipeline:backfill_from_artifacts\"}, \"metrics\": {\"airtable_candidates\": 1681, \"airtable_suppressed\": 0, \"airtable_write_failures\": 0, \"contacts_found\": 1048, \"cross_query_duplicates\": 0, \"final_pass_leads\": 711, \"jobs_captured\": 6205, \"net_new_jobs_captured\": 6205, \"provider_jobs_billed\": 6205, \"provider_jobs_returned\": 6205, \"sent_to_airtable\": 781, \"unique_opportunities\": 2410, \"verified_emails\": 1034}, \"mode\": \"live_acquisition_and_enrichment\", \"policy\": {\"allow_enrichment\": true, \"allow_instantly_enrollment\": false, \"allow_network\": true}, \"run_id\": \"20260904T130130Z-13b44a0c\", \"schema\": \"tgtc-run-reporting-ledger/1\", \"stages_recorded\": [\"start\", \"backfill_from_artifacts\", \"final\"], \"started_at\": \"2026-09-04T13:01:30Z\", \"state\": \"complete\", \"status\": \"complete\", \"stop_reason\": \"topup:max_iterations_guard\", \"updated_at\": \"2026-09-06T13:23:41Z\"}",
+        "severity": "info",
+        "timestamp": "2026-09-06T20:27:55.908156510Z"
+      },
+      {
+        "attributes": [
+          {
+            "key": "level",
+            "value": "\"info\""
+          }
+        ],
+        "message": "  LEDGER {\"_path\": \"/app/data/state/orchestrator_v2/reporting_ledger/20260905T030439Z-1d102bec.json\", \"acquisition_entered\": true, \"acquisition_reconciles\": true, \"artifact_dir\": \"run_artifacts/20260905T030439Z-1d102bec\", \"delivery_skip_breakdown\": {\"account_suppressed\": 0, \"company_function_suppressed\": 0, \"no_contact\": 0, \"other\": 0, \"send_safe_withheld\": 0, \"skipped_existing\": 0, \"updated_existing\": 0}, \"finished_at\": \"2026-09-05T03:05:59Z\", \"lane_names\": [\"fantastic\"], \"loss_reasons\": {\"account_suppressed\": 0, \"company_function_suppressed\": 0, \"hiring_manager_not_found\": 0, \"needs_check\": 0, \"no_contact\": 0, \"other\": 0, \"rejected\": 0, \"reroute\": 0, \"send_safe_withheld\": 0, \"skipped_existing\": 0, \"unverified\": 0, \"updated_existing\": 0}, \"metric_sources\": {\"airtable_candidates\": \"pipeline:delivery\", \"airtable_suppressed\": \"pipeline:delivery\", \"airtable_write_failures\": \"pipeline:delivery\", \"canonical_duplicates_in_run\": \"pipeline:acquisition\", \"companies_considered\": \"pipeline:enrichment\", \"contacts_found\": \"pipeline:enrichment\", \"cross_query_duplicates\": \"pipeline:acquisition\", \"cross_source_duplicates\": \"pipeline:acquisition\", \"final_pass_leads\": \"pipeline:enrichment\", \"historical_duplicates\": \"pipeline:acquisition\", \"historical_previously_seen_duplicates\": \"pipeline:acquisition\", \"jobs_captured\": \"pipeline:acquisition\", \"jobs_reviewed\": \"pipeline:enrichment\", \"net_new_jobs_captured\": \"pipeline:acquisition\", \"postings_missing_identity\": \"pipeline:acquisition\", \"provider_jobs_billed\": \"pipeline:acquisition\", \"provider_jobs_returned\": \"pipeline:acquisition\", \"role_qualified_postings\": \"pipeline:enrichment\", \"sent_to_airtable\": \"pipeline:delivery\", \"unique_opportunities\": \"pipeline:acquisition\", \"verified_emails\": \"pipeline:enrichment\"}, \"metrics\": {\"airtable_candidates\": 0, \"airtable_suppressed\": 0, \"airtable_write_failures\": 0, \"canonical_duplicates_in_run\": 0, \"companies_considered\": 0, \"contacts_found\": 0, \"cross_query_duplicates\": 200, \"cross_source_duplicates\": 0, \"final_pass_leads\": 0, \"historical_duplicates\": 0, \"historical_previously_seen_duplicates\": 0, \"jobs_captured\": 0, \"jobs_reviewed\": 0, \"net_new_jobs_captured\": 0, \"postings_missing_identity\": 0, \"provider_jobs_billed\": 200, \"provider_jobs_returned\": 200, \"role_qualified_postings\": 0, \"sent_to_airtable\": 0, \"unique_opportunities\": 0, \"verified_emails\": 0}, \"mode\": \"live_acquisition_and_enrichment\", \"physical_requests\": 2, \"policy\": {\"allow_enrichment\": true, \"allow_instantly_enrollment\": false, \"allow_network\": true}, \"run_id\": \"20260905T030439Z-1d102bec\", \"schema\": \"tgtc-run-reporting-ledger/1\", \"source_counts\": {\"fantastic_jobs_ats\": {\"cross_source_duplicates\": 0, \"drained\": false, \"duplicates\": 100, \"error_code\": \"\", \"jobs\": 0, \"novelty_pct\": 0.0, \"offset_from\": 0, \"offset_to\": 100, \"requests\": 1, \"returned_billed\": 100, \"schema_rejected\": 0, \"source_filtered_out\": 0, \"stop_reason\": \"no_new_ids\", \"unique_kept\": 0}, \"fantastic_jobs_linkedin\": {\"cross_source_duplicates\": 0, \"drained\": false, \"duplicates\": 100, \"error_code\": \"\", \"jobs\": 0, \"novelty_pct\": 0.0, \"offset_from\": 0, \"offset_to\": 100, \"requests\": 1, \"returned_billed\": 100, \"schema_rejected\": 0, \"source_filtered_out\": 0, \"stop_reason\": \"no_new_ids\", \"unique_kept\": 0}, \"fantastic_jobs_wellfound\": {\"cross_source_duplicates\": 0, \"drained\": true, \"duplicates\": 0, \"error_code\": \"\", \"jobs\": 0, \"offset_from\": 0, \"offset_to\": 0, \"requests\": 0, \"returned_billed\": 0, \"schema_rejected\": 0, \"source_filtered_out\": 0, \"stop_reason\": \"already_drained_this_window\", \"unique_kept\": 0}, \"fantastic_jobs_ycombinator\": {\"cross_source_duplicates\": 0, \"drained\": true, \"duplicates\": 0, \"error_code\": \"\", \"jobs\": 0, \"offset_from\": 0, \"offset_to\": 0, \"requests\": 0, \"returned_billed\": 0, \"schema_rejected\": 0, \"source_filtered_out\": 0, \"stop_reason\": \"already_drained_this_window\", \"unique_kept\": 0}}, \"stages_recorded\": [\"start\", \"acquisition\", \"enrichment\", \"delivery\", \"final\"], \"started_at\": \"2026-09-05T03:04:39Z\", \"state\": \"complete\", \"status\": \"complete\", \"stop_reason\": \"topup:max_iterations_guard\", \"updated_at\": \"2026-09-05T03:05:59Z\"}",
+        "severity": "info",
+        "timestamp": "2026-09-06T20:27:55.909351201Z"
+      },
+      {
+        "attributes": [
+          {
+            "key": "level",
+            "value": "\"info\""
+          }
+        ],
+        "message": "  LEDGER {\"_path\": \"/app/data/state/orchestrator_v2/reporting_ledger/20260906T030230Z-2f74ac7c.json\", \"acquisition_entered\": true, \"acquisition_reconciles\": true, \"artifact_dir\": \"run_artifacts/20260906T030230Z-2f74ac7c\", \"delivery_skip_breakdown\": {\"account_suppressed\": 0, \"company_function_suppressed\": 0, \"no_contact\": 0, \"other\": 0, \"send_safe_withheld\": 0, \"skipped_existing\": 0, \"updated_existing\": 0}, \"finished_at\": \"2026-09-06T03:16:31Z\", \"lane_names\": [\"fantastic\"], \"loss_reasons\": {\"REJECT_EXCLUDED_SENIORITY\": 1, \"REJECT_QUALITY_GUARD_OTHER\": 28, \"REJECT_ROLE_MISMATCH\": 3, \"account_suppressed\": 0, \"company_function_suppressed\": 0, \"hiring_manager_not_found\": 0, \"needs_check\": 0, \"no_contact\": 0, \"other\": 0, \"rejected\": 0, \"reroute\": 0, \"send_safe_withheld\": 0}, \"metric_sources\": {\"airtable_candidates\": \"pipeline:delivery\", \"airtable_suppressed\": \"pipeline:delivery\", \"airtable_write_failures\": \"pipeline:delivery\", \"canonical_duplicates_in_run\": \"pipeline:acquisition\", \"companies_considered\": \"pipeline:enrichment\", \"contacts_found\": \"pipeline:enrichment\", \"cross_query_duplicates\": \"pipeline:acquisition\", \"cross_source_duplicates\": \"pipeline:acquisition\", \"final_pass_leads\": \"pipeline:enrichment\", \"historical_duplicates\": \"pipeline:acquisition\", \"historical_previously_seen_duplicates\": \"pipeline:acquisition\", \"jobs_captured\": \"pipeline:acquisition\", \"jobs_reviewed\": \"pipeline:enrichment\", \"net_new_jobs_captured\": \"pipeline:acquisition\", \"postings_missing_identity\": \"pipeline:acquisition\", \"provider_jobs_billed\": \"pipeline:acquisition\", \"provider_jobs_returned\": \"pipeline:acquisition\", \"role_qualified_postings\": \"pipeline:enrichment\", \"sent_to_airtable\": \"pipeline:delivery\", \"unique_opportunities\": \"pipeline:acquisition\", \"verified_emails\": \"pipeline:enrichment\"}, \"metrics\": {\"airtable_candidates\": 0, \"airtable_suppressed\": 0, \"airtable_write_failures\": 0, \"canonical_duplicates_in_run\": 0, \"companies_considered\": 0, \"contacts_found\": 0, \"cross_query_duplicates\": 5218, \"cross_source_duplicates\": 0, \"final_pass_leads\": 0, \"historical_duplicates\": 0, \"historical_previously_seen_duplicates\": 0, \"jobs_captured\": 226, \"jobs_reviewed\": 226, \"net_new_jobs_captured\": 226, \"postings_missing_identity\": 0, \"provider_jobs_billed\": 5444, \"provider_jobs_returned\": 5444, \"role_qualified_postings\": 194, \"sent_to_airtable\": 0, \"unique_opportunities\": 0, \"verified_emails\": 0}, \"mode\": \"live_acquisition_and_enrichment\", \"physical_requests\": 56, \"policy\": {\"allow_enrichment\": true, \"allow_instantly_enrollment\": false, \"allow_network\": true}, \"run_id\": \"20260906T030230Z-2f74ac7c\", \"schema\": \"tgtc-run-reporting-ledger/1\", \"source_counts\": {\"fantastic_jobs_ats\": {\"cross_source_duplicates\": 0, \"drained\": false, \"duplicates\": 2722, \"error_code\": \"\", \"jobs\": 0, \"novelty_pct\": 0.0, \"offset_from\": 100, \"offset_to\": 2822, \"requests\": 28, \"returned_billed\": 2722, \"schema_rejected\": 0, \"source_filtered_out\": 0, \"stop_reason\": \"cap_reached\", \"unique_kept\": 0}, \"fantastic_jobs_linkedin\": {\"canonical_duplicates_in_run\": 0, \"cross_source_duplicates\": 0, \"drained\": false, \"duplicates\": 2496, \"error_code\": \"\", \"historical_previously_seen\": 0, \"jobs\": 226, \"missing_identity\": 0, \"net_new\": 226, \"novelty_pct\": 8.3, \"offset_from\": 100, \"offset_to\": 2822, \"postings_in\": 226, \"requests\": 28, \"returned_billed\": 2722, \"schema_rejected\": 0, \"source_filtered_out\": 0, \"stop_reason\": \"cap_reached\", \"unique_kept\": 226}, \"fantastic_jobs_wellfound\": {\"cross_source_duplicates\": 0, \"drained\": true, \"duplicates\": 0, \"error_code\": \"\", \"jobs\": 0, \"offset_from\": 0, \"offset_to\": 0, \"requests\": 0, \"returned_billed\": 0, \"schema_rejected\": 0, \"source_filtered_out\": 0, \"stop_reason\": \"already_drained_this_window\", \"unique_kept\": 0}, \"fantastic_jobs_ycombinator\": {\"cross_source_duplicates\": 0, \"drained\": true, \"duplicates\": 0, \"error_code\": \"\", \"jobs\": 0, \"offset_from\": 0, \"offset_to\": 0, \"requests\": 0, \"returned_billed\": 0, \"schema_rejected\": 0, \"source_filtered_out\": 0, \"stop_reason\": \"already_drained_this_window\", \"unique_kept\": 0}}, \"stages_recorded\": [\"start\", \"acquisition\", \"enrichment\", \"delivery\", \"final\"], \"started_at\": \"2026-09-06T03:02:30Z\", \"state\": \"complete\", \"status\": \"complete\", \"stop_reason\": \"topup:max_iterations_guard\", \"updated_at\": \"2026-09-06T03:16:31Z\"}",
+        "severity": "info",
+        "timestamp": "2026-09-06T20:27:55.909708080Z"
+      },
+      {
+        "attributes": [
+          {
+            "key": "level",
+            "value": "\"info\""
+          }
+        ],
+        "message": "  LEDGER {\"_path\": \"/app/data/state/orchestrator_v2/reporting_ledger/20260906T194056Z-6419f87a.json\", \"acquisition_entered\": false, \"acquisition_reconciles\": true, \"artifact_dir\": \"run_artifacts/20260906T194056Z-6419f87a\", \"delivery_skip_breakdown\": {\"account_suppressed\": 0, \"company_function_suppressed\": 0, \"no_contact\": 0, \"other\": 0, \"send_safe_withheld\": 0, \"skipped_existing\": 0, \"updated_existing\": 0}, \"finished_at\": \"2026-09-06T19:41:45Z\", \"lane_names\": [\"fantastic\"], \"loss_reasons\": {}, \"metric_sources\": {\"airtable_candidates\": \"pipeline:delivery\", \"airtable_suppressed\": \"pipeline:delivery\", \"airtable_write_failures\": \"pipeline:delivery\", \"canonical_duplicates_in_run\": \"pipeline:acquisition\", \"contacts_found\": \"pipeline:enrichment\", \"cross_query_duplicates\": \"pipeline:acquisition\", \"cross_source_duplicates\": \"pipeline:acquisition\", \"final_pass_leads\": \"pipeline:enrichment\", \"historical_duplicates\": \"pipeline:acquisition\", \"historical_previously_seen_duplicates\": \"pipeline:acquisition\", \"jobs_captured\": \"pipeline:acquisition\", \"net_new_jobs_captured\": \"pipeline:acquisition\", \"postings_missing_identity\": \"pipeline:acquisition\", \"provider_jobs_billed\": \"pipeline:acquisition\", \"provider_jobs_returned\": \"pipeline:acquisition\", \"sent_to_airtable\": \"pipeline:delivery\", \"unique_opportunities\": \"pipeline:acquisition\", \"verified_emails\": \"pipeline:enrichment\"}, \"metrics\": {\"airtable_candidates\": 0, \"airtable_suppressed\": 0, \"airtable_write_failures\": 0, \"canonical_duplicates_in_run\": 0, \"contacts_found\": 0, \"cross_query_duplicates\": 0, \"cross_source_duplicates\": 0, \"final_pass_leads\": 0, \"historical_duplicates\": 0, \"historical_previously_seen_duplicates\": 0, \"jobs_captured\": 0, \"net_new_jobs_captured\": 0, \"postings_missing_identity\": 0, \"provider_jobs_billed\": 0, \"provider_jobs_returned\": 0, \"sent_to_airtable\": 0, \"unique_opportunities\": 0, \"verified_emails\": 0}, \"mode\": \"live_acquisition_and_enrichment\", \"physical_requests\": 0, \"policy\": {\"allow_enrichment\": true, \"allow_instantly_enrollment\": false, \"allow_network\": true}, \"run_id\": \"20260906T194056Z-6419f87a\", \"schema\": \"tgtc-run-reporting-ledger/1\", \"source_counts\": {}, \"stages_recorded\": [\"start\", \"acquisition\", \"enrichment\", \"delivery\", \"final\"], \"started_at\": \"2026-09-06T19:40:56Z\", \"state\": \"complete\", \"status\": \"complete\", \"stop_reason\": \"topup:governor_zero_budget\", \"updated_at\": \"2026-09-06T19:41:45Z\"}",
+        "severity": "info",
+        "timestamp": "2026-09-06T20:27:55.910509943Z"
+      },
+      {
+        "attributes": [
+          {
+            "key": "level",
+            "value": "\"info\""
+          }
+        ],
+        "message": "  LEDGER {\"_path\": \"/app/data/state/orchestrator_v2/reporting_ledger/20260906T200507Z-d046af2b.json\", \"acquisition_entered\": false, \"acquisition_reconciles\": true, \"artifact_dir\": \"run_artifacts/20260906T200507Z-d046af2b\", \"delivery_skip_breakdown\": {\"account_suppressed\": 0, \"company_function_suppressed\": 0, \"no_contact\": 0, \"other\": 0, \"send_safe_withheld\": 0, \"skipped_existing\": 0, \"updated_existing\": 0}, \"finished_at\": \"2026-09-06T20:05:37Z\", \"lane_names\": [\"fantastic\"], \"loss_reasons\": {}, \"metric_sources\": {\"airtable_candidates\": \"pipeline:delivery\", \"airtable_suppressed\": \"pipeline:delivery\", \"airtable_write_failures\": \"pipeline:delivery\", \"canonical_duplicates_in_run\": \"pipeline:acquisition\", \"contacts_found\": \"pipeline:enrichment\", \"cross_query_duplicates\": \"pipeline:acquisition\", \"cross_source_duplicates\": \"pipeline:acquisition\", \"final_pass_leads\": \"pipeline:enrichment\", \"historical_duplicates\": \"pipeline:acquisition\", \"historical_previously_seen_duplicates\": \"pipeline:acquisition\", \"jobs_captured\": \"pipeline:acquisition\", \"net_new_jobs_captured\": \"pipeline:acquisition\", \"postings_missing_identity\": \"pipeline:acquisition\", \"provider_jobs_billed\": \"pipeline:acquisition\", \"provider_jobs_returned\": \"pipeline:acquisition\", \"sent_to_airtable\": \"pipeline:delivery\", \"unique_opportunities\": \"pipeline:acquisition\", \"verified_emails\": \"pipeline:enrichment\"}, \"metrics\": {\"airtable_candidates\": 0, \"airtable_suppressed\": 0, \"airtable_write_failures\": 0, \"canonical_duplicates_in_run\": 0, \"contacts_found\": 0, \"cross_query_duplicates\": 0, \"cross_source_duplicates\": 0, \"final_pass_leads\": 0, \"historical_duplicates\": 0, \"historical_previously_seen_duplicates\": 0, \"jobs_captured\": 0, \"net_new_jobs_captured\": 0, \"postings_missing_identity\": 0, \"provider_jobs_billed\": 0, \"provider_jobs_returned\": 0, \"sent_to_airtable\": 0, \"unique_opportunities\": 0, \"verified_emails\": 0}, \"mode\": \"live_acquisition_and_enrichment\", \"physical_requests\": 0, \"policy\": {\"allow_enrichment\": true, \"allow_instantly_enrollment\": false, \"allow_network\": true}, \"run_id\": \"20260906T200507Z-d046af2b\", \"schema\": \"tgtc-run-reporting-ledger/1\", \"source_counts\": {}, \"stages_recorded\": [\"start\", \"acquisition\", \"enrichment\", \"delivery\", \"final\"], \"started_at\": \"2026-09-06T20:05:07Z\", \"state\": \"complete\", \"status\": \"complete\", \"stop_reason\": \"topup:governor_zero_budget\", \"updated_at\": \"2026-09-06T20:05:37Z\"}",
+        "severity": "info",
+        "timestamp": "2026-09-06T20:27:55.911214299Z"
+      },
+      {
+        "attributes": [
+          {
+            "key": "level",
+            "value": "\"info\""
+          }
+        ],
+        "message": "  LEDGER {\"_path\": \"/app/data/state/orchestrator_v2/reporting_ledger/20260906T202534Z-0395cf0a.json\", \"acquisition_entered\": false, \"acquisition_reconciles\": true, \"artifact_dir\": \"run_artifacts/20260906T202534Z-0395cf0a\", \"delivery_skip_breakdown\": {\"account_suppressed\": 0, \"company_function_suppressed\": 0, \"no_contact\": 24, \"other\": 0, \"send_safe_withheld\": 2, \"skipped_existing\": 0, \"updated_existing\": 0}, \"finished_at\": \"2026-09-06T20:27:48Z\", \"lane_names\": [\"fantastic\"], \"loss_reasons\": {\"REJECT_EXCLUDED_SENIORITY\": 6, \"REJECT_INTERNSHIP\": 9, \"REJECT_QUALITY_GUARD_OTHER\": 192, \"REJECT_ROLE_MISMATCH\": 62, \"REJECT_ROLE_NOT_GLOBALLY_COVERABLE\": 12, \"REJECT_SECURITY_CLEARANCE_REQUIRED\": 16, \"email_unverified\": 24, \"hiring_manager_not_found\": 26, \"needs_check\": 2, \"no_contact\": 24, \"send_safe_withheld\": 2, \"unverified\": 24}, \"metric_sources\": {\"airtable_candidates\": \"pipeline:delivery\", \"airtable_suppressed\": \"pipeline:delivery\", \"airtable_write_failures\": \"pipeline:delivery\", \"canonical_duplicates_in_run\": \"pipeline:acquisition\", \"companies_considered\": \"pipeline:enrichment\", \"contacts_found\": \"pipeline:enrichment\", \"cross_query_duplicates\": \"pipeline:acquisition\", \"cross_source_duplicates\": \"pipeline:acquisition\", \"final_pass_leads\": \"pipeline:enrichment\", \"historical_duplicates\": \"pipeline:acquisition\", \"historical_previously_seen_duplicates\": \"pipeline:acquisition\", \"jobs_captured\": \"pipeline:acquisition\", \"jobs_reviewed\": \"pipeline:enrichment\", \"net_new_jobs_captured\": \"pipeline:acquisition\", \"postings_missing_identity\": \"pipeline:acquisition\", \"provider_jobs_billed\": \"pipeline:acquisition\", \"provider_jobs_returned\": \"pipeline:acquisition\", \"qualified_opportunities\": \"pipeline:enrichment\", \"role_qualified_postings\": \"pipeline:enrichment\", \"sent_to_airtable\": \"pipeline:delivery\", \"unique_opportunities\": \"pipeline:acquisition\", \"verified_emails\": \"pipeline:enrichment\"}, \"metrics\": {\"airtable_candidates\": 26, \"airtable_suppressed\": 0, \"airtable_write_failures\": 0, \"canonical_duplicates_in_run\": 0, \"companies_considered\": 5, \"contacts_found\": 2, \"cross_query_duplicates\": 0, \"cross_source_duplicates\": 0, \"final_pass_leads\": 0, \"historical_duplicates\": 0, \"historical_previously_seen_duplicates\": 0, \"jobs_captured\": 0, \"jobs_reviewed\": 2000, \"net_new_jobs_captured\": 0, \"postings_missing_identity\": 0, \"provider_jobs_billed\": 0, \"provider_jobs_returned\": 0, \"qualified_opportunities\": 26, \"role_qualified_postings\": 1701, \"sent_to_airtable\": 0, \"unique_opportunities\": 26, \"verified_emails\": 2}, \"mode\": \"live_acquisition_and_enrichment\", \"physical_requests\": 0, \"policy\": {\"allow_enrichment\": true, \"allow_instantly_enrollment\": false, \"allow_network\": true}, \"run_id\": \"20260906T202534Z-0395cf0a\", \"schema\": \"tgtc-run-reporting-ledger/1\", \"source_counts\": {}, \"stages_recorded\": [\"start\", \"acquisition\", \"enrichment\", \"delivery\", \"final\"], \"started_at\": \"2026-09-06T20:25:34Z\", \"state\": \"complete\", \"status\": \"complete\", \"stop_reason\": \"topup:max_iterations_guard\", \"updated_at\": \"2026-09-06T20:27:48Z\"}",
+        "severity": "info",
+        "timestamp": "2026-09-06T20:27:55.912071302Z"
+      },
+      {
+        "attributes": [
+          {
+            "key": "level",
+            "value": "\"info\""
+          }
+        ],
+        "message": "reconcile                 True",
+        "severity": "info",
+        "timestamp": "2026-09-06T20:27:55.912876357Z"
+      },
+      {
+        "attributes": [
+          {
+            "key": "level",
+            "value": "\"info\""
+          }
+        ],
+        "message": "artifacts                 /app/data/state/orchestrator_v2/run_artifacts/20260906T202534Z-0395cf0a",
+        "severity": "info",
+        "timestamp": "2026-09-06T20:27:55.912879817Z"
+      },
+      {
+        "attributes": [
+          {
+            "key": "level",
+            "value": "\"info\""
+          }
+        ],
+        "message": "=============================================",
+        "severity": "info",
+        "timestamp": "2026-09-06T20:27:55.912882197Z"
+      },
+      {
+        "attributes": [
+          {
+            "key": "level",
+            "value": "\"info\""
+          }
+        ],
+        "message": "weekly report not due today: waiting for friday; it is Sunday (2026-09-06 20:27) in UTC; nothing written",
+        "severity": "info",
+        "timestamp": "2026-09-06T20:27:55.912885207Z"
+      }
+    ],
+    "deploymentId": "0c2692c8-e7eb-469f-8069-0f38989671bd",
+    "environmentId": "bae427bd-64a6-4f4e-8f56-fbd406985434",
+    "serviceId": "3a41d0d7-cd66-4f53-baa6-886266ddbbed",
+    "status": "REMOVED"
+  }
+}

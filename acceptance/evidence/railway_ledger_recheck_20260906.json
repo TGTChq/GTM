@@ -1,0 +1,3124 @@
+{
+  "basis": "Original production ledger entries printed in Railway logs; local rendering, no heavy production artifacts or fresh Instantly query",
+  "entries": 9,
+  "reports": {
+    "last_completed_week": {
+      "schema": "tgtc-weekly-report/1",
+      "builder_version": "1.0.0",
+      "generated_at": "2026-09-06T20:28:00Z",
+      "included_run_ids": [
+        "20260901T130121Z-0cbadbc6",
+        "20260902T130429Z-a54f4f19",
+        "20260903T130019Z-65ca91e1"
+      ],
+      "run_count": 3,
+      "reporting_window_start": "2026-08-28T07:00:00Z",
+      "reporting_window_end": "2026-09-04T07:00:00Z",
+      "reporting_window_start_local": "2026-08-28T00:00:00-07:00",
+      "reporting_window_end_local": "2026-09-04T00:00:00-07:00",
+      "reporting_window_label": "Aug 28 - Sep 03, 2026",
+      "reporting_window_iso_week": "2026-W36",
+      "reporting_window_interval": "half_open [start, end)",
+      "reporting_window_duration_hours": 168.0,
+      "timezone": "America/Los_Angeles",
+      "timezone_source": "zoneinfo:tzdata",
+      "metric_rules": {
+        "window_attribution": "run completion timestamp (run_manifest.finished_at), falling back to started_at, then to the run_id prefix",
+        "posted_at_excluded": "A job's posted_at is never used to place work in a week; backlog processed this week counts as this week's throughput.",
+        "silence_is_not_zero": "A run that does not carry a counter is listed in runs_missing_field; it is never summed as zero.",
+        "interval": "half-open [start, end) so consecutive reports never double-count a run",
+        "simulated_runs_excluded": "A dry-run/preflight run writes the same artifact shape as a live run. Its counters are excluded from every metric and listed under provenance.excluded_simulated_runs."
+      },
+      "headline": [
+        {
+          "key": "jobs_captured",
+          "label": "Jobs captured",
+          "unit": "posting",
+          "value": 0,
+          "status": "partial",
+          "source": "run_ledger+run_artifacts",
+          "definition": "NET-NEW job postings captured by runs in this window: rows the provider returned minus the ones a previous run had already processed to completion. This is the population that becomes this week's work, so it is directly comparable with jobs reviewed. Provider rows bought a second time are acquisition cost and are reported separately as provider_jobs_returned / historical_duplicates -- counting them here made a re-bought posting look like a review-stage loss.",
+          "evidence": [
+            "reporting_ledger:metrics.net_new_jobs_captured"
+          ],
+          "attribution": "run completion timestamp (run_manifest.finished_at)",
+          "contributing_run_ids": [
+            "20260903T130019Z-65ca91e1"
+          ],
+          "counted_unit": "posting",
+          "cohort": "run_window",
+          "runs_missing_field": [
+            "20260901T130121Z-0cbadbc6",
+            "20260902T130429Z-a54f4f19"
+          ],
+          "reason": "2 of 3 runs did not report this counter; the total covers the runs that did"
+        },
+        {
+          "key": "jobs_reviewed",
+          "label": "Jobs reviewed",
+          "unit": "posting",
+          "value": null,
+          "status": "unavailable",
+          "source": "run_ledger+run_artifacts",
+          "definition": "Postings that entered the qualification/review stage in those runs. This is the SAME population as jobs captured, measured one stage later: the deduped opportunity list is handed straight to qualification, so in a run that reached enrichment the two are equal. They differ only when a run stopped in between, where this one is absent rather than smaller. There is no attrition between them, and no rate to read across them.",
+          "evidence": [],
+          "attribution": "run completion timestamp (run_manifest.finished_at)",
+          "contributing_run_ids": [],
+          "counted_unit": "posting",
+          "cohort": "run_window",
+          "runs_missing_field": [
+            "20260901T130121Z-0cbadbc6",
+            "20260902T130429Z-a54f4f19",
+            "20260903T130019Z-65ca91e1"
+          ],
+          "reason": "none of the 3 run(s) in this window carry any of: reporting_ledger:metrics.jobs_reviewed, orchestrator_result.json:enrichment.funnel.qualification_input"
+        },
+        {
+          "key": "review_rate_pct",
+          "label": "Review rate",
+          "unit": "percent",
+          "value": null,
+          "status": "unavailable",
+          "source": "derived",
+          "definition": "Jobs reviewed as a percentage of jobs captured in the same runs. 100% means every captured posting entered review -- which is what a run that completed its slices looks like, because the deduped opportunity list is handed straight to qualification. It is not automatic: a run interrupted between acquiring a slice and enriching it reviews fewer than it captured, and the rate falls below 100 accordingly.",
+          "evidence": [
+            "jobs_reviewed / jobs_captured"
+          ],
+          "attribution": "run completion timestamp (run_manifest.finished_at)",
+          "contributing_run_ids": [],
+          "counted_unit": "",
+          "cohort": "",
+          "reason": "requires jobs_reviewed, which is unavailable"
+        },
+        {
+          "key": "qualified_opportunities",
+          "label": "Qualified opportunities",
+          "unit": "opportunity",
+          "value": null,
+          "status": "unavailable",
+          "source": "run_ledger+run_artifacts",
+          "definition": "Opportunities that cleared job/role policy AND the company/account ICP decision AND had a resolvable search domain, and therefore entered contact discovery. Counted by the hiring-manager stage at the moment a people search is issued -- never reconstructed by subtracting reason codes from a total.",
+          "evidence": [],
+          "attribution": "run completion timestamp (run_manifest.finished_at)",
+          "contributing_run_ids": [],
+          "counted_unit": "company_role_bucket_opportunity",
+          "cohort": "run_window",
+          "runs_missing_field": [
+            "20260901T130121Z-0cbadbc6",
+            "20260902T130429Z-a54f4f19",
+            "20260903T130019Z-65ca91e1"
+          ],
+          "reason": "none of the 3 run(s) in this window carry any of: reporting_ledger:metrics.qualified_opportunities, orchestrator_result.json:enrichment.funnel.contact_discovery_entered"
+        },
+        {
+          "key": "contacts_found",
+          "label": "Contacts found",
+          "unit": "contact",
+          "value": 0,
+          "status": "measured",
+          "source": "run_ledger+run_artifacts",
+          "definition": "Leads carrying a resolved hiring-manager email address. Email presence, never a sum of disposition labels.",
+          "evidence": [
+            "reporting_ledger:metrics.contacts_found"
+          ],
+          "attribution": "run completion timestamp (run_manifest.finished_at)",
+          "contributing_run_ids": [
+            "20260901T130121Z-0cbadbc6",
+            "20260902T130429Z-a54f4f19",
+            "20260903T130019Z-65ca91e1"
+          ],
+          "counted_unit": "company_role_bucket_opportunity",
+          "cohort": "run_window"
+        },
+        {
+          "key": "sent_to_airtable",
+          "label": "Rows created in Airtable",
+          "unit": "row",
+          "value": 0,
+          "status": "measured",
+          "source": "run_ledger+run_artifacts",
+          "definition": "Airtable rows the run created (review staging). Rows suppressed as duplicates or already-present are excluded.",
+          "evidence": [
+            "reporting_ledger:metrics.sent_to_airtable"
+          ],
+          "attribution": "run completion timestamp (run_manifest.finished_at)",
+          "contributing_run_ids": [
+            "20260901T130121Z-0cbadbc6",
+            "20260902T130429Z-a54f4f19",
+            "20260903T130019Z-65ca91e1"
+          ],
+          "counted_unit": "company_role_bucket_opportunity",
+          "cohort": "run_window"
+        },
+        {
+          "key": "sent_to_instantly",
+          "label": "Sent to Instantly",
+          "unit": "lead",
+          "value": null,
+          "status": "unavailable",
+          "source": "instantly",
+          "definition": "Leads that entered an Instantly campaign during the window, counted by the lead's own timestamp_created. Instantly answers 200 for an address already in the workspace, so an accepted API call is not a delivery; a new timestamp_created is.",
+          "evidence": [],
+          "attribution": "Instantly lead.timestamp_created",
+          "contributing_run_ids": [],
+          "counted_unit": "instantly_lead",
+          "cohort": "external_backlog",
+          "reason": "the orchestrator ran with allow_instantly_enrollment=false in every run this window, so its artifacts provably cannot answer this. Enrollment is performed by the separate GTM Approved Sync service (run_approved.py), which writes no run artifact and has no volume -- its log lines do not survive the container. Run with --instantly to read the count from Instantly itself."
+        }
+      ],
+      "metrics": {
+        "airtable_candidates": {
+          "key": "airtable_candidates",
+          "label": "Rows submitted to Airtable",
+          "unit": "row",
+          "value": 0,
+          "status": "measured",
+          "source": "run_ledger+run_artifacts",
+          "definition": "Send-safe leads handed to the Airtable writer. The row above it (created) plus every suppression reason must account for all of these; an unexplained gap is a measurement defect, not a business result.",
+          "evidence": [
+            "reporting_ledger:metrics.airtable_candidates"
+          ],
+          "attribution": "run completion timestamp (run_manifest.finished_at)",
+          "contributing_run_ids": [
+            "20260901T130121Z-0cbadbc6",
+            "20260902T130429Z-a54f4f19",
+            "20260903T130019Z-65ca91e1"
+          ],
+          "counted_unit": "",
+          "cohort": "run_window"
+        },
+        "airtable_suppressed": {
+          "key": "airtable_suppressed",
+          "label": "Airtable rows suppressed as existing",
+          "unit": "row",
+          "value": 0,
+          "status": "measured",
+          "source": "run_ledger+run_artifacts",
+          "definition": "Deliverable leads not written because the company/function was already represented in Airtable.",
+          "evidence": [
+            "reporting_ledger:metrics.airtable_suppressed"
+          ],
+          "attribution": "run completion timestamp (run_manifest.finished_at)",
+          "contributing_run_ids": [
+            "20260901T130121Z-0cbadbc6",
+            "20260902T130429Z-a54f4f19",
+            "20260903T130019Z-65ca91e1"
+          ],
+          "counted_unit": "",
+          "cohort": "run_window"
+        },
+        "airtable_write_failures": {
+          "key": "airtable_write_failures",
+          "label": "Airtable writes that failed",
+          "unit": "row",
+          "value": 0,
+          "status": "measured",
+          "source": "run_ledger+run_artifacts",
+          "definition": "Rows the Airtable writer accepted but could not create.",
+          "evidence": [
+            "reporting_ledger:metrics.airtable_write_failures"
+          ],
+          "attribution": "run completion timestamp (run_manifest.finished_at)",
+          "contributing_run_ids": [
+            "20260901T130121Z-0cbadbc6",
+            "20260902T130429Z-a54f4f19",
+            "20260903T130019Z-65ca91e1"
+          ],
+          "counted_unit": "",
+          "cohort": "run_window"
+        },
+        "canonical_duplicates_in_run": {
+          "key": "canonical_duplicates_in_run",
+          "label": "Rows bought twice within one run",
+          "unit": "row",
+          "value": null,
+          "status": "unavailable",
+          "source": "run_ledger+run_artifacts",
+          "definition": "Postings whose canonical identity was already present EARLIER IN THE SAME RUN. Pure acquisition waste: we paid for the row twice inside one window. Distinct from a row a PREVIOUS run processed.",
+          "evidence": [],
+          "attribution": "run completion timestamp (run_manifest.finished_at)",
+          "contributing_run_ids": [],
+          "counted_unit": "",
+          "cohort": "run_window",
+          "runs_missing_field": [
+            "20260901T130121Z-0cbadbc6",
+            "20260902T130429Z-a54f4f19",
+            "20260903T130019Z-65ca91e1"
+          ],
+          "reason": "none of the 3 run(s) in this window carry any of: reporting_ledger:metrics.canonical_duplicates_in_run, orchestrator_result.json:acquisition.cumulative.canonical_duplicates_in_run"
+        },
+        "companies_considered": {
+          "key": "companies_considered",
+          "label": "Companies considered",
+          "unit": "company",
+          "value": null,
+          "status": "unavailable",
+          "source": "run_ledger+run_artifacts",
+          "definition": "Distinct companies evaluated against ICP criteria.",
+          "evidence": [],
+          "attribution": "run completion timestamp (run_manifest.finished_at)",
+          "contributing_run_ids": [],
+          "counted_unit": "",
+          "cohort": "run_window",
+          "runs_missing_field": [
+            "20260901T130121Z-0cbadbc6",
+            "20260902T130429Z-a54f4f19",
+            "20260903T130019Z-65ca91e1"
+          ],
+          "reason": "none of the 3 run(s) in this window carry any of: reporting_ledger:metrics.companies_considered, orchestrator_result.json:enrichment.funnel.companies_considered"
+        },
+        "contact_rate_pct": {
+          "key": "contact_rate_pct",
+          "label": "Contact discovery rate",
+          "unit": "percent",
+          "value": null,
+          "status": "unavailable",
+          "source": "derived",
+          "definition": "Contacts found as a percentage of qualified opportunities.",
+          "evidence": [
+            "contacts_found / qualified_opportunities"
+          ],
+          "attribution": "run completion timestamp (run_manifest.finished_at)",
+          "contributing_run_ids": [],
+          "counted_unit": "",
+          "cohort": "",
+          "reason": "requires qualified_opportunities, which is unavailable"
+        },
+        "contacts_found": {
+          "key": "contacts_found",
+          "label": "Contacts found",
+          "unit": "contact",
+          "value": 0,
+          "status": "measured",
+          "source": "run_ledger+run_artifacts",
+          "definition": "Leads carrying a resolved hiring-manager email address. Email presence, never a sum of disposition labels.",
+          "evidence": [
+            "reporting_ledger:metrics.contacts_found"
+          ],
+          "attribution": "run completion timestamp (run_manifest.finished_at)",
+          "contributing_run_ids": [
+            "20260901T130121Z-0cbadbc6",
+            "20260902T130429Z-a54f4f19",
+            "20260903T130019Z-65ca91e1"
+          ],
+          "counted_unit": "company_role_bucket_opportunity",
+          "cohort": "run_window"
+        },
+        "cross_query_duplicates": {
+          "key": "cross_query_duplicates",
+          "label": "Rows returned twice by the provider",
+          "unit": "row",
+          "value": 0,
+          "status": "measured",
+          "source": "run_ledger+run_artifacts",
+          "definition": "The same posting billed more than once within this run's queries.",
+          "evidence": [
+            "reporting_ledger:metrics.cross_query_duplicates"
+          ],
+          "attribution": "run completion timestamp (run_manifest.finished_at)",
+          "contributing_run_ids": [
+            "20260901T130121Z-0cbadbc6",
+            "20260902T130429Z-a54f4f19",
+            "20260903T130019Z-65ca91e1"
+          ],
+          "counted_unit": "",
+          "cohort": "run_window"
+        },
+        "cross_source_duplicates": {
+          "key": "cross_source_duplicates",
+          "label": "Rows seen from a second source",
+          "unit": "row",
+          "value": null,
+          "status": "unavailable",
+          "source": "run_ledger+run_artifacts",
+          "definition": "The same posting reaching us through more than one source.",
+          "evidence": [],
+          "attribution": "run completion timestamp (run_manifest.finished_at)",
+          "contributing_run_ids": [],
+          "counted_unit": "",
+          "cohort": "run_window",
+          "runs_missing_field": [
+            "20260901T130121Z-0cbadbc6",
+            "20260902T130429Z-a54f4f19",
+            "20260903T130019Z-65ca91e1"
+          ],
+          "reason": "none of the 3 run(s) in this window carry any of: reporting_ledger:metrics.cross_source_duplicates, orchestrator_result.json:acquisition.cumulative.cross_source_duplicates"
+        },
+        "final_pass_leads": {
+          "key": "final_pass_leads",
+          "label": "FINAL_PASS leads",
+          "unit": "lead",
+          "value": 0,
+          "status": "measured",
+          "source": "run_ledger+run_artifacts",
+          "definition": "Leads whose validated disposition is FINAL_PASS (send-safe candidates).",
+          "evidence": [
+            "reporting_ledger:metrics.final_pass_leads"
+          ],
+          "attribution": "run completion timestamp (run_manifest.finished_at)",
+          "contributing_run_ids": [
+            "20260901T130121Z-0cbadbc6",
+            "20260902T130429Z-a54f4f19",
+            "20260903T130019Z-65ca91e1"
+          ],
+          "counted_unit": "",
+          "cohort": "run_window"
+        },
+        "historical_duplicates": {
+          "key": "historical_duplicates",
+          "label": "Rows already processed in a previous run",
+          "unit": "row",
+          "value": null,
+          "status": "unavailable",
+          "source": "run_ledger+run_artifacts",
+          "definition": "Provider rows dropped because an earlier run had already carried that exact posting to a terminal outcome. The cost of the acquisition overlap, and the number that tells us whether the window is draining. Counted at the dedupe decision point: it no longer absorbs rows this run simply bought twice (see canonical_duplicates_in_run), which is a different problem with a different fix.",
+          "evidence": [],
+          "attribution": "run completion timestamp (run_manifest.finished_at)",
+          "contributing_run_ids": [],
+          "counted_unit": "",
+          "cohort": "run_window",
+          "runs_missing_field": [
+            "20260901T130121Z-0cbadbc6",
+            "20260902T130429Z-a54f4f19",
+            "20260903T130019Z-65ca91e1"
+          ],
+          "reason": "none of the 3 run(s) in this window carry any of: reporting_ledger:metrics.historical_previously_seen_duplicates, reporting_ledger:metrics.historical_duplicates, orchestrator_result.json:acquisition.cumulative.historical_previously_seen_duplicates, orchestrator_result.json:acquisition.cumulative.historical_duplicates"
+        },
+        "jobs_captured": {
+          "key": "jobs_captured",
+          "label": "Jobs captured",
+          "unit": "posting",
+          "value": 0,
+          "status": "partial",
+          "source": "run_ledger+run_artifacts",
+          "definition": "NET-NEW job postings captured by runs in this window: rows the provider returned minus the ones a previous run had already processed to completion. This is the population that becomes this week's work, so it is directly comparable with jobs reviewed. Provider rows bought a second time are acquisition cost and are reported separately as provider_jobs_returned / historical_duplicates -- counting them here made a re-bought posting look like a review-stage loss.",
+          "evidence": [
+            "reporting_ledger:metrics.net_new_jobs_captured"
+          ],
+          "attribution": "run completion timestamp (run_manifest.finished_at)",
+          "contributing_run_ids": [
+            "20260903T130019Z-65ca91e1"
+          ],
+          "counted_unit": "posting",
+          "cohort": "run_window",
+          "runs_missing_field": [
+            "20260901T130121Z-0cbadbc6",
+            "20260902T130429Z-a54f4f19"
+          ],
+          "reason": "2 of 3 runs did not report this counter; the total covers the runs that did"
+        },
+        "jobs_reviewed": {
+          "key": "jobs_reviewed",
+          "label": "Jobs reviewed",
+          "unit": "posting",
+          "value": null,
+          "status": "unavailable",
+          "source": "run_ledger+run_artifacts",
+          "definition": "Postings that entered the qualification/review stage in those runs. This is the SAME population as jobs captured, measured one stage later: the deduped opportunity list is handed straight to qualification, so in a run that reached enrichment the two are equal. They differ only when a run stopped in between, where this one is absent rather than smaller. There is no attrition between them, and no rate to read across them.",
+          "evidence": [],
+          "attribution": "run completion timestamp (run_manifest.finished_at)",
+          "contributing_run_ids": [],
+          "counted_unit": "posting",
+          "cohort": "run_window",
+          "runs_missing_field": [
+            "20260901T130121Z-0cbadbc6",
+            "20260902T130429Z-a54f4f19",
+            "20260903T130019Z-65ca91e1"
+          ],
+          "reason": "none of the 3 run(s) in this window carry any of: reporting_ledger:metrics.jobs_reviewed, orchestrator_result.json:enrichment.funnel.qualification_input"
+        },
+        "provider_jobs_billed": {
+          "key": "provider_jobs_billed",
+          "label": "Provider credits consumed",
+          "unit": "credit",
+          "value": 0,
+          "status": "measured",
+          "source": "run_ledger+run_artifacts",
+          "definition": "Jobs credits the provider actually charged this window. The denominator of every yield-per-credit number.",
+          "evidence": [
+            "reporting_ledger:metrics.provider_jobs_billed"
+          ],
+          "attribution": "run completion timestamp (run_manifest.finished_at)",
+          "contributing_run_ids": [
+            "20260901T130121Z-0cbadbc6",
+            "20260902T130429Z-a54f4f19",
+            "20260903T130019Z-65ca91e1"
+          ],
+          "counted_unit": "",
+          "cohort": "run_window"
+        },
+        "provider_jobs_returned": {
+          "key": "provider_jobs_returned",
+          "label": "Provider rows returned",
+          "unit": "row",
+          "value": 0,
+          "status": "measured",
+          "source": "run_ledger+run_artifacts",
+          "definition": "Rows the provider returned and billed, before any of our deduplication. Acquisition volume, not throughput.",
+          "evidence": [
+            "reporting_ledger:metrics.provider_jobs_returned"
+          ],
+          "attribution": "run completion timestamp (run_manifest.finished_at)",
+          "contributing_run_ids": [
+            "20260901T130121Z-0cbadbc6",
+            "20260902T130429Z-a54f4f19",
+            "20260903T130019Z-65ca91e1"
+          ],
+          "counted_unit": "",
+          "cohort": "run_window"
+        },
+        "qualification_rate_pct": {
+          "key": "qualification_rate_pct",
+          "label": "Qualification rate",
+          "unit": "percent",
+          "value": null,
+          "status": "unavailable",
+          "source": "derived",
+          "definition": "Qualified opportunities as a percentage of jobs reviewed.",
+          "evidence": [
+            "qualified_opportunities / jobs_reviewed"
+          ],
+          "attribution": "run completion timestamp (run_manifest.finished_at)",
+          "contributing_run_ids": [],
+          "counted_unit": "",
+          "cohort": "",
+          "reason": "requires qualified_opportunities and jobs_reviewed, which are unavailable"
+        },
+        "qualified_opportunities": {
+          "key": "qualified_opportunities",
+          "label": "Qualified opportunities",
+          "unit": "opportunity",
+          "value": null,
+          "status": "unavailable",
+          "source": "run_ledger+run_artifacts",
+          "definition": "Opportunities that cleared job/role policy AND the company/account ICP decision AND had a resolvable search domain, and therefore entered contact discovery. Counted by the hiring-manager stage at the moment a people search is issued -- never reconstructed by subtracting reason codes from a total.",
+          "evidence": [],
+          "attribution": "run completion timestamp (run_manifest.finished_at)",
+          "contributing_run_ids": [],
+          "counted_unit": "company_role_bucket_opportunity",
+          "cohort": "run_window",
+          "runs_missing_field": [
+            "20260901T130121Z-0cbadbc6",
+            "20260902T130429Z-a54f4f19",
+            "20260903T130019Z-65ca91e1"
+          ],
+          "reason": "none of the 3 run(s) in this window carry any of: reporting_ledger:metrics.qualified_opportunities, orchestrator_result.json:enrichment.funnel.contact_discovery_entered"
+        },
+        "review_rate_pct": {
+          "key": "review_rate_pct",
+          "label": "Review rate",
+          "unit": "percent",
+          "value": null,
+          "status": "unavailable",
+          "source": "derived",
+          "definition": "Jobs reviewed as a percentage of jobs captured in the same runs. 100% means every captured posting entered review -- which is what a run that completed its slices looks like, because the deduped opportunity list is handed straight to qualification. It is not automatic: a run interrupted between acquiring a slice and enriching it reviews fewer than it captured, and the rate falls below 100 accordingly.",
+          "evidence": [
+            "jobs_reviewed / jobs_captured"
+          ],
+          "attribution": "run completion timestamp (run_manifest.finished_at)",
+          "contributing_run_ids": [],
+          "counted_unit": "",
+          "cohort": "",
+          "reason": "requires jobs_reviewed, which is unavailable"
+        },
+        "role_qualified_postings": {
+          "key": "role_qualified_postings",
+          "label": "Postings passing the role/source gate",
+          "unit": "posting",
+          "value": null,
+          "status": "unavailable",
+          "source": "run_ledger+run_artifacts",
+          "definition": "Postings the pre-contact JobGate and RoleGate did not reject. A loose upstream filter -- 92.6% of postings passed it on the 2026-09-04 control run -- kept as context, NOT as 'qualified opportunities'.",
+          "evidence": [],
+          "attribution": "run completion timestamp (run_manifest.finished_at)",
+          "contributing_run_ids": [],
+          "counted_unit": "",
+          "cohort": "run_window",
+          "runs_missing_field": [
+            "20260901T130121Z-0cbadbc6",
+            "20260902T130429Z-a54f4f19",
+            "20260903T130019Z-65ca91e1"
+          ],
+          "reason": "none of the 3 run(s) in this window carry any of: reporting_ledger:metrics.role_qualified_postings, orchestrator_result.json:enrichment.funnel.target_role_eligible"
+        },
+        "sent_to_airtable": {
+          "key": "sent_to_airtable",
+          "label": "Rows created in Airtable",
+          "unit": "row",
+          "value": 0,
+          "status": "measured",
+          "source": "run_ledger+run_artifacts",
+          "definition": "Airtable rows the run created (review staging). Rows suppressed as duplicates or already-present are excluded.",
+          "evidence": [
+            "reporting_ledger:metrics.sent_to_airtable"
+          ],
+          "attribution": "run completion timestamp (run_manifest.finished_at)",
+          "contributing_run_ids": [
+            "20260901T130121Z-0cbadbc6",
+            "20260902T130429Z-a54f4f19",
+            "20260903T130019Z-65ca91e1"
+          ],
+          "counted_unit": "company_role_bucket_opportunity",
+          "cohort": "run_window"
+        },
+        "sent_to_instantly": {
+          "key": "sent_to_instantly",
+          "label": "Sent to Instantly",
+          "unit": "lead",
+          "value": null,
+          "status": "unavailable",
+          "source": "instantly",
+          "definition": "Leads that entered an Instantly campaign during the window, counted by the lead's own timestamp_created. Instantly answers 200 for an address already in the workspace, so an accepted API call is not a delivery; a new timestamp_created is.",
+          "evidence": [],
+          "attribution": "Instantly lead.timestamp_created",
+          "contributing_run_ids": [],
+          "counted_unit": "instantly_lead",
+          "cohort": "external_backlog",
+          "reason": "the orchestrator ran with allow_instantly_enrollment=false in every run this window, so its artifacts provably cannot answer this. Enrollment is performed by the separate GTM Approved Sync service (run_approved.py), which writes no run artifact and has no volume -- its log lines do not survive the container. Run with --instantly to read the count from Instantly itself."
+        },
+        "unique_opportunities": {
+          "key": "unique_opportunities",
+          "label": "Unique opportunities after dedupe",
+          "unit": "opportunity",
+          "value": 0,
+          "status": "measured",
+          "source": "run_ledger+run_artifacts",
+          "definition": "Postings remaining after cross-run and in-run deduplication.",
+          "evidence": [
+            "reporting_ledger:metrics.unique_opportunities"
+          ],
+          "attribution": "run completion timestamp (run_manifest.finished_at)",
+          "contributing_run_ids": [
+            "20260901T130121Z-0cbadbc6",
+            "20260902T130429Z-a54f4f19",
+            "20260903T130019Z-65ca91e1"
+          ],
+          "counted_unit": "",
+          "cohort": "run_window"
+        },
+        "verified_emails": {
+          "key": "verified_emails",
+          "label": "Apollo-verified emails",
+          "unit": "contact",
+          "value": 0,
+          "status": "measured",
+          "source": "run_ledger+run_artifacts",
+          "definition": "Contacts whose Apollo email status is 'verified'.",
+          "evidence": [
+            "reporting_ledger:metrics.verified_emails"
+          ],
+          "attribution": "run completion timestamp (run_manifest.finished_at)",
+          "contributing_run_ids": [
+            "20260901T130121Z-0cbadbc6",
+            "20260902T130429Z-a54f4f19",
+            "20260903T130019Z-65ca91e1"
+          ],
+          "counted_unit": "",
+          "cohort": "run_window"
+        }
+      },
+      "runs": [
+        {
+          "run_id": "20260901T130121Z-0cbadbc6",
+          "status": "complete",
+          "mode": "live_acquisition_and_enrichment",
+          "started_at": "2026-09-01T13:01:21Z",
+          "finished_at": "2026-09-01T13:02:25Z",
+          "attributed_at": "2026-09-01T13:02:25Z",
+          "attribution_field": "run_manifest.finished_at",
+          "realism": "production",
+          "artifacts_present": [
+            "ledger"
+          ],
+          "path": "/tmp/gtm-original-ledger-recheck-4htyf83b/reporting_ledger/20260901T130121Z-0cbadbc6.json",
+          "evidence_source": "ledger",
+          "heavy_artifacts_present": false,
+          "stop_reason": "topup:governor_zero_budget",
+          "metrics": {
+            "jobs_captured": null,
+            "jobs_reviewed": null,
+            "qualified_opportunities": null,
+            "contacts_found": 0,
+            "sent_to_airtable": 0,
+            "provider_jobs_returned": 0,
+            "provider_jobs_billed": 0,
+            "historical_duplicates": null,
+            "canonical_duplicates_in_run": null,
+            "cross_query_duplicates": 0,
+            "cross_source_duplicates": null,
+            "unique_opportunities": 0,
+            "final_pass_leads": 0,
+            "verified_emails": 0,
+            "role_qualified_postings": null,
+            "companies_considered": null,
+            "airtable_candidates": 0,
+            "airtable_suppressed": 0,
+            "airtable_write_failures": 0,
+            "sent_to_instantly": null
+          },
+          "metric_sources": {
+            "contacts_found": "reporting_ledger:metrics.contacts_found",
+            "sent_to_airtable": "reporting_ledger:metrics.sent_to_airtable",
+            "provider_jobs_returned": "reporting_ledger:metrics.provider_jobs_returned",
+            "provider_jobs_billed": "reporting_ledger:metrics.provider_jobs_billed",
+            "cross_query_duplicates": "reporting_ledger:metrics.cross_query_duplicates",
+            "unique_opportunities": "reporting_ledger:metrics.unique_opportunities",
+            "final_pass_leads": "reporting_ledger:metrics.final_pass_leads",
+            "verified_emails": "reporting_ledger:metrics.verified_emails",
+            "airtable_candidates": "reporting_ledger:metrics.airtable_candidates",
+            "airtable_suppressed": "reporting_ledger:metrics.airtable_suppressed",
+            "airtable_write_failures": "reporting_ledger:metrics.airtable_write_failures"
+          },
+          "allow_instantly_enrollment": false,
+          "local_day": "2026-09-01"
+        },
+        {
+          "run_id": "20260902T130429Z-a54f4f19",
+          "status": "complete",
+          "mode": "live_acquisition_and_enrichment",
+          "started_at": "2026-09-02T13:04:29Z",
+          "finished_at": "2026-09-02T13:05:11Z",
+          "attributed_at": "2026-09-02T13:05:11Z",
+          "attribution_field": "run_manifest.finished_at",
+          "realism": "production",
+          "artifacts_present": [
+            "ledger"
+          ],
+          "path": "/tmp/gtm-original-ledger-recheck-4htyf83b/reporting_ledger/20260902T130429Z-a54f4f19.json",
+          "evidence_source": "ledger",
+          "heavy_artifacts_present": false,
+          "stop_reason": "topup:governor_zero_budget",
+          "metrics": {
+            "jobs_captured": null,
+            "jobs_reviewed": null,
+            "qualified_opportunities": null,
+            "contacts_found": 0,
+            "sent_to_airtable": 0,
+            "provider_jobs_returned": 0,
+            "provider_jobs_billed": 0,
+            "historical_duplicates": null,
+            "canonical_duplicates_in_run": null,
+            "cross_query_duplicates": 0,
+            "cross_source_duplicates": null,
+            "unique_opportunities": 0,
+            "final_pass_leads": 0,
+            "verified_emails": 0,
+            "role_qualified_postings": null,
+            "companies_considered": null,
+            "airtable_candidates": 0,
+            "airtable_suppressed": 0,
+            "airtable_write_failures": 0,
+            "sent_to_instantly": null
+          },
+          "metric_sources": {
+            "contacts_found": "reporting_ledger:metrics.contacts_found",
+            "sent_to_airtable": "reporting_ledger:metrics.sent_to_airtable",
+            "provider_jobs_returned": "reporting_ledger:metrics.provider_jobs_returned",
+            "provider_jobs_billed": "reporting_ledger:metrics.provider_jobs_billed",
+            "cross_query_duplicates": "reporting_ledger:metrics.cross_query_duplicates",
+            "unique_opportunities": "reporting_ledger:metrics.unique_opportunities",
+            "final_pass_leads": "reporting_ledger:metrics.final_pass_leads",
+            "verified_emails": "reporting_ledger:metrics.verified_emails",
+            "airtable_candidates": "reporting_ledger:metrics.airtable_candidates",
+            "airtable_suppressed": "reporting_ledger:metrics.airtable_suppressed",
+            "airtable_write_failures": "reporting_ledger:metrics.airtable_write_failures"
+          },
+          "allow_instantly_enrollment": false,
+          "local_day": "2026-09-02"
+        },
+        {
+          "run_id": "20260903T130019Z-65ca91e1",
+          "status": "complete",
+          "mode": "live_acquisition_and_enrichment",
+          "started_at": "2026-09-03T13:00:19Z",
+          "finished_at": "2026-09-03T13:01:26Z",
+          "attributed_at": "2026-09-03T13:01:26Z",
+          "attribution_field": "run_manifest.finished_at",
+          "realism": "production",
+          "artifacts_present": [
+            "ledger"
+          ],
+          "path": "/tmp/gtm-original-ledger-recheck-4htyf83b/reporting_ledger/20260903T130019Z-65ca91e1.json",
+          "evidence_source": "ledger",
+          "heavy_artifacts_present": false,
+          "stop_reason": "topup:max_iterations_guard",
+          "metrics": {
+            "jobs_captured": 0,
+            "jobs_reviewed": null,
+            "qualified_opportunities": null,
+            "contacts_found": 0,
+            "sent_to_airtable": 0,
+            "provider_jobs_returned": 0,
+            "provider_jobs_billed": 0,
+            "historical_duplicates": null,
+            "canonical_duplicates_in_run": null,
+            "cross_query_duplicates": 0,
+            "cross_source_duplicates": null,
+            "unique_opportunities": 0,
+            "final_pass_leads": 0,
+            "verified_emails": 0,
+            "role_qualified_postings": null,
+            "companies_considered": null,
+            "airtable_candidates": 0,
+            "airtable_suppressed": 0,
+            "airtable_write_failures": 0,
+            "sent_to_instantly": null
+          },
+          "metric_sources": {
+            "jobs_captured": "reporting_ledger:metrics.net_new_jobs_captured",
+            "contacts_found": "reporting_ledger:metrics.contacts_found",
+            "sent_to_airtable": "reporting_ledger:metrics.sent_to_airtable",
+            "provider_jobs_returned": "reporting_ledger:metrics.provider_jobs_returned",
+            "provider_jobs_billed": "reporting_ledger:metrics.provider_jobs_billed",
+            "cross_query_duplicates": "reporting_ledger:metrics.cross_query_duplicates",
+            "unique_opportunities": "reporting_ledger:metrics.unique_opportunities",
+            "final_pass_leads": "reporting_ledger:metrics.final_pass_leads",
+            "verified_emails": "reporting_ledger:metrics.verified_emails",
+            "airtable_candidates": "reporting_ledger:metrics.airtable_candidates",
+            "airtable_suppressed": "reporting_ledger:metrics.airtable_suppressed",
+            "airtable_write_failures": "reporting_ledger:metrics.airtable_write_failures"
+          },
+          "allow_instantly_enrollment": false,
+          "local_day": "2026-09-03"
+        }
+      ],
+      "daily": [
+        {
+          "local_day": "2026-09-01",
+          "run_ids": [
+            "20260901T130121Z-0cbadbc6"
+          ],
+          "metrics": {
+            "contacts_found": 0,
+            "sent_to_airtable": 0,
+            "provider_jobs_returned": 0,
+            "provider_jobs_billed": 0,
+            "cross_query_duplicates": 0,
+            "unique_opportunities": 0,
+            "final_pass_leads": 0,
+            "verified_emails": 0,
+            "airtable_candidates": 0,
+            "airtable_suppressed": 0,
+            "airtable_write_failures": 0
+          }
+        },
+        {
+          "local_day": "2026-09-02",
+          "run_ids": [
+            "20260902T130429Z-a54f4f19"
+          ],
+          "metrics": {
+            "contacts_found": 0,
+            "sent_to_airtable": 0,
+            "provider_jobs_returned": 0,
+            "provider_jobs_billed": 0,
+            "cross_query_duplicates": 0,
+            "unique_opportunities": 0,
+            "final_pass_leads": 0,
+            "verified_emails": 0,
+            "airtable_candidates": 0,
+            "airtable_suppressed": 0,
+            "airtable_write_failures": 0
+          }
+        },
+        {
+          "local_day": "2026-09-03",
+          "run_ids": [
+            "20260903T130019Z-65ca91e1"
+          ],
+          "metrics": {
+            "jobs_captured": 0,
+            "contacts_found": 0,
+            "sent_to_airtable": 0,
+            "provider_jobs_returned": 0,
+            "provider_jobs_billed": 0,
+            "cross_query_duplicates": 0,
+            "unique_opportunities": 0,
+            "final_pass_leads": 0,
+            "verified_emails": 0,
+            "airtable_candidates": 0,
+            "airtable_suppressed": 0,
+            "airtable_write_failures": 0
+          }
+        }
+      ],
+      "bottleneck": {
+        "kind": "entry_not_established",
+        "boundary": "acquisition",
+        "from_metric": "",
+        "to_metric": "",
+        "entered": null,
+        "advanced": null,
+        "lost": null,
+        "loss_pct": null,
+        "top_reasons": [],
+        "evidence": [
+          "reporting_ledger:metrics.net_new_jobs_captured"
+        ],
+        "statement": "2 of 3 runs in this period did not record net-new captured postings, so the period's entry total is not established and no downstream rate can be read against it. The runs that did record it are in the report document.",
+        "unmeasured_boundaries": [
+          "jobs_reviewed",
+          "qualified_opportunities",
+          "sent_to_instantly"
+        ],
+        "incomparable_boundaries": []
+      },
+      "action_plan": [
+        {
+          "priority": 1,
+          "action": "Some runs in this period did not record net-new captured postings, so the period total cannot be stated. Confirm every run in the window is on a build that emits it before reading this report's rates.",
+          "basis": "2 of 3 runs in this period did not record net-new captured postings, so the period's entry total is not established and no downstream rate can be read against it. The runs that did record it are in the report document.",
+          "stakeholder_action": "Some runs in this period did not record net-new captured postings, so the period total cannot be stated. Confirm every run in the window is on a build that emits it before reading this report's rates."
+        },
+        {
+          "priority": 2,
+          "action": "jobs_reviewed comes from orchestrator_result.json:enrichment.funnel.qualification_input. A run that stopped before enrichment never produced it -- check that run's stop_reason.",
+          "basis": "evidence gap on jobs_reviewed",
+          "stakeholder_action": "Confirm which runs reached review and preserve their reviewed-posting counts."
+        },
+        {
+          "priority": 3,
+          "action": "Both jobs_captured and jobs_reviewed must be measurable for a rate to exist. A rate of 100% means every captured posting entered review; below 100 means a run stopped between acquiring postings and reviewing them.",
+          "basis": "evidence gap on review_rate_pct",
+          "stakeholder_action": "Separate recovered postings from new acquisitions before calculating review rates."
+        },
+        {
+          "priority": 4,
+          "action": "Confirm enrichment ran; the counter lives in enrichment.funnel.contact_discovery_entered, emitted by the hiring-manager stage when an opportunity enters contact discovery. Runs written before 2026-09-05 do not carry it and cannot be backfilled with it.",
+          "basis": "evidence gap on qualified_opportunities",
+          "stakeholder_action": "Record how many qualified company and role opportunities entered contact discovery."
+        },
+        {
+          "priority": 5,
+          "action": "Run the report with --instantly so the count comes from Instantly's own lead.timestamp_created; the Approved Sync service writes no artifact to read.",
+          "basis": "evidence gap on sent_to_instantly",
+          "stakeholder_action": "Confirm successful imports directly in Instantly for the reporting period."
+        }
+      ],
+      "gaps": [
+        {
+          "metric": "jobs_captured",
+          "reason": "2 of 3 runs did not report this counter; the total covers the runs that did",
+          "impact": "'Jobs captured' is a floor over 1 run(s), not a total.",
+          "remedy": "Identify which runs are silent and why. A partial total is a floor over the runs that answered; it is never presented as the period's number, and it must not be quoted as one."
+        },
+        {
+          "metric": "jobs_reviewed",
+          "reason": "none of the 3 run(s) in this window carry any of: reporting_ledger:metrics.jobs_reviewed, orchestrator_result.json:enrichment.funnel.qualification_input",
+          "impact": "'Jobs reviewed' is reported as unavailable, not as zero.",
+          "remedy": "jobs_reviewed comes from orchestrator_result.json:enrichment.funnel.qualification_input. A run that stopped before enrichment never produced it -- check that run's stop_reason."
+        },
+        {
+          "metric": "review_rate_pct",
+          "reason": "requires jobs_reviewed, which is unavailable",
+          "impact": "'Review rate' is reported as unavailable, not as zero.",
+          "remedy": "Both jobs_captured and jobs_reviewed must be measurable for a rate to exist. A rate of 100% means every captured posting entered review; below 100 means a run stopped between acquiring postings and reviewing them."
+        },
+        {
+          "metric": "qualified_opportunities",
+          "reason": "none of the 3 run(s) in this window carry any of: reporting_ledger:metrics.qualified_opportunities, orchestrator_result.json:enrichment.funnel.contact_discovery_entered",
+          "impact": "'Qualified opportunities' is reported as unavailable, not as zero.",
+          "remedy": "Confirm enrichment ran; the counter lives in enrichment.funnel.contact_discovery_entered, emitted by the hiring-manager stage when an opportunity enters contact discovery. Runs written before 2026-09-05 do not carry it and cannot be backfilled with it."
+        },
+        {
+          "metric": "sent_to_instantly",
+          "reason": "the orchestrator ran with allow_instantly_enrollment=false in every run this window, so its artifacts provably cannot answer this. Enrollment is performed by the separate GTM Approved Sync service (run_approved.py), which writes no run artifact and has no volume -- its log lines do not survive the container. Run with --instantly to read the count from Instantly itself.",
+          "impact": "'Sent to Instantly' is reported as unavailable, not as zero.",
+          "remedy": "Run the report with --instantly so the count comes from Instantly's own lead.timestamp_created; the Approved Sync service writes no artifact to read."
+        }
+      ],
+      "run_status_census": {
+        "complete": 3
+      },
+      "run_census": {
+        "runs": [
+          {
+            "run_id": "20260901T130121Z-0cbadbc6",
+            "state": "complete",
+            "attributed_at": "2026-09-01T13:02:25+00:00",
+            "attribution_field": "run_manifest.finished_at",
+            "local_day": "2026-09-01",
+            "evidence": "ledger",
+            "reconstructed": true,
+            "decision": "included",
+            "reason": "",
+            "contributes": {
+              "jobs_captured": {
+                "value": null,
+                "field": null
+              },
+              "jobs_reviewed": {
+                "value": null,
+                "field": null
+              },
+              "qualified_opportunities": {
+                "value": null,
+                "field": null
+              },
+              "contacts_found": {
+                "value": 0,
+                "field": "reporting_ledger:metrics.contacts_found"
+              },
+              "sent_to_airtable": {
+                "value": 0,
+                "field": "reporting_ledger:metrics.sent_to_airtable"
+              }
+            }
+          },
+          {
+            "run_id": "20260902T130429Z-a54f4f19",
+            "state": "complete",
+            "attributed_at": "2026-09-02T13:05:11+00:00",
+            "attribution_field": "run_manifest.finished_at",
+            "local_day": "2026-09-02",
+            "evidence": "ledger",
+            "reconstructed": true,
+            "decision": "included",
+            "reason": "",
+            "contributes": {
+              "jobs_captured": {
+                "value": null,
+                "field": null
+              },
+              "jobs_reviewed": {
+                "value": null,
+                "field": null
+              },
+              "qualified_opportunities": {
+                "value": null,
+                "field": null
+              },
+              "contacts_found": {
+                "value": 0,
+                "field": "reporting_ledger:metrics.contacts_found"
+              },
+              "sent_to_airtable": {
+                "value": 0,
+                "field": "reporting_ledger:metrics.sent_to_airtable"
+              }
+            }
+          },
+          {
+            "run_id": "20260903T130019Z-65ca91e1",
+            "state": "complete",
+            "attributed_at": "2026-09-03T13:01:26+00:00",
+            "attribution_field": "run_manifest.finished_at",
+            "local_day": "2026-09-03",
+            "evidence": "ledger",
+            "reconstructed": true,
+            "decision": "included",
+            "reason": "",
+            "contributes": {
+              "jobs_captured": {
+                "value": 0,
+                "field": "reporting_ledger:metrics.net_new_jobs_captured"
+              },
+              "jobs_reviewed": {
+                "value": null,
+                "field": null
+              },
+              "qualified_opportunities": {
+                "value": null,
+                "field": null
+              },
+              "contacts_found": {
+                "value": 0,
+                "field": "reporting_ledger:metrics.contacts_found"
+              },
+              "sent_to_airtable": {
+                "value": 0,
+                "field": "reporting_ledger:metrics.sent_to_airtable"
+              }
+            }
+          },
+          {
+            "run_id": "20260904T130130Z-13b44a0c",
+            "state": "complete",
+            "attributed_at": "2026-09-04T16:21:19+00:00",
+            "attribution_field": "run_manifest.finished_at",
+            "local_day": "2026-09-04",
+            "evidence": "ledger",
+            "reconstructed": true,
+            "decision": "excluded",
+            "reason": "finished outside the window (2026-09-04T16:21:19+00:00)",
+            "contributes": {
+              "jobs_captured": {
+                "value": 6205,
+                "field": "reporting_ledger:metrics.net_new_jobs_captured"
+              },
+              "jobs_reviewed": {
+                "value": null,
+                "field": null
+              },
+              "qualified_opportunities": {
+                "value": null,
+                "field": null
+              },
+              "contacts_found": {
+                "value": 1048,
+                "field": "reporting_ledger:metrics.contacts_found"
+              },
+              "sent_to_airtable": {
+                "value": 781,
+                "field": "reporting_ledger:metrics.sent_to_airtable"
+              }
+            }
+          },
+          {
+            "run_id": "20260905T030439Z-1d102bec",
+            "state": "complete",
+            "attributed_at": "2026-09-05T03:05:59+00:00",
+            "attribution_field": "run_manifest.finished_at",
+            "local_day": "2026-09-04",
+            "evidence": "ledger",
+            "reconstructed": false,
+            "decision": "excluded",
+            "reason": "finished outside the window (2026-09-05T03:05:59+00:00)",
+            "contributes": {
+              "jobs_captured": {
+                "value": 0,
+                "field": "reporting_ledger:metrics.net_new_jobs_captured"
+              },
+              "jobs_reviewed": {
+                "value": 0,
+                "field": "reporting_ledger:metrics.jobs_reviewed"
+              },
+              "qualified_opportunities": {
+                "value": null,
+                "field": null
+              },
+              "contacts_found": {
+                "value": 0,
+                "field": "reporting_ledger:metrics.contacts_found"
+              },
+              "sent_to_airtable": {
+                "value": 0,
+                "field": "reporting_ledger:metrics.sent_to_airtable"
+              }
+            }
+          },
+          {
+            "run_id": "20260906T030230Z-2f74ac7c",
+            "state": "complete",
+            "attributed_at": "2026-09-06T03:16:31+00:00",
+            "attribution_field": "run_manifest.finished_at",
+            "local_day": "2026-09-05",
+            "evidence": "ledger",
+            "reconstructed": false,
+            "decision": "excluded",
+            "reason": "finished outside the window (2026-09-06T03:16:31+00:00)",
+            "contributes": {
+              "jobs_captured": {
+                "value": 226,
+                "field": "reporting_ledger:metrics.net_new_jobs_captured"
+              },
+              "jobs_reviewed": {
+                "value": 226,
+                "field": "reporting_ledger:metrics.jobs_reviewed"
+              },
+              "qualified_opportunities": {
+                "value": null,
+                "field": null
+              },
+              "contacts_found": {
+                "value": 0,
+                "field": "reporting_ledger:metrics.contacts_found"
+              },
+              "sent_to_airtable": {
+                "value": 0,
+                "field": "reporting_ledger:metrics.sent_to_airtable"
+              }
+            }
+          },
+          {
+            "run_id": "20260906T194056Z-6419f87a",
+            "state": "complete",
+            "attributed_at": "2026-09-06T19:41:45+00:00",
+            "attribution_field": "run_manifest.finished_at",
+            "local_day": "2026-09-06",
+            "evidence": "ledger",
+            "reconstructed": false,
+            "decision": "excluded",
+            "reason": "finished outside the window (2026-09-06T19:41:45+00:00)",
+            "contributes": {
+              "jobs_captured": {
+                "value": 0,
+                "field": "reporting_ledger:metrics.net_new_jobs_captured"
+              },
+              "jobs_reviewed": {
+                "value": null,
+                "field": null
+              },
+              "qualified_opportunities": {
+                "value": null,
+                "field": null
+              },
+              "contacts_found": {
+                "value": 0,
+                "field": "reporting_ledger:metrics.contacts_found"
+              },
+              "sent_to_airtable": {
+                "value": 0,
+                "field": "reporting_ledger:metrics.sent_to_airtable"
+              }
+            }
+          },
+          {
+            "run_id": "20260906T200507Z-d046af2b",
+            "state": "complete",
+            "attributed_at": "2026-09-06T20:05:37+00:00",
+            "attribution_field": "run_manifest.finished_at",
+            "local_day": "2026-09-06",
+            "evidence": "ledger",
+            "reconstructed": false,
+            "decision": "excluded",
+            "reason": "finished outside the window (2026-09-06T20:05:37+00:00)",
+            "contributes": {
+              "jobs_captured": {
+                "value": 0,
+                "field": "reporting_ledger:metrics.net_new_jobs_captured"
+              },
+              "jobs_reviewed": {
+                "value": null,
+                "field": null
+              },
+              "qualified_opportunities": {
+                "value": null,
+                "field": null
+              },
+              "contacts_found": {
+                "value": 0,
+                "field": "reporting_ledger:metrics.contacts_found"
+              },
+              "sent_to_airtable": {
+                "value": 0,
+                "field": "reporting_ledger:metrics.sent_to_airtable"
+              }
+            }
+          },
+          {
+            "run_id": "20260906T202534Z-0395cf0a",
+            "state": "complete",
+            "attributed_at": "2026-09-06T20:27:48+00:00",
+            "attribution_field": "run_manifest.finished_at",
+            "local_day": "2026-09-06",
+            "evidence": "ledger",
+            "reconstructed": false,
+            "decision": "excluded",
+            "reason": "finished outside the window (2026-09-06T20:27:48+00:00)",
+            "contributes": {
+              "jobs_captured": {
+                "value": 0,
+                "field": "reporting_ledger:metrics.net_new_jobs_captured"
+              },
+              "jobs_reviewed": {
+                "value": 2000,
+                "field": "reporting_ledger:metrics.jobs_reviewed"
+              },
+              "qualified_opportunities": {
+                "value": 26,
+                "field": "reporting_ledger:metrics.qualified_opportunities"
+              },
+              "contacts_found": {
+                "value": 2,
+                "field": "reporting_ledger:metrics.contacts_found"
+              },
+              "sent_to_airtable": {
+                "value": 0,
+                "field": "reporting_ledger:metrics.sent_to_airtable"
+              }
+            }
+          }
+        ],
+        "included": [
+          "20260901T130121Z-0cbadbc6",
+          "20260902T130429Z-a54f4f19",
+          "20260903T130019Z-65ca91e1"
+        ],
+        "excluded": [
+          "20260904T130130Z-13b44a0c",
+          "20260905T030439Z-1d102bec",
+          "20260906T030230Z-2f74ac7c",
+          "20260906T194056Z-6419f87a",
+          "20260906T200507Z-d046af2b",
+          "20260906T202534Z-0395cf0a"
+        ],
+        "included_runs_by_local_day": {
+          "2026-09-01": [
+            "20260901T130121Z-0cbadbc6"
+          ],
+          "2026-09-02": [
+            "20260902T130429Z-a54f4f19"
+          ],
+          "2026-09-03": [
+            "20260903T130019Z-65ca91e1"
+          ]
+        },
+        "reconciles": {
+          "jobs_captured": {
+            "census_total": 0,
+            "census_runs": [
+              "20260903T130019Z-65ca91e1"
+            ],
+            "census_silent_runs": [
+              "20260901T130121Z-0cbadbc6",
+              "20260902T130429Z-a54f4f19"
+            ],
+            "census_expected_status": "partial",
+            "reported_value": 0,
+            "reported_runs": [
+              "20260903T130019Z-65ca91e1"
+            ],
+            "reported_status": "partial",
+            "values_agree": true,
+            "completeness_agrees": true,
+            "agrees": true
+          },
+          "jobs_reviewed": {
+            "census_total": null,
+            "census_runs": [],
+            "census_silent_runs": [
+              "20260901T130121Z-0cbadbc6",
+              "20260902T130429Z-a54f4f19",
+              "20260903T130019Z-65ca91e1"
+            ],
+            "census_expected_status": "unavailable",
+            "reported_value": null,
+            "reported_runs": [],
+            "reported_status": "unavailable",
+            "values_agree": true,
+            "completeness_agrees": true,
+            "agrees": true
+          },
+          "qualified_opportunities": {
+            "census_total": null,
+            "census_runs": [],
+            "census_silent_runs": [
+              "20260901T130121Z-0cbadbc6",
+              "20260902T130429Z-a54f4f19",
+              "20260903T130019Z-65ca91e1"
+            ],
+            "census_expected_status": "unavailable",
+            "reported_value": null,
+            "reported_runs": [],
+            "reported_status": "unavailable",
+            "values_agree": true,
+            "completeness_agrees": true,
+            "agrees": true
+          },
+          "contacts_found": {
+            "census_total": 0,
+            "census_runs": [
+              "20260901T130121Z-0cbadbc6",
+              "20260902T130429Z-a54f4f19",
+              "20260903T130019Z-65ca91e1"
+            ],
+            "census_silent_runs": [],
+            "census_expected_status": "measured",
+            "reported_value": 0,
+            "reported_runs": [
+              "20260901T130121Z-0cbadbc6",
+              "20260902T130429Z-a54f4f19",
+              "20260903T130019Z-65ca91e1"
+            ],
+            "reported_status": "measured",
+            "values_agree": true,
+            "completeness_agrees": true,
+            "agrees": true
+          },
+          "sent_to_airtable": {
+            "census_total": 0,
+            "census_runs": [
+              "20260901T130121Z-0cbadbc6",
+              "20260902T130429Z-a54f4f19",
+              "20260903T130019Z-65ca91e1"
+            ],
+            "census_silent_runs": [],
+            "census_expected_status": "measured",
+            "reported_value": 0,
+            "reported_runs": [
+              "20260901T130121Z-0cbadbc6",
+              "20260902T130429Z-a54f4f19",
+              "20260903T130019Z-65ca91e1"
+            ],
+            "reported_status": "measured",
+            "values_agree": true,
+            "completeness_agrees": true,
+            "agrees": true
+          }
+        },
+        "all_reconcile": true
+      },
+      "loss_reasons": {},
+      "disposition_census": {},
+      "acquisition_lane_failures": [],
+      "collectors": [],
+      "provenance": {
+        "artifact_roots": [
+          "/tmp/gtm-original-ledger-recheck-4htyf83b"
+        ],
+        "unattributable_run_ids": [],
+        "excluded_simulated_runs": [],
+        "problems": [],
+        "runs_reported_from_ledger_only": [
+          "20260901T130121Z-0cbadbc6",
+          "20260902T130429Z-a54f4f19",
+          "20260903T130019Z-65ca91e1"
+        ],
+        "runs_with_heavy_artifacts": [],
+        "writes_performed": "none (read-only report)"
+      }
+    },
+    "current_partial_week": {
+      "schema": "tgtc-weekly-report/1",
+      "builder_version": "1.0.0",
+      "generated_at": "2026-09-06T20:28:00Z",
+      "included_run_ids": [
+        "20260904T130130Z-13b44a0c",
+        "20260905T030439Z-1d102bec",
+        "20260906T030230Z-2f74ac7c",
+        "20260906T194056Z-6419f87a",
+        "20260906T200507Z-d046af2b",
+        "20260906T202534Z-0395cf0a"
+      ],
+      "run_count": 6,
+      "reporting_window_start": "2026-09-04T07:00:00Z",
+      "reporting_window_end": "2026-09-06T20:28:00Z",
+      "reporting_window_start_local": "2026-09-04T00:00:00-07:00",
+      "reporting_window_end_local": "2026-09-06T13:28:00-07:00",
+      "reporting_window_label": "Sep 04 - Sep 06, 2026",
+      "reporting_window_iso_week": "2026-W36",
+      "reporting_window_interval": "half_open [start, end)",
+      "reporting_window_duration_hours": 61.47,
+      "timezone": "America/Los_Angeles",
+      "timezone_source": "zoneinfo:tzdata",
+      "metric_rules": {
+        "window_attribution": "run completion timestamp (run_manifest.finished_at), falling back to started_at, then to the run_id prefix",
+        "posted_at_excluded": "A job's posted_at is never used to place work in a week; backlog processed this week counts as this week's throughput.",
+        "silence_is_not_zero": "A run that does not carry a counter is listed in runs_missing_field; it is never summed as zero.",
+        "interval": "half-open [start, end) so consecutive reports never double-count a run",
+        "simulated_runs_excluded": "A dry-run/preflight run writes the same artifact shape as a live run. Its counters are excluded from every metric and listed under provenance.excluded_simulated_runs."
+      },
+      "headline": [
+        {
+          "key": "jobs_captured",
+          "label": "Jobs captured",
+          "unit": "posting",
+          "value": 6431,
+          "status": "measured",
+          "source": "run_ledger+run_artifacts",
+          "definition": "NET-NEW job postings captured by runs in this window: rows the provider returned minus the ones a previous run had already processed to completion. This is the population that becomes this week's work, so it is directly comparable with jobs reviewed. Provider rows bought a second time are acquisition cost and are reported separately as provider_jobs_returned / historical_duplicates -- counting them here made a re-bought posting look like a review-stage loss.",
+          "evidence": [
+            "reporting_ledger:metrics.net_new_jobs_captured"
+          ],
+          "attribution": "run completion timestamp (run_manifest.finished_at)",
+          "contributing_run_ids": [
+            "20260904T130130Z-13b44a0c",
+            "20260905T030439Z-1d102bec",
+            "20260906T030230Z-2f74ac7c",
+            "20260906T194056Z-6419f87a",
+            "20260906T200507Z-d046af2b",
+            "20260906T202534Z-0395cf0a"
+          ],
+          "counted_unit": "posting",
+          "cohort": "run_window"
+        },
+        {
+          "key": "jobs_reviewed",
+          "label": "Jobs reviewed",
+          "unit": "posting",
+          "value": 2226,
+          "status": "partial",
+          "source": "run_ledger+run_artifacts",
+          "definition": "Postings that entered the qualification/review stage in those runs. This is the SAME population as jobs captured, measured one stage later: the deduped opportunity list is handed straight to qualification, so in a run that reached enrichment the two are equal. They differ only when a run stopped in between, where this one is absent rather than smaller. There is no attrition between them, and no rate to read across them.",
+          "evidence": [
+            "reporting_ledger:metrics.jobs_reviewed"
+          ],
+          "attribution": "run completion timestamp (run_manifest.finished_at)",
+          "contributing_run_ids": [
+            "20260905T030439Z-1d102bec",
+            "20260906T030230Z-2f74ac7c",
+            "20260906T202534Z-0395cf0a"
+          ],
+          "counted_unit": "posting",
+          "cohort": "run_window",
+          "runs_missing_field": [
+            "20260904T130130Z-13b44a0c",
+            "20260906T194056Z-6419f87a",
+            "20260906T200507Z-d046af2b"
+          ],
+          "reason": "3 of 6 runs did not report this counter; the total covers the runs that did"
+        },
+        {
+          "key": "review_rate_pct",
+          "label": "Review rate",
+          "unit": "percent",
+          "value": null,
+          "status": "unavailable",
+          "source": "derived",
+          "definition": "Jobs reviewed as a percentage of jobs captured in the same runs. 100% means every captured posting entered review -- which is what a run that completed its slices looks like, because the deduped opportunity list is handed straight to qualification. It is not automatic: a run interrupted between acquiring a slice and enriching it reviews fewer than it captured, and the rate falls below 100 accordingly.",
+          "evidence": [
+            "jobs_reviewed / jobs_captured"
+          ],
+          "attribution": "run completion timestamp (run_manifest.finished_at)",
+          "contributing_run_ids": [
+            "20260905T030439Z-1d102bec",
+            "20260906T030230Z-2f74ac7c",
+            "20260906T202534Z-0395cf0a"
+          ],
+          "counted_unit": "",
+          "cohort": "",
+          "reason": "jobs_reviewed and jobs_captured were summed over different run sets (only in jobs_reviewed: none; only in jobs_captured: 20260904T130130Z-13b44a0c, 20260906T194056Z-6419f87a, 20260906T200507Z-d046af2b), so their ratio is not a rate for either population"
+        },
+        {
+          "key": "qualified_opportunities",
+          "label": "Qualified opportunities",
+          "unit": "opportunity",
+          "value": 26,
+          "status": "partial",
+          "source": "run_ledger+run_artifacts",
+          "definition": "Opportunities that cleared job/role policy AND the company/account ICP decision AND had a resolvable search domain, and therefore entered contact discovery. Counted by the hiring-manager stage at the moment a people search is issued -- never reconstructed by subtracting reason codes from a total.",
+          "evidence": [
+            "reporting_ledger:metrics.qualified_opportunities"
+          ],
+          "attribution": "run completion timestamp (run_manifest.finished_at)",
+          "contributing_run_ids": [
+            "20260906T202534Z-0395cf0a"
+          ],
+          "counted_unit": "company_role_bucket_opportunity",
+          "cohort": "run_window",
+          "runs_missing_field": [
+            "20260904T130130Z-13b44a0c",
+            "20260905T030439Z-1d102bec",
+            "20260906T030230Z-2f74ac7c",
+            "20260906T194056Z-6419f87a",
+            "20260906T200507Z-d046af2b"
+          ],
+          "reason": "5 of 6 runs did not report this counter; the total covers the runs that did"
+        },
+        {
+          "key": "contacts_found",
+          "label": "Contacts found",
+          "unit": "contact",
+          "value": 1050,
+          "status": "measured",
+          "source": "run_ledger+run_artifacts",
+          "definition": "Leads carrying a resolved hiring-manager email address. Email presence, never a sum of disposition labels.",
+          "evidence": [
+            "reporting_ledger:metrics.contacts_found"
+          ],
+          "attribution": "run completion timestamp (run_manifest.finished_at)",
+          "contributing_run_ids": [
+            "20260904T130130Z-13b44a0c",
+            "20260905T030439Z-1d102bec",
+            "20260906T030230Z-2f74ac7c",
+            "20260906T194056Z-6419f87a",
+            "20260906T200507Z-d046af2b",
+            "20260906T202534Z-0395cf0a"
+          ],
+          "counted_unit": "company_role_bucket_opportunity",
+          "cohort": "run_window"
+        },
+        {
+          "key": "sent_to_airtable",
+          "label": "Rows created in Airtable",
+          "unit": "row",
+          "value": 781,
+          "status": "measured",
+          "source": "run_ledger+run_artifacts",
+          "definition": "Airtable rows the run created (review staging). Rows suppressed as duplicates or already-present are excluded.",
+          "evidence": [
+            "reporting_ledger:metrics.sent_to_airtable"
+          ],
+          "attribution": "run completion timestamp (run_manifest.finished_at)",
+          "contributing_run_ids": [
+            "20260904T130130Z-13b44a0c",
+            "20260905T030439Z-1d102bec",
+            "20260906T030230Z-2f74ac7c",
+            "20260906T194056Z-6419f87a",
+            "20260906T200507Z-d046af2b",
+            "20260906T202534Z-0395cf0a"
+          ],
+          "counted_unit": "company_role_bucket_opportunity",
+          "cohort": "run_window"
+        },
+        {
+          "key": "sent_to_instantly",
+          "label": "Sent to Instantly",
+          "unit": "lead",
+          "value": null,
+          "status": "unavailable",
+          "source": "instantly",
+          "definition": "Leads that entered an Instantly campaign during the window, counted by the lead's own timestamp_created. Instantly answers 200 for an address already in the workspace, so an accepted API call is not a delivery; a new timestamp_created is.",
+          "evidence": [],
+          "attribution": "Instantly lead.timestamp_created",
+          "contributing_run_ids": [],
+          "counted_unit": "instantly_lead",
+          "cohort": "external_backlog",
+          "reason": "the orchestrator ran with allow_instantly_enrollment=false in every run this window, so its artifacts provably cannot answer this. Enrollment is performed by the separate GTM Approved Sync service (run_approved.py), which writes no run artifact and has no volume -- its log lines do not survive the container. Run with --instantly to read the count from Instantly itself."
+        }
+      ],
+      "metrics": {
+        "airtable_candidates": {
+          "key": "airtable_candidates",
+          "label": "Rows submitted to Airtable",
+          "unit": "row",
+          "value": 1707,
+          "status": "measured",
+          "source": "run_ledger+run_artifacts",
+          "definition": "Send-safe leads handed to the Airtable writer. The row above it (created) plus every suppression reason must account for all of these; an unexplained gap is a measurement defect, not a business result.",
+          "evidence": [
+            "reporting_ledger:metrics.airtable_candidates"
+          ],
+          "attribution": "run completion timestamp (run_manifest.finished_at)",
+          "contributing_run_ids": [
+            "20260904T130130Z-13b44a0c",
+            "20260905T030439Z-1d102bec",
+            "20260906T030230Z-2f74ac7c",
+            "20260906T194056Z-6419f87a",
+            "20260906T200507Z-d046af2b",
+            "20260906T202534Z-0395cf0a"
+          ],
+          "counted_unit": "",
+          "cohort": "run_window"
+        },
+        "airtable_suppressed": {
+          "key": "airtable_suppressed",
+          "label": "Airtable rows suppressed as existing",
+          "unit": "row",
+          "value": 0,
+          "status": "measured",
+          "source": "run_ledger+run_artifacts",
+          "definition": "Deliverable leads not written because the company/function was already represented in Airtable.",
+          "evidence": [
+            "reporting_ledger:metrics.airtable_suppressed"
+          ],
+          "attribution": "run completion timestamp (run_manifest.finished_at)",
+          "contributing_run_ids": [
+            "20260904T130130Z-13b44a0c",
+            "20260905T030439Z-1d102bec",
+            "20260906T030230Z-2f74ac7c",
+            "20260906T194056Z-6419f87a",
+            "20260906T200507Z-d046af2b",
+            "20260906T202534Z-0395cf0a"
+          ],
+          "counted_unit": "",
+          "cohort": "run_window"
+        },
+        "airtable_write_failures": {
+          "key": "airtable_write_failures",
+          "label": "Airtable writes that failed",
+          "unit": "row",
+          "value": 0,
+          "status": "measured",
+          "source": "run_ledger+run_artifacts",
+          "definition": "Rows the Airtable writer accepted but could not create.",
+          "evidence": [
+            "reporting_ledger:metrics.airtable_write_failures"
+          ],
+          "attribution": "run completion timestamp (run_manifest.finished_at)",
+          "contributing_run_ids": [
+            "20260904T130130Z-13b44a0c",
+            "20260905T030439Z-1d102bec",
+            "20260906T030230Z-2f74ac7c",
+            "20260906T194056Z-6419f87a",
+            "20260906T200507Z-d046af2b",
+            "20260906T202534Z-0395cf0a"
+          ],
+          "counted_unit": "",
+          "cohort": "run_window"
+        },
+        "canonical_duplicates_in_run": {
+          "key": "canonical_duplicates_in_run",
+          "label": "Rows bought twice within one run",
+          "unit": "row",
+          "value": 0,
+          "status": "partial",
+          "source": "run_ledger+run_artifacts",
+          "definition": "Postings whose canonical identity was already present EARLIER IN THE SAME RUN. Pure acquisition waste: we paid for the row twice inside one window. Distinct from a row a PREVIOUS run processed.",
+          "evidence": [
+            "reporting_ledger:metrics.canonical_duplicates_in_run"
+          ],
+          "attribution": "run completion timestamp (run_manifest.finished_at)",
+          "contributing_run_ids": [
+            "20260905T030439Z-1d102bec",
+            "20260906T030230Z-2f74ac7c",
+            "20260906T194056Z-6419f87a",
+            "20260906T200507Z-d046af2b",
+            "20260906T202534Z-0395cf0a"
+          ],
+          "counted_unit": "",
+          "cohort": "run_window",
+          "runs_missing_field": [
+            "20260904T130130Z-13b44a0c"
+          ],
+          "reason": "1 of 6 runs did not report this counter; the total covers the runs that did"
+        },
+        "companies_considered": {
+          "key": "companies_considered",
+          "label": "Companies considered",
+          "unit": "company",
+          "value": 5,
+          "status": "partial",
+          "source": "run_ledger+run_artifacts",
+          "definition": "Distinct companies evaluated against ICP criteria.",
+          "evidence": [
+            "reporting_ledger:metrics.companies_considered"
+          ],
+          "attribution": "run completion timestamp (run_manifest.finished_at)",
+          "contributing_run_ids": [
+            "20260905T030439Z-1d102bec",
+            "20260906T030230Z-2f74ac7c",
+            "20260906T202534Z-0395cf0a"
+          ],
+          "counted_unit": "",
+          "cohort": "run_window",
+          "runs_missing_field": [
+            "20260904T130130Z-13b44a0c",
+            "20260906T194056Z-6419f87a",
+            "20260906T200507Z-d046af2b"
+          ],
+          "reason": "3 of 6 runs did not report this counter; the total covers the runs that did"
+        },
+        "contact_rate_pct": {
+          "key": "contact_rate_pct",
+          "label": "Contact discovery rate",
+          "unit": "percent",
+          "value": null,
+          "status": "unavailable",
+          "source": "derived",
+          "definition": "Contacts found as a percentage of qualified opportunities.",
+          "evidence": [
+            "contacts_found / qualified_opportunities"
+          ],
+          "attribution": "run completion timestamp (run_manifest.finished_at)",
+          "contributing_run_ids": [
+            "20260906T202534Z-0395cf0a"
+          ],
+          "counted_unit": "",
+          "cohort": "",
+          "reason": "contacts_found and qualified_opportunities were summed over different run sets (only in contacts_found: 20260904T130130Z-13b44a0c, 20260905T030439Z-1d102bec, 20260906T030230Z-2f74ac7c, 20260906T194056Z-6419f87a, 20260906T200507Z-d046af2b; only in qualified_opportunities: none), so their ratio is not a rate for either population"
+        },
+        "contacts_found": {
+          "key": "contacts_found",
+          "label": "Contacts found",
+          "unit": "contact",
+          "value": 1050,
+          "status": "measured",
+          "source": "run_ledger+run_artifacts",
+          "definition": "Leads carrying a resolved hiring-manager email address. Email presence, never a sum of disposition labels.",
+          "evidence": [
+            "reporting_ledger:metrics.contacts_found"
+          ],
+          "attribution": "run completion timestamp (run_manifest.finished_at)",
+          "contributing_run_ids": [
+            "20260904T130130Z-13b44a0c",
+            "20260905T030439Z-1d102bec",
+            "20260906T030230Z-2f74ac7c",
+            "20260906T194056Z-6419f87a",
+            "20260906T200507Z-d046af2b",
+            "20260906T202534Z-0395cf0a"
+          ],
+          "counted_unit": "company_role_bucket_opportunity",
+          "cohort": "run_window"
+        },
+        "cross_query_duplicates": {
+          "key": "cross_query_duplicates",
+          "label": "Rows returned twice by the provider",
+          "unit": "row",
+          "value": 5418,
+          "status": "measured",
+          "source": "run_ledger+run_artifacts",
+          "definition": "The same posting billed more than once within this run's queries.",
+          "evidence": [
+            "reporting_ledger:metrics.cross_query_duplicates"
+          ],
+          "attribution": "run completion timestamp (run_manifest.finished_at)",
+          "contributing_run_ids": [
+            "20260904T130130Z-13b44a0c",
+            "20260905T030439Z-1d102bec",
+            "20260906T030230Z-2f74ac7c",
+            "20260906T194056Z-6419f87a",
+            "20260906T200507Z-d046af2b",
+            "20260906T202534Z-0395cf0a"
+          ],
+          "counted_unit": "",
+          "cohort": "run_window"
+        },
+        "cross_source_duplicates": {
+          "key": "cross_source_duplicates",
+          "label": "Rows seen from a second source",
+          "unit": "row",
+          "value": 0,
+          "status": "partial",
+          "source": "run_ledger+run_artifacts",
+          "definition": "The same posting reaching us through more than one source.",
+          "evidence": [
+            "reporting_ledger:metrics.cross_source_duplicates"
+          ],
+          "attribution": "run completion timestamp (run_manifest.finished_at)",
+          "contributing_run_ids": [
+            "20260905T030439Z-1d102bec",
+            "20260906T030230Z-2f74ac7c",
+            "20260906T194056Z-6419f87a",
+            "20260906T200507Z-d046af2b",
+            "20260906T202534Z-0395cf0a"
+          ],
+          "counted_unit": "",
+          "cohort": "run_window",
+          "runs_missing_field": [
+            "20260904T130130Z-13b44a0c"
+          ],
+          "reason": "1 of 6 runs did not report this counter; the total covers the runs that did"
+        },
+        "final_pass_leads": {
+          "key": "final_pass_leads",
+          "label": "FINAL_PASS leads",
+          "unit": "lead",
+          "value": 711,
+          "status": "measured",
+          "source": "run_ledger+run_artifacts",
+          "definition": "Leads whose validated disposition is FINAL_PASS (send-safe candidates).",
+          "evidence": [
+            "reporting_ledger:metrics.final_pass_leads"
+          ],
+          "attribution": "run completion timestamp (run_manifest.finished_at)",
+          "contributing_run_ids": [
+            "20260904T130130Z-13b44a0c",
+            "20260905T030439Z-1d102bec",
+            "20260906T030230Z-2f74ac7c",
+            "20260906T194056Z-6419f87a",
+            "20260906T200507Z-d046af2b",
+            "20260906T202534Z-0395cf0a"
+          ],
+          "counted_unit": "",
+          "cohort": "run_window"
+        },
+        "historical_duplicates": {
+          "key": "historical_duplicates",
+          "label": "Rows already processed in a previous run",
+          "unit": "row",
+          "value": 0,
+          "status": "partial",
+          "source": "run_ledger+run_artifacts",
+          "definition": "Provider rows dropped because an earlier run had already carried that exact posting to a terminal outcome. The cost of the acquisition overlap, and the number that tells us whether the window is draining. Counted at the dedupe decision point: it no longer absorbs rows this run simply bought twice (see canonical_duplicates_in_run), which is a different problem with a different fix.",
+          "evidence": [
+            "reporting_ledger:metrics.historical_previously_seen_duplicates"
+          ],
+          "attribution": "run completion timestamp (run_manifest.finished_at)",
+          "contributing_run_ids": [
+            "20260905T030439Z-1d102bec",
+            "20260906T030230Z-2f74ac7c",
+            "20260906T194056Z-6419f87a",
+            "20260906T200507Z-d046af2b",
+            "20260906T202534Z-0395cf0a"
+          ],
+          "counted_unit": "",
+          "cohort": "run_window",
+          "runs_missing_field": [
+            "20260904T130130Z-13b44a0c"
+          ],
+          "reason": "1 of 6 runs did not report this counter; the total covers the runs that did"
+        },
+        "jobs_captured": {
+          "key": "jobs_captured",
+          "label": "Jobs captured",
+          "unit": "posting",
+          "value": 6431,
+          "status": "measured",
+          "source": "run_ledger+run_artifacts",
+          "definition": "NET-NEW job postings captured by runs in this window: rows the provider returned minus the ones a previous run had already processed to completion. This is the population that becomes this week's work, so it is directly comparable with jobs reviewed. Provider rows bought a second time are acquisition cost and are reported separately as provider_jobs_returned / historical_duplicates -- counting them here made a re-bought posting look like a review-stage loss.",
+          "evidence": [
+            "reporting_ledger:metrics.net_new_jobs_captured"
+          ],
+          "attribution": "run completion timestamp (run_manifest.finished_at)",
+          "contributing_run_ids": [
+            "20260904T130130Z-13b44a0c",
+            "20260905T030439Z-1d102bec",
+            "20260906T030230Z-2f74ac7c",
+            "20260906T194056Z-6419f87a",
+            "20260906T200507Z-d046af2b",
+            "20260906T202534Z-0395cf0a"
+          ],
+          "counted_unit": "posting",
+          "cohort": "run_window"
+        },
+        "jobs_reviewed": {
+          "key": "jobs_reviewed",
+          "label": "Jobs reviewed",
+          "unit": "posting",
+          "value": 2226,
+          "status": "partial",
+          "source": "run_ledger+run_artifacts",
+          "definition": "Postings that entered the qualification/review stage in those runs. This is the SAME population as jobs captured, measured one stage later: the deduped opportunity list is handed straight to qualification, so in a run that reached enrichment the two are equal. They differ only when a run stopped in between, where this one is absent rather than smaller. There is no attrition between them, and no rate to read across them.",
+          "evidence": [
+            "reporting_ledger:metrics.jobs_reviewed"
+          ],
+          "attribution": "run completion timestamp (run_manifest.finished_at)",
+          "contributing_run_ids": [
+            "20260905T030439Z-1d102bec",
+            "20260906T030230Z-2f74ac7c",
+            "20260906T202534Z-0395cf0a"
+          ],
+          "counted_unit": "posting",
+          "cohort": "run_window",
+          "runs_missing_field": [
+            "20260904T130130Z-13b44a0c",
+            "20260906T194056Z-6419f87a",
+            "20260906T200507Z-d046af2b"
+          ],
+          "reason": "3 of 6 runs did not report this counter; the total covers the runs that did"
+        },
+        "provider_jobs_billed": {
+          "key": "provider_jobs_billed",
+          "label": "Provider credits consumed",
+          "unit": "credit",
+          "value": 11849,
+          "status": "measured",
+          "source": "run_ledger+run_artifacts",
+          "definition": "Jobs credits the provider actually charged this window. The denominator of every yield-per-credit number.",
+          "evidence": [
+            "reporting_ledger:metrics.provider_jobs_billed"
+          ],
+          "attribution": "run completion timestamp (run_manifest.finished_at)",
+          "contributing_run_ids": [
+            "20260904T130130Z-13b44a0c",
+            "20260905T030439Z-1d102bec",
+            "20260906T030230Z-2f74ac7c",
+            "20260906T194056Z-6419f87a",
+            "20260906T200507Z-d046af2b",
+            "20260906T202534Z-0395cf0a"
+          ],
+          "counted_unit": "",
+          "cohort": "run_window"
+        },
+        "provider_jobs_returned": {
+          "key": "provider_jobs_returned",
+          "label": "Provider rows returned",
+          "unit": "row",
+          "value": 11849,
+          "status": "measured",
+          "source": "run_ledger+run_artifacts",
+          "definition": "Rows the provider returned and billed, before any of our deduplication. Acquisition volume, not throughput.",
+          "evidence": [
+            "reporting_ledger:metrics.provider_jobs_returned"
+          ],
+          "attribution": "run completion timestamp (run_manifest.finished_at)",
+          "contributing_run_ids": [
+            "20260904T130130Z-13b44a0c",
+            "20260905T030439Z-1d102bec",
+            "20260906T030230Z-2f74ac7c",
+            "20260906T194056Z-6419f87a",
+            "20260906T200507Z-d046af2b",
+            "20260906T202534Z-0395cf0a"
+          ],
+          "counted_unit": "",
+          "cohort": "run_window"
+        },
+        "qualification_rate_pct": {
+          "key": "qualification_rate_pct",
+          "label": "Qualification rate",
+          "unit": "percent",
+          "value": null,
+          "status": "unavailable",
+          "source": "derived",
+          "definition": "Qualified opportunities as a percentage of jobs reviewed.",
+          "evidence": [
+            "qualified_opportunities / jobs_reviewed"
+          ],
+          "attribution": "run completion timestamp (run_manifest.finished_at)",
+          "contributing_run_ids": [
+            "20260906T202534Z-0395cf0a"
+          ],
+          "counted_unit": "",
+          "cohort": "",
+          "reason": "qualified_opportunities counts company_role_bucket_opportunity and jobs_reviewed counts posting; a ratio between different populations is not a conversion rate"
+        },
+        "qualified_opportunities": {
+          "key": "qualified_opportunities",
+          "label": "Qualified opportunities",
+          "unit": "opportunity",
+          "value": 26,
+          "status": "partial",
+          "source": "run_ledger+run_artifacts",
+          "definition": "Opportunities that cleared job/role policy AND the company/account ICP decision AND had a resolvable search domain, and therefore entered contact discovery. Counted by the hiring-manager stage at the moment a people search is issued -- never reconstructed by subtracting reason codes from a total.",
+          "evidence": [
+            "reporting_ledger:metrics.qualified_opportunities"
+          ],
+          "attribution": "run completion timestamp (run_manifest.finished_at)",
+          "contributing_run_ids": [
+            "20260906T202534Z-0395cf0a"
+          ],
+          "counted_unit": "company_role_bucket_opportunity",
+          "cohort": "run_window",
+          "runs_missing_field": [
+            "20260904T130130Z-13b44a0c",
+            "20260905T030439Z-1d102bec",
+            "20260906T030230Z-2f74ac7c",
+            "20260906T194056Z-6419f87a",
+            "20260906T200507Z-d046af2b"
+          ],
+          "reason": "5 of 6 runs did not report this counter; the total covers the runs that did"
+        },
+        "review_rate_pct": {
+          "key": "review_rate_pct",
+          "label": "Review rate",
+          "unit": "percent",
+          "value": null,
+          "status": "unavailable",
+          "source": "derived",
+          "definition": "Jobs reviewed as a percentage of jobs captured in the same runs. 100% means every captured posting entered review -- which is what a run that completed its slices looks like, because the deduped opportunity list is handed straight to qualification. It is not automatic: a run interrupted between acquiring a slice and enriching it reviews fewer than it captured, and the rate falls below 100 accordingly.",
+          "evidence": [
+            "jobs_reviewed / jobs_captured"
+          ],
+          "attribution": "run completion timestamp (run_manifest.finished_at)",
+          "contributing_run_ids": [
+            "20260905T030439Z-1d102bec",
+            "20260906T030230Z-2f74ac7c",
+            "20260906T202534Z-0395cf0a"
+          ],
+          "counted_unit": "",
+          "cohort": "",
+          "reason": "jobs_reviewed and jobs_captured were summed over different run sets (only in jobs_reviewed: none; only in jobs_captured: 20260904T130130Z-13b44a0c, 20260906T194056Z-6419f87a, 20260906T200507Z-d046af2b), so their ratio is not a rate for either population"
+        },
+        "role_qualified_postings": {
+          "key": "role_qualified_postings",
+          "label": "Postings passing the role/source gate",
+          "unit": "posting",
+          "value": 1895,
+          "status": "partial",
+          "source": "run_ledger+run_artifacts",
+          "definition": "Postings the pre-contact JobGate and RoleGate did not reject. A loose upstream filter -- 92.6% of postings passed it on the 2026-09-04 control run -- kept as context, NOT as 'qualified opportunities'.",
+          "evidence": [
+            "reporting_ledger:metrics.role_qualified_postings"
+          ],
+          "attribution": "run completion timestamp (run_manifest.finished_at)",
+          "contributing_run_ids": [
+            "20260905T030439Z-1d102bec",
+            "20260906T030230Z-2f74ac7c",
+            "20260906T202534Z-0395cf0a"
+          ],
+          "counted_unit": "",
+          "cohort": "run_window",
+          "runs_missing_field": [
+            "20260904T130130Z-13b44a0c",
+            "20260906T194056Z-6419f87a",
+            "20260906T200507Z-d046af2b"
+          ],
+          "reason": "3 of 6 runs did not report this counter; the total covers the runs that did"
+        },
+        "sent_to_airtable": {
+          "key": "sent_to_airtable",
+          "label": "Rows created in Airtable",
+          "unit": "row",
+          "value": 781,
+          "status": "measured",
+          "source": "run_ledger+run_artifacts",
+          "definition": "Airtable rows the run created (review staging). Rows suppressed as duplicates or already-present are excluded.",
+          "evidence": [
+            "reporting_ledger:metrics.sent_to_airtable"
+          ],
+          "attribution": "run completion timestamp (run_manifest.finished_at)",
+          "contributing_run_ids": [
+            "20260904T130130Z-13b44a0c",
+            "20260905T030439Z-1d102bec",
+            "20260906T030230Z-2f74ac7c",
+            "20260906T194056Z-6419f87a",
+            "20260906T200507Z-d046af2b",
+            "20260906T202534Z-0395cf0a"
+          ],
+          "counted_unit": "company_role_bucket_opportunity",
+          "cohort": "run_window"
+        },
+        "sent_to_instantly": {
+          "key": "sent_to_instantly",
+          "label": "Sent to Instantly",
+          "unit": "lead",
+          "value": null,
+          "status": "unavailable",
+          "source": "instantly",
+          "definition": "Leads that entered an Instantly campaign during the window, counted by the lead's own timestamp_created. Instantly answers 200 for an address already in the workspace, so an accepted API call is not a delivery; a new timestamp_created is.",
+          "evidence": [],
+          "attribution": "Instantly lead.timestamp_created",
+          "contributing_run_ids": [],
+          "counted_unit": "instantly_lead",
+          "cohort": "external_backlog",
+          "reason": "the orchestrator ran with allow_instantly_enrollment=false in every run this window, so its artifacts provably cannot answer this. Enrollment is performed by the separate GTM Approved Sync service (run_approved.py), which writes no run artifact and has no volume -- its log lines do not survive the container. Run with --instantly to read the count from Instantly itself."
+        },
+        "unique_opportunities": {
+          "key": "unique_opportunities",
+          "label": "Unique opportunities after dedupe",
+          "unit": "opportunity",
+          "value": 2436,
+          "status": "measured",
+          "source": "run_ledger+run_artifacts",
+          "definition": "Postings remaining after cross-run and in-run deduplication.",
+          "evidence": [
+            "reporting_ledger:metrics.unique_opportunities"
+          ],
+          "attribution": "run completion timestamp (run_manifest.finished_at)",
+          "contributing_run_ids": [
+            "20260904T130130Z-13b44a0c",
+            "20260905T030439Z-1d102bec",
+            "20260906T030230Z-2f74ac7c",
+            "20260906T194056Z-6419f87a",
+            "20260906T200507Z-d046af2b",
+            "20260906T202534Z-0395cf0a"
+          ],
+          "counted_unit": "",
+          "cohort": "run_window"
+        },
+        "verified_emails": {
+          "key": "verified_emails",
+          "label": "Apollo-verified emails",
+          "unit": "contact",
+          "value": 1036,
+          "status": "measured",
+          "source": "run_ledger+run_artifacts",
+          "definition": "Contacts whose Apollo email status is 'verified'.",
+          "evidence": [
+            "reporting_ledger:metrics.verified_emails"
+          ],
+          "attribution": "run completion timestamp (run_manifest.finished_at)",
+          "contributing_run_ids": [
+            "20260904T130130Z-13b44a0c",
+            "20260905T030439Z-1d102bec",
+            "20260906T030230Z-2f74ac7c",
+            "20260906T194056Z-6419f87a",
+            "20260906T200507Z-d046af2b",
+            "20260906T202534Z-0395cf0a"
+          ],
+          "counted_unit": "",
+          "cohort": "run_window"
+        }
+      },
+      "runs": [
+        {
+          "run_id": "20260904T130130Z-13b44a0c",
+          "status": "complete",
+          "mode": "live_acquisition_and_enrichment",
+          "started_at": "2026-09-04T13:01:30Z",
+          "finished_at": "2026-09-04T16:21:19Z",
+          "attributed_at": "2026-09-04T16:21:19Z",
+          "attribution_field": "run_manifest.finished_at",
+          "realism": "production",
+          "artifacts_present": [
+            "ledger"
+          ],
+          "path": "/tmp/gtm-original-ledger-recheck-4htyf83b/reporting_ledger/20260904T130130Z-13b44a0c.json",
+          "evidence_source": "ledger",
+          "heavy_artifacts_present": false,
+          "stop_reason": "topup:max_iterations_guard",
+          "metrics": {
+            "jobs_captured": 6205,
+            "jobs_reviewed": null,
+            "qualified_opportunities": null,
+            "contacts_found": 1048,
+            "sent_to_airtable": 781,
+            "provider_jobs_returned": 6205,
+            "provider_jobs_billed": 6205,
+            "historical_duplicates": null,
+            "canonical_duplicates_in_run": null,
+            "cross_query_duplicates": 0,
+            "cross_source_duplicates": null,
+            "unique_opportunities": 2410,
+            "final_pass_leads": 711,
+            "verified_emails": 1034,
+            "role_qualified_postings": null,
+            "companies_considered": null,
+            "airtable_candidates": 1681,
+            "airtable_suppressed": 0,
+            "airtable_write_failures": 0,
+            "sent_to_instantly": null
+          },
+          "metric_sources": {
+            "jobs_captured": "reporting_ledger:metrics.net_new_jobs_captured",
+            "contacts_found": "reporting_ledger:metrics.contacts_found",
+            "sent_to_airtable": "reporting_ledger:metrics.sent_to_airtable",
+            "provider_jobs_returned": "reporting_ledger:metrics.provider_jobs_returned",
+            "provider_jobs_billed": "reporting_ledger:metrics.provider_jobs_billed",
+            "cross_query_duplicates": "reporting_ledger:metrics.cross_query_duplicates",
+            "unique_opportunities": "reporting_ledger:metrics.unique_opportunities",
+            "final_pass_leads": "reporting_ledger:metrics.final_pass_leads",
+            "verified_emails": "reporting_ledger:metrics.verified_emails",
+            "airtable_candidates": "reporting_ledger:metrics.airtable_candidates",
+            "airtable_suppressed": "reporting_ledger:metrics.airtable_suppressed",
+            "airtable_write_failures": "reporting_ledger:metrics.airtable_write_failures"
+          },
+          "allow_instantly_enrollment": false,
+          "local_day": "2026-09-04"
+        },
+        {
+          "run_id": "20260905T030439Z-1d102bec",
+          "status": "complete",
+          "mode": "live_acquisition_and_enrichment",
+          "started_at": "2026-09-05T03:04:39Z",
+          "finished_at": "2026-09-05T03:05:59Z",
+          "attributed_at": "2026-09-05T03:05:59Z",
+          "attribution_field": "run_manifest.finished_at",
+          "realism": "production",
+          "artifacts_present": [
+            "ledger"
+          ],
+          "path": "/tmp/gtm-original-ledger-recheck-4htyf83b/reporting_ledger/20260905T030439Z-1d102bec.json",
+          "evidence_source": "ledger",
+          "heavy_artifacts_present": false,
+          "stop_reason": "topup:max_iterations_guard",
+          "metrics": {
+            "jobs_captured": 0,
+            "jobs_reviewed": 0,
+            "qualified_opportunities": null,
+            "contacts_found": 0,
+            "sent_to_airtable": 0,
+            "provider_jobs_returned": 200,
+            "provider_jobs_billed": 200,
+            "historical_duplicates": 0,
+            "canonical_duplicates_in_run": 0,
+            "cross_query_duplicates": 200,
+            "cross_source_duplicates": 0,
+            "unique_opportunities": 0,
+            "final_pass_leads": 0,
+            "verified_emails": 0,
+            "role_qualified_postings": 0,
+            "companies_considered": 0,
+            "airtable_candidates": 0,
+            "airtable_suppressed": 0,
+            "airtable_write_failures": 0,
+            "sent_to_instantly": null
+          },
+          "metric_sources": {
+            "jobs_captured": "reporting_ledger:metrics.net_new_jobs_captured",
+            "jobs_reviewed": "reporting_ledger:metrics.jobs_reviewed",
+            "contacts_found": "reporting_ledger:metrics.contacts_found",
+            "sent_to_airtable": "reporting_ledger:metrics.sent_to_airtable",
+            "provider_jobs_returned": "reporting_ledger:metrics.provider_jobs_returned",
+            "provider_jobs_billed": "reporting_ledger:metrics.provider_jobs_billed",
+            "historical_duplicates": "reporting_ledger:metrics.historical_previously_seen_duplicates",
+            "canonical_duplicates_in_run": "reporting_ledger:metrics.canonical_duplicates_in_run",
+            "cross_query_duplicates": "reporting_ledger:metrics.cross_query_duplicates",
+            "cross_source_duplicates": "reporting_ledger:metrics.cross_source_duplicates",
+            "unique_opportunities": "reporting_ledger:metrics.unique_opportunities",
+            "final_pass_leads": "reporting_ledger:metrics.final_pass_leads",
+            "verified_emails": "reporting_ledger:metrics.verified_emails",
+            "role_qualified_postings": "reporting_ledger:metrics.role_qualified_postings",
+            "companies_considered": "reporting_ledger:metrics.companies_considered",
+            "airtable_candidates": "reporting_ledger:metrics.airtable_candidates",
+            "airtable_suppressed": "reporting_ledger:metrics.airtable_suppressed",
+            "airtable_write_failures": "reporting_ledger:metrics.airtable_write_failures"
+          },
+          "allow_instantly_enrollment": false,
+          "local_day": "2026-09-04"
+        },
+        {
+          "run_id": "20260906T030230Z-2f74ac7c",
+          "status": "complete",
+          "mode": "live_acquisition_and_enrichment",
+          "started_at": "2026-09-06T03:02:30Z",
+          "finished_at": "2026-09-06T03:16:31Z",
+          "attributed_at": "2026-09-06T03:16:31Z",
+          "attribution_field": "run_manifest.finished_at",
+          "realism": "production",
+          "artifacts_present": [
+            "ledger"
+          ],
+          "path": "/tmp/gtm-original-ledger-recheck-4htyf83b/reporting_ledger/20260906T030230Z-2f74ac7c.json",
+          "evidence_source": "ledger",
+          "heavy_artifacts_present": false,
+          "stop_reason": "topup:max_iterations_guard",
+          "metrics": {
+            "jobs_captured": 226,
+            "jobs_reviewed": 226,
+            "qualified_opportunities": null,
+            "contacts_found": 0,
+            "sent_to_airtable": 0,
+            "provider_jobs_returned": 5444,
+            "provider_jobs_billed": 5444,
+            "historical_duplicates": 0,
+            "canonical_duplicates_in_run": 0,
+            "cross_query_duplicates": 5218,
+            "cross_source_duplicates": 0,
+            "unique_opportunities": 0,
+            "final_pass_leads": 0,
+            "verified_emails": 0,
+            "role_qualified_postings": 194,
+            "companies_considered": 0,
+            "airtable_candidates": 0,
+            "airtable_suppressed": 0,
+            "airtable_write_failures": 0,
+            "sent_to_instantly": null
+          },
+          "metric_sources": {
+            "jobs_captured": "reporting_ledger:metrics.net_new_jobs_captured",
+            "jobs_reviewed": "reporting_ledger:metrics.jobs_reviewed",
+            "contacts_found": "reporting_ledger:metrics.contacts_found",
+            "sent_to_airtable": "reporting_ledger:metrics.sent_to_airtable",
+            "provider_jobs_returned": "reporting_ledger:metrics.provider_jobs_returned",
+            "provider_jobs_billed": "reporting_ledger:metrics.provider_jobs_billed",
+            "historical_duplicates": "reporting_ledger:metrics.historical_previously_seen_duplicates",
+            "canonical_duplicates_in_run": "reporting_ledger:metrics.canonical_duplicates_in_run",
+            "cross_query_duplicates": "reporting_ledger:metrics.cross_query_duplicates",
+            "cross_source_duplicates": "reporting_ledger:metrics.cross_source_duplicates",
+            "unique_opportunities": "reporting_ledger:metrics.unique_opportunities",
+            "final_pass_leads": "reporting_ledger:metrics.final_pass_leads",
+            "verified_emails": "reporting_ledger:metrics.verified_emails",
+            "role_qualified_postings": "reporting_ledger:metrics.role_qualified_postings",
+            "companies_considered": "reporting_ledger:metrics.companies_considered",
+            "airtable_candidates": "reporting_ledger:metrics.airtable_candidates",
+            "airtable_suppressed": "reporting_ledger:metrics.airtable_suppressed",
+            "airtable_write_failures": "reporting_ledger:metrics.airtable_write_failures"
+          },
+          "allow_instantly_enrollment": false,
+          "local_day": "2026-09-05"
+        },
+        {
+          "run_id": "20260906T194056Z-6419f87a",
+          "status": "complete",
+          "mode": "live_acquisition_and_enrichment",
+          "started_at": "2026-09-06T19:40:56Z",
+          "finished_at": "2026-09-06T19:41:45Z",
+          "attributed_at": "2026-09-06T19:41:45Z",
+          "attribution_field": "run_manifest.finished_at",
+          "realism": "production",
+          "artifacts_present": [
+            "ledger"
+          ],
+          "path": "/tmp/gtm-original-ledger-recheck-4htyf83b/reporting_ledger/20260906T194056Z-6419f87a.json",
+          "evidence_source": "ledger",
+          "heavy_artifacts_present": false,
+          "stop_reason": "topup:governor_zero_budget",
+          "metrics": {
+            "jobs_captured": 0,
+            "jobs_reviewed": null,
+            "qualified_opportunities": null,
+            "contacts_found": 0,
+            "sent_to_airtable": 0,
+            "provider_jobs_returned": 0,
+            "provider_jobs_billed": 0,
+            "historical_duplicates": 0,
+            "canonical_duplicates_in_run": 0,
+            "cross_query_duplicates": 0,
+            "cross_source_duplicates": 0,
+            "unique_opportunities": 0,
+            "final_pass_leads": 0,
+            "verified_emails": 0,
+            "role_qualified_postings": null,
+            "companies_considered": null,
+            "airtable_candidates": 0,
+            "airtable_suppressed": 0,
+            "airtable_write_failures": 0,
+            "sent_to_instantly": null
+          },
+          "metric_sources": {
+            "jobs_captured": "reporting_ledger:metrics.net_new_jobs_captured",
+            "contacts_found": "reporting_ledger:metrics.contacts_found",
+            "sent_to_airtable": "reporting_ledger:metrics.sent_to_airtable",
+            "provider_jobs_returned": "reporting_ledger:metrics.provider_jobs_returned",
+            "provider_jobs_billed": "reporting_ledger:metrics.provider_jobs_billed",
+            "historical_duplicates": "reporting_ledger:metrics.historical_previously_seen_duplicates",
+            "canonical_duplicates_in_run": "reporting_ledger:metrics.canonical_duplicates_in_run",
+            "cross_query_duplicates": "reporting_ledger:metrics.cross_query_duplicates",
+            "cross_source_duplicates": "reporting_ledger:metrics.cross_source_duplicates",
+            "unique_opportunities": "reporting_ledger:metrics.unique_opportunities",
+            "final_pass_leads": "reporting_ledger:metrics.final_pass_leads",
+            "verified_emails": "reporting_ledger:metrics.verified_emails",
+            "airtable_candidates": "reporting_ledger:metrics.airtable_candidates",
+            "airtable_suppressed": "reporting_ledger:metrics.airtable_suppressed",
+            "airtable_write_failures": "reporting_ledger:metrics.airtable_write_failures"
+          },
+          "allow_instantly_enrollment": false,
+          "local_day": "2026-09-06"
+        },
+        {
+          "run_id": "20260906T200507Z-d046af2b",
+          "status": "complete",
+          "mode": "live_acquisition_and_enrichment",
+          "started_at": "2026-09-06T20:05:07Z",
+          "finished_at": "2026-09-06T20:05:37Z",
+          "attributed_at": "2026-09-06T20:05:37Z",
+          "attribution_field": "run_manifest.finished_at",
+          "realism": "production",
+          "artifacts_present": [
+            "ledger"
+          ],
+          "path": "/tmp/gtm-original-ledger-recheck-4htyf83b/reporting_ledger/20260906T200507Z-d046af2b.json",
+          "evidence_source": "ledger",
+          "heavy_artifacts_present": false,
+          "stop_reason": "topup:governor_zero_budget",
+          "metrics": {
+            "jobs_captured": 0,
+            "jobs_reviewed": null,
+            "qualified_opportunities": null,
+            "contacts_found": 0,
+            "sent_to_airtable": 0,
+            "provider_jobs_returned": 0,
+            "provider_jobs_billed": 0,
+            "historical_duplicates": 0,
+            "canonical_duplicates_in_run": 0,
+            "cross_query_duplicates": 0,
+            "cross_source_duplicates": 0,
+            "unique_opportunities": 0,
+            "final_pass_leads": 0,
+            "verified_emails": 0,
+            "role_qualified_postings": null,
+            "companies_considered": null,
+            "airtable_candidates": 0,
+            "airtable_suppressed": 0,
+            "airtable_write_failures": 0,
+            "sent_to_instantly": null
+          },
+          "metric_sources": {
+            "jobs_captured": "reporting_ledger:metrics.net_new_jobs_captured",
+            "contacts_found": "reporting_ledger:metrics.contacts_found",
+            "sent_to_airtable": "reporting_ledger:metrics.sent_to_airtable",
+            "provider_jobs_returned": "reporting_ledger:metrics.provider_jobs_returned",
+            "provider_jobs_billed": "reporting_ledger:metrics.provider_jobs_billed",
+            "historical_duplicates": "reporting_ledger:metrics.historical_previously_seen_duplicates",
+            "canonical_duplicates_in_run": "reporting_ledger:metrics.canonical_duplicates_in_run",
+            "cross_query_duplicates": "reporting_ledger:metrics.cross_query_duplicates",
+            "cross_source_duplicates": "reporting_ledger:metrics.cross_source_duplicates",
+            "unique_opportunities": "reporting_ledger:metrics.unique_opportunities",
+            "final_pass_leads": "reporting_ledger:metrics.final_pass_leads",
+            "verified_emails": "reporting_ledger:metrics.verified_emails",
+            "airtable_candidates": "reporting_ledger:metrics.airtable_candidates",
+            "airtable_suppressed": "reporting_ledger:metrics.airtable_suppressed",
+            "airtable_write_failures": "reporting_ledger:metrics.airtable_write_failures"
+          },
+          "allow_instantly_enrollment": false,
+          "local_day": "2026-09-06"
+        },
+        {
+          "run_id": "20260906T202534Z-0395cf0a",
+          "status": "complete",
+          "mode": "live_acquisition_and_enrichment",
+          "started_at": "2026-09-06T20:25:34Z",
+          "finished_at": "2026-09-06T20:27:48Z",
+          "attributed_at": "2026-09-06T20:27:48Z",
+          "attribution_field": "run_manifest.finished_at",
+          "realism": "production",
+          "artifacts_present": [
+            "ledger"
+          ],
+          "path": "/tmp/gtm-original-ledger-recheck-4htyf83b/reporting_ledger/20260906T202534Z-0395cf0a.json",
+          "evidence_source": "ledger",
+          "heavy_artifacts_present": false,
+          "stop_reason": "topup:max_iterations_guard",
+          "metrics": {
+            "jobs_captured": 0,
+            "jobs_reviewed": 2000,
+            "qualified_opportunities": 26,
+            "contacts_found": 2,
+            "sent_to_airtable": 0,
+            "provider_jobs_returned": 0,
+            "provider_jobs_billed": 0,
+            "historical_duplicates": 0,
+            "canonical_duplicates_in_run": 0,
+            "cross_query_duplicates": 0,
+            "cross_source_duplicates": 0,
+            "unique_opportunities": 26,
+            "final_pass_leads": 0,
+            "verified_emails": 2,
+            "role_qualified_postings": 1701,
+            "companies_considered": 5,
+            "airtable_candidates": 26,
+            "airtable_suppressed": 0,
+            "airtable_write_failures": 0,
+            "sent_to_instantly": null
+          },
+          "metric_sources": {
+            "jobs_captured": "reporting_ledger:metrics.net_new_jobs_captured",
+            "jobs_reviewed": "reporting_ledger:metrics.jobs_reviewed",
+            "qualified_opportunities": "reporting_ledger:metrics.qualified_opportunities",
+            "contacts_found": "reporting_ledger:metrics.contacts_found",
+            "sent_to_airtable": "reporting_ledger:metrics.sent_to_airtable",
+            "provider_jobs_returned": "reporting_ledger:metrics.provider_jobs_returned",
+            "provider_jobs_billed": "reporting_ledger:metrics.provider_jobs_billed",
+            "historical_duplicates": "reporting_ledger:metrics.historical_previously_seen_duplicates",
+            "canonical_duplicates_in_run": "reporting_ledger:metrics.canonical_duplicates_in_run",
+            "cross_query_duplicates": "reporting_ledger:metrics.cross_query_duplicates",
+            "cross_source_duplicates": "reporting_ledger:metrics.cross_source_duplicates",
+            "unique_opportunities": "reporting_ledger:metrics.unique_opportunities",
+            "final_pass_leads": "reporting_ledger:metrics.final_pass_leads",
+            "verified_emails": "reporting_ledger:metrics.verified_emails",
+            "role_qualified_postings": "reporting_ledger:metrics.role_qualified_postings",
+            "companies_considered": "reporting_ledger:metrics.companies_considered",
+            "airtable_candidates": "reporting_ledger:metrics.airtable_candidates",
+            "airtable_suppressed": "reporting_ledger:metrics.airtable_suppressed",
+            "airtable_write_failures": "reporting_ledger:metrics.airtable_write_failures"
+          },
+          "allow_instantly_enrollment": false,
+          "local_day": "2026-09-06"
+        }
+      ],
+      "daily": [
+        {
+          "local_day": "2026-09-04",
+          "run_ids": [
+            "20260904T130130Z-13b44a0c",
+            "20260905T030439Z-1d102bec"
+          ],
+          "metrics": {
+            "jobs_captured": 6205,
+            "contacts_found": 1048,
+            "sent_to_airtable": 781,
+            "provider_jobs_returned": 6405,
+            "provider_jobs_billed": 6405,
+            "cross_query_duplicates": 200,
+            "unique_opportunities": 2410,
+            "final_pass_leads": 711,
+            "verified_emails": 1034,
+            "airtable_candidates": 1681,
+            "airtable_suppressed": 0,
+            "airtable_write_failures": 0,
+            "jobs_reviewed": 0,
+            "historical_duplicates": 0,
+            "canonical_duplicates_in_run": 0,
+            "cross_source_duplicates": 0,
+            "role_qualified_postings": 0,
+            "companies_considered": 0
+          }
+        },
+        {
+          "local_day": "2026-09-05",
+          "run_ids": [
+            "20260906T030230Z-2f74ac7c"
+          ],
+          "metrics": {
+            "jobs_captured": 226,
+            "jobs_reviewed": 226,
+            "contacts_found": 0,
+            "sent_to_airtable": 0,
+            "provider_jobs_returned": 5444,
+            "provider_jobs_billed": 5444,
+            "historical_duplicates": 0,
+            "canonical_duplicates_in_run": 0,
+            "cross_query_duplicates": 5218,
+            "cross_source_duplicates": 0,
+            "unique_opportunities": 0,
+            "final_pass_leads": 0,
+            "verified_emails": 0,
+            "role_qualified_postings": 194,
+            "companies_considered": 0,
+            "airtable_candidates": 0,
+            "airtable_suppressed": 0,
+            "airtable_write_failures": 0
+          }
+        },
+        {
+          "local_day": "2026-09-06",
+          "run_ids": [
+            "20260906T194056Z-6419f87a",
+            "20260906T200507Z-d046af2b",
+            "20260906T202534Z-0395cf0a"
+          ],
+          "metrics": {
+            "jobs_captured": 0,
+            "contacts_found": 2,
+            "sent_to_airtable": 0,
+            "provider_jobs_returned": 0,
+            "provider_jobs_billed": 0,
+            "historical_duplicates": 0,
+            "canonical_duplicates_in_run": 0,
+            "cross_query_duplicates": 0,
+            "cross_source_duplicates": 0,
+            "unique_opportunities": 26,
+            "final_pass_leads": 0,
+            "verified_emails": 2,
+            "airtable_candidates": 26,
+            "airtable_suppressed": 0,
+            "airtable_write_failures": 0,
+            "jobs_reviewed": 2000,
+            "qualified_opportunities": 26,
+            "role_qualified_postings": 1701,
+            "companies_considered": 5
+          }
+        }
+      ],
+      "bottleneck": {
+        "kind": "delivery_outcomes",
+        "boundary": "airtable_delivery",
+        "from_metric": "contacts_found",
+        "to_metric": "sent_to_airtable",
+        "entered": null,
+        "advanced": null,
+        "lost": null,
+        "loss_pct": null,
+        "top_reasons": [
+          {
+            "reason": "delivery_unreconciled",
+            "count": 900
+          },
+          {
+            "reason": "no_contact",
+            "count": 24
+          },
+          {
+            "reason": "send_safe_withheld",
+            "count": 2
+          }
+        ],
+        "evidence": [
+          "reporting_ledger:metrics.contacts_found",
+          "reporting_ledger:metrics.sent_to_airtable"
+        ],
+        "statement": "Delivery could not account for 900 submitted rows. Reconcile their outcomes against Airtable. Contacts found and Airtable creations do not establish a conversion rate.",
+        "unmeasured_boundaries": [
+          "sent_to_instantly"
+        ],
+        "incomparable_boundaries": [
+          {
+            "boundary": "review",
+            "reason": "jobs_captured and jobs_reviewed were summed over different run sets (only in jobs_captured: 20260904T130130Z-13b44a0c, 20260906T194056Z-6419f87a, 20260906T200507Z-d046af2b; only in jobs_reviewed: none), so their difference is not a loss"
+          },
+          {
+            "boundary": "qualification",
+            "reason": "jobs_reviewed counts posting and qualified_opportunities counts company_role_bucket_opportunity; one is not a subset of the other, so their difference is not a loss"
+          },
+          {
+            "boundary": "contact_discovery",
+            "reason": "qualified_opportunities and contacts_found were summed over different run sets (only in qualified_opportunities: none; only in contacts_found: 20260904T130130Z-13b44a0c, 20260905T030439Z-1d102bec, 20260906T030230Z-2f74ac7c, 20260906T194056Z-6419f87a, 20260906T200507Z-d046af2b), so their difference is not a loss"
+          },
+          {
+            "boundary": "airtable_delivery",
+            "reason": "Contacts found and Airtable creations are not proven subsets; recorded skip reasons do not make their difference a measured loss."
+          }
+        ]
+      },
+      "action_plan": [
+        {
+          "priority": 1,
+          "action": "Contacts are found but not written to Airtable. Review the delivery skip breakdown before adding acquisition volume.",
+          "basis": "recorded delivery outcomes; no comparable contact-to-creation rate",
+          "stakeholder_action": "Contacts are found but not written to Airtable. Review the delivery skip breakdown before adding acquisition volume."
+        },
+        {
+          "priority": 2,
+          "action": "Reconcile the rows delivery could not account for against Airtable and recover any failed writes.",
+          "basis": "recorded delivery reason delivery_unreconciled = 900",
+          "stakeholder_action": "Reconcile the rows delivery could not account for against Airtable and recover any failed writes."
+        }
+      ],
+      "gaps": [
+        {
+          "metric": "jobs_reviewed",
+          "reason": "3 of 6 runs did not report this counter; the total covers the runs that did",
+          "impact": "'Jobs reviewed' is a floor over 3 run(s), not a total.",
+          "remedy": "Identify which runs are silent and why. A partial total is a floor over the runs that answered; it is never presented as the period's number, and it must not be quoted as one."
+        },
+        {
+          "metric": "review_rate_pct",
+          "reason": "jobs_reviewed and jobs_captured were summed over different run sets (only in jobs_reviewed: none; only in jobs_captured: 20260904T130130Z-13b44a0c, 20260906T194056Z-6419f87a, 20260906T200507Z-d046af2b), so their ratio is not a rate for either population",
+          "impact": "'Review rate' is reported as unavailable, not as zero.",
+          "remedy": "Both jobs_captured and jobs_reviewed must be measurable for a rate to exist. A rate of 100% means every captured posting entered review; below 100 means a run stopped between acquiring postings and reviewing them."
+        },
+        {
+          "metric": "qualified_opportunities",
+          "reason": "5 of 6 runs did not report this counter; the total covers the runs that did",
+          "impact": "'Qualified opportunities' is a floor over 1 run(s), not a total.",
+          "remedy": "Identify which runs are silent and why. A partial total is a floor over the runs that answered; it is never presented as the period's number, and it must not be quoted as one."
+        },
+        {
+          "metric": "sent_to_instantly",
+          "reason": "the orchestrator ran with allow_instantly_enrollment=false in every run this window, so its artifacts provably cannot answer this. Enrollment is performed by the separate GTM Approved Sync service (run_approved.py), which writes no run artifact and has no volume -- its log lines do not survive the container. Run with --instantly to read the count from Instantly itself.",
+          "impact": "'Sent to Instantly' is reported as unavailable, not as zero.",
+          "remedy": "Run the report with --instantly so the count comes from Instantly's own lead.timestamp_created; the Approved Sync service writes no artifact to read."
+        }
+      ],
+      "run_status_census": {
+        "complete": 6
+      },
+      "run_census": {
+        "runs": [
+          {
+            "run_id": "20260901T130121Z-0cbadbc6",
+            "state": "complete",
+            "attributed_at": "2026-09-01T13:02:25+00:00",
+            "attribution_field": "run_manifest.finished_at",
+            "local_day": "2026-09-01",
+            "evidence": "ledger",
+            "reconstructed": true,
+            "decision": "excluded",
+            "reason": "finished outside the window (2026-09-01T13:02:25+00:00)",
+            "contributes": {
+              "jobs_captured": {
+                "value": null,
+                "field": null
+              },
+              "jobs_reviewed": {
+                "value": null,
+                "field": null
+              },
+              "qualified_opportunities": {
+                "value": null,
+                "field": null
+              },
+              "contacts_found": {
+                "value": 0,
+                "field": "reporting_ledger:metrics.contacts_found"
+              },
+              "sent_to_airtable": {
+                "value": 0,
+                "field": "reporting_ledger:metrics.sent_to_airtable"
+              }
+            }
+          },
+          {
+            "run_id": "20260902T130429Z-a54f4f19",
+            "state": "complete",
+            "attributed_at": "2026-09-02T13:05:11+00:00",
+            "attribution_field": "run_manifest.finished_at",
+            "local_day": "2026-09-02",
+            "evidence": "ledger",
+            "reconstructed": true,
+            "decision": "excluded",
+            "reason": "finished outside the window (2026-09-02T13:05:11+00:00)",
+            "contributes": {
+              "jobs_captured": {
+                "value": null,
+                "field": null
+              },
+              "jobs_reviewed": {
+                "value": null,
+                "field": null
+              },
+              "qualified_opportunities": {
+                "value": null,
+                "field": null
+              },
+              "contacts_found": {
+                "value": 0,
+                "field": "reporting_ledger:metrics.contacts_found"
+              },
+              "sent_to_airtable": {
+                "value": 0,
+                "field": "reporting_ledger:metrics.sent_to_airtable"
+              }
+            }
+          },
+          {
+            "run_id": "20260903T130019Z-65ca91e1",
+            "state": "complete",
+            "attributed_at": "2026-09-03T13:01:26+00:00",
+            "attribution_field": "run_manifest.finished_at",
+            "local_day": "2026-09-03",
+            "evidence": "ledger",
+            "reconstructed": true,
+            "decision": "excluded",
+            "reason": "finished outside the window (2026-09-03T13:01:26+00:00)",
+            "contributes": {
+              "jobs_captured": {
+                "value": 0,
+                "field": "reporting_ledger:metrics.net_new_jobs_captured"
+              },
+              "jobs_reviewed": {
+                "value": null,
+                "field": null
+              },
+              "qualified_opportunities": {
+                "value": null,
+                "field": null
+              },
+              "contacts_found": {
+                "value": 0,
+                "field": "reporting_ledger:metrics.contacts_found"
+              },
+              "sent_to_airtable": {
+                "value": 0,
+                "field": "reporting_ledger:metrics.sent_to_airtable"
+              }
+            }
+          },
+          {
+            "run_id": "20260904T130130Z-13b44a0c",
+            "state": "complete",
+            "attributed_at": "2026-09-04T16:21:19+00:00",
+            "attribution_field": "run_manifest.finished_at",
+            "local_day": "2026-09-04",
+            "evidence": "ledger",
+            "reconstructed": true,
+            "decision": "included",
+            "reason": "",
+            "contributes": {
+              "jobs_captured": {
+                "value": 6205,
+                "field": "reporting_ledger:metrics.net_new_jobs_captured"
+              },
+              "jobs_reviewed": {
+                "value": null,
+                "field": null
+              },
+              "qualified_opportunities": {
+                "value": null,
+                "field": null
+              },
+              "contacts_found": {
+                "value": 1048,
+                "field": "reporting_ledger:metrics.contacts_found"
+              },
+              "sent_to_airtable": {
+                "value": 781,
+                "field": "reporting_ledger:metrics.sent_to_airtable"
+              }
+            }
+          },
+          {
+            "run_id": "20260905T030439Z-1d102bec",
+            "state": "complete",
+            "attributed_at": "2026-09-05T03:05:59+00:00",
+            "attribution_field": "run_manifest.finished_at",
+            "local_day": "2026-09-04",
+            "evidence": "ledger",
+            "reconstructed": false,
+            "decision": "included",
+            "reason": "",
+            "contributes": {
+              "jobs_captured": {
+                "value": 0,
+                "field": "reporting_ledger:metrics.net_new_jobs_captured"
+              },
+              "jobs_reviewed": {
+                "value": 0,
+                "field": "reporting_ledger:metrics.jobs_reviewed"
+              },
+              "qualified_opportunities": {
+                "value": null,
+                "field": null
+              },
+              "contacts_found": {
+                "value": 0,
+                "field": "reporting_ledger:metrics.contacts_found"
+              },
+              "sent_to_airtable": {
+                "value": 0,
+                "field": "reporting_ledger:metrics.sent_to_airtable"
+              }
+            }
+          },
+          {
+            "run_id": "20260906T030230Z-2f74ac7c",
+            "state": "complete",
+            "attributed_at": "2026-09-06T03:16:31+00:00",
+            "attribution_field": "run_manifest.finished_at",
+            "local_day": "2026-09-05",
+            "evidence": "ledger",
+            "reconstructed": false,
+            "decision": "included",
+            "reason": "",
+            "contributes": {
+              "jobs_captured": {
+                "value": 226,
+                "field": "reporting_ledger:metrics.net_new_jobs_captured"
+              },
+              "jobs_reviewed": {
+                "value": 226,
+                "field": "reporting_ledger:metrics.jobs_reviewed"
+              },
+              "qualified_opportunities": {
+                "value": null,
+                "field": null
+              },
+              "contacts_found": {
+                "value": 0,
+                "field": "reporting_ledger:metrics.contacts_found"
+              },
+              "sent_to_airtable": {
+                "value": 0,
+                "field": "reporting_ledger:metrics.sent_to_airtable"
+              }
+            }
+          },
+          {
+            "run_id": "20260906T194056Z-6419f87a",
+            "state": "complete",
+            "attributed_at": "2026-09-06T19:41:45+00:00",
+            "attribution_field": "run_manifest.finished_at",
+            "local_day": "2026-09-06",
+            "evidence": "ledger",
+            "reconstructed": false,
+            "decision": "included",
+            "reason": "",
+            "contributes": {
+              "jobs_captured": {
+                "value": 0,
+                "field": "reporting_ledger:metrics.net_new_jobs_captured"
+              },
+              "jobs_reviewed": {
+                "value": null,
+                "field": null
+              },
+              "qualified_opportunities": {
+                "value": null,
+                "field": null
+              },
+              "contacts_found": {
+                "value": 0,
+                "field": "reporting_ledger:metrics.contacts_found"
+              },
+              "sent_to_airtable": {
+                "value": 0,
+                "field": "reporting_ledger:metrics.sent_to_airtable"
+              }
+            }
+          },
+          {
+            "run_id": "20260906T200507Z-d046af2b",
+            "state": "complete",
+            "attributed_at": "2026-09-06T20:05:37+00:00",
+            "attribution_field": "run_manifest.finished_at",
+            "local_day": "2026-09-06",
+            "evidence": "ledger",
+            "reconstructed": false,
+            "decision": "included",
+            "reason": "",
+            "contributes": {
+              "jobs_captured": {
+                "value": 0,
+                "field": "reporting_ledger:metrics.net_new_jobs_captured"
+              },
+              "jobs_reviewed": {
+                "value": null,
+                "field": null
+              },
+              "qualified_opportunities": {
+                "value": null,
+                "field": null
+              },
+              "contacts_found": {
+                "value": 0,
+                "field": "reporting_ledger:metrics.contacts_found"
+              },
+              "sent_to_airtable": {
+                "value": 0,
+                "field": "reporting_ledger:metrics.sent_to_airtable"
+              }
+            }
+          },
+          {
+            "run_id": "20260906T202534Z-0395cf0a",
+            "state": "complete",
+            "attributed_at": "2026-09-06T20:27:48+00:00",
+            "attribution_field": "run_manifest.finished_at",
+            "local_day": "2026-09-06",
+            "evidence": "ledger",
+            "reconstructed": false,
+            "decision": "included",
+            "reason": "",
+            "contributes": {
+              "jobs_captured": {
+                "value": 0,
+                "field": "reporting_ledger:metrics.net_new_jobs_captured"
+              },
+              "jobs_reviewed": {
+                "value": 2000,
+                "field": "reporting_ledger:metrics.jobs_reviewed"
+              },
+              "qualified_opportunities": {
+                "value": 26,
+                "field": "reporting_ledger:metrics.qualified_opportunities"
+              },
+              "contacts_found": {
+                "value": 2,
+                "field": "reporting_ledger:metrics.contacts_found"
+              },
+              "sent_to_airtable": {
+                "value": 0,
+                "field": "reporting_ledger:metrics.sent_to_airtable"
+              }
+            }
+          }
+        ],
+        "included": [
+          "20260904T130130Z-13b44a0c",
+          "20260905T030439Z-1d102bec",
+          "20260906T030230Z-2f74ac7c",
+          "20260906T194056Z-6419f87a",
+          "20260906T200507Z-d046af2b",
+          "20260906T202534Z-0395cf0a"
+        ],
+        "excluded": [
+          "20260901T130121Z-0cbadbc6",
+          "20260902T130429Z-a54f4f19",
+          "20260903T130019Z-65ca91e1"
+        ],
+        "included_runs_by_local_day": {
+          "2026-09-04": [
+            "20260904T130130Z-13b44a0c",
+            "20260905T030439Z-1d102bec"
+          ],
+          "2026-09-05": [
+            "20260906T030230Z-2f74ac7c"
+          ],
+          "2026-09-06": [
+            "20260906T194056Z-6419f87a",
+            "20260906T200507Z-d046af2b",
+            "20260906T202534Z-0395cf0a"
+          ]
+        },
+        "reconciles": {
+          "jobs_captured": {
+            "census_total": 6431,
+            "census_runs": [
+              "20260904T130130Z-13b44a0c",
+              "20260905T030439Z-1d102bec",
+              "20260906T030230Z-2f74ac7c",
+              "20260906T194056Z-6419f87a",
+              "20260906T200507Z-d046af2b",
+              "20260906T202534Z-0395cf0a"
+            ],
+            "census_silent_runs": [],
+            "census_expected_status": "measured",
+            "reported_value": 6431,
+            "reported_runs": [
+              "20260904T130130Z-13b44a0c",
+              "20260905T030439Z-1d102bec",
+              "20260906T030230Z-2f74ac7c",
+              "20260906T194056Z-6419f87a",
+              "20260906T200507Z-d046af2b",
+              "20260906T202534Z-0395cf0a"
+            ],
+            "reported_status": "measured",
+            "values_agree": true,
+            "completeness_agrees": true,
+            "agrees": true
+          },
+          "jobs_reviewed": {
+            "census_total": 2226,
+            "census_runs": [
+              "20260905T030439Z-1d102bec",
+              "20260906T030230Z-2f74ac7c",
+              "20260906T202534Z-0395cf0a"
+            ],
+            "census_silent_runs": [
+              "20260904T130130Z-13b44a0c",
+              "20260906T194056Z-6419f87a",
+              "20260906T200507Z-d046af2b"
+            ],
+            "census_expected_status": "partial",
+            "reported_value": 2226,
+            "reported_runs": [
+              "20260905T030439Z-1d102bec",
+              "20260906T030230Z-2f74ac7c",
+              "20260906T202534Z-0395cf0a"
+            ],
+            "reported_status": "partial",
+            "values_agree": true,
+            "completeness_agrees": true,
+            "agrees": true
+          },
+          "qualified_opportunities": {
+            "census_total": 26,
+            "census_runs": [
+              "20260906T202534Z-0395cf0a"
+            ],
+            "census_silent_runs": [
+              "20260904T130130Z-13b44a0c",
+              "20260905T030439Z-1d102bec",
+              "20260906T030230Z-2f74ac7c",
+              "20260906T194056Z-6419f87a",
+              "20260906T200507Z-d046af2b"
+            ],
+            "census_expected_status": "partial",
+            "reported_value": 26,
+            "reported_runs": [
+              "20260906T202534Z-0395cf0a"
+            ],
+            "reported_status": "partial",
+            "values_agree": true,
+            "completeness_agrees": true,
+            "agrees": true
+          },
+          "contacts_found": {
+            "census_total": 1050,
+            "census_runs": [
+              "20260904T130130Z-13b44a0c",
+              "20260905T030439Z-1d102bec",
+              "20260906T030230Z-2f74ac7c",
+              "20260906T194056Z-6419f87a",
+              "20260906T200507Z-d046af2b",
+              "20260906T202534Z-0395cf0a"
+            ],
+            "census_silent_runs": [],
+            "census_expected_status": "measured",
+            "reported_value": 1050,
+            "reported_runs": [
+              "20260904T130130Z-13b44a0c",
+              "20260905T030439Z-1d102bec",
+              "20260906T030230Z-2f74ac7c",
+              "20260906T194056Z-6419f87a",
+              "20260906T200507Z-d046af2b",
+              "20260906T202534Z-0395cf0a"
+            ],
+            "reported_status": "measured",
+            "values_agree": true,
+            "completeness_agrees": true,
+            "agrees": true
+          },
+          "sent_to_airtable": {
+            "census_total": 781,
+            "census_runs": [
+              "20260904T130130Z-13b44a0c",
+              "20260905T030439Z-1d102bec",
+              "20260906T030230Z-2f74ac7c",
+              "20260906T194056Z-6419f87a",
+              "20260906T200507Z-d046af2b",
+              "20260906T202534Z-0395cf0a"
+            ],
+            "census_silent_runs": [],
+            "census_expected_status": "measured",
+            "reported_value": 781,
+            "reported_runs": [
+              "20260904T130130Z-13b44a0c",
+              "20260905T030439Z-1d102bec",
+              "20260906T030230Z-2f74ac7c",
+              "20260906T194056Z-6419f87a",
+              "20260906T200507Z-d046af2b",
+              "20260906T202534Z-0395cf0a"
+            ],
+            "reported_status": "measured",
+            "values_agree": true,
+            "completeness_agrees": true,
+            "agrees": true
+          }
+        },
+        "all_reconcile": true
+      },
+      "loss_reasons": {
+        "delivery_unreconciled": 900,
+        "email_unverified": 764,
+        "not_icp": 606,
+        "hiring_manager_not_found": 273,
+        "REJECT_QUALITY_GUARD_OTHER": 220,
+        "company_unresolved": 106,
+        "REJECT_ROLE_MISMATCH": 65,
+        "no_contact": 24,
+        "unverified": 24,
+        "REJECT_SECURITY_CLEARANCE_REQUIRED": 16,
+        "REJECT_ROLE_NOT_GLOBALLY_COVERABLE": 12,
+        "REJECT_INTERNSHIP": 9,
+        "REJECT_EXCLUDED_SENIORITY": 7,
+        "needs_check": 2,
+        "send_safe_withheld": 2
+      },
+      "disposition_census": {},
+      "acquisition_lane_failures": [],
+      "collectors": [],
+      "provenance": {
+        "artifact_roots": [
+          "/tmp/gtm-original-ledger-recheck-4htyf83b"
+        ],
+        "unattributable_run_ids": [],
+        "excluded_simulated_runs": [],
+        "problems": [],
+        "runs_reported_from_ledger_only": [
+          "20260904T130130Z-13b44a0c",
+          "20260905T030439Z-1d102bec",
+          "20260906T030230Z-2f74ac7c",
+          "20260906T194056Z-6419f87a",
+          "20260906T200507Z-d046af2b",
+          "20260906T202534Z-0395cf0a"
+        ],
+        "runs_with_heavy_artifacts": [],
+        "writes_performed": "none (read-only report)"
+      }
+    }
+  }
+}

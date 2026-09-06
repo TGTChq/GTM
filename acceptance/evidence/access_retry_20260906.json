@@ -1,0 +1,274 @@
+{
+  "observed_at": "2026-09-06T22:58:34.518Z",
+  "railway": {
+    "environment": {
+      "id": "bae427bd-64a6-4f4e-8f56-fbd406985434",
+      "name": "production",
+      "unmergedChangesCount": null
+    },
+    "project": {
+      "id": "898f2e3a-1c1e-4b00-b9a6-686cf0432282",
+      "name": "tgtc-daily-pipeline",
+      "workspaceName": "My Projects"
+    },
+    "services": [
+      {
+        "cronSchedule": "0 3 * * *",
+        "id": "3a41d0d7-cd66-4f53-baa6-886266ddbbed",
+        "latestDeployment": {
+          "createdAt": "2026-09-06T20:41:49.461Z",
+          "id": "35545a59-50e5-4758-810d-74b5e32195c0",
+          "status": "SUCCESS",
+          "url": null
+        },
+        "name": "GTM",
+        "numReplicas": 1
+      },
+      {
+        "cronSchedule": "0 0 * * *",
+        "id": "d6b2e1c1-c931-4803-8555-91a8216124bc",
+        "latestDeployment": {
+          "createdAt": "2026-09-06T20:41:32.988Z",
+          "id": "b1a0ef60-2c61-4ad4-a4d5-a628ee67c187",
+          "status": "SUCCESS",
+          "url": null
+        },
+        "name": "GTM Approved Sync",
+        "numReplicas": 1
+      }
+    ]
+  },
+  "gtm_config": {
+    "config": {
+      "build": {
+        "buildEnvironment": "V3",
+        "builder": "RAILPACK"
+      },
+      "deploy": {
+        "cronSchedule": "0 3 * * *",
+        "ipv6EgressEnabled": false,
+        "multiRegionConfig": {
+          "sfo": {
+            "numReplicas": 1
+          }
+        },
+        "restartPolicyType": "NEVER",
+        "runtime": "V2",
+        "startCommand": "sh -c 'python -u run_orchestrator.py --mode live_acquisition_and_enrichment --lanes fantastic --target 300 --airtable-write --global-budget 1500 --artifact-root /app/data/state/orchestrator_v2; rc=$?; python -u run_weekly_report.py --artifact-root /app/data/state/orchestrator_v2 --if-due friday --once-per-window --anchored --require-completed-run --instantly --slack --max-seconds 480 || true; exit $rc'",
+        "useLegacyStacker": false
+      },
+      "networking": {
+        "privateNetworkEndpoint": "gtm"
+      },
+      "source": {
+        "branch": "main",
+        "checkSuites": false,
+        "repo": "TGTChq/GTM"
+      },
+      "volumeMounts": {
+        "ff83ecc1-750d-4781-bf14-5e29a3678de4": {
+          "mountPath": "/app/data/state"
+        }
+      }
+    },
+    "environment": {
+      "id": "bae427bd-64a6-4f4e-8f56-fbd406985434",
+      "name": "production"
+    },
+    "service": {
+      "id": "3a41d0d7-cd66-4f53-baa6-886266ddbbed",
+      "name": "GTM"
+    }
+  },
+  "variable_values_redacted": true,
+  "deployments": [
+    {
+      "id": "35545a59-50e5-4758-810d-74b5e32195c0",
+      "createdAt": "2026-09-06T20:41:49.461Z",
+      "status": "SUCCESS",
+      "commitHash": "6cd4fef879edee0b130cd9a5749982dc5b88427d",
+      "updatedAt": "2026-09-06T20:42:02.829Z"
+    },
+    {
+      "id": "963f7dd5-90cd-4a79-922e-8a59c565d9d2",
+      "createdAt": "2026-09-06T20:41:47.733Z",
+      "status": "REMOVED",
+      "commitHash": "6cd4fef879edee0b130cd9a5749982dc5b88427d",
+      "updatedAt": "2026-09-06T20:41:57.525Z"
+    },
+    {
+      "id": "e6e60d13-3c3d-4597-8455-43872c0b5210",
+      "createdAt": "2026-09-06T20:41:32.990Z",
+      "status": "REMOVED",
+      "commitHash": "6cd4fef879edee0b130cd9a5749982dc5b88427d",
+      "updatedAt": "2026-09-06T20:42:04.723Z"
+    },
+    {
+      "id": "4dd3dc27-b1e2-4c1f-8dd7-1916f0d9e82d",
+      "createdAt": "2026-09-06T20:37:22.848Z",
+      "status": "REMOVED",
+      "commitHash": "39f6b31487e45efaa7427d8b4153894c0b982e66",
+      "updatedAt": "2026-09-06T20:41:53.943Z"
+    },
+    {
+      "id": "0c2692c8-e7eb-469f-8069-0f38989671bd",
+      "createdAt": "2026-09-06T20:18:19.684Z",
+      "status": "REMOVED",
+      "commitHash": "241572c802318d5dc93fa17efc3828d5d5e4b926",
+      "updatedAt": "2026-09-06T20:37:44.400Z"
+    },
+    {
+      "id": "782aaebd-8553-48f5-bd23-e3037a4dc709",
+      "createdAt": "2026-09-06T19:58:59.581Z",
+      "status": "REMOVED",
+      "commitHash": "6574ebe4693ba8efb08f64d8e6e3066bfbf69d02",
+      "updatedAt": "2026-09-06T20:18:40.940Z"
+    },
+    {
+      "id": "98cb37e7-643f-4ef0-a058-3c80e1d1dd87",
+      "createdAt": "2026-09-06T19:33:38.434Z",
+      "status": "REMOVED",
+      "commitHash": "366c2645d515537dd3a3c2f4a896345d878dae6b",
+      "updatedAt": "2026-09-06T19:59:19.601Z"
+    },
+    {
+      "id": "6b751c1f-be0b-4e75-8a75-b5931d78be32",
+      "createdAt": "2026-09-06T19:33:36.898Z",
+      "status": "REMOVED",
+      "commitHash": "366c2645d515537dd3a3c2f4a896345d878dae6b",
+      "updatedAt": "2026-09-06T19:33:45.178Z"
+    },
+    {
+      "id": "d5ac0978-3160-4ef7-8991-e3056d6bddc6",
+      "createdAt": "2026-09-06T19:33:35.453Z",
+      "status": "REMOVED",
+      "commitHash": "366c2645d515537dd3a3c2f4a896345d878dae6b",
+      "updatedAt": "2026-09-06T19:33:44.295Z"
+    },
+    {
+      "id": "2b81e484-5951-4c50-b064-6203f343851b",
+      "createdAt": "2026-09-06T19:33:31.796Z",
+      "status": "REMOVED",
+      "commitHash": "366c2645d515537dd3a3c2f4a896345d878dae6b",
+      "updatedAt": "2026-09-06T19:33:40.226Z"
+    },
+    {
+      "id": "4b05f764-0ace-4c78-9919-f2dd178bfdfa",
+      "createdAt": "2026-09-06T19:33:18.493Z",
+      "status": "REMOVED",
+      "commitHash": "366c2645d515537dd3a3c2f4a896345d878dae6b",
+      "updatedAt": "2026-09-06T19:33:52.209Z"
+    },
+    {
+      "id": "9516a935-72d9-4372-94ff-f068c00c2951",
+      "createdAt": "2026-09-06T19:15:32.765Z",
+      "status": "REMOVED",
+      "commitHash": "929bc0aa23f3efebf40441555dd793eae8824783",
+      "updatedAt": "2026-09-06T19:33:37.742Z"
+    },
+    {
+      "id": "53655a38-dcb8-4f82-9dad-ec71f5632361",
+      "createdAt": "2026-09-06T19:15:30.996Z",
+      "status": "REMOVED",
+      "commitHash": "929bc0aa23f3efebf40441555dd793eae8824783",
+      "updatedAt": "2026-09-06T19:15:51.743Z"
+    },
+    {
+      "id": "ba9e62aa-9da0-45f8-97f1-e5658ff0c487",
+      "createdAt": "2026-09-06T19:15:16.585Z",
+      "status": "REMOVED",
+      "commitHash": "929bc0aa23f3efebf40441555dd793eae8824783",
+      "updatedAt": "2026-09-06T19:15:51.748Z"
+    },
+    {
+      "id": "a5a6faf8-cf8a-4b00-b76d-bc0d8dcbefb4",
+      "createdAt": "2026-09-06T18:39:27.027Z",
+      "status": "REMOVED",
+      "commitHash": "39adcaf0ba20ccf4844cb3b23659dc332d2385df",
+      "updatedAt": "2026-09-06T19:15:41.779Z"
+    },
+    {
+      "id": "ae7ec4fd-e503-4c2d-9bfb-bf5702796b71",
+      "createdAt": "2026-09-06T18:26:47.463Z",
+      "status": "REMOVED",
+      "commitHash": "e7b15299f5b34a4d21ddd6549051250f8cb5cc23",
+      "updatedAt": "2026-09-06T18:39:47.166Z"
+    },
+    {
+      "id": "fa9f4ab5-cc6b-4508-87e2-20916d7238c6",
+      "createdAt": "2026-09-06T18:26:29.283Z",
+      "status": "REMOVED",
+      "commitHash": "e7b15299f5b34a4d21ddd6549051250f8cb5cc23",
+      "updatedAt": "2026-09-06T18:27:00.771Z"
+    },
+    {
+      "id": "11653106-12ff-4e55-9bd9-34efbb3536a7",
+      "createdAt": "2026-09-06T18:09:11.640Z",
+      "status": "REMOVED",
+      "commitHash": "e90994adb90243484c7b5dba5ae1241894648421",
+      "updatedAt": "2026-09-06T18:26:48.545Z"
+    },
+    {
+      "id": "422c6f8f-8171-4082-870e-9d7aa0b2adb2",
+      "createdAt": "2026-09-06T18:08:53.701Z",
+      "status": "REMOVED",
+      "commitHash": "e90994adb90243484c7b5dba5ae1241894648421",
+      "updatedAt": "2026-09-06T18:09:26.433Z"
+    },
+    {
+      "id": "92c8e05c-07ef-4ae2-a1fe-afa7de5a7ed1",
+      "createdAt": "2026-09-06T17:53:20.730Z",
+      "status": "REMOVED",
+      "commitHash": "a406014cbc996aa49b6f660c92e65daa959d411e",
+      "updatedAt": "2026-09-06T18:09:19.428Z"
+    },
+    {
+      "id": "331f8246-f9bb-4f60-8d56-e749cecf9e88",
+      "createdAt": "2026-09-06T17:53:06.635Z",
+      "status": "REMOVED",
+      "commitHash": "a406014cbc996aa49b6f660c92e65daa959d411e",
+      "updatedAt": "2026-09-06T17:53:35.648Z"
+    },
+    {
+      "id": "2c8296f3-71a8-4c87-8399-095e1430176a",
+      "createdAt": "2026-09-06T17:52:46.835Z",
+      "status": "REMOVED",
+      "commitHash": "aa4756e3b579055ce063242c833d06025ee17c1f",
+      "updatedAt": "2026-09-06T17:53:27.814Z"
+    },
+    {
+      "id": "e8e3ed56-9bb3-4cea-ba6a-43608b730fea",
+      "createdAt": "2026-09-06T17:35:19.052Z",
+      "status": "REMOVED",
+      "commitHash": "c597e3542d60c497d5807275ba2a6903d505109f",
+      "updatedAt": "2026-09-06T17:53:06.474Z"
+    },
+    {
+      "id": "55a8cce8-ec49-4f78-98d0-97618e573686",
+      "createdAt": "2026-09-06T17:35:02.318Z",
+      "status": "REMOVED",
+      "commitHash": "c597e3542d60c497d5807275ba2a6903d505109f",
+      "updatedAt": "2026-09-06T17:35:36.019Z"
+    },
+    {
+      "id": "54bc932d-7f82-4dfe-bd65-6b08f88c6c1e",
+      "createdAt": "2026-09-06T15:26:20.785Z",
+      "status": "REMOVED",
+      "commitHash": "5029248eff4bc442ecec96178304ddbfa284be03",
+      "updatedAt": "2026-09-06T17:35:27.324Z"
+    }
+  ],
+  "github_publish_error": {
+    "error": "GitHub API error 403: {\"message\":\"Resource not accessible by integration\",\"documentation_url\":\"https://docs.github.com/rest/git/trees#create-a-tree\",\"status\":\"403\"}",
+    "error_code": "FORBIDDEN",
+    "error_data": {
+      "documentation_url": "https://docs.github.com/rest/git/trees#create-a-tree",
+      "message": "Resource not accessible by integration",
+      "status": "403"
+    }
+  },
+  "github_installations": {
+    "allow_all_repositories_for_testing": false,
+    "installations": []
+  }
+}
