@@ -196,6 +196,19 @@ no delivery. The rows are classified and counted, not enriched.
 *Decision it informs.* Whether to widen the role catalog — the only lever of the
 right order of magnitude for the 1,000/day target.
 
+*Why this cannot be shortcut by "just adding the obvious adjacent titles".* The
+catalog already holds **131 roles across 10 function buckets** (engineering 32,
+marketing 27, gtm_revenue 15, finance 12, people_hr 12, operations 9, customer
+success 7, customer support 6, ecommerce 6, product 5). Probing it for the titles one
+would reach for first — revenue operations, growth, partnerships, business
+development, sales enablement, solutions, lifecycle, brand, content, SEO, product
+marketing, sales development, community — finds **all but three already present**
+(demand generation, account management, channel). So the 15× excluded inventory is
+unlikely to be adjacent GTM roles that were simply forgotten; it is far more likely
+to be genuinely different work. That makes a guess a bad instrument and a
+measurement a cheap one, which is exactly why this is the request rather than a
+catalog patch.
+
 ### 2. Activate the 145 direct ATS boards — **0 credits, one variable**
 
 `ATS_DIRECT_ACQUISITION_ENABLED` is already true, but the lane is built only when
