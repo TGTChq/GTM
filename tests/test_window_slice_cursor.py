@@ -158,3 +158,59 @@ class TheWindowStillClosesHonestly(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SliceProgressIsNotDurableUntilCustodyIsTaken(unittest.TestCase):
+    """Slice completion is continuation state, so it obeys the same ordering rule as
+    the offset it replaces: it must not become durable before the rows it advances
+    past are held.
+
+    `_run_sliced` originally called `self._save()` at the end of its loop, which
+    persisted `window_slices` BEFORE `checkpoint()` ran the custody hook -- reopening
+    the exact gap the hook exists to close. A run that died in between would have
+    recorded slices as drained while nothing held their rows.
+    """
+
+    def test_the_sliced_pass_does_not_persist_state_itself(self):
+        import inspect
+
+        import fantastic_jobs_adapter as fja
+
+        # As a CALL, not as text -- the comment explaining the absence names it.
+        import ast
+        import textwrap
+
+        source = textwrap.dedent(
+            inspect.getsource(fja.DateCreatedWatermarkEngine._run_sliced))
+        calls = {getattr(n.func, "attr", "") for n in ast.walk(ast.parse(source))
+                 if isinstance(n, ast.Call)}
+        self.assertNotIn("_save", calls,
+                         "continuation must be saved by checkpoint(), after custody")
+
+    def test_a_failed_custody_hook_leaves_no_slice_recorded(self):
+        import json as _json
+        import os as _os
+        import tempfile as _tempfile
+
+        import fantastic_jobs_adapter as fja
+        from tests.test_continuation_multirun_replay import MovingFloorFeed as _Feed
+
+        state = _os.path.join(_tempfile.mkdtemp(), "wm.json")
+        feed = _Feed()
+        fja.set_custody_hook(lambda _rows: False)
+        try:
+            _run(state, feed, BASE, cap=240, seen=set(),
+                 FANTASTIC_WINDOW_SLICING_ENABLED=True)
+        finally:
+            fja.set_custody_hook(None)
+
+        persisted = _json.load(open(state, encoding="utf-8")) if _os.path.exists(state) else {}
+        self.assertFalse((persisted.get("window_slices") or {}).get(LABEL),
+                         "custody failed, so no slice may be recorded as drained")
+
+    def test_checkpoint_does_persist_them_when_custody_succeeds(self):
+        out = _sweep(True, cap=240, days=3)
+        with open(out["state"], encoding="utf-8") as fh:
+            state = json.load(fh)
+        self.assertTrue((state.get("window_slices") or {}).get(LABEL),
+                        "the normal path still records progress")

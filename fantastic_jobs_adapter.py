@@ -2723,7 +2723,13 @@ class DateCreatedWatermarkEngine:
 
         if len(done) >= len(slices) and slices:
             self.mark_source_drained_from_slices(label)
-        self._save()
+        # DELIBERATELY NOT `self._save()`. Slice progress is continuation state, and
+        # continuation must not become durable before the rows it advances past are
+        # in custody. `checkpoint()` runs the custody hook and only then saves, so
+        # persisting here would reopen the exact gap the hook exists to close: a run
+        # that died in between would have recorded slices as drained while nothing
+        # held their rows. In-memory progress is enough -- a run that never reaches
+        # checkpoint has bought nothing it can keep either.
 
     def mark_source_drained_from_slices(self, label: str) -> None:
         """Every slice of this window drained -- the source is genuinely finished.
