@@ -1399,6 +1399,11 @@ SEEN_JOBS_RETENTION_DAYS = _env_int("SEEN_JOBS_RETENTION_DAYS", 30)
 # a pipeline run, on the existing schedule and with no start-command change. It is
 # refused unless acquisition is already paused, so it can never mask a live run.
 MAINTENANCE_ONLY = _env_bool("MAINTENANCE_ONLY", False)
+# Optional steps for a maintenance pass, settable without a code change so a single
+# scheduled container can be pointed at a specific job.
+MAINTENANCE_CAPACITY_RUNS = os.getenv("MAINTENANCE_CAPACITY_RUNS", "")
+MAINTENANCE_DROP_EMPTY_RUN = os.getenv("MAINTENANCE_DROP_EMPTY_RUN", "")
+MAINTENANCE_WINDOW_START = os.getenv("MAINTENANCE_WINDOW_START", "2026-09-04T07:00:00Z")
 PENDING_WORK_ENABLED = _env_bool("PENDING_WORK_ENABLED", True)
 PENDING_WORK_RESUME_MAX_PER_RUN = _env_int("PENDING_WORK_RESUME_MAX_PER_RUN", 2000)
 PENDING_WORK_MAX_AGE_DAYS = _env_int("PENDING_WORK_MAX_AGE_DAYS", 14)

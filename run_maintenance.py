@@ -34,7 +34,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import shutil
 import sys
 import tempfile
@@ -159,7 +158,6 @@ def reconcile(root: Path, run_id: str) -> dict:
 def adopt(root: Path) -> dict:
     """Lift retained opportunity lists into custody. Idempotent and bounded."""
     from orchestrator import pending_work
-    from orchestrator.state import STORES  # noqa: F401  (documents the store name)
 
     store = root / pending_work.STORE
     seen_terminal: set = set()
@@ -224,6 +222,66 @@ def drop_empty_run(root: Path, run_id: str) -> dict:
     if run_dir.is_dir():
         shutil.rmtree(run_dir, ignore_errors=True)
         out["removed_dir"] = not run_dir.is_dir()
+    return out
+
+
+def capacity(root: Path, run_ids) -> dict:
+    """Distinct company x function OPPORTUNITIES behind a run's retained postings.
+
+    This is the quantity approvals are actually capped by -- one active Airtable row
+    per company x role bucket -- and it had never been measured for any cohort,
+    because posting counts are not opportunity counts and no count endpoint returns
+    it. The retained `postings.json` payloads make it computable offline.
+
+    It uses the PRODUCTION identity functions, not a local re-implementation:
+    `multi_source_acquisition._classify` assigns `_matched_role`,
+    `role_mapping.get_bucket_name_for_job` turns that into the function bucket, and
+    `airtable_client._company_identity_keys_from_job` supplies the employer identity
+    the suppression rule keys on. No provider is contacted and nothing is written.
+    """
+    from airtable_client import _company_identity_keys_from_job
+    from multi_source_acquisition import _classify
+    from role_mapping import get_bucket_name_for_job
+
+    out = {"unit_note": "postings -> company x function opportunities", "runs": []}
+    for run_id in run_ids:
+        src = root / "run_artifacts" / run_id / "enrichment" / "postings.json"
+        row = {"run_id": run_id, "postings": None, "companies": None,
+               "opportunities": None, "role_relevant_postings": None,
+               "postings_per_opportunity": None, "unavailable": ""}
+        if not src.is_file():
+            row["unavailable"] = "postings.json absent"
+            out["runs"].append(row)
+            continue
+        try:
+            data = json.loads(src.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            row["unavailable"] = f"unreadable: {type(exc).__name__}"
+            out["runs"].append(row)
+            continue
+        jobs = [j for j in (data.get("jobs") or []) if isinstance(j, dict)]
+        row["postings"] = len(jobs)
+        companies, opportunities, relevant = set(), set(), 0
+        for job in jobs:
+            try:
+                _classify(job)
+            except Exception:  # noqa: BLE001 - one bad row must not stop the count
+                continue
+            if str(job.get("_role_relevance_status") or "").lower() != "reject":
+                relevant += 1
+            keys = _company_identity_keys_from_job(job)
+            if not keys:
+                continue
+            company = sorted(keys)[0]
+            companies.add(company)
+            bucket = get_bucket_name_for_job(job) or "unbucketed"
+            opportunities.add(f"{company}|{bucket}")
+        row["companies"] = len(companies)
+        row["opportunities"] = len(opportunities)
+        row["role_relevant_postings"] = relevant
+        if opportunities:
+            row["postings_per_opportunity"] = round(len(jobs) / len(opportunities), 3)
+        out["runs"].append(row)
     return out
 
 
@@ -323,6 +381,9 @@ def main(argv=None) -> int:
     ap.add_argument("--instantly", action="store_true",
                     help="read-only Instantly count for the report window")
     ap.add_argument("--backup-dir", default="")
+    ap.add_argument("--capacity-runs", default="",
+                    help="comma-separated run ids to measure "
+                         "company x function opportunities for")
     ap.add_argument("--drop-empty-run", default="",
                     help="remove a phantom run dir + ledger entry "
                          "(refuses if either carries evidence)")
@@ -354,6 +415,11 @@ def main(argv=None) -> int:
     if a.drop_empty_run:
         _say(f"4b. DROP PHANTOM RUN {a.drop_empty_run}")
         print(json.dumps(drop_empty_run(root, a.drop_empty_run), indent=2))
+
+    if a.capacity_runs:
+        _say("4c. CAPACITY: company x function opportunities from retained payloads")
+        ids = [r.strip() for r in a.capacity_runs.split(",") if r.strip()]
+        print(json.dumps(capacity(root, ids), indent=2))
 
     _say("5. REPORTING: artifacts+ledger VS ledger-only, on production files")
     rc = ab_and_report(root, a.window_start, a.instantly)

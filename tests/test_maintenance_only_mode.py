@@ -66,17 +66,47 @@ class MaintenanceOnlyReachesNoPipelineCode(unittest.TestCase):
         self.assertIn("import run_maintenance", head)
         self.assertIn("run_maintenance.main(", head)
 
-    def test_the_maintenance_module_imports_no_provider_or_write_client(self):
-        """Structural: the module never imports acquisition, Apollo, Hunter, the
-        Airtable writer or the Instantly writer at any level."""
+    def test_the_maintenance_module_reaches_no_provider(self):
+        """Structural: no acquisition adapter, no Apollo, no Hunter, no delivery."""
         import run_maintenance
 
         source = open(run_maintenance.__file__, encoding="utf-8").read()
         for forbidden in ("fantastic_jobs_adapter", "apollo_client", "hunter",
-                          "instantly_client", "airtable_client",
-                          "real_fantastic_runner", "RealDelivery"):
+                          "instantly_client", "real_fantastic_runner", "RealDelivery"):
             self.assertNotIn(forbidden, source,
                              f"maintenance must not reach {forbidden}")
+
+    def test_it_calls_no_write_entry_point(self):
+        """`airtable_client` IS imported -- for `_company_identity_keys_from_job`,
+        the production key the suppression rule uses, which capacity measurement must
+        not re-implement. What must never appear is a CALL that writes."""
+        import ast
+
+        import run_maintenance
+
+        tree = ast.parse(open(run_maintenance.__file__, encoding="utf-8").read())
+        called = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call):
+                fn = node.func
+                called.add(getattr(fn, "id", None) or getattr(fn, "attr", None) or "")
+        for forbidden in ("push_leads", "enroll_record", "enroll_approved_leads",
+                          "create_leads", "deliver"):
+            self.assertNotIn(forbidden, called,
+                             f"maintenance must never call {forbidden}")
+
+    def test_only_pure_helpers_are_taken_from_airtable_client(self):
+        import ast
+
+        import run_maintenance
+
+        tree = ast.parse(open(run_maintenance.__file__, encoding="utf-8").read())
+        imported = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and node.module == "airtable_client":
+                imported.update(a.name for a in node.names)
+        self.assertTrue(imported <= {"_company_identity_keys_from_job"},
+                        f"unexpected airtable_client imports: {imported}")
 
     def test_it_never_sends_slack(self):
         """Checked as CODE, not as prose: no slack module, no webhook read, no

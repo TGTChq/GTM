@@ -608,11 +608,15 @@ def main(argv=None) -> int:
         import run_maintenance
         print("MAINTENANCE_ONLY: delegating to run_maintenance; no run directory, "
               "lane runner, engine or delivery manager is created.")
-        return run_maintenance.main([
-            "--artifact-root", str(a.artifact_root),
-            "--window-start", "2026-09-04T07:00:00Z",
-            "--instantly",
-        ])
+        argv = ["--artifact-root", str(a.artifact_root),
+                "--window-start", str(getattr(config, "MAINTENANCE_WINDOW_START", "")
+                                      or "2026-09-04T07:00:00Z"),
+                "--instantly"]
+        if getattr(config, "MAINTENANCE_CAPACITY_RUNS", ""):
+            argv += ["--capacity-runs", str(config.MAINTENANCE_CAPACITY_RUNS)]
+        if getattr(config, "MAINTENANCE_DROP_EMPTY_RUN", ""):
+            argv += ["--drop-empty-run", str(config.MAINTENANCE_DROP_EMPTY_RUN)]
+        return run_maintenance.main(argv)
 
     ctx = RunContext.create(mode, _identity_arguments(a), run_id=a.run_id)
     state = StateManager(a.artifact_root, policy, run_id=ctx.run_id)
