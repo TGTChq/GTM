@@ -80,11 +80,44 @@ def _record_apollo_error(
     write_error_artifact(_apollo_error_dir(), record)
 
 
-def _raise_credit_error(exc: BaseException) -> None:
+def _raise_credit_error(
+    exc: BaseException,
+    classification: Optional[ApolloErrorClassification] = None,
+) -> None:
+    """Report a credit stop in APOLLO's words, and prescribe no remedy.
+
+    The old text asserted "ask an Apollo admin to add credits". That is a fix we
+    invented: Apollo's body says the team has used its allotment *for this billing
+    cycle* and offers a plan upgrade, and on an account with pay-as-you-go or
+    additional usage the same code can mean a spend cap was hit, an overage
+    setting does not cover this credit type, or a payment failed. Those need
+    different actions, none of them visible from the API. So the exception now
+    carries Apollo's own error code and message and stops there -- an operator
+    reading it can see what Apollo actually said instead of a guess.
+    """
+    detail = ""
+    facts = ""
+    if classification is not None:
+        code = classification.error_code or ""
+        message = classification.message or ""
+        detail = f" Apollo says: {code + ' -- ' if code else ''}{message}".rstrip()
+        context = classification.context or {}
+        # Apollo attaches the diagnosis itself: which pool, what it reads the
+        # balance as, and when the cycle turns over. Repeat it verbatim rather
+        # than paraphrasing -- "next billing date 2026-09-18" is an option, and a
+        # message that only said "add credits" hid it.
+        pairs = [(k, context[k]) for k in
+                 ("credit_type", "credit_balance", "next_billing_date")
+                 if k in context]
+        if pairs:
+            facts = " Apollo reports " + ", ".join(f"{k}={v}" for k, v in pairs) + "."
     raise ApolloCreditsExhaustedError(
-        "Apollo credit-consuming enrichment is unavailable. Apollo's response "
-        "explicitly reports the team's shared credits are exhausted. Ask an "
-        "Apollo admin to add credits, then rerun the daily pipeline."
+        "Apollo refused credit-consuming calls: its response reports the team's "
+        f"credits are used up (HTTP {getattr(classification, 'status', None)})."
+        f"{detail}{facts} The remedy depends on which billing control fired -- "
+        "plan allotment, an additional-usage cap, or a billing failure -- and "
+        "which one it is is visible only in Apollo's billing settings, not over "
+        "the API. Waiting for the next billing date is also an option."
     ) from exc
 
 
@@ -97,7 +130,7 @@ def _raise_global_fatal(classification: ApolloErrorClassification, exc: BaseExce
     category = classification.category
     response = getattr(exc, "response", None)
     if category is ApolloErrorCategory.CREDIT_EXHAUSTED:
-        _raise_credit_error(exc)
+        _raise_credit_error(exc, classification)
     if category is ApolloErrorCategory.AUTHORIZATION:
         raise ApolloAuthorizationError(
             f"Apollo rejected the request (HTTP {classification.status}): "
@@ -245,9 +278,18 @@ def enrich_organization(
         ctx_domain = normalized_domain or domain
         # Global-fatal (credit / auth / rate limit): stop Apollo for the whole run.
         if classification.global_fatal:
+            # Log Apollo's OWN code and message, not just our category. Both are
+            # already sanitized by the classifier, and without them the only copy
+            # of what Apollo actually said is an artifact on the run volume --
+            # which is unreadable between cron runs, so a stop cannot be diagnosed
+            # from the log alone. That gap is what made "credit_exhausted (HTTP
+            # 422)" impossible to check against the account.
             logger.error(
-                "Apollo organization enrichment stopped for %s/%s: %s (HTTP %s).",
+                "Apollo organization enrichment stopped for %s/%s: %s (HTTP %s) "
+                "apollo_code=%s apollo_message=%s apollo_context=%s",
                 domain, name, classification.category.value, classification.status,
+                classification.error_code or "-", classification.message or "-",
+                classification.context or "-",
             )
             _record_apollo_error(
                 classification, domain=ctx_domain, retry_decision="none",
@@ -573,8 +615,11 @@ def match_person(person: Dict[str, Any]) -> PersonMatch:
         classification = classify_apollo_error(exc)
         if classification.global_fatal:
             logger.error(
-                "Apollo person enrichment stopped: %s (HTTP %s).",
+                "Apollo person enrichment stopped: %s (HTTP %s) "
+                "apollo_code=%s apollo_message=%s apollo_context=%s",
                 classification.category.value, classification.status,
+                classification.error_code or "-", classification.message or "-",
+                classification.context or "-",
             )
             _record_apollo_error(
                 classification, retry_decision="none",

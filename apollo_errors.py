@@ -84,6 +84,12 @@ class ApolloErrorClassification:
     message: str = ""
     retry_after: Optional[float] = None
     endpoint: str = ""
+    #: Scalar facts Apollo attaches under ``error_details.context``. For a credit
+    #: stop these are the whole diagnosis -- ``credit_type``, ``credit_balance``
+    #: and ``next_billing_date`` say which pool ran out, that Apollo reads it as
+    #: zero, and when the cycle resets. Dropping them is what forced a stop to be
+    #: investigated by hand against the account.
+    context: Dict[str, Any] = field(default_factory=dict)
 
     @property
     def global_fatal(self) -> bool:
@@ -103,6 +109,7 @@ class ApolloErrorClassification:
             "retry_after": self.retry_after,
             "endpoint": self.endpoint,
             "global_fatal": self.global_fatal,
+            "context": dict(self.context),
         }
 
 
@@ -154,23 +161,36 @@ def looks_like_credit_exhaustion(text: str) -> bool:
     return any(marker in body for marker in CREDIT_MARKERS)
 
 
-def _extract_error_fields(body: str) -> Dict[str, str]:
+def _extract_error_fields(body: str) -> Dict[str, Any]:
     """Pull ``error_code`` and a human message from Apollo's JSON body, sanitized.
 
     Falls back to the raw (sanitized) text when the body is not JSON.
     """
-    fields: Dict[str, str] = {}
+    fields: Dict[str, Any] = {}
     try:
         data = json.loads(body)
     except (ValueError, TypeError):
         data = None
 
     if isinstance(data, dict):
-        code = data.get("error_code") or data.get("code")
+        # Apollo nests its machine-readable code under ``error_details``:
+        #   {"error": "You have insufficient credits! <a href=...>Upgrade</a>...",
+        #    "error_details": {"code": "BILLING.LIMIT.CREDITS_EXHAUSTED",
+        #                      "message": "Your team has used all of its credits
+        #                                  for this billing cycle."}}
+        # Reading only the top level dropped the one field that says WHICH billing
+        # control fired, so a credit stop reached the operator as our category and
+        # nothing of Apollo's. ``error_details.message`` is preferred over
+        # ``error`` for the same reason: it is the plain sentence, where ``error``
+        # is an HTML upsell blob.
+        details = data.get("error_details")
+        details = details if isinstance(details, dict) else {}
+        code = data.get("error_code") or data.get("code") or details.get("code")
         if code is not None:
             fields["error_code"] = _sanitize_text(str(code))
         message = (
-            data.get("error")
+            details.get("message")
+            or data.get("error")
             or data.get("message")
             or data.get("error_message")
             or data.get("errors")
@@ -179,6 +199,20 @@ def _extract_error_fields(body: str) -> Dict[str, str]:
             fields["message"] = _sanitize_text(
                 message if isinstance(message, str) else json.dumps(message)
             )
+        # ``context`` is a map of {name: {value, description}}. Keep the values
+        # only, and only scalars -- a nested structure here is not evidence we
+        # know how to read, and copying it wholesale risks carrying something
+        # unsanitized into a log line.
+        raw_context = details.get("context")
+        if isinstance(raw_context, dict):
+            extracted = {}
+            for name, entry in raw_context.items():
+                value = entry.get("value") if isinstance(entry, dict) else entry
+                if isinstance(value, (str, int, float, bool)) or value is None:
+                    extracted[_sanitize_text(str(name))] = (
+                        _sanitize_text(value) if isinstance(value, str) else value)
+            if extracted:
+                fields["context"] = extracted
     if "message" not in fields:
         fields["message"] = _sanitize_text(body)
     return fields
@@ -205,6 +239,7 @@ def classify_apollo_error(exc: BaseException) -> ApolloErrorClassification:
             message=fields.get("message", ""),
             retry_after=float(retry_after) if retry_after is not None else None,
             endpoint=endpoint,
+            context=dict(fields.get("context") or {}),
         )
 
     # 1) Explicit credit exhaustion -- the only path to CREDIT_EXHAUSTED.
@@ -253,6 +288,7 @@ def build_error_record(
         "apollo_error_code": classification.error_code,
         "apollo_message": classification.message,
         "retry_after": classification.retry_after,
+        "apollo_context": dict(classification.context),
         "company_key": company_key,
         "domain": domain,
         "classification": classification.category.value,
