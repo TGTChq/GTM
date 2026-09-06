@@ -602,8 +602,14 @@ def main(argv=None) -> int:
     # must leave no trace that can be mistaken for one.
     if bool(getattr(config, "MAINTENANCE_ONLY", False)):
         if bool(getattr(config, "FANTASTIC_JOBS_ENABLED", False)):
-            print("MAINTENANCE_ONLY refused: acquisition is still armed "
-                  "(FANTASTIC_JOBS_ENABLED). Pause it first.", file=sys.stderr)
+            # Loud, not silent. Ignoring a set flag would be worse than failing:
+            # someone re-arming acquisition while this is still on almost certainly
+            # means they forgot to clear it, and a maintenance pass silently
+            # becoming a paid run is the one outcome to rule out.
+            print("MAINTENANCE_ONLY refused: acquisition is armed "
+                  "(FANTASTIC_JOBS_ENABLED=1). These two must never both be set. "
+                  "To resume normal production set MAINTENANCE_ONLY=0; to run "
+                  "maintenance instead, pause acquisition first.", file=sys.stderr)
             return 2
         import run_maintenance
         print("MAINTENANCE_ONLY: delegating to run_maintenance; no run directory, "

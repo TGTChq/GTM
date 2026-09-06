@@ -1,0 +1,28 @@
+{
+  "acquisition": {
+    "cumulative": {
+      "jobs_unique_kept": 6205,
+      "jobs_returned_billed": 6205,
+      "jobs_quota_consumed": 6205,
+      "cross_query_duplicates": 0
+    }
+  },
+  "waterfall": {
+    "unit_totals": {
+      "postings": 6205,
+      "opportunities": 2410,
+      "contacts": 1048
+    },
+    "final_pass_count": 711
+  },
+  "emails": {
+    "verified": 1034,
+    "unverified": 14
+  },
+  "delivery": {
+    "reviewable_submitted": 1681,
+    "created": 781,
+    "skipped_existing": 0,
+    "failed": 0
+  }
+}
