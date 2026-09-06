@@ -98,3 +98,7 @@ reports/*control_activation*
 # record ids). The re-validation run before merge lands here too, so the
 # rule covers the family rather than one filename.
 reports/anchor_conflict_*.json
+
+# Local dry-runs of run_maintenance write these under a corpus; they are not evidence.
+acceptance/evidence/*/log_corpus/maintenance_backups/
+acceptance/evidence/*/log_corpus/pending_work/
