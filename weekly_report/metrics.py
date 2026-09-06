@@ -658,7 +658,20 @@ def reason_census(runs: Sequence[RunRecord]) -> Dict[str, int]:
         delivery = run.artifact("delivery") or dig(result, "delivery") or {}
         if isinstance(delivery, dict):
             _add(delivery.get("skip_breakdown"))
-    return dict(sorted(census.items(), key=lambda kv: (-kv[1], kv[0])))
+    # A REASON RECORDED AS ZERO EXPLAINS NOTHING. The delivery skip breakdown is a
+    # fixed-shape dataclass: every bucket is emitted every run, so a policy that is
+    # switched off still contributes its name with a count of 0. Left in, those keys
+    # became "top reasons", and the action plan told Brett to "verify
+    # AIRTABLE_SUPPRESS_ACCOUNT_LEVEL is deliberately on" when it is off and had
+    # suppressed nothing. Worse, a boundary whose counters are not nested is allowed
+    # to be named THE bottleneck only because reason codes attribute it -- so an
+    # all-zero set could carry a headline it does not support.
+    #
+    # Dropped at the END, not inside `_add`, so a run contributing 0 still merges
+    # arithmetically with another run's real count; only a reason that is zero across
+    # the whole window disappears.
+    return dict(sorted(((r, c) for r, c in census.items() if c > 0),
+                       key=lambda kv: (-kv[1], kv[0])))
 
 
 def disposition_census(runs: Sequence[RunRecord]) -> Dict[str, int]:

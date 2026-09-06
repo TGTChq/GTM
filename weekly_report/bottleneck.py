@@ -443,8 +443,11 @@ def identify(
         )
         # Only reasons that can be RECORDED at this boundary may explain it.
         admissible = REASONS_BY_BOUNDARY.get(boundary_name)
+        # ...and only reasons that actually FIRED. A zero is not an explanation, and
+        # this set is also the eligibility gate below for a non-nested pair, so an
+        # all-zero set would let a boundary carry a headline nothing attributes.
         scoped = {r: c for r, c in reasons.items()
-                  if admissible is None or r in admissible}
+                  if (admissible is None or r in admissible) and int(c or 0) > 0}
         candidate.top_reasons = [
             {"reason": reason, "count": count} for reason, count in list(scoped.items())[:5]
         ]
