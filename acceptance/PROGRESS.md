@@ -142,3 +142,36 @@ persisted state is a set of finished date ranges rather than an index.
 Ordering preserved: slice progress is NOT saved by the sliced pass -- `checkpoint()`
 persists it after the custody hook, so continuation never becomes durable ahead of
 the rows it advances past.
+
+
+### Defects found by running against production, and fixed (2026-09-06)
+
+Running the pass against the real volume exposed four defects in code I had written
+and previously called done. Each is listed because "the tests passed" had not
+established any of them.
+
+1. **The maintenance pass created a phantom run.** Constructing a `StateManager`
+   creates a run directory; the ledger backfill lifted the empty directory in as an
+   INTERRUPTED run and the census counted it as an eligible run that failed to
+   record its metrics, degrading every headline metric from `measured` to `partial`.
+   Delegation now precedes `RunContext`/`StateManager`; `--drop-empty-run` removed
+   the one already written.
+2. **Slice progress was persisted before custody.** `_run_sliced` called
+   `self._save()`, making continuation durable ahead of the rows it advanced past --
+   the original failure in a new shape. `checkpoint()` now persists it, after the
+   custody hook.
+3. **Adoption excluded nothing.** It read `seen_suppression/seen.json` with a
+   top-level `postings` list; the real file is `seen_suppression/postings.json` with
+   ids under `keys`. Finished work was taken into custody -- 1,774 postings from the
+   09-04 run. Now read from `SuppressionStore`'s own constants, and terminal work
+   already in custody is released.
+4. **A truncated import was marked finished.** The marker is checked before the file
+   is opened, so 4,431 of the 09-04 run's retained opportunities were stranded with
+   the run recorded as done. A run is marked finished only when its whole eligible
+   set is taken, and a truncated pass skips what custody already holds.
+
+### Custody on production (after the second pass)
+
+    pending_postings 2000 across 2 runs
+      20260906T030230Z-2f74ac7c   226   <- the interrupted work, recovered
+      20260904T130130Z-13b44a0c 1,774   <- truncated + wrongly included; fixed above
