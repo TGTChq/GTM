@@ -22,16 +22,80 @@ This is the quantity that bounds approvals: `AIRTABLE_SUPPRESS_EXISTING_COMPANY_
 allows one active row per company × role bucket, so **approved rows/day ≤ new
 company × function opportunities/day**.
 
-Daily addressable inventory, counted 2026-09-06 over one 24h `date_created` window
-with production filters (0 Jobs credits, 1 request each):
+## RETRACTED: the "<=881 postings/day" ceiling
 
-| source | postings/24h |
+The earlier version of this document bounded daily inventory at **<=881 postings**
+from two count probes taken on **2026-09-06 — a Sunday**, and added them together.
+Both halves of that were wrong, and the conclusion built on them ("the target is not
+achievable from the sources currently active") does not survive.
+
+Re-measured over **five matched 24h `date_created` windows** with the production
+query builders and the production title expression, `/v1/active-jb-count` and
+`/v1/active-ats-count`, **0 Jobs credits, 35 requests**
+(`acceptance/inventory_probe.py`, raw JSON in
+`evidence/20260906-maintenance/inventory_probe.json`):
+
+| window ends | linkedin | ats | wellfound | yc | **addressable** | untitled |
+|---|---|---|---|---|---|---|
+| 2026-09-06 (Sat→Sun) | 327 | 111 | 6 | 2 | **446** | 8,341 |
+| 2026-09-05 | 1,159 | 1,161 | 30 | 12 | **2,362** | 37,052 |
+| 2026-09-04 | 1,266 | 1,076 | 28 | 10 | **2,380** | 32,945 |
+| 2026-09-03 | 1,437 | 1,108 | 30 | 9 | **2,584** | 35,066 |
+| 2026-09-02 | 1,571 | 1,291 | 28 | 7 | **2,897** | 40,274 |
+
+**Business-day inventory is 2,362–2,897 postings/day; the weekend window is 446.**
+The single day the old ceiling was measured on is the lowest of the five by a factor
+of five. Quoting it as a ceiling was the error, not the arithmetic.
+
+Two provider facts had to be established before any of this could be counted, and
+both were previously assumed:
+
+* **The ATS source is a different DATASET, not a `source` value.** It lives on
+  `/v1/active-ats`; sending `source=ats` to active-jb returns **0**, which the first
+  version of the probe would have published as "ATS contributes nothing".
+* **`/v1/active-ats-count` rejects `include_basic_organization_details`** with a
+  400 — it shapes a row payload and that endpoint returns no rows. Found by
+  bisecting the parameters.
+
+The two are **additive, not overlapping**: the active-jb queries send
+`exclude_ats_duplicate=true`, so a posting carried by both is returned by active-ats
+only. Wellfound and Y Combinator are additive for a different reason — they carry no
+provider firmographics, so the null-excluding predicates drop them from the
+firmographic union entirely and they must be counted on their own.
+
+### What that does to the target
+
+    2,556 postings/day (business-day mean)  /  1.3 postings per opportunity
+      ~=  1,966 company x function opportunities/day
+
+At the conservative backlog ratio (1.496) it is ~1,708. **Either way, daily inventory
+supports well over 1,000 opportunities/day.** The target is *not* inventory-bound
+from the sources already active, which is the opposite of what this document said
+this morning.
+
+The binding constraint is the **opportunity -> approved conversion**, observed once
+at **18.8%** (781 of 4,147) on a run Apollo truncated at 2,170 of 2,410 leads — a
+floor, not a rate.
+
+| if conversion is… | approved/day at ~1,966 opportunities |
 |---|---|
-| Fantastic LinkedIn + title expression | 361 |
-| Fantastic ATS + title expression | 520 |
-| **union of the two** | **unmeasured** — the LinkedIn query sends `exclude_ats_duplicate`, so ≤ 881 |
-| Wellfound / Y Combinator | not counted in this window (205 postings on 09-04) |
-| 145 direct ATS boards | **inactive** — the lane is built only when `"ats"` is in `--lanes`, and production passes `--lanes fantastic` |
+| 18.8% (observed floor) | ~370 |
+| 35% | ~688 |
+| **51%** | **~1,000** |
+| 60% | ~1,180 |
+
+So the external requirement is now specific: **roughly 51% opportunity -> approved,
+or more inventory.** And there is a great deal more inventory — the same filters
+without the title expression return **30,736/day on average, 14.4x** the titled
+volume.
+
+### The spend this implies, stated plainly
+
+Acquiring ~2,556 postings/day costs ~2,556 Jobs credits/day, about **77,000/month**
+against ~77,600 remaining in the current cycle. Running at full measured inventory is
+therefore roughly a whole month's allowance, and it is a budget decision rather than
+a capability one. Nothing here is spent without authorization; acquisition remains
+paused.
 
 ## Inventory already paid for and preserved
 
@@ -91,16 +155,12 @@ Note also that this day's LinkedIn count is **350** where 2026-09-06 earlier gav
 **361**: these are observations of a moving feed, not a stable ceiling, exactly as
 stated above.
 
-## What that implies for 1,000/day
+## What that implies for 1,000/day — SUPERSEDED SECTION, corrected
 
-Steady state is bounded by **daily inflow**, not by budget once the cursor is fixed:
-
-    ≤881 postings/day  ÷  1.3 postings/opportunity  ≈  ≤678 opportunities/day
-
-The 1.3 comes from the 2026-09-06 daily cohort (226 → 174). The backlog cohort gives
-1.496 (6,205 → 4,147), which would yield ~589. Taking the smaller divisor is the
-CONSERVATIVE choice -- it produces MORE opportunities per posting and therefore the
-most favourable estimate. The conclusion below holds at either ratio.
+Everything between here and the next heading was reasoning from the retracted
+weekend measurement. The three conversion ratios below are still valid — they come
+from the 09-04 run's own identities — but the inventory figure they were multiplied
+against was wrong by about 3x, and the conclusion is reversed.
 
 Three conversions from the 09-04 run, kept apart because they are different stages
 and all three are floors (Apollo truncated it at 2,170 of 2,410 leads):
@@ -109,40 +169,50 @@ and all three are floors (Apollo truncated it at 2,170 of 2,410 leads):
     opportunity -> approved   781 / 4,147 = 18.8%
     lead        -> approved   781 / 2,410 = 32.4%
 
-The projection below uses the opportunity ratio, matching the unit it projects from.
+~~**Even at a perfect 100% opportunity → approved conversion, the two currently
+active sources cannot sustain 1,000 approved leads/day.**~~ **WITHDRAWN.** That
+sentence rested on <=881 postings/day, measured on the one Sunday in the range.
+Business-day inventory is 2,362–2,897 postings/day, so the two active sources supply
+roughly **1,700–2,200 company × function opportunities/day** — comfortably above
+1,000 before any conversion is applied.
 
-**Even at a perfect 100% opportunity → approved conversion, the two currently active
-sources cannot sustain 1,000 approved leads/day.** The shortfall is on the correct
-unit, from measured identities, on a matched window.
+### The external requirement, corrected
 
-At the only observed conversion — 09-04 produced 781 Airtable rows from 4,147
-opportunities, **18.8%**, and that run was truncated by Apollo at 2,170 of 2,410
-leads so 18.8% is a **floor** — the same inflow yields roughly **127 approved/day**.
+To reach 1,000 approved/day at ~1,966 opportunities/day (business-day mean ÷ 1.3):
 
-### The external requirement, quantified
+| if approval conversion is… | approved/day | verdict |
+|---|---|---|
+| 18.8% (observed floor, truncated run) | ~370 | short |
+| 35% | ~688 | short |
+| **~51%** | **~1,000** | **target met on current inventory** |
+| 60% | ~1,180 | headroom |
 
-To reach 1,000 approved/day:
+**The requirement is a conversion requirement, not an inventory requirement.** That
+is a different and far more tractable problem than the ~6,000 postings/day deficit
+this document previously reported, and it can only be measured once Apollo serves —
+the 18.8% floor comes from a run that was cut off partway through contact discovery.
 
-| if approval conversion is… | opportunities/day needed | postings/day needed (@1.3) | deficit vs ≤881 |
-|---|---|---|---|
-| 18.8% (observed floor) | ~5,320 | ~6,900 | **~6,000/day** |
-| 50% | 2,000 | ~2,600 | ~1,700/day |
-| 100% (unreachable) | 1,000 | ~1,300 | ~420/day |
+If conversion turns out to be genuinely near 19%, the inventory to close the gap
+also exists: the same filters without the title expression return **30,736
+postings/day**, 14.4x the titled volume. Whether any of it is commercially relevant
+is the one thing still unmeasured, and item 1 below is the bounded way to find out.
 
-**No conversion improvement alone closes it.** More inventory is required in every
-scenario.
+### Where inventory could come from — three of the four are now measured
 
-### Where inventory could come from — and what is unmeasured
-
-* **The title filter is the largest single lever.** The same firmographic filters
-  without the title expression returned **5,511 postings/24h** on LinkedIn — about
-  15× the titled 361. Whether any of those are commercially relevant is **not
-  established**, and the title-selected corpus cannot estimate it. Functional
-  discovery is the mechanism built to measure exactly this, and it is **off**.
-* **145 direct ATS boards** are registered and never invoked. Yield unmeasured.
-* **Wellfound and Y Combinator** contributed 205 postings on 09-04; not counted in a
-  matched 24h window.
-* **The source union** is unmeasured, so ≤881 is an upper bound, not the figure.
+* **Wellfound and Y Combinator — MEASURED.** 24.4 and 8.0 postings/day respectively
+  over five matched windows. Small, real, and additive: they carry no provider
+  firmographics, so the null-excluding predicates drop them from the firmographic
+  union and they must be counted separately rather than assumed inside it.
+* **The source union — MEASURED.** Not 881. active-jb and active-ats are
+  complementary by construction (`exclude_ats_duplicate=true`), so they add:
+  1,152 + 949 + 24 + 8 = **2,134/day** on average, 2,362–2,897 on business days.
+* **145 direct ATS boards — measured separately**, in the next section. They are
+  scraped from each employer's own board and cost no provider credits at all.
+* **The title filter remains the largest single lever, and the one thing still
+  unmeasured.** Same filters without the title expression: **30,736 postings/day**,
+  **14.4x** the titled volume. Whether any of it is commercially relevant is not
+  established, and a title-selected corpus cannot estimate it. Functional discovery
+  is the mechanism built to measure exactly this, and it is off.
 
 ### Sending is not the constraint
 
@@ -163,12 +233,25 @@ truncated backlog run and should not be treated as the steady-state rate.
 
 ## Conclusion
 
-The target is **not achievable from the sources currently active**, and the gap is
-now quantified on the right unit rather than asserted. It is **not** shown to be
-unachievable in principle: three inventory sources are unmeasured and one — the
-title-excluded inventory, 15× the current volume — has a purpose-built measurement
-path that is switched off.
+**The target is inventory-feasible from the sources already active, and
+conversion-bound.** Corrected from this morning's opposite conclusion, which was
+built on a single weekend window.
 
+* Business-day addressable inventory: **2,362–2,897 postings/day**, measured over
+  five matched windows at zero credits.
+* That is **~1,700–2,200 company × function opportunities/day** on the production
+  identity functions — above the 1,000/day target before conversion.
+* Reaching 1,000 approved/day therefore needs **~51% opportunity → approved**. The
+  only observed figure is 18.8%, and it is a floor from a run Apollo truncated.
+* If real conversion is far below that, **14.4x more inventory** sits behind the
+  title filter, unmeasured.
+* Sustaining full inventory costs ~2,556 Jobs credits/day — about a month's current
+  allowance. A budget decision, not a capability one.
+
+**Not achieved, and not claimed as achieved.** What has changed is that the obstacle
+is now identified and bounded: measure conversion on an untruncated run, which
+requires Apollo, which requires the billing screens in
+`INCIDENT_2026-09-06_apollo_credits.md`.
 
 ---
 

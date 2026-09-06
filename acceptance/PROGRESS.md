@@ -437,6 +437,48 @@ reads. The pass now refreshes it explicitly and prints what changed.
 Brett's report now names the bottleneck AND attributes it, and says so identically
 from the artifacts and from the ledger alone.
 
+### The capacity ceiling was wrong, and it was my error (2026-09-06 ~13:45Z)
+
+The stop condition was right to reject the closeout: `<=881 postings/day -> <=678
+opportunities -> the target is not achievable` is a **ceiling**, and it was built on
+two count probes taken on **2026-09-06, a Sunday**, then added together.
+
+Re-measured over **five matched 24h `date_created` windows** with the production
+query builders and title expression -- `/v1/active-jb-count` and
+`/v1/active-ats-count`, **0 Jobs credits, 35 requests**:
+
+    window ends   linkedin    ats   wf  yc    TOTAL   untitled
+    09-06 (Sun)        327    111    6   2      446      8,341
+    09-05            1,159  1,161   30  12    2,362     37,052
+    09-04            1,266  1,076   28  10    2,380     32,945
+    09-03            1,437  1,108   30   9    2,584     35,066
+    09-02            1,571  1,291   28   7    2,897     40,274
+
+**Business-day inventory is 2,362-2,897 postings/day.** The day the ceiling was
+measured on is the lowest of five by a factor of five.
+
+Two provider facts had to be established first, both previously assumed:
+
+* the ATS source is a different **dataset** on `/v1/active-ats`, not a `source`
+  value -- `source=ats` on active-jb returns **0**, which the first version of the
+  probe would have published as "ATS contributes nothing";
+* `/v1/active-ats-count` rejects `include_basic_organization_details` with a 400; it
+  shapes a row payload and that endpoint returns none. Found by bisection.
+
+The two are additive rather than overlapping (`exclude_ats_duplicate=true` means a
+posting carried by both is returned by active-ats only), and Wellfound/YC are
+additive again because the null-excluding firmographic predicates drop them from the
+union entirely.
+
+**Corrected conclusion.** ~2,556 postings/day / 1.3 = **~1,966 company x function
+opportunities/day** -- comfortably above 1,000 *before* conversion. The target is
+**conversion-bound, not inventory-bound**: it needs ~51% opportunity -> approved
+against an observed floor of 18.8% from a run Apollo truncated. Not achieved, and
+the obstacle is now identified and bounded rather than asserted.
+
+Cost of running at full measured inventory: ~2,556 Jobs credits/day, ~77,000/month
+against ~77,600 remaining. A budget decision, not a capability one.
+
 ### Final state
 
     origin/main   6b0d117, deployed to both services

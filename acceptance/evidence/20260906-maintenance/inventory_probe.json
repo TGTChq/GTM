@@ -1,0 +1,121 @@
+{
+  "measured_at": "2026-09-06T11:37:46Z",
+  "title_expression_chars": 4222,
+  "endpoint": "/v1/active-jb-count",
+  "jobs_credits": 0,
+  "windows": [
+    {
+      "from": "2026-09-05T11:37:46Z",
+      "to": "2026-09-06T11:37:46Z",
+      "sources": {
+        "linkedin": 327,
+        "wellfound": 6,
+        "ycombinator": 2,
+        "ats": 111
+      },
+      "union_jb_titled": 327,
+      "union_jb_untitled": 5633,
+      "ats_untitled": 2708,
+      "addressable_total": 446,
+      "addressable_untitled_total": 8341
+    },
+    {
+      "from": "2026-09-04T11:37:46Z",
+      "to": "2026-09-05T11:37:46Z",
+      "sources": {
+        "linkedin": 1159,
+        "wellfound": 30,
+        "ycombinator": 12,
+        "ats": 1161
+      },
+      "union_jb_titled": 1159,
+      "union_jb_untitled": 15278,
+      "ats_untitled": 21774,
+      "addressable_total": 2362,
+      "addressable_untitled_total": 37052
+    },
+    {
+      "from": "2026-09-03T11:37:46Z",
+      "to": "2026-09-04T11:37:46Z",
+      "sources": {
+        "linkedin": 1266,
+        "wellfound": 28,
+        "ycombinator": 10,
+        "ats": 1076
+      },
+      "union_jb_titled": 1266,
+      "union_jb_untitled": 16827,
+      "ats_untitled": 16118,
+      "addressable_total": 2380,
+      "addressable_untitled_total": 32945
+    },
+    {
+      "from": "2026-09-02T11:37:46Z",
+      "to": "2026-09-03T11:37:46Z",
+      "sources": {
+        "linkedin": 1437,
+        "wellfound": 30,
+        "ycombinator": 9,
+        "ats": 1108
+      },
+      "union_jb_titled": 1437,
+      "union_jb_untitled": 18355,
+      "ats_untitled": 16711,
+      "addressable_total": 2584,
+      "addressable_untitled_total": 35066
+    },
+    {
+      "from": "2026-09-01T11:37:46Z",
+      "to": "2026-09-02T11:37:46Z",
+      "sources": {
+        "linkedin": 1571,
+        "wellfound": 28,
+        "ycombinator": 7,
+        "ats": 1291
+      },
+      "union_jb_titled": 1571,
+      "union_jb_untitled": 21306,
+      "ats_untitled": 18968,
+      "addressable_total": 2897,
+      "addressable_untitled_total": 40274
+    }
+  ],
+  "requests": 35,
+  "addressable_per_day": {
+    "n": 5,
+    "min": 446,
+    "max": 2897,
+    "mean": 2133.8
+  },
+  "per_source_per_day": {
+    "linkedin": {
+      "n": 5,
+      "min": 327,
+      "max": 1571,
+      "mean": 1152.0
+    },
+    "ats": {
+      "n": 5,
+      "min": 111,
+      "max": 1291,
+      "mean": 949.4
+    },
+    "wellfound": {
+      "n": 5,
+      "min": 6,
+      "max": 30,
+      "mean": 24.4
+    },
+    "ycombinator": {
+      "n": 5,
+      "min": 2,
+      "max": 12,
+      "mean": 8.0
+    }
+  },
+  "title_filter_excludes": {
+    "untitled_mean": 30735.6,
+    "titled_mean": 2133.8,
+    "multiple": 14.4
+  }
+}
