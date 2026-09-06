@@ -319,3 +319,113 @@ against a 7-day window, resumed against a window the floor has clamped to ~180 r
 addresses nothing, returns an empty page and concludes it **drained** -- having
 inspected none of the rows the window still holds. The existing guard catches that
 case because `empty_page` is a drained stop.
+
+---
+
+# Addendum 2 — the enforced units, read off the enforcement code
+
+**The previous addendum's "one approved row per company x function, one enrolled
+person per employer -> the binding unit is distinct employers per day" was wrong on
+its second half, and the capacity conclusion built on it is withdrawn.** I read the
+flag NAMES. Here is what the code enforces, verified in
+`tests/test_enforced_cardinality.py` against the real builders.
+
+## `AIRTABLE_SUPPRESS_EXISTING_COMPANY_FUNCTION`
+
+* **Key:** company + role bucket. `_company_function_keys_from_job` builds it from
+  Website/Company plus Role Bucket.
+* **Lookup scope:** the Airtable records that ALREADY EXIST when the run starts, and
+  only those in an ACTIVE status -- Pending, Approved, Enrolled, or blank.
+  **Error and Rejected stay retryable** and do not block.
+* **Rejection condition:** a new job is dropped when its company+function key
+  intersects that active set.
+* **Not enforced:** anything within the run. The blocked set is computed once and
+  never grows as rows are created, so two new rows for the same company+function
+  inside ONE run are not suppressed here. The one-per-function property across a run
+  comes from enrichment emitting one lead per company x role bucket, not from this
+  rule.
+
+**A company with two eligible functions produces two opportunities.** Acme+Sales
+survives while Acme+Finance is active.
+
+## `ENROLLMENT_PERSON_EMPLOYER_UNIQUENESS`
+
+* **Key:** `normalized_domain|normalized_email` -- a PERSON-EMPLOYER PAIR, and
+  `_person_employer_key` is documented as bucket-agnostic.
+* **Rejection condition:** the same person appearing twice at the same employer
+  (typically under two role buckets) collapses to one, best bucket winning; and a
+  person who is already an ACTIVE Airtable row is not re-enrolled under a new
+  function key. At the Instantly boundary it also sets `skip_if_in_workspace`.
+* **It does NOT cap an employer.** Its own docstring: *"Distinct emails at the same
+  employer (distinct buyers) are all kept; the same person at two employers
+  (different domain) is kept in both."*
+
+**So it prevents a duplicate person/employer pair. It does not exclude additional
+people at an employer.**
+
+### The four cases, as the code actually answers them
+
+| case | outcome | why |
+|---|---|---|
+| one company, two eligible functions, two contacts | **both allowed** | different company+function keys; different person keys |
+| one company/function, two different contacts | cross-run: second **suppressed**; within one run this rule does not suppress | active-record snapshot is company+function scoped and does not grow mid-run |
+| same person + employer across campaigns | **collapsed to one** | person-employer key is bucket-agnostic |
+| separate openings, same company/function | **one opportunity** | postings collapse to one company x role bucket before contact discovery |
+
+**No additional rule imposing one lead per employer was found.** Nothing in the
+Airtable suppression, the enrollment collapse, or the Instantly client does that.
+The earlier claim is retracted.
+
+## Capacity, recalculated on verified units only
+
+**What the rules permit is different for the two stages, so they are stated
+separately.**
+
+* **Airtable approvals** are capped at one ACTIVE row per company x role bucket,
+  across runs. The daily ceiling is therefore *distinct NEW company x function
+  opportunities per day* -- not postings, and not employers.
+* **Instantly enrollments** are capped at one per person-employer pair. An employer
+  with several distinct contactable people across several functions yields several
+  enrollments.
+
+**And that ceiling has never been measured.** The count endpoint returns POSTING
+counts. Distinct company x role bucket opportunities per day, and distinct
+contactable people per day, are not derivable from it, and the 2026-09-04 ratio
+(6,205 postings -> 2,410 opportunities) cannot stand in: that cohort was a ten-day
+backlog and its run was truncated at 2,170 of 2,410 opportunities.
+
+**Matched-window observation, and only this** -- 2026-09-06, one 24h `date_created`
+window, production filters:
+
+| source | postings in that window |
+|---|---|
+| Fantastic LinkedIn + title expression | 361 |
+| Fantastic ATS + title expression | 520 |
+| union of the two | **unmeasured** (the LinkedIn query sends `exclude_ats_duplicate`, so overlap is expected) |
+| Wellfound, Y Combinator | **not counted in this window** |
+| direct ATS boards (145) | **inactive** -- the lane is never invoked under `--lanes fantastic` |
+
+The 2026-09-04 Wellfound/YC figures (160 and 45) are from a different window and a
+different cohort and are **not** added to the above.
+
+### What this supports about 1,000 new approved leads/day
+
+**Nothing, in either direction.** Approvals are bounded by distinct new company x
+function opportunities per day, that quantity has never been measured for any single
+day, and the only posting counts available are per-source, un-unioned, from one
+window, with two configured sources uncounted and one inactive. Any ceiling derived
+from posting counts alone -- including the "881" and the "<1,000 employers"
+arguments in the earlier sections -- substitutes one unit for another and is
+withdrawn.
+
+**Now computable without Apollo, and not yet done:**
+
+1. Distinct company x role bucket opportunities in a matched window. The custody
+   store (`pending_work`) now retains the acquired postings, so this becomes an
+   offline calculation over real production rows the next time a run acquires.
+2. The deduplicated union of LinkedIn and ATS, and matched-window counts for
+   Wellfound, Y Combinator and a direct-ATS board sweep.
+
+**Still dependent on Apollo:** opportunity -> contact -> send-safe -> approved yield
+on an uninterrupted daily cohort. Nothing above needs it, and nothing above supplies
+it.
