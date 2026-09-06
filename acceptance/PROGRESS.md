@@ -3,7 +3,7 @@
 Living record. Survives compaction. Reopen a closed item only on contradictory
 evidence.
 
-**Deployed:** `origin/main = 515b66b`.
+**Deployed:** `origin/main = 6b0d117`.
 **Acquisition:** PAUSED (`FANTASTIC_JOBS_ENABLED=False` on GTM). Billing untouched.
 **Cron:** GTM `0 3 * * *`, Approved Sync `0 0 * * *` — both verified after every pass.
 
@@ -403,11 +403,45 @@ thing: an instrumentation defect fixed within hours of the run that suffered it 
 aggregation. None is a pipeline yield problem, and the reporting layer now names them
 rather than inventing causes for them.
 
+### Passes seven to nine -- the acceptance gate earning its keep
+
+**Pass 7: no change at all.** `delivery_unreconciled` was implemented, tested and
+deployed, and the report still said "no reason code was recorded there". The 09-04
+ledger block is populated, the ledger's copy wins over the artifacts, and the delivery
+record was therefore never opened. Precedence is right for a MERGED reason and wrong
+for a DERIVED one: a ledger written before the reason existed cannot contain it. Now
+computed once per run outside the precedence branch, guarded against double counting.
+
+The maintenance probe now prints each run's non-zero ledger `loss_reasons` beside its
+delivery counters, because "which source will the report actually read" is what made
+the first attempt look like a no-op, and nothing showed it.
+
+**Pass 8: the bottleneck was named, and `ACCEPTED: False`.** The gate doing its job.
+The reason could be derived from the heavy delivery artifact and had no way into the
+durable record, so side A and side B disagreed -- and once retention runs, B is the
+only side there is. `run_ledger.reason_census_from_parts` is a second implementation
+of the same census whose docstring promises it matches the report's; it now carries
+all three changes, with a test holding the two to the same output on four shapes.
+
+Two further defects the failure exposed: the backfill's idempotence check compared
+METRICS only, so an improvement to the census could never reach an entry that already
+existed; and only a pipeline run backfills the production ledger, so while acquisition
+is paused a correction would pass its tests and never reach the record Friday's report
+reads. The pass now refreshes it explicitly and prints what changed.
+
+**Pass 9: `ACCEPTED: True`, rc=0**, with the durable record updated in place:
+
+    loss_reasons_changed  20260904T130130Z-13b44a0c  ->  delivery_unreconciled 900
+    ledger_loss_reasons_nonzero                          delivery_unreconciled 900
+
+Brett's report now names the bottleneck AND attributes it, and says so identically
+from the artifacts and from the ledger alone.
+
 ### Final state
 
-    origin/main   2a2fc44, deployed to both services
-    GTM cron      0 3 * * *   (verified after the fifth pass)
+    origin/main   6b0d117, deployed to both services
+    GTM cron      0 3 * * *   (verified after every pass; nine so far)
     Approved Sync 0 0 * * *   (untouched throughout)
     acquisition   PAUSED      MAINTENANCE_ONLY=1 (must be 0 before resuming)
     custody       3,595 postings = 2,998 opportunities, resumable
-    gates         3223 passed, 1 skipped, 1001 subtests; integrity 27/0/0
+    gates         3234 passed, 1 skipped, 1001 subtests; integrity 27/0/0

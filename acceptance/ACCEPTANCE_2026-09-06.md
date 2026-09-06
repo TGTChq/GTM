@@ -202,7 +202,7 @@ paused. Setting a cron a few minutes ahead then produces a live container that
 acquires nothing, enriches nothing, delivers nothing, and gives full access to the
 volume.
 
-Five passes have run this way. Results, from `evidence/20260906-maintenance/`:
+Nine passes have run this way. Results, from `evidence/20260906-maintenance/`:
 
 * **A/B on production files: `ACCEPTED: True`** — text, values, completeness
   statuses and counted units identical between artifacts+ledger and ledger-only.
