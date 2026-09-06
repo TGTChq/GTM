@@ -1385,6 +1385,17 @@ def get_final_pass_target() -> int:
 # the bounded controls. Set a positive value only for a deliberate cost-limited run.
 MAX_ELIGIBLE_COMPANIES_PER_RUN = _env_int("MAX_ELIGIBLE_COMPANIES_PER_RUN", 0)
 SEEN_JOBS_RETENTION_DAYS = _env_int("SEEN_JOBS_RETENTION_DAYS", 30)
+
+# -- custody of acquired-but-unfinished postings ---------------------------------
+# A run that buys postings and then stops before finishing them (an Apollo billing
+# rejection, a crash) used to lose that work: nothing was suppressed, but nothing
+# handed it back either, and the window offsets had already advanced past it. These
+# bound the store that now keeps it. ON by default -- a correctness fix that is off
+# fixes nothing -- but the RESUME is bounded, because a long outage must not hand a
+# single run more enrichment than its budget can serve.
+PENDING_WORK_ENABLED = _env_bool("PENDING_WORK_ENABLED", True)
+PENDING_WORK_RESUME_MAX_PER_RUN = _env_int("PENDING_WORK_RESUME_MAX_PER_RUN", 2000)
+PENDING_WORK_MAX_AGE_DAYS = _env_int("PENDING_WORK_MAX_AGE_DAYS", 14)
 CRM_MIN_MATCH_LENGTH = _env_int("CRM_MIN_MATCH_LENGTH", 4)
 
 # ---------- Firmographics ----------

@@ -43,6 +43,7 @@ from orchestrator.runcontrol import RunContext, RunStatus
 from orchestrator.runlock import RunLock, RunLockHeld
 from orchestrator.state import StateManager
 from orchestrator.suppression import SuppressionStore
+from orchestrator import pending_work
 from orchestrator.topup import TopUpController
 from orchestrator.waterfall import WaterfallReport, reconcile_stage
 
@@ -890,6 +891,9 @@ class Orchestrator:
         if gov.run_budget is not None and gov.run_budget <= 0:
             stop_reason = "governor_zero_budget"
 
+        pending_on = bool(getattr(config, "PENDING_WORK_ENABLED", True))
+        pending_dir = self.state.store_path("pending_work") if pending_on else None
+        pending_adopted = False
         while not stop_reason:
             decision = controller.decide(
                 quota_remaining=last_quota, apollo_circuit_open=last_circuit,
@@ -985,6 +989,42 @@ class Orchestrator:
             # conflation the net-new semantics exist to remove.
             self._ledger_record_acquisition(acq_cum, len(all_leads))
 
+            # CUSTODY of paid-for work, taken BEFORE enrichment can fail.
+            #
+            # "Not suppressed" is not the same as "will be retried". When Apollo
+            # refused on 2026-09-06 nothing was blacklisted and the watermark stayed
+            # in flight -- and the 226 postings were still lost, because the window
+            # offsets had already advanced past them and no later run reads a run's
+            # enrichment workdir. So the deduped opportunities are persisted here,
+            # in a store prune cannot reach, and released only when they finish.
+            if pending_on:
+                acq_cum["pending_work_recorded"] = pending_work.record(
+                    pending_dir, self.ctx.run_id, opportunities)
+                # Adopt what earlier runs are still owed, once per run. This happens
+                # AFTER net_new_jobs_captured is accumulated, so re-entered work is
+                # never counted as newly captured -- it was bought and counted once,
+                # by the run that acquired it.
+                if not pending_adopted:
+                    pending_adopted = True
+                    resumed, resume_info = pending_work.load(
+                        pending_dir,
+                        exclude_run_id=self.ctx.run_id,
+                        limit=int(getattr(config, "PENDING_WORK_RESUME_MAX_PER_RUN", 0) or 0) or None,
+                        max_age_days=int(getattr(config, "PENDING_WORK_MAX_AGE_DAYS", 0) or 0) or None,
+                        exclude_keys=[k for k in (posting_identity(o)[1] for o in opportunities) if k],
+                    )
+                    # Anything a previous run already finished is in suppression;
+                    # re-entering it would redo settled work.
+                    already = supp.seen_postings()
+                    resumed = [j for j in resumed
+                               if posting_identity(j)[1] not in (already or set())]
+                    if resumed:
+                        for j in resumed:
+                            j.setdefault("_resumed_from_pending", True)
+                        opportunities = list(opportunities) + resumed
+                        resume_info["adopted"] = len(resumed)
+                    acq_cum["pending_work_resumed"] = resume_info
+
             enr_kwargs: Dict[str, Any] = {}
             deliver_kwargs: Dict[str, Any] = {}
             if snapshot is not None:
@@ -1011,8 +1051,15 @@ class Orchestrator:
             self._ledger_mark_outcomes(ledger, enrichment.leads, delivery,
                                        covered_at_start=covered_at_start)
 
-            supp.commit_postings(enrichment.terminal_posting_ids())
+            terminal_ids = enrichment.terminal_posting_ids()
+            supp.commit_postings(terminal_ids)
             supp.commit_delivered(getattr(delivery, "delivered_lead_keys", []) or [])
+            # Custody ends where suppression begins, on the IDENTICAL id set: a
+            # posting stops being owed work exactly when it is genuinely finished,
+            # never on a deferred outcome.
+            if pending_on:
+                acq_cum["pending_work_released"] = pending_work.release(
+                    pending_dir, terminal_ids)
             # Gate-E D12: postings that terminally collapsed into another lead (N->1)
             # must also be committed, else they are re-billed + re-enriched every run.
             collapsed_ids = [rid for lead in enrichment.leads
@@ -1169,6 +1216,8 @@ class Orchestrator:
             "budget": self.budget.to_dict(),
             "run_lock": lock.to_dict() if lock is not None else None,
             "suppression": supp.to_dict(),
+            "pending_work": (pending_work.summary(pending_dir) if pending_on else
+                             {"pending_postings": 0, "pending_runs": 0, "runs": []}),
             "all_reconcile": all_reconcile,
         }
         self.state.write_artifact("run_status.json", {"run_id": self.ctx.run_id,

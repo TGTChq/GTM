@@ -47,6 +47,10 @@ STORES = (
     "provider_cache",
     "scheduler_state",
     "delivery_state",
+    # Acquired-but-unfinished postings. Deliberately a SIBLING of
+    # run_artifacts: prune only ever deletes under run_artifacts, so
+    # custody of paid-for work survives retention.
+    "pending_work",
 )
 
 
