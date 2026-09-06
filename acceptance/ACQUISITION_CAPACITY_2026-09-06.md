@@ -205,3 +205,117 @@ enrichment stage truncated part-way.
    its contents — that determines how much of the daily budget buys anything.
 
 Items 1, 2 and 4 need no Apollo credits. Item 3 does.
+
+---
+
+# Addendum 2026-09-06 — approval mechanism identified, active paths enumerated
+
+## The approval mechanism is automatic, and my "781 Pending" reading was wrong
+
+`FANTASTIC_AUTO_APPROVE_SEND_SAFE` defaults **True** and is **True on both GTM and
+GTM Approved Sync**, read back from the running services. `airtable_client._job_to_fields`
+creates a genuine Fantastic row at `Status=Approved` when `send_safe_facts` passes.
+There is no human step and no Airtable automation in that path.
+
+What misled me: the run log's `delivery airtable=review-staging(Pending)
+auto_approve=OFF` was a **hardcoded literal**, printed unconditionally, and the
+delivery block header `---- Airtable (review-staging, Status=Pending) ----` likewise.
+Neither read any configuration. `auto_approve=OFF` referred to the `--auto-approve`
+CLI flag, which selects WHICH leads are submitted (FINAL_PASS only) and whether they
+enrol directly -- a different thing entirely from the record status. Both lines now
+report the real settings, guarded by `tests/test_delivery_preflight_reads_config.py`,
+and the wiring is verified on the real field builder: send-safe Fantastic -> Approved;
+not send-safe -> Pending; non-Fantastic -> Pending; flag off -> Pending.
+
+So the earlier closeouts saying "send-safe auto-approval is enabled" were **correct**,
+and the contradiction was in the log line rather than the behaviour. No missing wiring
+and no obsolete manual gate were found.
+
+**Actor for the 2026-09-04 records: not established.** The mechanism above is
+sufficient to explain 781 Approved rows without a human, but Airtable record-level
+status history and the identity of whoever or whatever last wrote each `Status` are
+not in the run logs and were not queried. Aggregate arithmetic (992 - 211 = 781) does
+not establish record identity, and nothing here claims it does.
+
+## Effective ceiling per opportunity — read back from production
+
+| setting | GTM | Approved Sync |
+|---|---|---|
+| `AIRTABLE_SUPPRESS_EXISTING_COMPANY_FUNCTION` | True | True |
+| `AIRTABLE_SUPPRESS_ACCOUNT_LEVEL` | False | False |
+| `ENROLLMENT_PERSON_EMPLOYER_UNIQUENESS` | True | True |
+
+**One approved row per company x function, and one enrolled person per employer.**
+That makes the binding unit **distinct new employers per day** -- not postings. A
+company advertising five roles does not become five leads.
+
+## Which acquisition paths are actually ACTIVE
+
+| path | configured | active in production | evidence |
+|---|---|---|---|
+| Fantastic LinkedIn | yes | **yes** | 28 requests on 09-06 |
+| Fantastic ATS source | yes | **yes** | 28 requests on 09-06 |
+| Fantastic Wellfound | yes | yes, when not drained | 160 rows on 09-04 |
+| Fantastic Y Combinator | yes | yes, when not drained | 45 rows on 09-04 |
+| **Direct ATS boards (145)** | `ATS_DIRECT_ACQUISITION_ENABLED=True` | **NO** | the lane is built only `if "ats" in lanes`, and the start command passes `--lanes fantastic` |
+
+The 145 registered boards contribute **zero**, and not because they are unproductive
+-- the lane is never invoked. Registered is not active. Enabling it is a start-command
+change, and its yield is unmeasured.
+
+## What this implies for 1,000 new approved leads/day
+
+**Bounded for the day measured, not in general.** On 2026-09-06 the two active
+Fantastic sources matched 361 and 520 postings in one 24h window; the union is
+unmeasured, so at most 881 postings. Since approved leads are capped at one per
+company x function and one enrolled person per employer, distinct employers <=
+postings, so those two sources could not have yielded 1,000 new approved leads that
+day. Wellfound and Y Combinator added ~205 rows on 09-04. Direct ATS is inactive.
+
+That is a statement about **one observed day and the currently active paths**. It is
+not a permanent ceiling: inventory varies day to day, the direct-ATS path exists and
+is switched off, and no multi-day distribution has been measured.
+
+**Pending Apollo, and only these:** opportunity -> contact -> send-safe yield on a
+daily (non-backlog) cohort. The 2026-09-04 figures cannot serve -- that run was
+truncated at 2,170 of 2,410 opportunities and its cohort was a ten-day backlog.
+
+**Answerable without Apollo, and still open:**
+
+1. The **union** of LinkedIn and ATS inventory, plus Wellfound/YC and a direct-ATS
+   board sweep, over several days rather than one.
+2. Distinct **employers** per day behind those postings -- the actual binding unit,
+   which no count has yet measured.
+3. Why the 09-06 window was re-paged: partly answered below.
+
+## Why the window was re-paged (continuation)
+
+Traced across the three runs and reproduced offline in
+`tests/test_continuation_multirun_replay.py`:
+
+* **09-04** wrote no per-source cursor at all -- that build had none. It kept 6,205
+  rows and left no record of how far it had reached.
+* **09-05** therefore opened the reused window at `offsets_at_open {}`, paged 0->100
+  on both sources, kept **0**, and stopped `no_new_ids`.
+* **09-06** resumed at 100 and paged to 2,822, keeping 226 on LinkedIn and 0 on ATS.
+
+So the repetition was **required for coverage**: with no cursor from the run that
+took the inventory, paging and deduping was the only way to find unseen rows, and it
+worked -- 226 rows were found that no earlier run had. **Lowering the duplicate-page
+cap would have stopped that search before it found them**, so the 40-vs-28 arithmetic
+is not by itself proof of a defect and the cap is left alone.
+
+What IS a defect: the offset was carried across a **changed lower bound** (clamped
+2026-08-23 -> 2026-08-30 by the rising 7-day frame floor), and the coverage
+assessment that should have recorded that ran only for sources stopping on a DRAINED
+reason. Both sources stopped `cap_reached`, so the run recorded no coverage doubt at
+all. Now fixed: exposure is assessed and recorded for every stop reason, each offset
+is stamped with the window bound it was measured against, and the drift is reported.
+The rewind DECISION is deliberately unchanged -- rewinding a budget-stopped source
+would re-page a prefix it already holds without reaching the tail.
+
+The replay also reproduces the sharpest form of the hazard: an offset of 200 measured
+against a 7-day window, resumed against a window the floor has clamped to ~180 rows,
+addresses nothing, returns an empty page and concludes it **drained** -- having
+inspected none of the rows the window still holds. The existing guard catches that
+case because `empty_page` is a drained stop.

@@ -2199,6 +2199,10 @@ class DateCreatedWatermarkEngine:
         # cursor safe to carry across runs -- not any inherent stability of offset
         # paging.
         base = int(self.window_offsets().get(str(label), 0) or 0)
+        # The bound this offset was measured against, read BEFORE this pass
+        # re-stamps it. Read afterwards it always equals the current bound,
+        # which is exactly the drift it is supposed to reveal.
+        base_basis = self.window_offset_basis().get(str(label), "")
         # BILLED, not KEPT (see _fetch_segment's billing-accurate cap): the provider
         # bills every RETURNED row, so measuring cross-segment consumption by kept
         # jobs would let dup-heavy segments overspend the shared run budget.
@@ -2248,7 +2252,21 @@ class DateCreatedWatermarkEngine:
         seg_now = (self.metrics.get("segments", {}).get(label) or {})
         slipped = float(self.metrics["watermark"].get("frame_slippage_minutes") or 0.0)
         stop = str(seg_now.get("stop_reason") or "")
-        exposed = bool(base > 0 and slipped > 0 and stop in self._DRAINED_STOPS)
+        # ASSESS ALWAYS, ACT NARROWLY. This previously required a DRAINED stop, so a
+        # source that ran out of BUDGET while the floor was cutting into its window
+        # was never assessed at all -- and that is the more exposed case, not the
+        # less: it carries an unfinished offset into a set that has since moved. On
+        # 2026-09-06 both sources stopped `cap_reached` with `lower_clamped_to_frame`
+        # true, and the run recorded no coverage doubt whatsoever.
+        #
+        # The rewind DECISION is deliberately left where it was. Sending a
+        # budget-stopped source back to the head would make it re-page a prefix it
+        # already holds, and the duplicate-page cap cannot stop that within one
+        # grant -- so it would spend the budget without reaching the tail. What is
+        # fixed here is the truthfulness of the coverage state, not the behaviour.
+        at_risk = bool(base > 0 and slipped > 0)
+        exposed = at_risk
+        rewind_eligible = at_risk and stop in self._DRAINED_STOPS
         # IS THE FLOOR INSIDE THE WINDOW? That, not an observed direction, decides
         # whether rows are actually leaving the set this offset indexes into.
         #
@@ -2280,13 +2298,21 @@ class DateCreatedWatermarkEngine:
                 "floor_inside_window": floor_inside_window,
                 "page_order_observed": order or "not_yet_observed",
                 "drained_stop": stop,
+                "stop_reason": stop,
+                "rewind_eligible": rewind_eligible,
+                # The bound this offset was measured against, versus the one in
+                # force now. Different values mean the resumed index addresses a
+                # different result set.
+                "offset_basis": base_basis,
+                "offset_basis_now": self.lower,
+                "offset_basis_changed": bool(base_basis and base_basis != self.lower),
             }
         already_rewound = self.coverage_rewinds().get(str(label), 0) > 0
         if exposed and not adverse:
             seg_now["coverage_uncertain"]["resolution"] = "floor_outside_window"
             seg_now["coverage_uncertain"]["action"] = (
                 "window allowed to close; the frame floor never reached into it")
-        uncertain = exposed and adverse
+        uncertain = rewind_eligible and adverse
         if exposed:
             skipped = self.metrics["watermark"].setdefault("coverage", {}).setdefault(
                 "possibly_skipped_sources", [])
@@ -2467,10 +2493,25 @@ class DateCreatedWatermarkEngine:
 
     def record_window_offset(self, label: str, value: int) -> None:
         """Persist the resume point. Never moves backwards: a later pass that
-        returned nothing must not rewind a cursor an earlier pass advanced."""
+        returned nothing must not rewind a cursor an earlier pass advanced.
+
+        The window's LOWER BOUND at the time of measurement is stamped alongside it.
+        An offset is an index into a result set, and it only means what it meant
+        while that set is the same one. The frame floor rises between runs whether
+        or not we clamp, so a resumed offset can silently address different rows --
+        the stamp is what makes that detectable instead of invisible.
+        """
         m = self.window_offsets()
         m[str(label)] = max(int(m.get(str(label), 0) or 0), int(value or 0))
         self.state["window_offsets"] = m
+        basis = dict(self.state.get("window_offset_basis") or {})
+        basis[str(label)] = self.lower
+        self.state["window_offset_basis"] = basis
+
+    def window_offset_basis(self) -> Dict[str, str]:
+        """The window lower bound each persisted offset was measured against."""
+        m = self.state.get("window_offset_basis")
+        return {str(k): str(v or "") for k, v in m.items()} if isinstance(m, dict) else {}
 
     def coverage_rewinds(self) -> Dict[str, int]:
         """How many times each source was sent back to the head of THIS window."""
