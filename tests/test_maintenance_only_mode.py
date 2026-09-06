@@ -202,3 +202,81 @@ class TheProvenanceProbeExplainsAPartialMetric(unittest.TestCase):
         self.assertEqual(row["skip_breakdown_nonzero"],
                          {"company_function_suppressed": 200})
         self.assertFalse(row["skip_breakdown_all_zero"])
+
+
+class CustodyIsProvedResumableNotJustCounted(unittest.TestCase):
+    """`pending_postings 3595` is a file statistic. It says nothing about whether
+    what is held can be handed back and processed -- a store full of stubs would
+    report the same number and fail on the day it was needed. The dry run loads the
+    work through the pipeline's own `pending_work.load` and runs the production
+    identity functions over what comes back."""
+
+    def _store(self, jobs, run_id="20260904T130130Z-13b44a0c"):
+        import tempfile as _tempfile
+        from pathlib import Path as _Path
+
+        from orchestrator import pending_work as pw
+
+        root = _Path(_tempfile.mkdtemp())
+        pw.record(root / pw.STORE, run_id, jobs)
+        return root
+
+    def _job(self, jid, employer="Acme Robotics", title="Head of Sales",
+             domain="acme.example"):
+        return {"job_id": jid, "posting_id": jid, "title": title,
+                "employer_name": employer, "company_name": employer,
+                "organization": employer, "employer_website": domain,
+                "url": f"https://{domain}/{jid}"}
+
+    def test_held_work_is_loaded_through_the_pipelines_own_reader(self):
+        root = self._store([self._job("j1"), self._job("j2")])
+        out = run_maintenance.resume_dry_run(root)
+        self.assertEqual(out["loaded_via"], "orchestrator.pending_work.load")
+        self.assertEqual(out["returned"], 2)
+
+    def test_it_reports_opportunities_not_only_postings(self):
+        """The unit that bounds approvals, so the preserved backlog can be stated as
+        business capacity rather than as a row count."""
+        root = self._store([self._job("j1"), self._job("j2"),
+                            self._job("j3", employer="Other Corp",
+                                      domain="other.example")])
+        ident = run_maintenance.resume_dry_run(root)["identities"]
+        self.assertEqual(ident["postings"], 3)
+        self.assertGreaterEqual(ident["companies"], 2)
+        self.assertGreaterEqual(ident["opportunities"], 2)
+
+    def test_a_payload_with_no_resolvable_employer_is_reported_unresumable(self):
+        """It could never finish, so it would sit in custody for ever -- the one
+        failure mode a count of held rows cannot show."""
+        root = self._store([{"job_id": "x1", "posting_id": "x1", "title": "Head of Sales"}])
+        out = run_maintenance.resume_dry_run(root)
+        self.assertFalse(out["resumable"])
+        self.assertIn("no resolvable employer", out["note"])
+
+    def test_an_empty_store_is_not_reported_as_a_failure(self):
+        import tempfile as _tempfile
+        from pathlib import Path as _Path
+
+        out = run_maintenance.resume_dry_run(_Path(_tempfile.mkdtemp()))
+        self.assertEqual(out["returned"], 0)
+        self.assertEqual(out["note"], "no work is held")
+
+    def test_the_dry_run_releases_nothing(self):
+        from orchestrator import pending_work as pw
+
+        root = self._store([self._job("j1"), self._job("j2")])
+        before = pw.summary(root / pw.STORE)["pending_postings"]
+        run_maintenance.resume_dry_run(root)
+        self.assertEqual(pw.summary(root / pw.STORE)["pending_postings"], before)
+
+
+class BothCohortsAreCountedByOneImplementation(unittest.TestCase):
+    def test_capacity_and_the_dry_run_share_the_identity_helper(self):
+        """Two implementations of "an opportunity" would make the retained-payload
+        figure and the custody figure incomparable -- and they are quoted together."""
+        import inspect
+
+        source = inspect.getsource(run_maintenance)
+        self.assertEqual(source.count("def measure_identities"), 1)
+        self.assertIn("row.update(measure_identities(jobs))", source)
+        self.assertIn('out["identities"] = measure_identities(jobs)', source)

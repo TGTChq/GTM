@@ -283,6 +283,52 @@ def _read_json(path: Path) -> dict:
     return data if isinstance(data, dict) else {}
 
 
+def measure_identities(jobs) -> dict:
+    """Postings -> distinct companies -> company x function OPPORTUNITIES.
+
+    The production identity functions, not a local re-implementation:
+    `multi_source_acquisition._classify` assigns `_matched_role`,
+    `role_mapping.get_bucket_name_for_job` turns that into the function bucket, and
+    `airtable_client._company_identity_keys_from_job` supplies the employer identity
+    the suppression rule keys on. Nothing is contacted and nothing is written.
+
+    Shared by the retained-payload measurement and the custody dry-run so both count
+    the same thing the same way -- two implementations of "an opportunity" would
+    make the two figures incomparable, which is the whole point of quoting them
+    together.
+    """
+    from airtable_client import _company_identity_keys_from_job
+    from multi_source_acquisition import _classify
+    from role_mapping import get_bucket_name_for_job
+
+    jobs = [j for j in (jobs or []) if isinstance(j, dict)]
+    companies, opportunities, relevant, unidentifiable = set(), set(), 0, 0
+    for job in jobs:
+        try:
+            _classify(job)
+        except Exception:  # noqa: BLE001 - one bad row must not stop the count
+            continue
+        if str(job.get("_role_relevance_status") or "").lower() != "reject":
+            relevant += 1
+        keys = _company_identity_keys_from_job(job)
+        if not keys:
+            unidentifiable += 1
+            continue
+        company = sorted(keys)[0]
+        companies.add(company)
+        bucket = get_bucket_name_for_job(job) or "unbucketed"
+        opportunities.add(f"{company}|{bucket}")
+    return {
+        "postings": len(jobs),
+        "companies": len(companies),
+        "opportunities": len(opportunities),
+        "role_relevant_postings": relevant,
+        "unidentifiable_employer": unidentifiable,
+        "postings_per_opportunity": (round(len(jobs) / len(opportunities), 3)
+                                     if opportunities else None),
+    }
+
+
 def capacity(root: Path, run_ids) -> dict:
     """Distinct company x function OPPORTUNITIES behind a run's retained postings.
 
@@ -297,10 +343,6 @@ def capacity(root: Path, run_ids) -> dict:
     `airtable_client._company_identity_keys_from_job` supplies the employer identity
     the suppression rule keys on. No provider is contacted and nothing is written.
     """
-    from airtable_client import _company_identity_keys_from_job
-    from multi_source_acquisition import _classify
-    from role_mapping import get_bucket_name_for_job
-
     out = {"unit_note": "postings -> company x function opportunities", "runs": []}
     for run_id in run_ids:
         src = root / "run_artifacts" / run_id / "enrichment" / "postings.json"
@@ -318,28 +360,51 @@ def capacity(root: Path, run_ids) -> dict:
             out["runs"].append(row)
             continue
         jobs = [j for j in (data.get("jobs") or []) if isinstance(j, dict)]
-        row["postings"] = len(jobs)
-        companies, opportunities, relevant = set(), set(), 0
-        for job in jobs:
-            try:
-                _classify(job)
-            except Exception:  # noqa: BLE001 - one bad row must not stop the count
-                continue
-            if str(job.get("_role_relevance_status") or "").lower() != "reject":
-                relevant += 1
-            keys = _company_identity_keys_from_job(job)
-            if not keys:
-                continue
-            company = sorted(keys)[0]
-            companies.add(company)
-            bucket = get_bucket_name_for_job(job) or "unbucketed"
-            opportunities.add(f"{company}|{bucket}")
-        row["companies"] = len(companies)
-        row["opportunities"] = len(opportunities)
-        row["role_relevant_postings"] = relevant
-        if opportunities:
-            row["postings_per_opportunity"] = round(len(jobs) / len(opportunities), 3)
+        row.update(measure_identities(jobs))
         out["runs"].append(row)
+    return out
+
+
+def resume_dry_run(root: Path) -> dict:
+    """Prove the work in custody can actually be resumed -- without spending anything.
+
+    Custody has been exercised on production for RECORD and RELEASE. Resume has only
+    ever run in tests, and "preserved" is worth nothing if what was preserved turns
+    out to be too thin to process: a store full of stubs would look identical in
+    every count until the day it was needed.
+
+    So this loads the held work through the SAME `pending_work.load` the pipeline
+    calls, then runs the production identity functions over the payloads it gets
+    back. If they classify and resolve to an employer, they are complete enough to
+    enter enrichment -- which is exactly what resume does with them.
+
+    It also converts the held postings into the unit that bounds approvals, so the
+    preserved backlog can be stated as opportunities rather than as a file size.
+
+    Reads only. Nothing is released, expired or written.
+    """
+    from orchestrator import pending_work as pw
+
+    store = root / pw.STORE
+    jobs, info = pw.load(store)
+    out = {
+        "loaded_via": "orchestrator.pending_work.load",
+        "files": info.get("files"),
+        "offered": info.get("offered"),
+        "returned": len(jobs),
+        "runs": info.get("runs"),
+    }
+    out["identities"] = measure_identities(jobs)
+    # The resume-path check: a payload that cannot be classified or attributed to an
+    # employer cannot be enriched, so it would be held for ever and never finish.
+    ident = out["identities"]
+    out["resumable"] = bool(jobs) and ident["unidentifiable_employer"] == 0
+    out["note"] = ("every held posting resolves to an employer and a function, so "
+                   "resume has real work to hand back"
+                   if out["resumable"] else
+                   "no work is held" if not jobs else
+                   f"{ident['unidentifiable_employer']} held posting(s) carry no "
+                   "resolvable employer and could never finish")
     return out
 
 
@@ -541,7 +606,10 @@ def main(argv=None) -> int:
         ids = [r.strip() for r in a.capacity_runs.split(",") if r.strip()]
         print(json.dumps(capacity(root, ids), indent=2))
 
-    _say("4d. PROVENANCE PROBE: which reported fields each run actually carries")
+    _say("4d. RESUME DRY RUN: can the work in custody actually be handed back?")
+    print(json.dumps(resume_dry_run(root), indent=2, default=str))
+
+    _say("4e. PROVENANCE PROBE: which reported fields each run actually carries")
     print(json.dumps(provenance_probe(root), indent=2, default=str))
 
     _say("5. REPORTING: artifacts+ledger VS ledger-only, on production files")
