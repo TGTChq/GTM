@@ -414,6 +414,11 @@ class Orchestrator:
             except Exception:  # noqa: BLE001 - reporting must never mask the outcome
                 pass
             lock.release()
+            try:
+                import fantastic_jobs_adapter as _fja_custody
+                _fja_custody.set_custody_hook(None)
+            except Exception:  # noqa: BLE001
+                pass
             # Lift any run that predates the ledger into it BEFORE retention
             # deletes its evidence. Without this the last runs written by the
             # previous build would vanish from the very report the ledger exists
@@ -432,10 +437,42 @@ class Orchestrator:
             # urgent -- the artifacts are already bounded, one extra run's worth
             # costs nothing, and the next run retries the lift. Losing the evidence
             # is not recoverable at any later time.
+            # Lift opportunity lists left by runs that predate custody INTO custody,
+            # for exactly the same reason the ledger backfill runs here: the file is
+            # under run_artifacts and the next statement may delete it. A run whose
+            # postings were never finished has its only copy in
+            # run_artifacts/<run_id>/enrichment/postings.json.
+            protect_runs = {self.ctx.run_id}
+            if bool(getattr(config, "PENDING_WORK_ENABLED", True)):
+                store = self.state.store_path("pending_work")
+                try:
+                    self.result_pending_adoption = pending_work.adopt_from_artifacts(
+                        self.state.root, store,
+                        limit=int(getattr(config, "PENDING_WORK_RESUME_MAX_PER_RUN", 0) or 0) or None,
+                        exclude_keys=SuppressionStore(self.state).seen_postings() or set(),
+                    )
+                except Exception:  # noqa: BLE001 - recovery never masks the outcome
+                    pass
+                # Age out custody WITHOUT calling it done: expire() archives the
+                # payloads and audits the outcome as unresolved. A retention policy
+                # must never read as a completed disposition.
+                try:
+                    pending_work.expire(
+                        store,
+                        max_age_days=int(getattr(config, "PENDING_WORK_MAX_AGE_DAYS", 0) or 0),
+                        run_id=self.ctx.run_id)
+                except Exception:  # noqa: BLE001
+                    pass
+                # A run that still owes work keeps its artifacts: they are the
+                # evidence any recovery or reconciliation has to be checked against.
+                try:
+                    protect_runs |= pending_work.pending_run_ids(store)
+                except Exception:  # noqa: BLE001
+                    pass
             if backfilled:
                 try:
                     self.state.prune(keep=int(retention_keep), max_bytes=RETENTION_MAX_BYTES,
-                                     protect={self.ctx.run_id})
+                                     protect=protect_runs)
                 except Exception:  # noqa: BLE001
                     pass
             else:
@@ -894,6 +931,20 @@ class Orchestrator:
         pending_on = bool(getattr(config, "PENDING_WORK_ENABLED", True))
         pending_dir = self.state.store_path("pending_work") if pending_on else None
         pending_adopted = False
+        if pending_on:
+            # Custody must be durable BEFORE the acquisition cursor is. The adapter
+            # persists per-source offsets at the end of acquisition -- before the
+            # pipeline sees a single posting -- and replays them forward, so a run
+            # that died in between advanced past rows nothing had kept. The hook
+            # takes custody of the RAW acquired rows (a superset: dedupe has not run
+            # yet); the rows dedupe then proves were not new work are released
+            # immediately afterwards with a `deduped` outcome.
+            import fantastic_jobs_adapter as _fja_custody
+
+            def _hold(rows, _run_id=self.ctx.run_id, _dir=pending_dir):
+                return bool(pending_work.record(_dir, _run_id, rows).get("ok"))
+
+            _fja_custody.set_custody_hook(_hold)
         while not stop_reason:
             decision = controller.decide(
                 quota_remaining=last_quota, apollo_circuit_open=last_circuit,
@@ -976,6 +1027,15 @@ class Orchestrator:
             for jid, exit_stage in dedup_attr["exits"]:
                 ledger.mark(jid, exit_stage=exit_stage,
                             previously_seen=(exit_stage == "dedup_previously_seen"))
+            # The custody hook held the RAW rows, because it had to run before the
+            # cursor advanced and dedupe had not happened yet. Now that dedupe has
+            # ruled, retire the ones that were never new work -- with an explicit
+            # `deduped` outcome, so custody shrinks to genuine debt and the audit
+            # still shows why each row left.
+            if pending_on and dedup_attr["exits"]:
+                pending_work.release(
+                    pending_dir, [jid for jid, _stage in dedup_attr["exits"]],
+                    outcome=pending_work.OUTCOME_DEDUPED, run_id=self.ctx.run_id)
 
             # Checkpoint acquisition BEFORE enrichment and delivery run. Recording
             # only at the end of the slice would lose these counters whenever a
@@ -1010,7 +1070,6 @@ class Orchestrator:
                         pending_dir,
                         exclude_run_id=self.ctx.run_id,
                         limit=int(getattr(config, "PENDING_WORK_RESUME_MAX_PER_RUN", 0) or 0) or None,
-                        max_age_days=int(getattr(config, "PENDING_WORK_MAX_AGE_DAYS", 0) or 0) or None,
                         exclude_keys=[k for k in (posting_identity(o)[1] for o in opportunities) if k],
                     )
                     # Anything a previous run already finished is in suppression;
@@ -1059,7 +1118,8 @@ class Orchestrator:
             # never on a deferred outcome.
             if pending_on:
                 acq_cum["pending_work_released"] = pending_work.release(
-                    pending_dir, terminal_ids)
+                    pending_dir, terminal_ids,
+                    outcome=pending_work.OUTCOME_TERMINAL, run_id=self.ctx.run_id)
             # Gate-E D12: postings that terminally collapsed into another lead (N->1)
             # must also be committed, else they are re-billed + re-enriched every run.
             collapsed_ids = [rid for lead in enrichment.leads

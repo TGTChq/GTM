@@ -51,6 +51,24 @@ def _load_continuation_state() -> Dict[str, Any]:
     return {}
 
 
+#: Called with the rows acquired so far, immediately BEFORE the window checkpoint
+#: makes the per-source offsets durable. Set by the pipeline.
+#:
+#: The ordering is the whole point and it is not "before enrichment". Offsets become
+#: durable inside ``DateCreatedWatermarkEngine.checkpoint()``, which runs at the END
+#: of acquisition -- before the pipeline has even seen the postings. A run that died
+#: between those two points advanced the cursor past rows nothing had kept. So the
+#: hook runs first, and a FAILED hook stops the checkpoint: re-billing a page is
+#: recoverable, losing it is not.
+_CUSTODY_HOOK = None
+
+
+def set_custody_hook(fn) -> None:
+    """Install (or clear, with ``None``) the pre-checkpoint custody hook."""
+    global _CUSTODY_HOOK
+    _CUSTODY_HOOK = fn
+
+
 def _save_continuation_state(state: Dict[str, Any]) -> None:
     path = str(getattr(config, "FANTASTIC_JOBS_CONTINUATION_STATE_PATH", "") or "")
     if not path:
@@ -2537,6 +2555,25 @@ class DateCreatedWatermarkEngine:
         inherit someone else's completion."""
         if not self.opened:
             return
+        # CUSTODY BEFORE CONTINUATION. `_save()` below makes `window_offsets`
+        # durable, and those offsets are replayed FORWARD -- once saved, the rows
+        # between the old and new offset are never requested again. So anything
+        # acquired has to be safely held FIRST. A hook that fails leaves the cursor
+        # exactly where it was: the next run re-bills those pages, which costs
+        # credits, where advancing would cost the work itself.
+        if _CUSTODY_HOOK is not None and self.acquired:
+            try:
+                held = bool(_CUSTODY_HOOK(list(self.acquired)))
+            except Exception as exc:  # noqa: BLE001
+                held = False
+                self.metrics["watermark"]["custody_error"] = f"{type(exc).__name__}: {exc}"
+            if not held:
+                self.metrics["watermark"]["custody_failed"] = True
+                self.metrics["watermark"]["committed"] = False
+                self.metrics["watermark"]["offsets_not_advanced"] = True
+                return
+            self.metrics["watermark"]["custody_ok"] = True
+
         ids = set(str(i) for i in (self.state.get("window_acquired_ids") or []))
         ids |= {str(j.get("_fantastic_internal_id")) for j in self.acquired if j.get("_fantastic_internal_id")}
         self.state["window_acquired_ids"] = sorted(ids)
