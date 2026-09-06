@@ -322,10 +322,25 @@ def ab_and_report(root: Path, window_start: str, use_instantly: bool) -> int:
     now = datetime.now(timezone.utc)
     window = anchored_window(start, now, tz_name="America/Los_Angeles")
 
-    # ISOLATED COPY. Production state is read, never written, by this comparison.
+    # ISOLATED COPY, and a SELECTIVE one. Production state is read, never written.
+    #
+    # Copying the whole root would drag in every per-stage subtree -- including the
+    # `enrichment/postings.json` payload files, 6,205 opportunities for one run
+    # alone -- plus the maintenance backups from previous passes, into container
+    # temp space, and would grow with every pass. The report reads only the ledger
+    # and the TOP-LEVEL json per run, so that is all that is copied.
     work = Path(tempfile.mkdtemp(prefix="ab_")) / "orchestrator_v2"
-    shutil.copytree(root, work, dirs_exist_ok=True,
-                    ignore=shutil.ignore_patterns("*.tmp", ".run.lock"))
+    work.mkdir(parents=True, exist_ok=True)
+    if (root / "reporting_ledger").is_dir():
+        shutil.copytree(root / "reporting_ledger", work / "reporting_ledger",
+                        dirs_exist_ok=True)
+    src_runs = root / "run_artifacts"
+    if src_runs.is_dir():
+        for run_dir in sorted(d for d in src_runs.iterdir() if d.is_dir()):
+            for artifact in run_dir.glob("*.json"):
+                dst = work / "run_artifacts" / run_dir.name / artifact.name
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(artifact, dst)
     before = {e["run_id"] for e in read_entries(work)[0]}
     lift = backfill_from_artifacts(work)
     after = {e["run_id"] for e in read_entries(work)[0]}
