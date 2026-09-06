@@ -125,15 +125,35 @@ class SliceStateIsStableWhereAnOffsetIsNot(unittest.TestCase):
 
 
 class TheWindowStillClosesHonestly(unittest.TestCase):
-    def test_a_source_is_drained_only_when_every_slice_is(self):
+    """`commit_watermark` only advances when every enabled source is drained, so
+    what "drained" means decides whether the watermark can step over rows nobody
+    inspected. Under the slice cursor it means every `date_created` sub-range was
+    paged to exhaustion -- a far stronger claim than one index ceasing to return
+    rows, which is all the offset path could ever assert."""
+
+    def test_a_starved_run_does_not_declare_the_source_drained(self):
+        out = _sweep(True, cap=30, days=1)
+        with open(out["state"], encoding="utf-8") as fh:
+            state = json.load(fh)
+        self.assertFalse((state.get("window_drained_sources") or {}).get(LABEL),
+                         "a budget stop must never read as full coverage")
+
+    def test_full_coverage_does_declare_it_drained(self):
         out = _sweep(True, cap=240)
         with open(out["state"], encoding="utf-8") as fh:
             state = json.load(fh)
-        drained = (state.get("window_drained_sources") or {}).get(LABEL)
-        done = len((state.get("window_slices") or {}).get(LABEL) or [])
-        if drained:
-            self.assertGreater(done, 0,
-                               "drained means every slice reported exhaustion")
+        self.assertTrue((state.get("window_drained_sources") or {}).get(LABEL))
+        self.assertGreater(len((state.get("window_slices") or {}).get(LABEL) or []), 0)
+
+    def test_drained_is_never_set_while_slices_remain(self):
+        for cap in (30, 60, 120, 240):
+            out = _sweep(True, cap=cap, days=2)
+            with open(out["state"], encoding="utf-8") as fh:
+                state = json.load(fh)
+            drained = bool((state.get("window_drained_sources") or {}).get(LABEL))
+            if drained:
+                self.assertEqual(out["pending"], 0,
+                                 f"cap={cap}: drained but rows remain unseen")
 
 
 if __name__ == "__main__":

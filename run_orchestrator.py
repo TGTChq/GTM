@@ -818,8 +818,23 @@ def _print_run_summary(ctx, mode, result, state) -> None:
             line("window_upper", wm.get("upper"))
             line("window_reused", wm.get("window_reused"))
             line("previous_watermark", wm.get("previous_watermark"))
-            line("offsets_at_open", wm.get("offsets_at_open"))
-            line("offsets_at_close", wm.get("offsets_at_close"))
+            # Under the slice cursor these are empty by design -- progress is a set
+            # of drained date ranges, not an index -- so print whichever cursor the
+            # run actually used. An empty offset pair would otherwise read as "no
+            # progress" on a run that drained the window completely.
+            slices = wm.get("slices") or {}
+            if slices:
+                line("cursor", "date_created slices")
+                for label, s in sorted(slices.items()):
+                    print(f"  {label:24} slices {s.get('already_done', 0)}+"
+                          f"{s.get('drained_now', 0)}/{s.get('total', 0)} drained "
+                          f"attempted={s.get('attempted', 0)} billed={s.get('billed', 0)} "
+                          f"kept={s.get('kept', 0)} "
+                          f"budget_exhausted={s.get('budget_exhausted', False)}")
+            else:
+                line("cursor", "window offset")
+                line("offsets_at_open", wm.get("offsets_at_open"))
+                line("offsets_at_close", wm.get("offsets_at_close"))
             line("drained_at_open", wm.get("drained_at_open"))
             line("drained_sources", wm.get("drained_sources"))
             line("undrained_sources", wm.get("undrained_sources"))
