@@ -33,6 +33,23 @@ with production filters (0 Jobs credits, 1 request each):
 | Wellfound / Y Combinator | not counted in this window (205 postings on 09-04) |
 | 145 direct ATS boards | **inactive** — the lane is built only when `"ats"` is in `--lanes`, and production passes `--lanes fantastic` |
 
+## Inventory already paid for and preserved
+
+Measured 2026-09-06T12:13Z by loading custody through the pipeline's own
+`pending_work.load` and running the same identity functions as the table above:
+
+| held | distinct companies | **company × function opportunities** | role-relevant | unidentifiable |
+|---|---|---|---|---|
+| 3,595 postings | 2,808 | **2,998** | 3,500 | **0** |
+
+Every held posting resolves to an employer and a function, so this is work that can
+be enriched rather than a store of stubs. It is already bought: resuming it costs no
+provider credits, only Apollo enrichment.
+
+Against the 1,000/day target that is roughly **three days of opportunity inventory
+sitting in hand** — it does not raise the daily ceiling, but it means the first days
+after Apollo is restored are not inflow-bound.
+
 ## The internal loss, and its correction
 
 The 2026-09-06 run billed **5,444** provider rows and kept **226** — 4% useful. The

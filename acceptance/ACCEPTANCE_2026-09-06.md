@@ -213,8 +213,24 @@ Five passes have run this way. Results, from `evidence/20260906-maintenance/`:
 * `contacts_found 1,048` and `sent_to_airtable 781` are **measured**, and the census
   reconciles on all of them.
 
-`jobs_reviewed` remains **partial** for the period: the 09-04 run contributes
-nothing to it. Whether that field was never written or merely never read is the
-difference between a data gap and a reporting gap, and it must not be guessed, so
-the maintenance pass now prints a per-run provenance probe that names the exact
-field. The answer is recorded below once that pass has run.
+### `jobs_reviewed partial` — settled, and it is not an open defect
+
+The provenance probe answers it exactly. Per run, on the volume:
+
+| run | commit | `funnel.qualification_input` | funnel keys present |
+|---|---|---|---|
+| `20260903T130019Z` | — | absent | **none** |
+| `20260904T130130Z` | `8291a09` | absent | **none** |
+| `20260905T030439Z` | `b31e55a` | `0` | all 18 |
+| `20260906T030230Z` | `83fa993` | `226` | all 18 |
+
+The 09-04 run wrote **no enrichment funnel at all** — the topup path set
+`enrichment.funnel = {}` unconditionally. That was fixed by `b332577`
+(2026-09-04 11:03 MDT); the 09-04 run started on `8291a09` (03:52 MDT), seven hours
+before the fix, and `git merge-base --is-ancestor b332577 8291a09` confirms the fix
+is not in it. Every run since carries the field.
+
+So the missing contribution is a **data gap, not a reporting gap**: it cannot be
+recovered from any payload, because it was never written. `partial` is the correct
+status, the report says so plainly, and no run from 2026-09-05 onward will repeat
+it. Nothing to fix.
