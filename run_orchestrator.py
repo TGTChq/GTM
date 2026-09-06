@@ -130,7 +130,7 @@ def _identity_arguments(a: argparse.Namespace) -> Dict[str, Any]:
     return out
 
 
-def _emit_reporting_ledger(state, keep: int = 14) -> None:
+def _emit_reporting_ledger(state, keep: int = 30) -> None:
     """Print the durable reporting ledger so it can be captured from LOGS.
 
     gtm-volume is reachable only while a container is running, and on a cron
@@ -140,8 +140,8 @@ def _emit_reporting_ledger(state, keep: int = 14) -> None:
 
     So the compact ledger -- the store the weekly report reads FIRST for every
     metric -- is written to stdout at the end of every run. That turns capture from
-    a timing problem into a query. Bounded to the most recent `keep` runs, which
-    covers any weekly window; the heavy artifacts are deliberately NOT emitted.
+    a timing problem into a query. Bounded to the most recent `keep` runs (30), comfortably above
+    the ~7 a weekly window holds; the heavy artifacts are deliberately NOT emitted.
     """
     try:
         from orchestrator.run_ledger import read_entries
@@ -642,6 +642,14 @@ def main(argv=None) -> int:
     except RunLockHeld as exc:
         print(f"run_lock             HELD\n{exc}", file=sys.stderr)
         return 2
+    except Exception:
+        # A FAILED run is precisely the one the weekly report must not lose,
+        # and it never reaches the summary below. The pipeline finalizes its
+        # ledger entry in its own `finally`, so the entry exists by now --
+        # emit it before the traceback leaves the process, or the only copy
+        # stays on a volume that is unreachable between cron runs.
+        _emit_reporting_ledger(state)
+        raise
 
     _print_run_summary(ctx, mode, result, state)
     return 0 if result["all_reconcile"] else 1

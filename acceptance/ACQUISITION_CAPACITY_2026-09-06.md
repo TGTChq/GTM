@@ -1,152 +1,207 @@
 # Acquisition capacity — what the evidence supports, and what it does not
 
-Apollo blocks new enrichment measurement. It does not block analysis of the
-acquisition that already ran, and it does not block the **count endpoint**, which
-returns a number and quota headers, no job rows: **0 Jobs credits, 1 request**.
+**This file supersedes an earlier version that stated ~111 approved leads/day and
+called 1,000/day "arithmetically impossible". Both claims went beyond the
+evidence and are retracted here.** What follows separates observation from
+conditional estimate from unknown, and the unknowns are load-bearing.
 
-Everything below is either read from a production run log or from a count probe
-whose cost is stated. Where a mechanism is not established, it says so.
+Apollo blocks new enrichment measurement. It does not block the count endpoint,
+which returns a number and quota headers and no job rows: **0 Jobs credits, 1
+request** per call.
 
-## Measured addressable inventory
+## 1. What the duplicate counter actually counted
 
-Count endpoint, 24h `date_created` window, built with the **same production
-functions the run uses** (`build_title_query_plan`, `build_jb_params`,
-`build_ats_params`), so it is comparable to what the run actually queries.
+The earlier version said 5,218 of the 2026-09-06 run's 5,444 billed rows were
+"billed more than once inside the same run". **That was wrong.**
 
-| query | postings / 24h |
+`seen_ids` is initialised empty per fetch and then SEEDED at window open from
+persisted state (`fantastic_jobs_adapter.py`, `DateCreatedWatermarkEngine.open`):
+
+```python
+for key in ("boundary_ids", "overlap_band_ids", "window_acquired_ids"):
+    self.seen_ids |= {f"fantastic_{i}" for i in (self.state.get(key) or [])}
+```
+
+`window_acquired_ids` holds every id **kept in the open window by previous runs**
+(`checkpoint()` writes `self.acquired`, which `_fetch_segment` extends with kept
+rows only). The 2026-09-04 run kept **6,205** postings in the window that was still
+in flight on 2026-09-06 — `window_reused=True`, `previous_watermark`
+2026-08-23T10:02:36Z, `in_flight_window_end` 2026-09-04T10:02:11Z, never drained,
+never committed. So roughly 6,205 ids were in `seen_ids` before the first request
+of the 09-06 run went out.
+
+**A duplicate is therefore predominantly a cross-run re-delivery that dedupe
+correctly suppressed** — the provider returning rows an earlier run already took —
+not a within-run double purchase. It is still repeated *paid* delivery: billing
+counts every returned row (`seg["returned"] += 1; quota.jobs_consumed += 1` before
+any disposition), which is why 5,218 wasted credits is real regardless.
+
+### Reconciling ATS: 2,722 billed, 0 kept, `cross_source_duplicates` 0
+
+`cross_source_duplicates` increments only when `metrics["_first_seen"]` names a
+*different* source for that id — and `_first_seen` is written only for rows **kept
+in this run**. A seeded id has no owner, so `owner` is `None` and the counter
+cannot fire. **A zero there does not mean the sources failed to overlap; it means
+the duplicates were not attributable to a source that kept the row in this run.**
+
+Reproduced offline in `tests/test_duplicate_accounting_semantics.py` against a
+well-behaved feed — nothing depends on provider misbehaviour:
+
+| behaviour | pinned |
 |---|---|
-| LinkedIn + production title expression (4,222 chars) | **361** |
-| LinkedIn, same firmographic filters, **no** title expression | **5,511** |
-| ATS + production title expression | **520** |
+| every row already acquired by an earlier run → all duplicates, `cross_source_duplicates` 0, all billed | ✅ |
+| genuine cross-source overlap → `cross_source_duplicates` fires | ✅ (so 0 is informative) |
+| a new id among seeded ones survives | ✅ first occurrences are not discarded |
+| a source-filtered row never claims its id | ✅ nothing pre-inserts an id it then rejects |
+| a within-run repeat is suppressed but still billed | ✅ |
 
-**Addressable titled inventory across the two active sources: ~881 postings/day.**
+**No dedupe correctness defect was found.** Insertion happens only after a row is
+kept; the seed format (`fantastic_{internal_id}`) matches `job["job_id"]` exactly;
+`_first_seen` affects attribution only, never the keep/drop decision. The adapter's
+`duplicates` and the orchestrator's `historical_previously_seen` count different
+things at different stages and were both reported — conflating them was my error,
+not double counting in the code.
 
-Wellfound and Y Combinator were not requested at all on 2026-09-06
-(`drained_at_open=True`, `stop=already_drained_this_window`); on 2026-09-04 they
-contributed 160 and 45 rows respectively. They are small.
+### One demonstrated calibration defect
+
+`FANTASTIC_MAX_CONSECUTIVE_DUPLICATE_PAGES` exists so that "one run cannot spend its
+entire budget discovering" a fully-overlapping window. It is **40** in production,
+and the 09-06 governor grant bought **28 pages per source**. The guard could not be
+reached. ATS spent its whole allocation on consecutive all-duplicate pages and
+stopped on `cap_reached`, not `duplicate_page_cap`. Pinned as arithmetic in the
+tests; **not adjusted**, because the right threshold depends on why the window is
+being re-paged at all, which is unresolved.
+
+### Limits of this evidence
+
+Production retains **no response-level id list**. `postings.json` holds only kept
+rows; `window_acquired_ids` holds only kept ids; `duplicate_pages_skipped` is in the
+segment metrics but is not printed in the RUN SUMMARY. **The actual
+first-occurrence-and-duplicate trace for the 5,218 events cannot be reconstructed
+from the 2026-09-06 evidence**, and no representative id list is offered here. The
+reproductions establish the mechanism, not the history.
+
+## 2. Inventory counts — observations, not ceilings
+
+Count endpoint, **one 24-hour `date_created` window ending 2026-09-06T~08:30Z**.
+These are single observations of one window on one day. They are **not** stable
+daily ceilings, and no variance is known.
+
+| query | count in that window |
+|---|---|
+| LinkedIn + production title expression (4,222 chars) | 361 |
+| LinkedIn, same firmographic filters, **no** title expression | 5,511 |
+| ATS + production title expression | 520 |
+
+### Filters actually sent, and comparability
+
+LinkedIn: `source`, `title_advanced`, `location`, `ai_employment_type`,
+`organization_headcount_gte`, `organization_headcount_lt`, `organization_agency`,
+`exclude_organization_industry`, `exclude_ats_duplicate`, `date_created_gte`,
+`date_created_lt` — built by the production `build_jb_params` /
+`build_title_query_plan`.
+
+Removed for the count: `limit`, `offset`, `cursor`, `time_frame`, `order`. These are
+pagination and window controls, not row filters; the explicit 24h `date_created`
+window sits inside the production `time_frame=7d`, so the matched set is unchanged.
+
+ATS additionally required removing **`include_basic_organization_details`**, which
+the count endpoint rejects with HTTP 400 "Unknown query parameter". That parameter
+controls *response shape*, not which rows match, so comparability is preserved.
 
 The same count over the run's own 5.3-day window returned **HTTP 504 — "The count
 timed out. Narrow your filters, or use a shorter time window."** The production
 title expression is expensive enough server-side that the provider cannot count it
-over five days. That is a fact about the query, not about the jobs endpoint.
+over five days.
 
-## The 2026-09-06 run, reconciled
+### Overlap and missing sources — why 881 is not a total
 
-```
-billed                       5,444   = ats 2,722 + linkedin 2,722
-cross_query_duplicates       5,218   rows the provider returned MORE THAN ONCE in this run
-cross_source_duplicates          0
-historical_previously_seen       0
-canonical_duplicates_in_run      0
-postings_missing_identity        0
-schema_rejected / source_filtered 0 / 0   (both sources)
--------------------------------------------------
-net-new captured               226
-  role-eligible                194
-  REJECT_QUALITY_GUARD_OTHER    28
-  REJECT_ROLE_MISMATCH           3
-  REJECT_EXCLUDED_SENIORITY      1        194 + 32 = 226, reconciles
-companies considered             0        Apollo circuit opened on company one
-```
+The earlier version summed 361 + 520 = 881 and treated it as the daily total. That
+sum assumes the two sources carry **disjoint** postings, which is not established —
+and the LinkedIn query itself sends `exclude_ats_duplicate`, which exists precisely
+because the same posting reaches us from both. **The union is unmeasured**, so 881
+is an upper bound on the union, not the union.
 
-**The dominant measured loss is within-run re-purchase: 5,218 of 5,444 rows,
-95.8% of the spend.** `seen_ids` is initialised empty per fetch, so a "duplicate"
-here is a row this run was billed for more than once — not inventory a previous run
-already worked.
+Three configured acquisition paths are **absent from the estimate entirely**:
 
-**Do not read `historical_previously_seen = 0` as proof we are not re-buying across
-runs.** That counter matches against the suppression store, which only holds
-postings that reached a TERMINAL disposition. Almost nothing has reached terminal
-while Apollo has been down, so suppression is nearly empty and the check is close
-to vacuous right now.
+* **Wellfound** and **Y Combinator** — enabled, but `already_drained_this_window` on
+  09-06 so they were never requested; they contributed 160 and 45 rows on 09-04.
+* **Direct ATS board acquisition** — `ATS_DIRECT_ACQUISITION_ENABLED=True`, **145
+  boards** in the registry (workday 68, smartrecruiters 31, ashby 22, greenhouse 13,
+  lever 6, …). This is a separate, non-Fantastic path and none of it is counted
+  above.
 
-### Why the governor allowed 5,444
+**So no total daily inventory figure is established by this evidence.**
 
-`governor_budget 5444 reason=pace remaining=82986 reserve=10000`. It paces the
-monthly job quota and nothing else. **It has no novelty signal** — no input for how
-much unseen inventory the window holds. It granted 5,444 credits against a window
-whose measured titled inventory is roughly 881/day × 5.3 days ≈ 4,700 rows, of
-which 226 turned out to be new. That is the mechanism by which a run spends a full
-budget for almost nothing: the budget is a spend limit, not a yield estimate.
+### What the no-title count does and does not show
 
-### Why ATS billed 2,722 and kept zero
+5,511/day is LinkedIn's ICP-shaped inventory with the title filter removed. It
+establishes that the title expression excludes roughly 93% of postings that pass the
+firmographic filters. It does **not** establish that any of those excluded postings
+are commercially relevant. Symmetrically, the cached corpus we have is
+**title-selected**, so it cannot estimate relevance among title-excluded jobs
+either. Both limitations stand; neither number can be turned into addressable
+inventory.
 
-Every ATS row was already in the run's `seen_ids`. ATS's own measured inventory is
-520/day ≈ 2,756 over the 5.3-day window — almost exactly the 2,722 it billed. So it
-appears to have swept its whole window and found nothing the run had not already
-seen.
-
-**The mechanism is NOT established.** The obvious hypothesis — ATS returning the
-ATS-side copy of postings LinkedIn already returned — is contradicted by
-`cross_source_duplicates = 0`. Either that counter does not capture this case or
-the duplication is internal to ATS's own paging. Resolving it needs a probe that
-has not been run.
-
-### Why LinkedIn kept only 226
-
-2,722 billed, 226 unique, 2,496 already seen within the run. Measured LinkedIn
-inventory is 361/day ≈ 1,914 over the window, and offsets 0–100 were consumed by
-the 2026-09-05 run. So the window plausibly held on the order of 1,700 rows the run
-never kept, while it paged offsets 100 → 2,822.
-
-**Not established**, and this is the single most valuable open measurement: either
-the paging is not reaching those rows (offset walking a `date_posted`-ordered feed
-while the filter is on `date_created`), or the count endpoint and the jobs endpoint
-disagree about what the query matches.
-
-### Did either source exhaust its window?
-
-No — and the flag disagrees with the arithmetic. Both recorded
-`stop=cap_reached`, `drained=False`, `undrained_sources=['fantastic_jobs_ats',
-'fantastic_jobs_linkedin']`, `window_drained=False`, `watermark_committed=False`.
-So the run stopped on **budget**, with the window formally uninspected. But a 95.8%
-duplicate rate is what an exhausted feed looks like. `cap_reached` is not in
-`_DRAINED_STOPS`, so a source that has in fact run out cannot say so.
-
-## Can this produce 1,000 new approved leads per day?
-
-**No — and the shortfall is arithmetic, not efficiency.**
-
-The only end-to-end evidence with Apollo working is 2026-09-04:
+## 3. The 2026-09-04 funnel — why 781/6,205 is not a forecast
 
 ```
-6,205 postings -> 2,410 opportunities -> 1,048 contacts -> 781 Airtable rows -> 770 Instantly
+6,205 postings -> 2,410 opportunities -> 1,048 contacts_with_email -> 781 Airtable rows created
+                                                                   -> 770 delivered to Instantly (09-05 sync)
 ```
 
-posting → approved Airtable row = **12.6%**. Counting units differ along that chain
-and are kept distinct: postings, then company×role_bucket opportunities, then
-persons.
+Four reasons that ratio cannot be projected forward:
 
-Note what those 6,205 postings were: a **ten-day backlog** cleared after the
-acquisition outage, not a daily rate. 6,205 / 10 ≈ 620/day, consistent with the
-881/day ceiling measured above.
+1. **Creations are not approvals.** The run logged
+   `delivery airtable=review-staging(Pending) auto_approve=OFF`. Those 781 rows were
+   created **Pending**. By the 09-05 00:02Z sync the Approved view held 992 rows of
+   which 781 were valid — and 992 = the 211 pre-existing blocked rows + 781. So all
+   781 became Approved within ~11 hours. **By what mechanism is not established** —
+   human review, or fact-based send-safe auto-approval independent of the run's
+   `auto_approve` flag. This determines whether "approved leads/day" is machine-
+   bounded or human-bounded, and it is the single most important unknown here.
+2. **The cohort was a backlog, not a day.** Those 6,205 postings were ~10 days of
+   inventory cleared after the acquisition outage. Its company mix, and therefore
+   its posting→opportunity density (2,410/6,205 = 0.388), need not hold for a daily
+   slice.
+3. **The run was truncated.** Apollo exhausted after **2,170 of 2,410**
+   opportunities, so 240 were never processed. The observed contact rate is a floor,
+   and the end-to-end ratio understates what an uninterrupted run would produce.
+4. **Counting units differ at every step** and are not interchangeable: postings →
+   company×role_bucket opportunities → persons → Instantly lead records.
+   `AIRTABLE_SUPPRESS_EXISTING_COMPANY_FUNCTION` defaults True, so the practical
+   ceiling is about **one approved contact per company×function**, which means
+   *opportunities*, not postings, bound the outcome. The observed 1,048 contacts
+   against 2,410 opportunities is consistent with ≤1 per opportunity, but the
+   configured maximum has not been read back from production.
 
-| scenario | postings/day | approved/day at 12.6% |
-|---|---|---|
-| observed, current sources and filters | 881 | **~111** |
-| hypothetical: LinkedIn title filter removed entirely | 5,511 + ATS | ~700 (relevance destroyed) |
-| required for the target | **~7,940** | 1,000 |
+## 4. What the evidence supports about 1,000 approved leads/day
 
-**Even at 100% conversion, 881 postings/day cannot yield 1,000 approved leads/day.**
-The target is unreachable from the currently enabled sources and filters regardless
-of any downstream improvement — Apollo, enrichment throughput and delivery are all
-irrelevant to that particular gap.
+**Supported:** in one 24-hour window, the two Fantastic sources that were actually
+queried on 09-06 matched 361 and 520 postings under production filters, with the
+union unmeasured. The only end-to-end funnel observed (2026-09-04) turned a 10-day
+backlog of 6,205 postings into 781 Airtable rows and 770 Instantly imports, with the
+enrichment stage truncated part-way.
 
-**The limiting factor is measured: addressable daily acquisition inventory.**
+**Not supported, in either direction:**
 
-The one lever of the right order of magnitude is the title filter: it removes 93.5%
-of LinkedIn's ICP-shaped inventory (5,511 → 361). Widening it trades relevance for
-volume, and the 12.6% conversion above was measured on title-matched postings — it
-would not survive the trade unchanged.
+* No daily inventory total exists — the source union is unmeasured and three
+  configured paths (Wellfound, Y Combinator, 145 direct ATS boards) are excluded.
+* No approval rate exists — creations were Pending, and the approval mechanism is
+  unidentified.
+* No projection to 1,000/day is warranted, and neither is any specific lower ceiling.
+  The earlier "~111/day" figure applied one truncated run's ratio to a partial
+  inventory count and should not be used.
 
-### Distinguishing what this is
+**The specific missing measurements**, in the order they would settle the question:
 
-* **Observed:** 361/520/5,511 per day; the 09-06 reconciliation; the 09-04 funnel.
-* **Conditional estimate:** ~111 approved/day, which applies one run's 12.6%
-  conversion to the measured inventory. One run is not a rate.
-* **Unknown:** ATS inventory without the title filter; whether other geographies or
-  sources add materially; why LinkedIn kept 226 from a window measured to hold far
-  more; whether ATS duplicates LinkedIn's rows.
+1. Which mechanism approved 781 Pending rows on 2026-09-04, and at what rate it
+   scales. Without this there is no "approved leads/day" quantity at all.
+2. The **union** of LinkedIn and ATS inventory under production filters, rather than
+   the sum, plus counts for Wellfound, Y Combinator and the 145 direct ATS boards.
+3. An **uninterrupted** enrichment run, to measure opportunity→contact→approval on a
+   daily cohort rather than a truncated backlog.
+4. Why the 09-06 window was re-paged at all when a previous run had already acquired
+   its contents — that determines how much of the daily budget buys anything.
 
-No target is promised here, and nothing above establishes that 1,000/day is
-achievable with any change.
+Items 1, 2 and 4 need no Apollo credits. Item 3 does.
