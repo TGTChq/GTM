@@ -437,6 +437,106 @@ def refresh_ledger(root: Path) -> dict:
             "unreadable_entries": sorted(set(problems_before) | set(problems_after))}
 
 
+def domain_readiness(root: Path, run_ids) -> dict:
+    """How much of contact discovery fails BEFORE Apollo is ever asked.
+
+    The 25.3% opportunity -> contact rate has been attributed wholesale to Apollo.
+    Part of it is not Apollo's. `_process_company` computes `_best_input_domain(job)`
+    from the posting itself -- entirely offline -- and an opportunity with no
+    resolvable search domain gets `missing_company_domain` and never reaches a people
+    search at all. Apollo can sometimes recover a domain by NAME, but that path needs
+    a successful `organizations/enrich`, which is the call currently returning 422,
+    and the org-ID fallback behind it is unreachable for the same reason.
+
+    So this splits the opportunities into the ones that arrive with their own
+    first-party domain and the ones that depend on the provider to supply it. The
+    first group is what Apollo can work with today; the second is an INTERNAL,
+    avoidable loss addressable by domain resolution rather than by billing.
+
+    Uses the production functions -- `hiring_manager._best_input_domain`,
+    `company_key_for_job` and the same company x function identity as everywhere
+    else. Offline, nothing contacted, nothing written.
+    """
+    from collections import defaultdict
+
+    from hiring_manager import _best_input_domain, company_key_for_job
+    from multi_source_acquisition import _classify
+    from role_mapping import get_bucket_name_for_job
+    from job_filter import normalize_text
+
+    out = {"unit_note": "opportunities reaching Apollo with vs without a first-party domain",
+           "runs": []}
+    for run_id in run_ids:
+        src = root / "run_artifacts" / run_id / "enrichment" / "postings.json"
+        row = {"run_id": run_id, "unavailable": ""}
+        if not src.is_file():
+            row["unavailable"] = "postings.json absent"
+            out["runs"].append(row)
+            continue
+        data = _read_json(src)
+        jobs = [j for j in (data.get("jobs") or []) if isinstance(j, dict)]
+        # Grouped by `company_key_for_job` -- the key `_process_company` itself
+        # uses -- NOT the Airtable suppression identity. They are different keys and
+        # measuring one while describing the other is how a probe quietly answers a
+        # question nobody asked.
+        by_company = defaultdict(list)
+        for job in jobs:
+            try:
+                _classify(job)
+            except Exception:  # noqa: BLE001
+                continue
+            by_company[company_key_for_job(job)].append(job)
+
+        with_domain = without = 0
+        opps_with = opps_without = 0
+        domain_names = set()
+        nameless = {}
+        for key, company_jobs in by_company.items():
+            domain = ""
+            for job in company_jobs:
+                domain = _best_input_domain(job)
+                if domain:
+                    break
+            buckets = {get_bucket_name_for_job(j) or "unbucketed" for j in company_jobs}
+            name = normalize_text(str(company_jobs[0].get("employer_name") or ""))
+            if domain:
+                with_domain += 1
+                opps_with += len(buckets)
+                if name:
+                    domain_names.add(name)
+            else:
+                without += 1
+                opps_without += len(buckets)
+                if name:
+                    nameless[key] = (name, len(buckets))
+        # RECOVERABLE WITHOUT ANY PROVIDER: `company_key_for_job` is
+        # "domain or name", so the SAME employer splits into two groups when only
+        # some of its postings carry a domain. The domainless half then spends an
+        # Apollo organisation enrich and comes back `missing_company_domain`, while
+        # the domain sits on a sibling posting we already hold.
+        recoverable_companies = sum(1 for name, _ in nameless.values() if name in domain_names)
+        recoverable_opps = sum(n for name, n in nameless.values() if name in domain_names)
+
+        total_opps = opps_with + opps_without
+        row.update({
+            "postings": len(jobs),
+            "companies": len(by_company),
+            "companies_with_first_party_domain": with_domain,
+            "companies_without": without,
+            "opportunities": total_opps,
+            "opportunities_with_first_party_domain": opps_with,
+            "opportunities_depending_on_apollo_for_a_domain": opps_without,
+            # The subset of the above that needs no provider at all: a sibling
+            # posting from the same employer already carries the domain.
+            "recoverable_companies_same_name_has_domain": recoverable_companies,
+            "recoverable_opportunities": recoverable_opps,
+        })
+        if total_opps:
+            row["first_party_domain_rate"] = round(opps_with / total_opps, 4)
+        out["runs"].append(row)
+    return out
+
+
 def qualify_offline(root: Path, run_ids) -> dict:
     """Replay the PRE-APOLLO half of the funnel over retained payloads.
 
@@ -717,6 +817,9 @@ def main(argv=None) -> int:
         _say("4c0. PRE-APOLLO QUALIFICATION REPLAY (offline, no provider contacted)")
         ids = [r.strip() for r in str(config.MAINTENANCE_QUALIFY_RUNS).split(",") if r.strip()]
         print(json.dumps(qualify_offline(root, ids), indent=2, default=str))
+
+        _say("4c0b. DOMAIN READINESS (which opportunities can reach Apollo at all)")
+        print(json.dumps(domain_readiness(root, ids), indent=2, default=str))
 
     if getattr(config, "MAINTENANCE_ATS_BOARD_YIELD", ""):
         # The 145 registered boards are scraped from each employer's OWN public job

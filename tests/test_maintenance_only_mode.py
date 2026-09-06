@@ -408,3 +408,93 @@ class ThePreApolloHalfOfTheFunnelIsMeasurableWithoutApollo(unittest.TestCase):
 
         source = inspect.getsource(run_maintenance.qualify_offline)
         self.assertIn("fetch_sources=False", source)
+
+
+class NotAllOfContactDiscoveryIsApollo(unittest.TestCase):
+    """The 25.3% opportunity -> contact rate has been attributed wholesale to Apollo.
+    Part of it never reaches Apollo: `_process_company` computes
+    `_best_input_domain(job)` from the posting itself, and an opportunity with no
+    resolvable search domain is recorded `missing_company_domain` without a people
+    search ever running.
+
+    Splitting the two matters because they have different owners. A missing
+    first-party domain is an INTERNAL loss addressable by domain resolution; a
+    person Apollo cannot find is not. Attributing both to billing would leave the
+    fixable half unfixed."""
+
+    def _root(self, jobs, run_id="r1"):
+        import json as _json
+        import tempfile as _tempfile
+        from pathlib import Path as _Path
+
+        root = _Path(_tempfile.mkdtemp())
+        d = root / "run_artifacts" / run_id / "enrichment"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "postings.json").write_text(_json.dumps({"jobs": jobs}), encoding="utf-8")
+        return root
+
+    def _job(self, jid, employer, domain=""):
+        job = {"job_id": jid, "posting_id": jid, "job_title": "Head of Sales",
+               "title": "Head of Sales", "employer_name": employer,
+               "company_name": employer, "organization": employer}
+        if domain:
+            job["_employer_domain_input"] = domain
+            job["employer_website"] = domain
+            job["job_apply_link"] = f"https://{domain}/{jid}"
+        return job
+
+    def test_a_company_with_its_own_domain_is_counted_ready(self):
+        out = run_maintenance.domain_readiness(
+            self._root([self._job("j1", "Acme Robotics", "acme.example")]), ["r1"])
+        row = out["runs"][0]
+        self.assertEqual(row["companies_with_first_party_domain"], 1)
+        self.assertEqual(row["opportunities_depending_on_apollo_for_a_domain"], 0)
+
+    def test_a_company_without_one_depends_on_the_provider(self):
+        out = run_maintenance.domain_readiness(
+            self._root([self._job("j1", "Nameless Co")]), ["r1"])
+        row = out["runs"][0]
+        self.assertEqual(row["companies_without"], 1)
+        self.assertEqual(row["opportunities_with_first_party_domain"], 0)
+
+    def test_an_employer_that_splits_is_flagged_as_recoverable(self):
+        """`company_key_for_job` is "domain or name", so ONE employer becomes TWO
+        groups when only some of its postings carry a domain. The domainless half
+        then spends an Apollo organisation enrich and returns
+        `missing_company_domain` -- while the domain sits on a sibling posting we
+        already hold. That subset needs no provider at all to fix."""
+        out = run_maintenance.domain_readiness(self._root([
+            self._job("j1", "Acme Robotics", "acme.example"),
+            self._job("j2", "Acme Robotics"),
+        ]), ["r1"])
+        row = out["runs"][0]
+        self.assertEqual(row["companies"], 2, "this split is the production behaviour")
+        self.assertEqual(row["recoverable_companies_same_name_has_domain"], 1)
+        self.assertGreaterEqual(row["recoverable_opportunities"], 1)
+
+    def test_an_unrelated_domainless_employer_is_not_called_recoverable(self):
+        out = run_maintenance.domain_readiness(self._root([
+            self._job("j1", "Acme Robotics", "acme.example"),
+            self._job("j2", "Nameless Co"),
+        ]), ["r1"])
+        self.assertEqual(out["runs"][0]["recoverable_companies_same_name_has_domain"], 0)
+
+    def test_a_missing_payload_is_reported(self):
+        out = run_maintenance.domain_readiness(self._root([]), ["nope"])
+        self.assertEqual(out["runs"][0]["unavailable"], "postings.json absent")
+
+    def test_it_calls_no_provider_client(self):
+        """A measurement that quietly enriched would be an Apollo run wearing a
+        probe's name -- and Apollo is refusing, so it would also just fail."""
+        import ast
+        import inspect
+        import textwrap
+
+        tree = ast.parse(textwrap.dedent(
+            inspect.getsource(run_maintenance.domain_readiness)))
+        called = {getattr(n.func, "attr", "") for n in ast.walk(tree)
+                  if isinstance(n, ast.Call)}
+        # `dict.get` is obviously fine; these are the provider entry points.
+        for forbidden in ("enrich_organization", "search_people_at_company",
+                          "match_person", "request_with_retry"):
+            self.assertNotIn(forbidden, called)
