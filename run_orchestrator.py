@@ -622,6 +622,8 @@ def main(argv=None) -> int:
             argv += ["--capacity-runs", str(config.MAINTENANCE_CAPACITY_RUNS)]
         if getattr(config, "MAINTENANCE_DROP_EMPTY_RUN", ""):
             argv += ["--drop-empty-run", str(config.MAINTENANCE_DROP_EMPTY_RUN)]
+        if getattr(config, "MAINTENANCE_REIMPORT_RUN", ""):
+            argv += ["--reimport-run", str(config.MAINTENANCE_REIMPORT_RUN)]
         return run_maintenance.main(argv)
 
     ctx = RunContext.create(mode, _identity_arguments(a), run_id=a.run_id)

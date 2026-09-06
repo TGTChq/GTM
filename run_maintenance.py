@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shutil
 import sys
 import tempfile
@@ -250,6 +251,38 @@ def drop_empty_run(root: Path, run_id: str) -> dict:
     return out
 
 
+def reimport_run(store: Path, run_id: str) -> dict:
+    """Drop a run from the import marker so its remainder can be taken in.
+
+    The marker is consulted before the artifact file is even opened, so a run marked
+    imported is never revisited. The truncated-import bug set that marker while
+    taking only part of the file; this clears it for one named run. Adoption is
+    idempotent -- it skips what custody already holds and filters out anything
+    terminal -- so re-importing can only ADD genuinely pending work.
+    """
+    out = {"run_id": run_id, "cleared": False, "runs_remaining": None}
+    marker_path = Path(store) / "_imported_from_artifacts.json"
+    data = _read_json(marker_path)
+    runs = [str(r) for r in (data.get("runs") or [])]
+    if run_id in runs:
+        runs.remove(run_id)
+        data["runs"] = runs
+        tmp = marker_path.with_suffix(marker_path.suffix + ".tmp")
+        tmp.write_text(json.dumps(data), encoding="utf-8")
+        os.replace(tmp, marker_path)
+        out["cleared"] = True
+    out["runs_remaining"] = len(runs)
+    return out
+
+
+def _read_json(path: Path) -> dict:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
 def capacity(root: Path, run_ids) -> dict:
     """Distinct company x function OPPORTUNITIES behind a run's retained postings.
 
@@ -421,6 +454,9 @@ def main(argv=None) -> int:
     ap.add_argument("--instantly", action="store_true",
                     help="read-only Instantly count for the report window")
     ap.add_argument("--backup-dir", default="")
+    ap.add_argument("--reimport-run", default="",
+                    help="drop a run from the import marker so its "
+                         "remainder can be adopted")
     ap.add_argument("--capacity-runs", default="",
                     help="comma-separated run ids to measure "
                          "company x function opportunities for")
@@ -448,6 +484,11 @@ def main(argv=None) -> int:
 
     _say(f"3. RECONCILE {a.reconcile_run}")
     print(json.dumps(reconcile(root, a.reconcile_run), indent=2))
+
+    if a.reimport_run:
+        _say(f"3b. CLEAR IMPORT MARKER FOR {a.reimport_run}")
+        from orchestrator import pending_work as _pw
+        print(json.dumps(reimport_run(root / _pw.STORE, a.reimport_run), indent=2))
 
     _say("4. ADOPT INTERRUPTED WORK INTO pending_work")
     print(json.dumps(adopt(root), indent=2, default=str))
