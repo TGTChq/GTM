@@ -130,6 +130,36 @@ def _identity_arguments(a: argparse.Namespace) -> Dict[str, Any]:
     return out
 
 
+def _emit_reporting_ledger(state, keep: int = 14) -> None:
+    """Print the durable reporting ledger so it can be captured from LOGS.
+
+    gtm-volume is reachable only while a container is running, and on a cron
+    service that is a window of minutes -- which made reporting acceptance depend
+    on someone being awake at 03:00 UTC. Deployment logs have no such limit:
+    `railway logs -d <id>` works for REMOVED deployments and well past 7 days.
+
+    So the compact ledger -- the store the weekly report reads FIRST for every
+    metric -- is written to stdout at the end of every run. That turns capture from
+    a timing problem into a query. Bounded to the most recent `keep` runs, which
+    covers any weekly window; the heavy artifacts are deliberately NOT emitted.
+    """
+    try:
+        from orchestrator.run_ledger import read_entries
+        entries, problems = read_entries(state.root)
+    except Exception as exc:  # noqa: BLE001 - observability is never fatal
+        print(f"---- reporting ledger ---- unavailable: {type(exc).__name__}: {exc}")
+        return
+    recent = entries[-int(keep):] if keep else entries
+    print(f"---- reporting ledger (last {len(recent)} of {len(entries)}) ----")
+    if problems:
+        print(f"  ledger_problems {problems}")
+    for entry in recent:
+        try:
+            print("  LEDGER " + json.dumps(entry, sort_keys=True, default=str))
+        except Exception:  # noqa: BLE001
+            print(f"  LEDGER <unserializable {entry.get('run_id', '?')}>")
+
+
 def _preflight_checks(a):
     """Zero-network integrity/config/space checks. Returns (results, lines);
     never prints or returns a secret value."""
@@ -864,6 +894,7 @@ def _print_run_summary(ctx, mode, result, state) -> None:
         line("  pending_runs", pw.get("pending_runs"))
         for row in (pw.get("runs") or [])[:5]:
             print(f"    {row.get('run_id')}  {row.get('postings')} posting(s)")
+    _emit_reporting_ledger(state)
     line("reconcile", result["all_reconcile"])
     line("artifacts", state.run_dir())
     print("=============================================")

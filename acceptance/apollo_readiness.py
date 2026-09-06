@@ -1,9 +1,18 @@
 """Is Apollo willing to serve credit-consuming calls again? READ-ONLY.
 
-One GET to ``organizations/enrich`` -- the same endpoint the run stops on. While
-Apollo is refusing, the call costs nothing: it returns 422 before doing any work,
-and the body carries the account's own numbers. When Apollo is serving again it
-returns 200, which is the signal to resume.
+One GET to ``organizations/enrich`` -- the same endpoint the run stops on.
+
+COST, both cases, stated because "zero-cost probe" is only true of the failing one:
+
+  * WHILE APOLLO IS REFUSING it costs nothing. The 422 is returned before any work
+    is done, and its body carries the account's own numbers.
+  * IF IT SUCCEEDS it consumes ONE LEAD CREDIT. Apollo's own refusal names
+    ``credit_type: lead credits`` as what it checked, so the call that finally
+    succeeds is a call that spends. That single credit is the price of knowing;
+    it is not free, and it draws on the same pool the run needs.
+
+There is no zero-cost readiness signal: ``auth/health`` returns 200 throughout, so
+the only way to learn that credits are back is to attempt a credit-consuming call.
 
 Run it before restoring ``FANTASTIC_JOBS_ENABLED=1``. Resume on this, never on a
 date: ``next_billing_date`` is what Apollo reports, not a promise. A cycle can roll
@@ -18,7 +27,6 @@ Exit codes:  0 READY   1 STILL REFUSING   2 UNEXPECTED (look before resuming)
 from __future__ import annotations
 
 import json
-import sys
 
 import requests
 
@@ -50,6 +58,7 @@ def main() -> int:
 
     if response.status_code == 200:
         print("READY: Apollo served a credit-consuming call.")
+        print("       This call CONSUMED ONE LEAD CREDIT -- success is not free.")
         print("Next: confirm pending_work is on the running commit, then restore")
         print("      FANTASTIC_JOBS_ENABLED=1 (see INCIDENT_2026-09-06_apollo_credits.md).")
         return 0
