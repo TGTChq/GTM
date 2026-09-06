@@ -46,9 +46,9 @@ evidence.
 | W2 | 09-06 recovery + reconciliation | **DONE** — net_new 226 / retained 226 / distinct 226 / unavailable [] / **agrees true** |
 | W3 | Real-artifact vs ledger-only acceptance | **PASSED on production files** — `ACCEPTED: True` |
 | W4 | Provider contract verified | **DONE** — durable cross-run offset exceeds the documented contract |
-| W5 | Expired-unacquired loss (25% in fixture) — determine avoidable share | **in progress** |
-| W6 | Source budget allocation vs measured yield | open |
-| W7 | Capacity: company×function opportunities | **UNBLOCKED** — payloads retained (6,205 / 226); `capacity()` measures them offline; contacts still need B3 |
+| W5 | Expired-unacquired loss | **FIXED** — `date_created` slice cursor: 100% of billed rows useful, 0 expired at adequate budget |
+| W6 | Source budget allocation | **RESOLVED BY W5** — ATS's 2,722-for-0 was the offset cursor re-walking acquired inventory, not a bad source; a drained source now requests nothing |
+| W7 | Capacity: company×function opportunities | **MEASURED** — 09-04: 6,205 postings → 3,819 companies → 4,147 opportunities; 09-06 (one day): 226 → 170 → 174 |
 | W8 | Integrated review for omissions/contradictions | open |
 
 ---
@@ -104,3 +104,41 @@ its metrics. That single phantom degraded every headline metric from `measured` 
 census reading `jobs_captured census=6431 reported=6431 agrees=True`. Delegation now
 happens before `RunContext`/`StateManager`; `--drop-empty-run` removes the one
 already written, refusing anything carrying evidence.
+
+
+### Second production maintenance pass — 2026-09-06T10:48Z (deployment `e677e12e`)
+
+`MAINTENANCE COMPLETE rc=0`, A/B **ACCEPTED** again on production files.
+
+**Phantom removed** (`removed_dir: true`). Brett's report is materially corrected:
+
+    Jobs: 6,431 captured / reviewed not measured for the full period
+    Contacts found: 1,048        sent to Instantly: 769
+
+`jobs_captured 6431` and `contacts_found 1048` and `sent_to_airtable 781` are now
+**measured**, not `partial`; the census reconciles on every one. The bottleneck line
+is a real business finding at last -- 781 of 1,048 contacts became Airtable rows
+(74.5%) -- rather than an artefact of counting the maintenance pass as a failed run.
+
+**Capacity, measured on real payloads with the production identity functions**
+(`_classify` -> `get_bucket_name_for_job` -> `_company_identity_keys_from_job`):
+
+| cohort | postings | companies | company×function opportunities | postings/opp |
+|---|---|---|---|---|
+| 2026-09-04 (≈10-day backlog) | 6,205 | 3,819 | **4,147** | 1.496 |
+| 2026-09-06 (one day) | 226 | 170 | **174** | 1.299 |
+
+### Acquisition fix — `date_created` slice cursor
+
+The provider documents offset paging only for draining a set in ONE pass. Our
+cross-run offset exceeded that, and the rising 7-day floor made it unsound.
+Replaced with a cursor over `date_created` slices, drained oldest-first, whose
+persisted state is a set of finished date ranges rather than an index.
+
+    cursor   cap  acquired  expired  billed  useful
+    offset   240       376       44     600   62.7%
+    slice    240       420        0     420  100.0%
+
+Ordering preserved: slice progress is NOT saved by the sliced pass -- `checkpoint()`
+persists it after the custody hook, so continuation never becomes durable ahead of
+the rows it advances past.
