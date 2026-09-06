@@ -54,3 +54,31 @@ evidence.
 ---
 
 ## Log
+
+### W4 — provider contract verified against current official documentation (2026-09-06)
+
+Checked `developer.fantastic.jobs` and the vendor's own API pages. The documented
+pagination contract is:
+
+> "To retrieve all jobs for a time_frame, you might need to do multiple requests
+> while increasing the offset, with a preferred limit between 100 and 1,000."
+> "If the number of jobs returned is less than the limit, do another request while
+> increasing offset by the limit, and keep making requests until the API returns
+> less jobs than the limit."
+
+**That describes draining a result set in ONE pass.** Nothing in the documentation
+states that an offset remains meaningful across requests separated in time, and
+nothing documents a stable sort order for the active-jobs endpoints.
+
+**Consequence, and it is the root of the expired-unacquired loss:** our durable
+cross-run `window_offsets` cursor is an EXTENSION BEYOND THE DOCUMENTED CONTRACT.
+We resume an index into a result set the provider never promised would be stable,
+and the 7-day frame floor guarantees it is not.
+
+Also confirmed: the count endpoints use a different `time_frame` set (1m default,
+no 7d option) -- our count probes pass explicit `date_created_gte/lt`, so they are
+unaffected.
+
+`date_created_gte` / `date_created_lt` ARE honoured (proven by our own count probes
+returning distinct counts for distinct 24h ranges). A `date_created` boundary is
+STABLE in a way an offset is not: a row's `date_created` never changes.
