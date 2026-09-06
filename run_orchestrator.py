@@ -854,6 +854,16 @@ def _print_run_summary(ctx, mode, result, state) -> None:
                 print(ln)
         except Exception:  # noqa: BLE001 - summary is best-effort, never fatal
             pass
+    pw = result.get("pending_work") or {}
+    if pw.get("pending_postings"):
+        # Postings already PAID FOR that no run has finished. Printed because the
+        # 2026-09-06 loss was invisible: that run reported a clean stop and said
+        # nothing about the 226 postings it had bought and then dropped.
+        print("---- Acquired work still owed enrichment ----")
+        line("  pending_postings", pw.get("pending_postings"))
+        line("  pending_runs", pw.get("pending_runs"))
+        for row in (pw.get("runs") or [])[:5]:
+            print(f"    {row.get('run_id')}  {row.get('postings')} posting(s)")
     line("reconcile", result["all_reconcile"])
     line("artifacts", state.run_dir())
     print("=============================================")
