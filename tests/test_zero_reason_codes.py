@@ -249,3 +249,56 @@ class TheDerivedReasonSurvivesAWinningLedger(unittest.TestCase):
             "reviewable_submitted": 10, "created": 10, "failed": 0,
             "skip_breakdown": {"no_contact": 5}, "reviewable_reconciles": False})])
         self.assertNotIn("delivery_unreconciled", census)
+
+
+class BothCensusImplementationsMustAgree(unittest.TestCase):
+    """`run_ledger.reason_census_from_parts` and `weekly_report.metrics.reason_census`
+    are two implementations of one concept, and the ledger's docstring promises they
+    match "so a ledger-only week and an artifact-backed week produce identical
+    totals". Changing one and not the other broke the production A/B on the eighth
+    pass: `ACCEPTED: False`, because a derived reason the report could compute from
+    the heavy delivery artifact had no way into the durable record.
+    """
+
+    DELIVERY = {"reviewable_submitted": 1681, "created": 781, "failed": 0,
+                "skip_breakdown": {"account_suppressed": 0, "no_contact": 0},
+                "skipped_already_delivered": 0, "person_employer_duplicate": 0,
+                "reviewable_reconciles": False}
+
+    def _both(self, delivery, waterfall=None, qual=None, loss=None):
+        from orchestrator.run_ledger import reason_census_from_parts
+
+        ledger_side = reason_census_from_parts(waterfall, loss, delivery,
+                                               qual_reasons=qual)
+        run = _Run(delivery=delivery, waterfall=waterfall,
+                   orchestrator_result={"enrichment": {
+                       "loss_census": loss or {},
+                       "funnel": {"qual_reason_counts": qual or {}}}})
+        return ledger_side, mx.reason_census([run])
+
+    def test_they_agree_on_the_unreconciled_remainder(self):
+        ledger_side, report_side = self._both(self.DELIVERY)
+        self.assertEqual(ledger_side, {"delivery_unreconciled": 900})
+        self.assertEqual(ledger_side, report_side)
+
+    def test_they_agree_when_zeros_are_the_only_skips(self):
+        delivery = dict(self.DELIVERY, reviewable_reconciles=True)
+        ledger_side, report_side = self._both(delivery)
+        self.assertEqual(ledger_side, {})
+        self.assertEqual(ledger_side, report_side)
+
+    def test_they_agree_on_pre_submission_withholding(self):
+        delivery = dict(self.DELIVERY, reviewable_reconciles=True,
+                        skipped_already_delivered=260, person_employer_duplicate=7)
+        ledger_side, report_side = self._both(delivery)
+        self.assertEqual(ledger_side,
+                         {"already_delivered": 260, "person_employer_duplicate": 7})
+        self.assertEqual(ledger_side, report_side)
+
+    def test_they_agree_with_qualification_reasons_mixed_in(self):
+        ledger_side, report_side = self._both(
+            self.DELIVERY, qual={"not_icp": 40, "in_crm": 0},
+            loss={"no_search_domain": 12})
+        self.assertEqual(ledger_side, report_side)
+        self.assertNotIn("in_crm", ledger_side)
+        self.assertEqual(ledger_side["not_icp"], 40)

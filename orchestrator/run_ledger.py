@@ -321,7 +321,29 @@ def reason_census_from_parts(waterfall: Any, loss_census: Any, delivery: Any,
     _add(loss_census)
     if isinstance(delivery, dict):
         _add(delivery.get("skip_breakdown"))
-    ranked = sorted(census.items(), key=lambda kv: (-kv[1], kv[0]))
+        # Withheld BEFORE submission, so absent from the skip breakdown, which
+        # partitions only submitted-but-not-created rows.
+        _add({"already_delivered": delivery.get("skipped_already_delivered"),
+              "person_employer_duplicate": delivery.get("person_employer_duplicate")})
+        # The run's own identity check, when it fails: rows it submitted, did not
+        # create, and gave no reason for. DERIVED from counters rather than merged
+        # from a source -- which is precisely why it has to be computed HERE. The
+        # report can only reach it through the heavy delivery artifact, so a
+        # ledger-only week would silently lose the attribution and the A/B against
+        # production files would fail. It did, on the eighth pass.
+        if delivery.get("reviewable_reconciles") is False:
+            named = sum(v for v in (delivery.get("skip_breakdown") or {}).values()
+                        if isinstance(v, int) and not isinstance(v, bool))
+            gap = (int(delivery.get("reviewable_submitted") or 0)
+                   - int(delivery.get("created") or 0)
+                   - int(delivery.get("failed") or 0) - named)
+            if gap > 0:
+                _add({"delivery_unreconciled": gap})
+    # A reason recorded as ZERO explains nothing, and the delivery skip breakdown is
+    # a fixed-shape record that writes every bucket on every run. Dropped on both
+    # sides of the A/B, or the two would disagree on which reasons exist.
+    ranked = sorted(((r, c) for r, c in census.items() if c > 0),
+                    key=lambda kv: (-kv[1], kv[0]))
     return dict(ranked[:_LEDGER_REASON_LIMIT])
 
 
@@ -668,9 +690,22 @@ def backfill_from_artifacts(
             enrolled = _as_count(_dig(artifacts.get("delivery"), "enrolled"))
             if enrolled is not None:
                 measured["sent_to_instantly"] = enrolled
-        if prior is not None and dict(prior.get("metrics") or {}) == measured:
+        result_block = artifacts.get("orchestrator_result") or {}
+        census = reason_census_from_parts(
+            artifacts.get("waterfall") or _dig(result_block, "waterfall"),
+            _dig(result_block, "enrichment.loss_census"),
+            artifacts.get("delivery") or _dig(result_block, "delivery"),
+            qual_reasons=_dig(result_block, "enrichment.funnel.qual_reason_counts"),
+        )
+        if (prior is not None and dict(prior.get("metrics") or {}) == measured
+                and dict(prior.get("loss_reasons") or {}) == census):
             # An identical re-derivation. Leave the file untouched so repeated runs
             # are idempotent down to the timestamp.
+            #
+            # The comparison covers the REASONS as well as the metrics. It used to
+            # check metrics alone, so an improvement to the census could never reach
+            # an entry that already existed -- the durable record stayed frozen at
+            # whatever the build that first wrote it happened to know.
             continue
         if measured:
             # Provenance says "artifacts", not "pipeline": these counters were
@@ -679,14 +714,8 @@ def backfill_from_artifacts(
 
         # Carry the loss reasons across too, or a backfilled run would still lose
         # its action plan the moment its evidence is pruned -- the exact failure
-        # this store exists to prevent, just one week later.
-        result_block = artifacts.get("orchestrator_result") or {}
-        census = reason_census_from_parts(
-            artifacts.get("waterfall") or _dig(result_block, "waterfall"),
-            _dig(result_block, "enrichment.loss_census"),
-            artifacts.get("delivery") or _dig(result_block, "delivery"),
-            qual_reasons=_dig(result_block, "enrichment.funnel.qual_reason_counts"),
-        )
+        # this store exists to prevent, just one week later. (Computed above, so the
+        # idempotence check can see it.)
         if census:
             ledger._payload["loss_reasons"] = census
 

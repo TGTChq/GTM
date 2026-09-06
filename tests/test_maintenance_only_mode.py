@@ -280,3 +280,68 @@ class BothCohortsAreCountedByOneImplementation(unittest.TestCase):
         self.assertEqual(source.count("def measure_identities"), 1)
         self.assertIn("row.update(measure_identities(jobs))", source)
         self.assertIn('out["identities"] = measure_identities(jobs)', source)
+
+
+class TheDurableRecordIsRefreshedWhileTheEvidenceExists(unittest.TestCase):
+    """The A/B runs on a COPY, so it proves the ledger *can* answer without proving
+    the production ledger *does*. Only a pipeline run backfills the real one, and
+    while acquisition is paused no pipeline runs -- so a corrected loss-reason census
+    would pass its tests and never reach the record that outlives the artifacts.
+    Friday's report reads that record.
+
+    The prior entry here is written by the REAL backfill rather than hand-built, so
+    "an entry that already existed" means an entry the production writer produced.
+    """
+
+    RUN_ID = "20260904T130130Z-13b44a0c"
+    RECONCILING = {"reviewable_submitted": 100, "created": 60, "failed": 0,
+                   "skip_breakdown": {"no_contact": 40},
+                   "reviewable_reconciles": True}
+    UNRECONCILED = {"reviewable_submitted": 1681, "created": 781, "failed": 0,
+                    "skip_breakdown": {"account_suppressed": 0},
+                    "reviewable_reconciles": False}
+
+    def _root(self):
+        import json as _json
+        import tempfile as _tempfile
+        from pathlib import Path as _Path
+
+        root = _Path(_tempfile.mkdtemp())
+        d = root / "run_artifacts" / self.RUN_ID
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "orchestrator_result.json").write_text("{}", encoding="utf-8")
+        (d / "run_status.json").write_text(_json.dumps({"status": "complete"}),
+                                           encoding="utf-8")
+        return root
+
+    def _delivery(self, root, payload):
+        import json as _json
+
+        (root / "run_artifacts" / self.RUN_ID / "delivery.json").write_text(
+            _json.dumps(payload), encoding="utf-8")
+
+    def test_a_correction_reaches_an_entry_that_already_existed(self):
+        root = self._root()
+        self._delivery(root, self.RECONCILING)
+        run_maintenance.refresh_ledger(root)          # the entry now exists
+        self._delivery(root, self.UNRECONCILED)       # ...and the evidence changes
+        out = run_maintenance.refresh_ledger(root)
+        self.assertIn(self.RUN_ID, out["loss_reasons_changed"])
+        change = out["loss_reasons_changed"][self.RUN_ID]
+        self.assertEqual(change["before"], {"no_contact": 40})
+        self.assertEqual(change["after"], {"delivery_unreconciled": 900})
+
+    def test_it_reports_nothing_when_the_record_is_already_current(self):
+        root = self._root()
+        self._delivery(root, self.UNRECONCILED)
+        run_maintenance.refresh_ledger(root)
+        self.assertEqual(run_maintenance.refresh_ledger(root)["loss_reasons_changed"],
+                         {})
+
+    def test_an_unreadable_ledger_file_is_reported_not_swallowed(self):
+        root = self._root()
+        self._delivery(root, self.UNRECONCILED)
+        run_maintenance.refresh_ledger(root)
+        from orchestrator.run_ledger import LEDGER_STORE
+        (root / LEDGER_STORE / "not-an-entry.json").write_text("{{{", encoding="utf-8")
+        self.assertTrue(run_maintenance.refresh_ledger(root)["unreadable_entries"])

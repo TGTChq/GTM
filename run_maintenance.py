@@ -408,6 +408,35 @@ def resume_dry_run(root: Path) -> dict:
     return out
 
 
+def refresh_ledger(root: Path) -> dict:
+    """Bring the DURABLE record up to date from artifacts that still exist.
+
+    The A/B runs on a copy, so it proves the ledger CAN answer without proving that
+    the production ledger does. Only a pipeline run backfills the real one, and while
+    acquisition is paused no pipeline runs -- so a correction to the loss-reason
+    census would sit in the code, pass its tests, and never reach the record that
+    outlives the artifacts. Friday's report reads that record.
+
+    Additive and idempotent: `backfill_from_artifacts` rewrites an entry only when
+    its derived metrics or reasons actually changed, and the pass has already taken a
+    full backup of the ledger before anything here runs.
+    """
+    from orchestrator.run_ledger import backfill_from_artifacts, read_entries
+
+    # `read_entries` returns (entries, problems) -- the problems list is not
+    # discarded, because an unreadable ledger file is exactly what this refresh
+    # would otherwise paper over.
+    entries, problems_before = read_entries(root)
+    before = {e.get("run_id"): dict(e.get("loss_reasons") or {}) for e in entries}
+    result = backfill_from_artifacts(root)
+    entries, problems_after = read_entries(root)
+    after = {e.get("run_id"): dict(e.get("loss_reasons") or {}) for e in entries}
+    changed = {rid: {"before": before.get(rid, {}), "after": reasons}
+               for rid, reasons in after.items() if before.get(rid, {}) != reasons}
+    return {"written": result.get("written"), "loss_reasons_changed": changed,
+            "unreadable_entries": sorted(set(problems_before) | set(problems_after))}
+
+
 def provenance_probe(root: Path) -> dict:
     """Why each headline metric is measured, partial or unavailable -- per run.
 
@@ -628,6 +657,9 @@ def main(argv=None) -> int:
         _say("4c. CAPACITY: company x function opportunities from retained payloads")
         ids = [r.strip() for r in a.capacity_runs.split(",") if r.strip()]
         print(json.dumps(capacity(root, ids), indent=2))
+
+    _say("4c2. LEDGER REFRESH: carry today's corrections into the durable record")
+    print(json.dumps(refresh_ledger(root), indent=2, default=str))
 
     _say("4d. RESUME DRY RUN: can the work in custody actually be handed back?")
     print(json.dumps(resume_dry_run(root), indent=2, default=str))
