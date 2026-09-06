@@ -301,21 +301,58 @@ class CoverageConvergesWithoutANewStrategy(unittest.TestCase):
     not established by this replay.
     """
 
-    def test_unseen_inventory_reaches_zero_without_a_new_acquisition_strategy(self):
+    def test_every_decrease_in_unseen_is_accounted_for(self):
+        """A falling "unseen" count is NOT evidence of recovery.
+
+        Decomposed run by run, the fixture gives:
+
+            day  stop         billed kept | in_frame unseen | acquired expired
+              0  cap_reached    120  120  |     420    300  |     120        0
+              1  cap_reached    120  120  |     360    120  |     120       60
+              2  short_page      60   60  |     300     28  |      60       32
+              3  cap_reached    120    0  |     240     21  |       0        7
+              4  short_page      60   15  |     180      0  |      15        6
+
+        Day 3 is the one that matters: 120 rows billed, ZERO kept, and unseen still
+        fell 28 -> 21. Every one of those 7 left because it dropped below the frame
+        floor -- it EXPIRED UNACQUIRED. Reading that as convergence was wrong.
+
+        Totals: 315 acquired, 105 expired before acquisition, 0 still pending.
+        A quarter of the window was never bought.
+        """
         state = os.path.join(tempfile.mkdtemp(), "wm.json")
         feed = MovingFloorFeed()
         seen: set = set()
-        unseen_by_day = []
+        acquired = expired_unacquired = 0
+        prev_frame = None
         for day in range(7):
+            before = set(seen)
             _e, _m, _ = _run(state, feed, BASE + timedelta(days=day), cap=120, seen=seen)
-            in_frame = {f"fantastic_{r['id']}" for r in feed.visible()}
-            unseen_by_day.append(len(in_frame - seen))
+            frame = {f"fantastic_{r['id']}" for r in feed.visible()}
+            acquired += len(seen - before)
+            if prev_frame is not None:
+                expired_unacquired += len((prev_frame - frame) - before)
+            prev_frame = frame
 
-        self.assertGreater(unseen_by_day[0], 0, "there was inventory to miss")
-        self.assertEqual(unseen_by_day[-1], 0,
-                         "every row inside the frame was eventually inspected")
-        self.assertEqual(unseen_by_day, sorted(unseen_by_day, reverse=True),
-                         "and the backlog only ever shrinks")
+        start_frame = 420
+        self.assertEqual(acquired + expired_unacquired, start_frame,
+                         "every row is either acquired or expired unacquired")
+        self.assertGreater(expired_unacquired, 0,
+                           "expiry is a real loss in this fixture, not a rounding effect")
+        self.assertEqual(len(prev_frame - seen), 0, "nothing is left pending")
+
+    def test_expiry_is_never_counted_as_recovery(self):
+        """The property the previous version of this test violated."""
+        state = os.path.join(tempfile.mkdtemp(), "wm.json")
+        feed = MovingFloorFeed()
+        seen: set = set()
+        for day in range(4):
+            before = set(seen)
+            _e, m, _ = _run(state, feed, BASE + timedelta(days=day), cap=120, seen=seen)
+            if day == 3:
+                self.assertEqual(m["segments"][LABEL]["schema_valid"], 0)
+                self.assertEqual(len(seen - before), 0,
+                                 "day 3 acquired nothing; any drop in unseen is expiry")
 
     def test_the_recovery_is_the_rewind_and_it_fires_once(self):
         state = os.path.join(tempfile.mkdtemp(), "wm.json")
