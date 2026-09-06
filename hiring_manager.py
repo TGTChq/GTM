@@ -1883,6 +1883,11 @@ class _EnrichmentProgress:
 
 
 def _apollo_circuit_reason(exc: BaseException) -> str:
+    if isinstance(exc, getattr(apollo, "ApolloBudgetExhaustedError", ())):
+        # Distinct from credit exhaustion: the PROVIDER is fine, our authorized
+        # budget is spent. The remaining work resumes on a later run rather than
+        # being investigated as a failure.
+        return "apollo_budget_exhausted"
     if isinstance(exc, apollo.ApolloCreditsExhaustedError):
         return "apollo_credit_exhausted"
     if isinstance(exc, apollo.ApolloAuthorizationError):

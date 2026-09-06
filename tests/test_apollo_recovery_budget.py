@@ -191,12 +191,40 @@ class TheChargePointsAreTheChargeableCalls(unittest.TestCase):
             # No exception, no state file, nothing to configure.
             apollo_client._charge_recovery_budget("person_match")
 
-    def test_exhaustion_propagates_rather_than_being_swallowed(self):
-        """A swallowed exhaustion would let the run continue and finish work it did
-        not pay for -- and mark it terminal, releasing it from custody."""
+    def test_exhaustion_stops_the_run_globally_not_one_company(self):
+        """THE bug this nearly shipped with. `BudgetExhausted` is a plain
+        RuntimeError, and the enrichment loop's per-company handler catches
+        `Exception`, marks that company UNVERIFIED and CONTINUES -- so it would have
+        been re-raised on the next company and the next, marking the entire remaining
+        cohort UNVERIFIED while spending nothing and reporting it as processed.
+
+        Re-raised as a member of `GLOBAL_FATAL_ERRORS`, the loop stops, completed work
+        is preserved and the company that tripped it is left for a later run -- the
+        clean pause the budget is documented to be."""
         import apollo_client
 
         with _cfg(APOLLO_RECOVERY_BUDGET_CALLS=1):
             apollo_client._charge_recovery_budget("person_match")
-            with self.assertRaises(ab.BudgetExhausted):
+            with self.assertRaises(apollo_client.ApolloBudgetExhaustedError):
                 apollo_client._charge_recovery_budget("person_match")
+
+    def test_the_budget_error_is_globally_fatal(self):
+        import apollo_client
+
+        self.assertIn(apollo_client.ApolloBudgetExhaustedError,
+                      apollo_client.GLOBAL_FATAL_ERRORS)
+
+    def test_it_is_reported_as_a_budget_stop_not_a_credit_stop(self):
+        """"We may not spend more" and "the provider has nothing left" need different
+        responses and must never look alike in an artifact."""
+        import apollo_client
+        import hiring_manager
+
+        self.assertEqual(
+            hiring_manager._apollo_circuit_reason(
+                apollo_client.ApolloBudgetExhaustedError("spent")),
+            "apollo_budget_exhausted")
+        self.assertEqual(
+            hiring_manager._apollo_circuit_reason(
+                apollo_client.ApolloCreditsExhaustedError("gone")),
+            "apollo_credit_exhausted")

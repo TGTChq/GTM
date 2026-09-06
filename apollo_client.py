@@ -46,12 +46,30 @@ class ApolloRateLimited(requests.HTTPError):
     """
 
 
+class ApolloBudgetExhaustedError(RuntimeError):
+    """The AUTHORIZED aggregate budget is spent. Apollo itself is fine.
+
+    A distinct type because the response differs from every other stop: nothing is
+    wrong, we simply may not spend more today, and the remaining work is expected to
+    resume later rather than being investigated.
+
+    It belongs in GLOBAL_FATAL_ERRORS for one specific reason. The enrichment loop's
+    OTHER handler catches `Exception` per company, marks it UNVERIFIED and CONTINUES
+    -- so a budget error raised there would be re-raised on the next company and the
+    next, marking the entire remaining cohort UNVERIFIED while spending nothing and
+    reporting it as processed. Being globally fatal is what makes exhaustion the
+    clean pause it is documented to be: the loop stops, completed work is preserved,
+    and the company that tripped it is left unprocessed for a later run.
+    """
+
+
 #: Failures that mean Apollo is unusable for the WHOLE run. The enrichment loop
 #: opens a circuit and preserves completed work rather than crashing.
 GLOBAL_FATAL_ERRORS = (
     ApolloCreditsExhaustedError,
     ApolloAuthorizationError,
     ApolloRateLimited,
+    ApolloBudgetExhaustedError,
 )
 
 
@@ -268,8 +286,16 @@ def _charge_recovery_budget(kind: str) -> None:
     """
     from orchestrator import apollo_budget
 
-    if apollo_budget.enabled():
+    if not apollo_budget.enabled():
+        return
+    try:
         apollo_budget.charge(kind)
+    except apollo_budget.BudgetExhausted as exc:
+        # Re-raised as a GLOBALLY FATAL Apollo error so the enrichment loop stops
+        # cleanly. Raised as a plain RuntimeError it would hit the per-company
+        # handler, which marks the company UNVERIFIED and moves on -- and would then
+        # do the same to every remaining company in the cohort.
+        raise ApolloBudgetExhaustedError(str(exc)) from exc
 
 
 def enrich_organization(
