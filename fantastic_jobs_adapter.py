@@ -2031,6 +2031,12 @@ class DateCreatedWatermarkEngine:
             self.state["window_acquired_ids"] = []
             self.state["window_drained_sources"] = {}
             self.state["window_offsets"] = {}
+            # ... and the slice cursor with it. A slice key is a date RANGE, so a
+            # stale key from the previous window could align with a new window's
+            # boundary and silently skip a range nobody paged. Cheaper to clear
+            # than to reason about which overlaps are safe.
+            self.state["window_slices"] = {}
+            self.state["window_slice_offsets"] = {}
         if in_flight and start_ok:
             self.lower, self.upper = str(self.state.get("window_start")), str(in_flight)
             reused = True
