@@ -202,3 +202,38 @@ that day's window closed; Saturday and Sunday are off. **First send is Monday
 
 Also relevant to capacity: 16 active campaigns x 550/day is far above current lead
 volume, so SENDING is not the constraint on approved-lead throughput.
+
+
+---
+
+## Resumable checkpoint (2026-09-06 ~11:20Z)
+
+**How to reach the production volume again** — this is the procedure, and it works:
+
+1. `MAINTENANCE_ONLY=1` is already set on GTM (`variableUpsert` is authorized).
+2. Set `cronSchedule` a few minutes ahead via `serviceInstanceUpdate` — **cron only**;
+   `startCommand` is denied and must not be retried.
+3. **Do not `git push` during the window** — a new deployment kills the run
+   mid-flight (it happened at 10:40).
+4. Capture with `railway logs -d <deployment id>`; everything prints to stdout.
+5. **Restore `cronSchedule` to `0 3 * * *`.** Easy to forget; check it.
+6. Verify the run actually fired: the deployment's `updatedAt` must move past its
+   build time. A cron set while a build is in flight may not fire (11:12 did not).
+
+**State to be aware of**
+* `MAINTENANCE_ONLY=1` is still set, deliberately — tonight's 03:00Z run does a
+  maintenance pass on the fixed code rather than a no-op pipeline run. **It must be
+  set to 0 before acquisition resumes**; if both are on the run exits 2 with a
+  message naming the remedy.
+* `MAINTENANCE_CAPACITY_RUNS` is set to the two measured cohorts.
+* Acquisition is paused (`FANTASTIC_JOBS_ENABLED=0`) and must stay paused until
+  Apollo serves — check with `acceptance/apollo_readiness.py` (free while refusing,
+  **one lead credit if it succeeds**).
+
+**Next actions if this resumes**
+* Confirm the custody correction landed (terminal work released; 09-04 remainder
+  imported) — happens automatically on the next maintenance pass.
+* When Apollo serves: set `MAINTENANCE_ONLY=0`, then `FANTASTIC_JOBS_ENABLED=1`, and
+  watch the first run's `cursor: date_created slices` line.
+* The four items in `CAPACITY_ASSESSMENT.md`'s consolidated request need a decision;
+  nothing is spent without one.
