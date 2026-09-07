@@ -99,7 +99,7 @@ usage and sustainable approved-lead capacity remain unmeasured.
 
 ---
 
-**Deployed:** `origin/main = 6b0d117`.
+**Deployed:** `origin/main = 69f822f` (both services SUCCESS).
 **Acquisition:** PAUSED (`FANTASTIC_JOBS_ENABLED=False` on GTM). Billing untouched.
 **Cron:** GTM `0 3 * * *`, Approved Sync `0 0 * * *` — both verified after every pass.
 
@@ -969,55 +969,61 @@ Offline gate after the fix: **3,444 passed / 1 skipped / 1,001 subtests**, integ
 Cron verified `0 3 * * *` / `0 0 * * *` after a transient API error interrupted the
 readback mid-pass -- the restore itself had already applied.
 
-### Final state — 2026-09-06T15:30Z
+### Final state — 2026-09-07T05:05Z
 
-    origin/main   afd92db, deployed to both services (SUCCESS)
-    GTM cron      0 3 * * *     (restored and verified after all 13 passes)
-    Approved Sync 0 0 * * *     (untouched throughout)
-    acquisition   PAUSED        FANTASTIC_JOBS_ENABLED=0
-    maintenance   MAINTENANCE_ONLY=1  (MUST be 0 before acquisition resumes)
-    probe vars    cleared       (MAINTENANCE_QUALIFY_RUNS, MAINTENANCE_ATS_BOARD_YIELD)
-    custody       3,595 postings = 2,998 opportunities, proved resumable
-    gates         3245 passed, 1 skipped, 1001 subtests; integrity 27/0/0
-    reporting     A/B on production files ACCEPTED: True
+    origin/main   69f822f, deployed to BOTH services (SUCCESS)
+    GTM cron      0 3 * * *     restored and verified after every pass
+    Approved Sync 0 0 * * *     untouched throughout
+    acquisition   PAUSED        FANTASTIC_JOBS_ENABLED=false  (container-verified)
+    maintenance   MAINTENANCE_ONLY=1   MUST be 0 before acquisition resumes
+    apollo grant  APOLLO_RECOVERY_BUDGET_CALLS=0  (container-verified)
+    probe vars    cleared
+    custody       3,595 distinct postings = 3,006 opportunities, resumable
+    gates         3,448 passed / 1 skipped / 1,001 subtests; integrity 28/0/0
+    reporting     A/B on production files ACCEPTED: True (nine ledger entries)
+    recovery      226 / 226 / 226, new-capture and recovery cohorts agree separately
 
-## Remaining work — all of it external, and why
+**Measured production output: 0 approved leads.** No production run has produced any
+new Approved Airtable row. Nothing in this record claims otherwise.
 
-| # | blocked action | who unblocks it | what it answers |
+## Two entries below were CONTRADICTED by later evidence and are corrected here
+
+**Apollo is no longer refusing.** The old B3 said
+`BILLING.LIMIT.CREDITS_EXHAUSTED, balance 0`. On 2026-09-06T20:xx
+`acceptance/apollo_readiness.py` returned **HTTP 200** on a credit-consuming call, and
+the calibration then ran and consumed its full 50-reservation grant. The blocker is no
+longer "the provider refuses"; it is "no grant is authorized". Those need different
+actions and must not share a label.
+
+**The 25.5% opportunity -> contact figure cited by the old B3 is withdrawn** and must
+not be reintroduced as the thing a grant would settle. It treated a resolvable domain
+as proof a search had run, on a run that was interrupted. What a grant would settle is
+the rate itself, which is currently **unknown**.
+
+## Remaining work — all external, with the concrete missing action
+
+| # | blocked action | the exact missing thing | what it answers |
 |---|---|---|---|
-| **B3** | Apollo lead credits (`BILLING.LIMIT.CREDITS_EXHAUSTED`, balance 0, refuses rather than billing overage) | five read-only billing screens, `INCIDENT_2026-09-06_apollo_credits.md` | **the critical path.** Whether 25.5% opportunity → contact is real or an artefact of the truncation. Every remaining question about 1,000/day is downstream of it |
-| A1 | 500 Jobs credits, no Apollo | a spend decision | whether any of the 14.4x title-excluded inventory is relevant |
-| A2 | `ACQUISITION_EXTRA_LANES=ats` | a variable, once Apollo serves | activates 615 free opportunities + ~44/day |
-| A3 | historical backfill row budget | a spend decision | only worth deciding after A1 |
+| **E1** | A funded recovery run | a NEW `APOLLO_RECOVERY_BUDGET_ID` and a positive `APOLLO_RECOVERY_BUDGET_CALLS`. The `calib-2026-09-06-50` grant is spent and is never reused | the opportunity -> contact -> approved rate on a cohort whose denominator is known before the run starts |
+| **E2** | Production resumption | existing authorization; `MAINTENANCE_ONLY=0` then `FANTASTIC_JOBS_ENABLED=1`, in that order | whether the slice cursor, the per-run target and the identity fixes behave live |
+| **E3** | Apollo balance | a read-only billing screen, or one paid probe | the reported ~2,000 credits are UNVERIFIED; no paid probe was made |
+| E4 | 145 ATS boards | `ACQUISITION_EXTRA_LANES=ats` (one authorized variable; no credits) | free inventory, and the corpus where the identity fix should matter most |
 
-**Internal work is NOT closed.** The reconciliation reopened it: 712 internal skips
-(606 `not_icp`, 106 `company_unresolved`) and 1,737 opportunities that never reached
-the stage are ours, not the provider's. What cannot be done without Apollo is
-*measuring* whether the remaining outcomes improve — which is why the first run after
-Apollo returns is the recovered cohort and not new acquisition.
+## Resumable checkpoint
 
-| # | internal item reopened by the reconciliation | state |
-|---|---|---|
-| I1 | 606 `not_icp` rejections at the hiring-manager stage — is the ICP rule right, and is it being applied to Apollo org data that was itself degraded? | open, needs Apollo to re-measure |
-| I2 | 106 `company_unresolved` | open |
-| I3 | 1,737 opportunities never reaching the stage on an interrupted run | open; the recovered cohort is exactly this work |
-| I4 | 740 `email_unverified` — a person found, email unpromotable | open; Apollo-only remedy |
+**Do not re-run any of this; it is deployed.** To resume:
 
-### Resumable checkpoint
+1. Read this file, then `OPERATIONAL_STATUS.md` for container-verified effective flags.
+2. **Before clearing maintenance, note that `RUN_APPROVED_TARGET_ENABLED` is already
+   `true` in production** with `RUN_APPROVED_TARGET=1000` and
+   `CONTINUE_AFTER_TARGET=true`. It self-enabled on upgrade from
+   `NET_NEW_SEND_SAFE_TARGET=1000`. Clearing maintenance activates it immediately.
+3. For a funded recovery acceptance follow `RECOVERY_FIRST_ACCEPTANCE.md`: keep
+   `FANTASTIC_JOBS_ENABLED=0`, set the new grant, clear maintenance for that run only,
+   restore maintenance afterwards.
+4. The maintenance procedure itself is in this file's earlier checkpoint: set the cron
+   a few minutes ahead, **do not push during the window**, capture the deployment that
+   is CURRENT at capture time, and always restore `0 3 * * *`.
 
-* Reach the volume: `MAINTENANCE_ONLY=1` is already set; set `cronSchedule` a few
-  minutes ahead, wait for the build to be SUCCESS, **do not push during the window**,
-  capture with `railway logs -d <id>`, then restore `0 3 * * *` and verify.
-* Optional maintenance steps, all opt-in and all off right now:
-  `MAINTENANCE_CAPACITY_RUNS`, `MAINTENANCE_QUALIFY_RUNS`,
-  `MAINTENANCE_ATS_BOARD_YIELD`, `MAINTENANCE_DROP_EMPTY_RUN`.
-* Free measurements that can be re-run any time:
-  `acceptance/inventory_probe.py` (35 requests, 0 credits) and
-  `acceptance/ats_board_yield.py` (0 credits, in-container only).
-* When Apollo serves: `acceptance/apollo_readiness.py` → `MAINTENANCE_ONLY=0` →
-  `FANTASTIC_JOBS_ENABLED=1`, then watch the first run's
-  `cursor: date_created slices` and `expired_inventory` lines.
-
-**The 1,000/day target is NOT achieved and is not claimed to be.** It is
-inventory-feasible (~1,700–2,200 opportunities/day) and conversion-bound (needs ~51%,
-observed 18.8%), and the conversion measurement itself is blocked on Apollo.
+**Unfinished:** demonstrated production output against the 1,000/day target. Every
+prerequisite upstream of E1/E2 is complete, deployed and verified.
