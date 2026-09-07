@@ -39,10 +39,14 @@ class SuppressionStore:
     def _load(self, name: str) -> Set[str]:
         try:
             data = self.state.read_json("seen_suppression", name, require_schema=False)
-        except Exception:  # noqa: BLE001 - a corrupt file is treated as empty, not fatal
-            data = None
-        if not isinstance(data, dict):
+        except Exception as exc:
+            raise RuntimeError(f"Suppression history unreadable: {name}; preserve and reconcile it") from exc
+        if data is None:
             return set()
+        if (not isinstance(data, dict) or not isinstance(data.get("keys"), list)
+                or any(not isinstance(key, str) for key in data["keys"])
+                or data.get("schema_version") not in (None, SUPPRESSION_SCHEMA)):
+            raise RuntimeError(f"Suppression history invalid: {name}; preserve and reconcile it")
         return {str(k) for k in (data.get("keys") or [])}
 
     def _save(self, name: str, keys: Set[str]) -> None:

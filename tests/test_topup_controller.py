@@ -298,13 +298,10 @@ class AnAcquisitionBudgetStopsAcquisitionNotTheRun(unittest.TestCase):
         self.assertEqual(c.to_dict()["acquisition_suppressed"],
                          "acquisition_safety_cap")
 
-    def test_a_zero_slice_never_calls_the_lanes(self):
-        """Calling the lanes with a cap of zero would still open a session and could
-        still bill -- the opposite of what the decision means."""
-        import inspect
-
-        from orchestrator import pipeline
-
-        source = inspect.getsource(pipeline)
-        self.assertIn("if decision.next_slice <= 0:", source)
-        self.assertIn("iter_lanes = {}", source)
+    def test_independent_lane_does_not_receive_a_fantastic_grant(self):
+        c = self._controller()
+        decision = c.decide(independent_acquisition_pending=True)
+        self.assertTrue(decision.should_continue)
+        self.assertEqual(decision.next_slice, 0)
+        c.record(billed=0, net_new_send_safe=0)
+        self.assertFalse(c.decide(independent_acquisition_pending=False).should_continue)

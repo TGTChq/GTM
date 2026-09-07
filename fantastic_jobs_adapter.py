@@ -36,8 +36,7 @@ _CONTINUATION_SCHEMA = "fantastic-continuation/1"
 
 
 def _load_continuation_state() -> Dict[str, Any]:
-    """Cross-run continuation cursor state (best-effort; a missing/corrupt file
-    starts fresh so the first run acquires the newest window)."""
+    """A missing cursor starts fresh; damaged history must be recovered explicitly."""
     path = str(getattr(config, "FANTASTIC_JOBS_CONTINUATION_STATE_PATH", "") or "")
     if not path:
         return {}
@@ -46,9 +45,11 @@ def _load_continuation_state() -> Dict[str, Any]:
             data = json.load(handle)
         if isinstance(data, dict) and data.get("schema") == _CONTINUATION_SCHEMA:
             return data
-    except (OSError, ValueError):
-        pass
-    return {}
+    except FileNotFoundError:
+        return {}
+    except (OSError, ValueError) as exc:
+        raise AcquisitionStateError(f"Unreadable continuation at {path}; preserving history") from exc
+    raise AcquisitionStateError(f"Invalid continuation at {path}; preserving history")
 
 
 #: Called with the rows acquired so far, immediately BEFORE the window checkpoint
@@ -61,6 +62,17 @@ def _load_continuation_state() -> Dict[str, Any]:
 #: hook runs first, and a FAILED hook stops the checkpoint: re-billing a page is
 #: recoverable, losing it is not.
 _CUSTODY_HOOK = None
+_BILLING_HOOK = None
+
+
+class AcquisitionStateError(RuntimeError):
+    """Continuation history is unreadable or cannot persist; do not restart it."""
+
+
+def set_billing_hook(fn) -> None:
+    """Persist cumulative returned-row spend before processing or another request."""
+    global _BILLING_HOOK
+    _BILLING_HOOK = fn
 
 
 def set_custody_hook(fn) -> None:
@@ -80,9 +92,11 @@ def _save_continuation_state(state: Dict[str, Any]) -> None:
         tmp = f"{path}.tmp"
         with open(tmp, "w", encoding="utf-8") as handle:
             json.dump(state, handle)
+            handle.flush()
+            os.fsync(handle.fileno())
         os.replace(tmp, path)  # atomic
-    except OSError as exc:  # never fail the run on a state-write error
-        logger.warning("Could not persist Fantastic continuation state: %s", type(exc).__name__)
+    except OSError as exc:
+        raise AcquisitionStateError(f"Continuation could not persist at {path}; stopping") from exc
 
 
 def _advance_iso_second(value: str, seconds: int = 1) -> str:
@@ -283,6 +297,13 @@ class _QuotaState:
     jobs_consumed: int = 0
     requests_consumed: int = 0
     stop_reason: str = ""
+
+    def charge_jobs(self, count: int) -> None:
+        self.jobs_consumed += int(count)
+
+    def persist_spend(self) -> None:
+        if _BILLING_HOOK is not None:
+            _BILLING_HOOK(self.jobs_consumed)
 
 
 HttpGet = Callable[..., Any]
@@ -1162,9 +1183,11 @@ def run_historical_recovery(http_get: HttpGet, quota: "_QuotaState",
                 loaded = json.load(fh)
             if isinstance(loaded, dict) and loaded.get("schema") == _HISTORICAL_SCHEMA:
                 state = loaded
-        except (OSError, ValueError):
-            state = {}
-    cursor = str(state.get("cursor") or "")
+            else:
+                raise AcquisitionStateError("Invalid historical cursor; refusing reset")
+        except (OSError, ValueError) as exc:
+            raise AcquisitionStateError("Unreadable historical cursor; refusing reset") from exc
+    cursor = str(state.get("cursor") or "0")
 
     def _save() -> None:
         if not state_path:
@@ -1176,9 +1199,11 @@ def run_historical_recovery(http_get: HttpGet, quota: "_QuotaState",
             tmp = f"{state_path}.tmp"
             with open(tmp, "w", encoding="utf-8") as fh:
                 json.dump(state, fh)
+                fh.flush()
+                os.fsync(fh.fileno())
             os.replace(tmp, state_path)
-        except OSError:
-            pass
+        except OSError as exc:
+            raise AcquisitionStateError("Historical cursor could not be saved") from exc
 
     base = {"time_frame": "6m", "exclude_ats_duplicate": "true"}
     base.update(_jb_filter_params())
@@ -1195,8 +1220,9 @@ def run_historical_recovery(http_get: HttpGet, quota: "_QuotaState",
     while billed < budget:
         want = min(budget - billed, 100)
         params = dict(base, limit=want)
-        if cursor:
-            params["cursor"] = cursor
+        # Cursor must be present on page ONE as well. Omitting it selects
+        # date_posted DESC; changing to id ASC afterwards can skip older IDs.
+        params["cursor"] = cursor
         try:
             rows, _q = _request(endpoint, params, http_get,
                                 metrics["segments"].setdefault(label, {}))
@@ -1208,9 +1234,10 @@ def run_historical_recovery(http_get: HttpGet, quota: "_QuotaState",
             stop = "exhausted"
             break
         last_id = ""
+        billed += len(rows)
+        quota.charge_jobs(len(rows))
+        page_start = len(jobs)
         for record in rows:
-            billed += 1
-            quota.jobs_consumed += 1
             rid = str((record or {}).get("id") or "")
             if rid:
                 last_id = rid
@@ -1222,6 +1249,10 @@ def run_historical_recovery(http_get: HttpGet, quota: "_QuotaState",
             seen_ids.add(job["job_id"])
             jobs.append(job)
             kept += 1
+        if _CUSTODY_HOOK is not None and jobs[page_start:]:
+            if not _CUSTODY_HOOK(jobs[page_start:]):
+                raise AcquisitionStateError("Historical page custody failed; cursor retained")
+        quota.persist_spend()
         if not last_id:
             # Without an id there is no cursor to advance, and repeating the same
             # request would bill the same page forever.
@@ -1443,7 +1474,8 @@ def _fetch_segment(endpoint: str, base_params: Dict[str, Any], source_label: str
                    metrics: Dict[str, Any], accept_source: Optional[Tuple[str, ...]] = None,
                    stop_before_date: Optional[str] = None,
                    start_offset: int = 0,
-                   durable_cursor: bool = False) -> List[Dict[str, Any]]:
+                   durable_cursor: bool = False,
+                   page_checkpoint=None) -> List[Dict[str, Any]]:
     """When ``stop_before_date`` is set (fresh-edge/head pass), the DESC feed is
     paged from the top and paging STOPS as soon as a job older than that timestamp
     is seen -- so only jobs newer than the prior high_water are collected. Jobs AT
@@ -1492,6 +1524,12 @@ def _fetch_segment(endpoint: str, base_params: Dict[str, Any], source_label: str
     returned = 0
     while returned < cap:
         want = min(cap - returned, 100)
+        if stop_before_date and cap > 1:
+            # A returning head often crosses its old boundary immediately. Buying
+            # the whole remaining grant in that first response stranded the deep
+            # cursor forever. Probe with part of the grant; if it is all fresh,
+            # ordinary pagination still uses the rest under the same hard cap.
+            want = min(want, max(1, cap // 4))
         breach = _quota_would_breach(quota, want)
         if breach:
             seg["stop_reason"] = breach
@@ -1532,11 +1570,21 @@ def _fetch_segment(endpoint: str, base_params: Dict[str, Any], source_label: str
         if not rows:
             seg["stop_reason"] = seg["stop_reason"] or "empty_page"
             break
+        # Billing belongs to the RESPONSE, before any content-based early exit.
+        # A repeated page or a head boundary still costs the full returned page.
+        seg["returned"] += len(rows)
+        quota.charge_jobs(len(rows))
+        returned += len(rows)
         fp = tuple(str(r.get("id")) for r in rows if isinstance(r, dict))
         if fp and fp in fingerprints:
             seg["stop_reason"] = "repeated_page"
+            seg["repeated_page_billed"] = seg.get("repeated_page_billed", 0) + len(rows)
+            quota.persist_spend()
             break
         fingerprints.add(fp)
+        # A repeated response was billed but did not prove coverage at its offset.
+        # Keep cursor progress separate so accounting cannot skip that missing page.
+        seg["continuation_rows"] = seg.get("continuation_rows", 0) + len(rows)
         # ORDERING OBSERVATION -- free, and the only evidence we have.
         #
         # No `order_by`/`sort` parameter is sent (see build_jb_params), and the
@@ -1552,10 +1600,8 @@ def _fetch_segment(endpoint: str, base_params: Dict[str, Any], source_label: str
         _observe_order(seg, rows)                       # documented sort: date_posted
         _observe_order(seg.setdefault("window_field_order", {}), rows, "date_created")
         new_ids = 0
+        page_kept_start = len(jobs)
         for record in rows:
-            seg["returned"] += 1
-            quota.jobs_consumed += 1
-            returned += 1
             job, reason = map_record(record, source_label, seg)
             if job is None:
                 seg["schema_rejected"] += 1
@@ -1625,6 +1671,16 @@ def _fetch_segment(endpoint: str, base_params: Dict[str, Any], source_label: str
             jobs.append(job)
             if len(jobs) >= cap:
                 break
+        # Hold payloads even on legacy paths before spend/cursor persistence.
+        # If either write fails, stop with this page recoverable and no next request.
+        if _CUSTODY_HOOK is not None and jobs[page_kept_start:]:
+            if not _CUSTODY_HOOK(jobs[page_kept_start:]):
+                raise AcquisitionStateError("Paid page custody failed; acquisition stopped")
+        quota.persist_spend()
+        if page_checkpoint is not None:
+            # The paid page must be held before requesting another page. A crash
+            # in the next request cannot erase this response or force repurchase.
+            page_checkpoint(jobs[page_kept_start:], start_offset + returned)
         if boundary_hit:
             break
         if returned >= cap:
@@ -1653,7 +1709,7 @@ def _fetch_segment(endpoint: str, base_params: Dict[str, Any], source_label: str
             # With a durable cursor the offset has already moved, so the next
             # page is genuinely further in and the spend is not repeated next run.
             # Stopping here throws that away.
-            if not durable_cursor:
+            if not durable_cursor and not stop_before_date:
                 seg["stop_reason"] = seg["stop_reason"] or "no_new_ids"
                 break
             duplicate_pages += 1
@@ -1941,9 +1997,11 @@ class DateCreatedWatermarkEngine:
                 data = json.load(fh)
             if isinstance(data, dict) and data.get("schema") == _WATERMARK_SCHEMA:
                 return data
-        except (OSError, ValueError):
-            pass
-        return {}
+        except FileNotFoundError:
+            return {}
+        except (OSError, ValueError) as exc:
+            raise AcquisitionStateError(f"Unreadable acquisition watermark at {p}; preserving cursor") from exc
+        raise AcquisitionStateError(f"Invalid acquisition watermark at {p}; preserving cursor")
 
     def _save(self) -> None:
         p = self._path()
@@ -1958,9 +2016,24 @@ class DateCreatedWatermarkEngine:
             self.state["updated_at"] = datetime.now(timezone.utc).isoformat()
             with open(tmp, "w", encoding="utf-8") as fh:
                 json.dump(self.state, fh)
+                fh.flush()
+                os.fsync(fh.fileno())
             os.replace(tmp, p)
         except OSError as exc:
-            logger.warning("watermark state not persisted: %s", type(exc).__name__)
+            raise AcquisitionStateError(f"Acquisition cursor could not persist at {p}; stopping") from exc
+
+    def _checkpoint_page(self, rows, next_offset, update_cursor) -> None:
+        if _CUSTODY_HOOK is None:
+            return  # non-orchestrated caller has no durable payload store
+        if rows and not _CUSTODY_HOOK(rows):
+            raise RuntimeError("Paid page custody failed; acquisition cursor not advanced")
+        ids = set(self.state.get("window_acquired_ids") or [])
+        ids.update(str(j["_fantastic_internal_id"]) for j in rows
+                   if j.get("_fantastic_internal_id"))
+        self.state["window_acquired_ids"] = sorted(ids)
+        update_cursor(next_offset)
+        self._save()
+        _save_quota_snapshot(self.quota, self.metrics)
 
     @staticmethod
     def _iso(dt: datetime) -> str:
@@ -2232,14 +2305,18 @@ class DateCreatedWatermarkEngine:
         params["date_created_gte"] = self.lower
         params["date_created_lt"] = self.upper
         before = self.quota.jobs_consumed
+        progress_before = int((self.metrics["segments"].get(label) or {}).get("continuation_rows", 0))
         got = _fetch_segment(endpoint, params, label, room, self.quota, self.http_get,
                              self.seen_ids, self.metrics, accept_source=accept,
-                             start_offset=base, durable_cursor=True)
+                             start_offset=base, durable_cursor=True,
+                             page_checkpoint=lambda rows, offset: self._checkpoint_page(
+                                 rows, offset, lambda value: self.record_window_offset(label, value)))
         # Advance by every row the provider RETURNED for this label in this pass
         # (billed rows, not kept rows -- the next unseen row sits exactly after
         # them because paging is contiguous). Same accounting the bootstrap uses.
         billed_this_pass = self.quota.jobs_consumed - before
-        self.record_window_offset(label, base + billed_this_pass)
+        progress = int((self.metrics["segments"].get(label) or {}).get("continuation_rows", 0)) - progress_before
+        self.record_window_offset(label, base + progress)
         self.acquired.extend(got)
         self.result.jobs.extend(got)
         self.metrics["watermark"]["acquired"] = self.metrics["watermark"].get("acquired", 0) + len(got)
@@ -2360,7 +2437,7 @@ class DateCreatedWatermarkEngine:
         cursors = self.metrics["watermark"].setdefault("window_cursors", {})
         cur = cursors.setdefault(str(label), {"offset_from": base, "offset_to": base,
                                               "billed": 0, "passes": 0})
-        cur["offset_to"] = base + billed_this_pass
+        cur["offset_to"] = self.window_offsets().get(str(label), base + progress)
         cur["billed"] = int(cur.get("billed", 0)) + billed_this_pass
         cur["passes"] = int(cur.get("passes", 0)) + 1
         cur["kept"] = int(cur.get("kept", 0)) + len(got)
@@ -2482,22 +2559,28 @@ class DateCreatedWatermarkEngine:
         # deliberate trade against re-billing forever (seen_ids still dedupes).
         start = int(rec.get("offset", 0) or 0)
         before = self.quota.jobs_consumed
+        progress_before = int((self.metrics["segments"].get(blabel) or {}).get("continuation_rows", 0))
+        def advance_bootstrap(offset):
+            self.state["source_bootstrap"][str(label)]["offset"] = offset
         got = _fetch_segment(endpoint, params, blabel, room, self.quota, self.http_get,
                              self.seen_ids, self.metrics, accept_source=accept,
-                             start_offset=start, durable_cursor=True)
+                             start_offset=start, durable_cursor=True,
+                             page_checkpoint=lambda rows, offset: self._checkpoint_page(
+                                 rows, offset, advance_bootstrap))
         consumed = self.quota.jobs_consumed - before
+        progress = int((self.metrics["segments"].get(blabel) or {}).get("continuation_rows", 0)) - progress_before
         self.acquired.extend(got)
         self.result.jobs.extend(got)
         boots = dict(self.state.get("source_bootstrap") or {})
         cur = dict(boots.get(str(label)) or {})
-        cur["offset"] = start + consumed
+        cur["offset"] = start + progress
         cur["acquired"] = int(cur.get("acquired", 0) or 0) + len(got)
         boots[str(label)] = cur
         self.state["source_bootstrap"] = boots
         self.mark_bootstrap_drained(label)
         self.metrics.setdefault("bootstrap", {})[label] = {
             "lower": rec["lower"], "upper": rec["upper"], "acquired": len(got),
-            "offset_from": start, "offset_to": start + consumed,
+            "offset_from": start, "offset_to": start + progress, "billed": consumed,
             "drained": bool((self.state.get("source_bootstrap") or {}).get(label, {}).get("drained"))}
 
     # -- per-source drain state ---------------------------------------------------
@@ -2741,15 +2824,19 @@ class DateCreatedWatermarkEngine:
             if seg_key is not None:
                 seg_key["stop_reason"] = ""
             before = self.quota.jobs_consumed
+            progress_before = int((seg_key or {}).get("continuation_rows", 0))
             got = _fetch_segment(endpoint, params, label, room, self.quota,
                                  self.http_get, self.seen_ids, self.metrics,
                                  accept_source=accept, start_offset=resume,
-                                 durable_cursor=True)
+                                 durable_cursor=True,
+                                 page_checkpoint=lambda rows, offset: self._checkpoint_page(
+                                     rows, offset, lambda value: self.record_slice_offset(label, key, value)))
             seg_key = self.metrics["segments"].get(label) or {}
             slice_stop = str(seg_key.get("stop_reason") or "")
             if seg_key:
                 seg_key["stop_reason"] = carried or slice_stop
             billed = self.quota.jobs_consumed - before
+            progress = int(seg_key.get("continuation_rows", 0)) - progress_before
             stats["attempted"] += 1
             stats["billed"] += billed
             stats["kept"] += len(got)
@@ -2764,10 +2851,10 @@ class DateCreatedWatermarkEngine:
                 self.mark_slice_done(label, key)
                 done.add(key)
                 stats["drained_now"] += 1
-            elif billed:
+            elif progress:
                 # Unfinished: remember how far into THIS slice we got, so the next
                 # run continues rather than re-buying the prefix.
-                self.record_slice_offset(label, key, resume + billed)
+                self.record_slice_offset(label, key, resume + progress)
 
         if len(done) >= len(slices) and slices:
             self.mark_source_drained_from_slices(label)
@@ -3183,6 +3270,9 @@ def run_fantastic_jobs_acquisition(http_get: HttpGet = _http_get, *,
     do_head = continuation_enabled and acquire_mode in ("head", "head_then_deep")
     do_deep = ((not continuation_enabled)
                or (acquire_mode in ("deep", "head_then_deep") and bool(cursor_date_lt)))
+    if continuation_enabled and any(not rec.get("drained")
+                                   for rec in (cont_state.get("head_progress") or {}).values()):
+        do_head = True  # continuation of a pinned head band, not a new top-of-feed purchase
     if continuation_enabled and not do_head and not do_deep:
         do_deep = True  # degenerate config -> plain current-window fetch (never zero)
     # Fresh-edge anchor: the prior high_water (empty on the first run / after a stale
@@ -3225,6 +3315,8 @@ def run_fantastic_jobs_acquisition(http_get: HttpGet = _http_get, *,
             if not eng.opened or not eng.upper:
                 raise ValueError("watermark window did not open")
             watermark_engine = eng
+        except AcquisitionStateError:
+            raise  # damaged durable history cannot authorize a head/deep restart
         except Exception as exc:  # noqa: BLE001
             metrics["watermark"] = {"enabled": True, "circuit_open": True,
                                     "fallback": "head_deep",
@@ -3249,6 +3341,7 @@ def run_fantastic_jobs_acquisition(http_get: HttpGet = _http_get, *,
     # buckets so a head pass can never regress the deep floor (which would re-bill).
     stream_head_jobs: List[Dict[str, Any]] = []
     stream_deep_jobs: List[Dict[str, Any]] = []
+    head_progress = dict(cont_state.get("head_progress") or {})
     # Filter set reused by the 0-credit watermark visibility-lag audit (count only).
     jb_audit_params: Dict[str, Any] = {}
 
@@ -3261,10 +3354,35 @@ def run_fantastic_jobs_acquisition(http_get: HttpGet = _http_get, *,
         disabled by the acquire mode."""
         if do_head:
             room = min(cap_limit, run_cap - quota.jobs_consumed)
-            if room > 0:
+            head_state = dict(head_progress.get(label) or {})
+            if room > 0 and not head_state.get("drained"):
+                head_params = dict(base_jb)
+                if head_high_water:
+                    # Freeze the upper edge while a larger-than-one-grant fresh
+                    # band drains. Advancing high_water after its first slice used
+                    # to abandon all unseen rows between that slice and the old head.
+                    head_state.setdefault("lower", head_high_water)
+                    if head_state.get("upper_lt"):
+                        head_params["date_posted_lt"] = head_state["upper_lt"]
+                start = int(head_state.get("offset") or 0)
+                before = int((metrics["segments"].get(label) or {}).get("continuation_rows", 0))
+                if label in metrics["segments"]:
+                    metrics["segments"][label]["stop_reason"] = ""
                 got = _fetch_segment(  # NO date_posted_lt: page from the top
-                    endpoint, dict(base_jb), label, room, quota, http_get, seen_ids,
-                    metrics, accept_source=accept, stop_before_date=(head_high_water or None))
+                    endpoint, head_params, label, room, quota, http_get, seen_ids,
+                    metrics, accept_source=accept, stop_before_date=(head_state.get("lower") or None),
+                    start_offset=start, durable_cursor=bool(head_high_water))
+                if head_high_water:
+                    segment = metrics["segments"].get(label) or {}
+                    head_state["offset"] = start + int(segment.get("continuation_rows", 0)) - before
+                    head_state["drained"] = segment.get("stop_reason") in (
+                        "head_boundary", "empty_page", "short_page")
+                    peak = _cursor_stats(got)
+                    if peak and peak["high_water"] > str(head_state.get("high_water") or ""):
+                        head_state["high_water"] = peak["high_water"]
+                        head_state["high_water_ids"] = _ids_at(got, peak["high_water"])
+                        head_state.setdefault("upper_lt", _advance_iso_second(peak["high_water"], 1))
+                    head_progress[label] = head_state
                 stream_head_jobs.extend(got)
                 result.jobs.extend(got)
                 metrics["continuation"]["head_acquired"] = (
@@ -3641,7 +3759,7 @@ def run_fantastic_jobs_acquisition(http_get: HttpGet = _http_get, *,
                     _sm = metrics["segments"].setdefault(_rseg.label, {})
                     # Rows already billed for this label ARE the offset to resume at:
                     # paging is contiguous, so the next unseen row is exactly there.
-                    _start = int(_sm.get("returned", 0) or 0)
+                    _start = int(_sm.get("continuation_rows", 0) or 0)
                     # The LAST pass decides how the segment finished; otherwise a
                     # round-1 "cap_reached" would mask a later genuine drain and the
                     # canonical watermark could never advance.
@@ -3871,11 +3989,20 @@ def run_fantastic_jobs_acquisition(http_get: HttpGet = _http_get, *,
             new_high_ids = _ids_at(head_source, new_high)
         else:
             new_high, new_high_ids = prior_high, prior_high_ids  # no fresher jobs
-        if stream_head_jobs or stream_deep_jobs:
+        if head_progress:
+            if all(rec.get("drained") for rec in head_progress.values()):
+                for rec in head_progress.values():
+                    if str(rec.get("high_water") or "") > new_high:
+                        new_high, new_high_ids = rec["high_water"], rec.get("high_water_ids") or []
+                head_progress = {}
+        if stream_head_jobs or stream_deep_jobs or head_progress != (cont_state.get("head_progress") or {}):
+            if _CUSTODY_HOOK is not None and result.jobs and not _CUSTODY_HOOK(result.jobs):
+                raise AcquisitionStateError("Continuation custody failed; cursor not advanced")
             _save_continuation_state({
                 "schema": _CONTINUATION_SCHEMA, "source": "linkedin",
                 "cursor_date": new_cursor, "high_water": new_high,
                 "high_water_ids": new_high_ids, "boundary_ids": new_boundary,
+                "head_progress": head_progress,
                 "acquired_this_run": len(stream_head_jobs) + len(stream_deep_jobs),
                 "updated_at": datetime.now(timezone.utc).isoformat(),
             })

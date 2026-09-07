@@ -2235,6 +2235,11 @@ INTERMEDIARY_JOB_DOMAINS = [
     "weworkremotely.com",
 ]
 
+# Keep source recognition and employer identity consistent across all consumers.
+# ApplicantPro/isolved tenants otherwise collapse into one unrelated employer.
+from source_domains import ATS_DOMAINS as _SHARED_ATS_DOMAINS
+INTERMEDIARY_JOB_DOMAINS.extend(sorted(_SHARED_ATS_DOMAINS - set(INTERMEDIARY_JOB_DOMAINS)))
+
 KNOWN_OUTSOURCING_EMPLOYERS = [
     "concentrix", "teleperformance", "foundever", "sitel", "ttec",
     "alorica", "taskus", "transcom", "genpact", "wns", "conduent",

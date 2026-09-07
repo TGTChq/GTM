@@ -86,9 +86,13 @@ def _now() -> datetime:
 def _read(path: Path) -> Dict[str, Any]:
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+    except FileNotFoundError:
         return {}
-    return data if isinstance(data, dict) else {}
+    except (OSError, ValueError) as exc:
+        raise RuntimeError(f"Unreadable pending-work evidence at {path}; preserving custody") from exc
+    if not isinstance(data, dict):
+        raise RuntimeError(f"Invalid pending-work evidence at {path}; preserving custody")
+    return data
 
 
 def _write(path: Path, payload: Dict[str, Any]) -> None:
@@ -374,6 +378,17 @@ def adopt_from_artifacts(
     skip = {str(k) for k in exclude_keys if k}
     budget = None if limit is None else int(limit)
 
+    # A recovery run's postings.json contains work owned by older runs too.
+    # Importing against only its own custody file copied those rows again and
+    # consumed the import grant on a prefix that was already durably held.
+    held_keys = {
+        _key(job)
+        for path in _entry_files(base_store)
+        for payload in [_read(path)] if payload.get("schema") == SCHEMA
+        for job in (payload.get("jobs") or [])
+    }
+    held_keys.discard("")
+
     for run_dir in sorted((d for d in artifacts.iterdir() if d.is_dir()), reverse=True):
         if info["runs_imported"] >= int(max_runs):
             break
@@ -392,11 +407,8 @@ def adopt_from_artifacts(
         jobs = [j for j in (payload.get("jobs") or []) if isinstance(j, dict)]
         found = len(jobs)
         jobs = [j for j in jobs if _key(j) and _key(j) not in skip]
-        # Skip what custody ALREADY holds for this run before truncating, or a
-        # budget-limited pass slices the same prefix every time and never advances.
-        held = {_key(j) for j in (_read(base_store / f"{run_id}.json").get("jobs") or [])}
-        held.discard("")
-        eligible = [j for j in jobs if _key(j) not in held]
+        # Skip what ANY run holds before applying the remaining import budget.
+        eligible = [j for j in jobs if _key(j) not in held_keys]
         if budget is not None:
             jobs = eligible[:max(0, budget)]
         else:
@@ -405,6 +417,7 @@ def adopt_from_artifacts(
         outcome = record(base_store, run_id, jobs) if jobs else {"ok": True, "recorded": 0}
         if not outcome.get("ok"):
             continue
+        held_keys.update(_key(job) for job in jobs)
         # A run is only FINISHED importing when its whole eligible set was taken.
         # Marking a budget-truncated import complete stranded the remainder for
         # good: the marker is checked before the file is even opened, so a later
@@ -463,13 +476,22 @@ def summary(store: str | Path) -> Dict[str, Any]:
     base = Path(store)
     runs: List[Dict[str, Any]] = []
     total = 0
+    distinct_keys: Set[str] = set()
+    unidentifiable = 0
     if base.is_dir():
         for path in _entry_files(base):
             held = _read(path)
             if held.get("schema") != SCHEMA:
                 continue
-            count = len(held.get("jobs") or [])
+            jobs = held.get("jobs") or []
+            count = len(jobs)
             total += count
+            for job in jobs:
+                key = _key(job)
+                if key:
+                    distinct_keys.add(key)
+                else:
+                    unidentifiable += 1
             runs.append({"run_id": str(held.get("run_id") or path.stem),
                          "postings": count,
                          "recorded_at": str(held.get("recorded_at") or "")})
@@ -478,6 +500,10 @@ def summary(store: str | Path) -> Dict[str, Any]:
     if archive.is_dir():
         for path in sorted(archive.glob("*.json")):
             expired_total += len(_read(path).get("jobs") or [])
-    return {"pending_postings": total, "pending_runs": len(runs), "runs": runs,
+    return {"pending_postings": len(distinct_keys),
+            "stored_posting_records": total,
+            "duplicate_custody_records": total - unidentifiable - len(distinct_keys),
+            "unidentifiable_custody_records": unidentifiable,
+            "pending_runs": len(runs), "runs": runs,
             "expired_unresolved_postings": expired_total,
             "unit": "normalized_opportunity"}

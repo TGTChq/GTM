@@ -474,6 +474,29 @@ def enrich_organization(
     )
 
 
+class PeopleSearchResults(list):
+    """Usable candidates plus whether all requested pages completed successfully."""
+    def __init__(self, people=(), *, complete=True):
+        super().__init__(people)
+        self.complete = bool(complete)
+
+
+def _people_search_request(params, debug_name):
+    try:
+        response = request_with_retry("POST", f"{APOLLO_BASE_URL}/mixed_people/api_search",
+                                      headers=_headers(), params=params)
+    except requests.HTTPError as exc:
+        classification = classify_apollo_error(exc)
+        if classification.global_fatal:
+            _raise_global_fatal(classification, exc)
+        raise
+    data = safe_json(response)
+    debug_dump(debug_name, data)
+    if not isinstance(data, dict) or not isinstance(data.get("people"), list):
+        raise ValueError("Apollo people search did not return a people array")
+    return data
+
+
 def search_people_at_company(domain: str, titles: List[str]) -> List[Dict[str, Any]]:
     domain = _domain(domain)
     if not domain or not titles:
@@ -484,6 +507,7 @@ def search_people_at_company(domain: str, titles: List[str]) -> List[Dict[str, A
     per_page = 25
     max_pages = max(1, int(getattr(config, "APOLLO_PEOPLE_SEARCH_MAX_PAGES", 1)))
     all_people: List[Dict[str, Any]] = []
+    complete = True
     for page in range(1, max_pages + 1):
         # Apollo documents these as query parameters, including [] in array names.
         params: List[tuple[str, str]] = [
@@ -495,20 +519,16 @@ def search_people_at_company(domain: str, titles: List[str]) -> List[Dict[str, A
         params.extend(("person_titles[]", title) for title in titles)
 
         try:
-            response = request_with_retry(
-                "POST",
-                f"{APOLLO_BASE_URL}/mixed_people/api_search",
-                headers=_headers(),
-                params=params,
-            )
-            data = safe_json(response)
-            debug_dump("apollo_people_search", data)
+            data = _people_search_request(params, "apollo_people_search")
+        except GLOBAL_FATAL_ERRORS:
+            raise
         except Exception as exc:
             logger.error("Apollo people search failed for %s (page %d): %s", domain, page, exc)
             if page == 1:
                 raise
             # A later page failing is not fatal -- keep whatever was already
             # found rather than discarding a successful first page.
+            complete = False
             break
 
         page_people = data.get("people") or []
@@ -523,6 +543,8 @@ def search_people_at_company(domain: str, titles: List[str]) -> List[Dict[str, A
             break
         if isinstance(total_pages, int) and page >= total_pages:
             break
+        if page == max_pages:
+            complete = False
 
     # Defensive domain validation. Search filters can be loose, and wrong-company
     # contacts are more damaging than a lower match rate.
@@ -538,7 +560,7 @@ def search_people_at_company(domain: str, titles: List[str]) -> List[Dict[str, A
             )
             continue
         validated.append(person)
-    return validated
+    return PeopleSearchResults(validated, complete=complete)
 
 
 def search_people_by_org_id(organization_id: str, titles: List[str],
@@ -567,6 +589,7 @@ def search_people_by_org_id(organization_id: str, titles: List[str],
     per_page = 25
     max_pages = max(1, int(getattr(config, "APOLLO_PEOPLE_SEARCH_MAX_PAGES", 1)))
     all_people: List[Dict[str, Any]] = []
+    complete = True
     for page in range(1, max_pages + 1):
         params: List[tuple[str, str]] = [
             ("organization_ids[]", organization_id),
@@ -576,20 +599,17 @@ def search_people_by_org_id(organization_id: str, titles: List[str],
         ]
         params.extend(("person_titles[]", title) for title in titles)
         try:
-            response = request_with_retry(
-                "POST",
-                f"{APOLLO_BASE_URL}/mixed_people/api_search",
-                headers=_headers(),
-                params=params,
-            )
-            data = safe_json(response)
-            debug_dump("apollo_people_search_org_id", data)
+            data = _people_search_request(params, "apollo_people_search_org_id")
+        except GLOBAL_FATAL_ERRORS:
+            raise
         except Exception as exc:
             logger.error("Apollo org-id people search failed for org %s (page %d): %s",
                          organization_id, page, exc)
             if page == 1:
-                # A failed fallback must never worsen the primary outcome.
-                return []
+                # The caller defers errors. Returning [] would assert a successful
+                # empty search and poison its negative cache for later runs.
+                raise
+            complete = False
             break
 
         page_people = data.get("people") or []
@@ -603,10 +623,12 @@ def search_people_by_org_id(organization_id: str, titles: List[str],
             break
         if isinstance(total_pages, int) and page >= total_pages:
             break
+        if page == max_pages:
+            complete = False
 
     expected = _domain(expected_domain) if expected_domain else ""
     if not expected:
-        return all_people
+        return PeopleSearchResults(all_people, complete=complete)
     validated: List[Dict[str, Any]] = []
     for person in all_people:
         person_domain = _person_org_domain(person)
@@ -615,7 +637,7 @@ def search_people_by_org_id(organization_id: str, titles: List[str],
                            person.get("id") or person.get("person_id"), person_domain, expected)
             continue
         validated.append(person)
-    return validated
+    return PeopleSearchResults(validated, complete=complete)
 
 
 def match_person(person: Dict[str, Any]) -> PersonMatch:

@@ -691,7 +691,8 @@ def main(argv=None) -> int:
         lanes=lanes, lane_runners=lane_runners,
         enrichment_engine=RealEnrichmentStage(
             target_final_pass=int(a.target),
-            workdir=str(state.run_dir() / "enrichment")),
+            workdir=str(state.run_dir() / "enrichment"),
+            paid_evidence_dir=str(state.store_path("provider_cache") / "paid_replies")),
         delivery_manager=RealDelivery(
             enable_airtable_write=bool(a.airtable_write) and policy.allow_airtable_write,
             auto_approve=bool(a.auto_approve),

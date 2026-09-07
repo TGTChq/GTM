@@ -90,7 +90,9 @@ class CrossRunSuppressionTests(unittest.TestCase):
         tmp = tempfile.mkdtemp()
         st = _state(tmp)
         (st.store_path("seen_suppression") / "postings.json").write_text("{bad json")
-        self.assertEqual(SuppressionStore(st).seen_postings(), set())  # empty, not crash
+        with self.assertRaises(RuntimeError):
+            SuppressionStore(st).seen_postings()
+        self.assertEqual((st.store_path("seen_suppression") / "postings.json").read_text(), "{bad json")
 
 
 class DeliveryIdempotencyTests(unittest.TestCase):

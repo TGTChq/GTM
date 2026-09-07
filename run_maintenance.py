@@ -692,6 +692,43 @@ def preserve_run_artifacts(root: Path, run_ids, *, max_bytes: int = 64_000_000) 
     return out
 
 
+def _retained_company_hold_facts(job: dict) -> dict:
+    """Retained resolver evidence, excluding contact details and signing material.
+
+    A company-side hold does not establish WHICH resolver rule failed. Keep the
+    original reason and candidate evidence so a later reader can distinguish an
+    unsafe employer conflict from a safe alias or a missing input. Do not resolve
+    again, consult a cache, or infer a reason from a different historical cohort.
+    """
+    evidence = job.get("_outbound_company_evidence")
+    evidence = evidence if isinstance(evidence, dict) else None
+    candidate_keys = ("source", "raw", "cleaned", "transformations",
+                      "identity_matches", "ambiguous_separator", "malformed_name",
+                      "verified_canonical_pair", "score")
+    selected = None if evidence is None else {
+        key: evidence[key] for key in (
+            "identity_keys", "selected_source", "selected_transformations",
+            "cache_hit", "manual_override", "identity_conflict", "bridging_brand",
+            "reasons") if key in evidence
+    }
+    if selected is not None and isinstance(evidence.get("candidates"), list):
+        selected["candidates"] = [
+            {key: candidate[key] for key in candidate_keys if key in candidate}
+            for candidate in evidence["candidates"] if isinstance(candidate, dict)
+        ]
+    return {
+        "evidence_status": "retained" if evidence else "unavailable",
+        "display_name": job.get("outbound_company_name"),
+        "confidence": job.get("outbound_company_confidence"),
+        "identity_key": job.get("outbound_company_identity_key"),
+        "identity_safe": job.get("_outbound_company_identity_safe"),
+        "company_hold": job.get("_outbound_company_hold"),
+        "role_hold": job.get("_outbound_role_hold"),
+        "resolver_version": job.get("_outbound_display_resolver_version"),
+        "resolver_evidence": selected,
+    }
+
+
 def send_safe_forensics(root: Path, run_ids, *, limit: int = 200) -> dict:
     """WHY a lead was withheld as not send-safe, per lead, from its own stored facts.
 
@@ -701,9 +738,10 @@ def send_safe_forensics(root: Path, run_ids, *, limit: int = 200) -> dict:
     and neither can a count.
 
     `send_safe_facts` is deterministic, offline and fail-closed: it returns the FIRST
-    failing fact. Rebuilding each retained lead's Airtable fields with the production
-    `_job_to_fields` and re-running the gate reproduces exactly the decision delivery
-    made, with the reason it never emitted.
+    failing fact. Rebuilding each retained lead's Airtable fields evaluates those
+    facts under the CURRENT mapper, signing key and gate. The mapper signs afresh
+    and may default missing version/timestamp fields, so this is not verification
+    of a historical Airtable fingerprint or an exact original request replay.
 
     Reads only. No provider is contacted, nothing is written to Airtable, and no
     field is repaired -- a rebuilt row is used to ASK the gate, never to change it.
@@ -711,6 +749,8 @@ def send_safe_forensics(root: Path, run_ids, *, limit: int = 200) -> dict:
     from airtable_client import _job_to_fields, send_safe_facts
 
     out = {"unit_note": "per-lead send-safe gate reasons, recomputed offline",
+           "evaluation_basis": "retained_leads_current_mapper_and_gate",
+           "historical_fingerprint_verified": False,
            "runs": []}
     for run_id in run_ids:
         enr = root / "run_artifacts" / run_id / "enrichment"
@@ -730,7 +770,7 @@ def send_safe_forensics(root: Path, run_ids, *, limit: int = 200) -> dict:
             jobs = data.get("jobs") if isinstance(data, dict) else data
             if not isinstance(jobs, list):
                 continue
-            for job in jobs:
+            for job_index, job in enumerate(jobs):
                 if not isinstance(job, dict):
                     continue
                 if row["examined"] >= limit:
@@ -752,14 +792,22 @@ def send_safe_forensics(root: Path, run_ids, *, limit: int = 200) -> dict:
                 if str(fields.get("Apollo Email Status") or "").strip().lower() == "verified":
                     if len(row["verified_withheld"]) < 25:
                         row["verified_withheld"].append({
+                            "artifact": path.relative_to(enr.resolve()).as_posix(),
+                            "job_index": job_index,
                             "reason": reason,
                             "final_decision": fields.get("Final Decision"),
                             "email_validation": fields.get("Email Validation"),
                             "contact_alignment": fields.get("Contact Alignment"),
                             "outbound_hold": bool(fields.get("Outbound Hold")),
                             "validation_version": fields.get("Validation Version"),
+                            "validation_version_source": (
+                                "retained_lead" if job.get("_validation_version")
+                                else "current_configuration_default"),
+                            "fingerprint_source": "rebuilt_by_current_mapper",
                             "has_fingerprint": bool(
                                 str(fields.get("Validation Fingerprint") or "").strip()),
+                            "company_facts": _retained_company_hold_facts(job),
+                            "checks_after_first_failure": "not_evaluated",
                         })
             if row["examined"] >= limit:
                 break

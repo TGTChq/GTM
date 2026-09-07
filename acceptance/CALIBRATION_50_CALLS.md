@@ -6,9 +6,24 @@ calls, and reserved before wrappers rather than each physical paid request. The
 billable requests or credits. See `THROUGHPUT_FIX_2026-09-06.md`.
 
 Run `20260906T202534Z-0395cf0a`, 2026-09-06T20:25Z, inside the production container.
-Acquisition disabled, external test delivery off, Instantly off. **Apollo is serving
+Acquisition disabled, Airtable writes enabled, Instantly enrollment off. No rows were created because all candidates were withheld. **Apollo is serving
 again** — `acceptance/apollo_readiness.py` returned HTTP 200 on a credit-consuming
 call (its billed credit amount has not been independently reconciled here).
+
+## Identity correction from original retained rows (2026-09-07)
+
+The full 1,869,595-byte artifact was recovered through 19 supported read-only chunks.
+Rows 0–7 identify eight employers on isolvedhire.com but carry one Hyundai MOBIS
+canonical account. Rows 15–19 identify five employers on applicantpro.com but carry
+one Cutrale account. The missing ATS denylist entries merged unrelated tenants.
+The 13 surviving representatives now group into 13 employer-name keys, versus two
+shared domains before. Five processed groups is not five actual employers, and
+24 missing emails cannot be attributed entirely to provider coverage.
+
+Rows 23 and 24 are two distinct RMC contacts; all non-display gates passed. A
+first-party-reviewed exact identity alias replays both to FINAL_PASS and mapped
+Approved locally with all send-safe facts passing. This is not production output.
+See `COMPANY_HOLD_REVIEW_2026-09-07.md` and `evidence/company_identity_replay_20260907.json`.
 
 ## What it measured
 
@@ -17,10 +32,10 @@ call (its billed credit amount has not been independently reconciled here).
 | postings adopted from custody | **2,000** (the batch limit) |
 | distinct company × function opportunities | **1,660** |
 | internal Apollo budget reservations consumed | **50 of 50** |
-| companies actually reached | **5** |
+| recorded company groups processed | **5**, including two shared ATS domains (not five distinct employers) |
 | internal reservations per company | **10.0**, including free searches |
-| ICP-eligible companies | 5 of 5 (0 rejected) |
-| hiring managers found | **2 of 5 (40%)** |
+| recorded group-level account PASS | 5 of 5; mixed ATS tenants invalidate employer-level interpretation |
+| distinct contacts found | **2**, both at one employer; no company conversion rate established |
 | contacts with an email | 2 |
 | verified emails | **2** — unverified 0 |
 | dispositions | FINAL_PASS **0**, NEEDS_CHECK 2, UNVERIFIED 24 |

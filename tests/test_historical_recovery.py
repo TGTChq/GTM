@@ -31,7 +31,7 @@ import fantastic_jobs_adapter as fja
 
 def _rows(start, n):
     """Ascending ids, the order the provider returns in cursor mode."""
-    return [{"id": f"id-{i:05d}", "title": "Account Executive",
+    return [{"id": str(i + 1), "title": "Account Executive",
              "organization": f"Co{i}", "source": "linkedin",
              "organization_url": f"https://co{i}.com",
              "date_posted": "2026-04-01T00:00:00Z",
@@ -53,7 +53,7 @@ class _CursorFeed:
     def __call__(self, url, headers, params, timeout):
         self.calls.append(dict(params))
         after = params.get("cursor")
-        start = 0 if not after else int(str(after).split("-")[1]) + 1
+        start = int(after) if after is not None else 0
         limit = int(params.get("limit", 100))
         rows = _rows(start, max(0, min(limit, self.total - start)))
 
@@ -113,8 +113,8 @@ class HistoricalRecoveryTests(unittest.TestCase):
 
         self.assertEqual(feed.calls[0]["time_frame"], "6m")
         self.assertNotIn("offset", feed.calls[0], "cursor mode never sends an offset")
-        self.assertNotIn("cursor", feed.calls[0], "the first page has no cursor")
-        self.assertEqual(feed.calls[1]["cursor"], "id-00099",
+        self.assertEqual(feed.calls[0]["cursor"], "0", "page one must also use id ASC")
+        self.assertEqual(feed.calls[1]["cursor"], "100",
                          "the cursor is the LAST ID of the previous page")
         self.assertEqual(block["pagination"], "cursor(id asc)")
 
@@ -131,7 +131,7 @@ class HistoricalRecoveryTests(unittest.TestCase):
         self._run(feed)
         saved = json.load(open(self.state, encoding="utf-8"))
         self.assertEqual(saved["schema"], "fantastic-historical-recovery/1")
-        self.assertEqual(saved["cursor"], "id-00149")
+        self.assertEqual(saved["cursor"], "150")
 
     def test_a_second_run_resumes_instead_of_restarting(self):
         first_feed = _CursorFeed(total=10_000)
@@ -139,10 +139,10 @@ class HistoricalRecoveryTests(unittest.TestCase):
         second_feed = _CursorFeed(total=10_000)
         self._run(second_feed)
 
-        self.assertEqual(second_feed.calls[0].get("cursor"), "id-00149",
+        self.assertEqual(second_feed.calls[0].get("cursor"), "150",
                          "the second run starts where the first stopped")
         saved = json.load(open(self.state, encoding="utf-8"))
-        self.assertEqual(saved["cursor"], "id-00299")
+        self.assertEqual(saved["cursor"], "300")
 
     def test_its_state_is_its_own_and_never_the_windowed_engine_s(self):
         """The provider warns against resuming an offset run with a cursor. Keeping
@@ -158,7 +158,7 @@ class HistoricalRecoveryTests(unittest.TestCase):
     # -- it cannot double-count, and it cannot spin --------------------------
 
     def test_rows_already_held_are_deduped_not_re_emitted(self):
-        seen = {f"fantastic_id-{i:05d}" for i in range(0, 100)}
+        seen = {f"fantastic_{i + 1}" for i in range(0, 100)}
         jobs, block, _m = self._run(_CursorFeed(), seen=seen)
         self.assertEqual(block["billed"], 150, "the provider still billed them")
         self.assertEqual(len(jobs), 50, "but only the unseen ones are emitted")

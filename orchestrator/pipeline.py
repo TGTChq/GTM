@@ -14,7 +14,7 @@ run_id and the same checkpoint yields the same artifacts.
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Callable, Dict, List, Optional, Sequence
 
 import config
@@ -84,23 +84,14 @@ _FUNNEL_TO_LEDGER = (
 )
 
 def _opportunity_key(job) -> str:
-    """company x function -- the unit approvals are capped by, and NOT a posting.
-
-    The same functions the Airtable suppression rule keys on, so a cohort counted
-    here and a cohort counted by `run_maintenance.measure_identities` agree.
-    """
-    try:
-        from airtable_client import _company_identity_keys_from_job
-        from role_mapping import get_bucket_name_for_job
-    except Exception:  # noqa: BLE001 - identity is observability, never a run blocker
+    """The employer/function grouping the hiring-manager stage actually uses."""
+    from hiring_manager import company_key_for_job
+    from role_mapping import get_bucket_name_for_job
+    company = company_key_for_job(job)
+    bucket = get_bucket_name_for_job(job)
+    if not company or company == "unknown" or not bucket:
         return ""
-    try:
-        keys = _company_identity_keys_from_job(job)
-        if not keys:
-            return ""
-        return f"{sorted(keys)[0]}|{get_bucket_name_for_job(job) or 'unbucketed'}"
-    except Exception:  # noqa: BLE001
-        return ""
+    return f"{company}|{bucket}"
 
 
 def _account_recovery_cohort(cohort, leads, delivery) -> None:
@@ -130,11 +121,14 @@ def _account_recovery_cohort(cohort, leads, delivery) -> None:
         # ATTEMPTED means the stage produced an outcome for this opportunity. It is
         # the only honest denominator for a conversion rate: work the run never
         # reached has no outcome and must not sit in the bottom of a fraction.
-        opp = _opportunity_key(getattr(lead, "company", None) or {})
-        if not opp:
-            opp = str(getattr(lead, "posting_id", "") or "")
+        contact = getattr(lead, "contact", None) or {}
+        row = contact.get("_airtable_row") or {}
+        opp = _opportunity_key(row or getattr(lead, "company", None) or {})
         if opp:
             cohort["attempted_opportunity_keys"].add(opp)
+        else:
+            cohort["outcomes_with_unknown_opportunity_identity"] = (
+                cohort.get("outcomes_with_unknown_opportunity_identity", 0) + 1)
         contact_key = str(getattr(lead, "contact_key", "") or "")
         # A CONTACT IS AN ADDRESS, not a key. `_build_no_contact_lead` still carries a
         # `contact_key`, so counting the key reported `with_contact 26` on a
@@ -144,6 +138,8 @@ def _account_recovery_cohort(cohort, leads, delivery) -> None:
         email = str((contact.get("email") if isinstance(contact, dict) else "") or "").strip()
         if email:
             cohort["with_contact"] += 1
+            if opp:
+                cohort.setdefault("contact_opportunity_keys", set()).add(opp)
         disposition = str(getattr(getattr(lead, "disposition", None), "value", "") or "")
         if disposition == "FINAL_PASS":
             cohort["final_pass"] += 1
@@ -155,6 +151,14 @@ def _account_recovery_cohort(cohort, leads, delivery) -> None:
             cohort["other"] += 1
         if contact_key and contact_key in delivered:
             cohort["delivered_lead_keys"].append(contact_key)
+
+
+def _recovery_contact_rate(cohort):
+    denominator = len(cohort.get("attempted_opportunity_keys") or ())
+    numerator = len(cohort.get("contact_opportunity_keys") or ())
+    if not denominator or cohort.get("outcomes_with_unknown_opportunity_identity"):
+        return None
+    return round(numerator / denominator, 4)
 
 
 def _accumulate_counts(into: Dict[str, Any], source: Any) -> Dict[str, Any]:
@@ -208,30 +212,28 @@ _SOURCE_STATE_KEYS = ("stop_reason", "error_code", "offset_from", "offset_to", "
 
 
 def _lane_billing_totals(lane_results: Any, kept_fallback: int) -> tuple:
-    """(rows the provider returned, rows the provider billed) across all lanes.
+    """(returned rows, explicitly billed job rows).
 
-    A lane that exposes no billing counter (the free/ATS lanes) contributes its
-    kept-row count, which is the best available truth for it. Never reports fewer
-    rows than were kept -- that would claim we got rows we did not pay for.
+    ATS/feed/import rows do not spend Fantastic job credits. Other request-based
+    provider budgets remain with their lane; these are not a common credit unit.
     """
     returned = 0
     billed = 0
-    exposed = False
-    for r in (lane_results or {}).values():
+    for name, r in (lane_results or {}).items():
         attr = getattr(r, "attribution", None) or {}
-        raw = int(attr.get("raw_records") or 0)
-        consumed = int(attr.get("jobs_quota_consumed") or 0)
-        if raw or consumed:
-            exposed = True
-            returned += raw or len(getattr(r, "jobs", []) or [])
-            billed += consumed or raw
-        else:
-            n = len(getattr(r, "jobs", []) or [])
-            returned += n
-            billed += n
-    if not exposed:
-        return max(int(kept_fallback), returned), max(int(kept_fallback), billed)
+        raw = int(attr.get("raw_records", len(getattr(r, "jobs", []) or [])) or 0)
+        returned += raw
+        billed += int(attr.get("jobs_quota_consumed", raw if name == "fantastic" else 0) or 0)
     return returned, billed
+
+
+def _approved_creation_count(delivery) -> Optional[int]:
+    evidence = (getattr(delivery, "detail", {}) or {}).get("airtable") or {}
+    if int(evidence.get("created_approval_status_unknown") or 0):
+        return None
+    if "created_approved_lead_keys" in evidence:
+        return len(set(evidence["created_approved_lead_keys"] or []))
+    return 0 if not getattr(delivery, "created", 0) else None
 
 
 def _merge_source_counts(into: Dict[str, Any], lane_results: Any,
@@ -491,6 +493,7 @@ class Orchestrator:
             try:
                 import fantastic_jobs_adapter as _fja_custody
                 _fja_custody.set_custody_hook(None)
+                _fja_custody.set_billing_hook(None)
             except Exception:  # noqa: BLE001
                 pass
             # Lift any run that predates the ledger into it BEFORE retention
@@ -517,6 +520,7 @@ class Orchestrator:
             # postings were never finished has its only copy in
             # run_artifacts/<run_id>/enrichment/postings.json.
             protect_runs = {self.ctx.run_id}
+            custody_protected = True
             if bool(getattr(config, "PENDING_WORK_ENABLED", True)):
                 store = self.state.store_path("pending_work")
                 try:
@@ -525,8 +529,8 @@ class Orchestrator:
                         limit=int(getattr(config, "PENDING_WORK_RESUME_MAX_PER_RUN", 0) or 0) or None,
                         exclude_keys=SuppressionStore(self.state).seen_postings() or set(),
                     )
-                except Exception:  # noqa: BLE001 - recovery never masks the outcome
-                    pass
+                except Exception:  # noqa: BLE001 - preserve evidence when adoption fails
+                    custody_protected = False
                 # Age out custody WITHOUT calling it done: expire() archives the
                 # payloads and audits the outcome as unresolved. A retention policy
                 # must never read as a completed disposition.
@@ -542,8 +546,8 @@ class Orchestrator:
                 try:
                     protect_runs |= pending_work.pending_run_ids(store)
                 except Exception:  # noqa: BLE001
-                    pass
-            if backfilled:
+                    custody_protected = False
+            if backfilled and custody_protected:
                 try:
                     self.state.prune(keep=int(retention_keep), max_bytes=RETENTION_MAX_BYTES,
                                      protect=protect_runs)
@@ -553,8 +557,8 @@ class Orchestrator:
                 # print, not logging: this module has no logger, and reaching for
                 # one is how run_orchestrator.py:461 shipped a NameError into a live
                 # acquisition path (#39).
-                print("[retention] skipped: backfill_from_artifacts failed, so "
-                      "pruning could delete run evidence that has no ledger entry")
+                print("[retention] skipped: reporting backfill or custody protection failed; "
+                      "original run evidence is retained")
             # Ledger retention is separate and far longer: the compact record must
             # outlive the heavy evidence it summarises (that is the entire point).
             try:
@@ -580,6 +584,9 @@ class Orchestrator:
 
     def _run_body(self, plan: OrchestratorPlan, *, resume: bool = False,
                   lock: Optional[RunLock] = None) -> Dict[str, Any]:
+        # Corrupt history cannot authorize buying or delivering the same work
+        # again. Validate both stores before either production path acquires.
+        SuppressionStore(self.state).to_dict()
         # Adaptive net-new top-up runs a DISTINCT loop; the normal single-pass body
         # below is left byte-for-byte unchanged so it (and every test that exercises
         # it) is unaffected when NET_NEW_SEND_SAFE_TARGET is 0 (the default).
@@ -710,11 +717,11 @@ class Orchestrator:
 
             capacity = build_capacity_report(
                 raw_postings=len(postings),
-                opportunities=len(opportunities),
+                opportunities=len({key for key in map(_opportunity_key, opportunities) if key}),
                 enrichment=enrichment,
-                delivered_final_pass=delivery.created,
+                delivered_final_pass=_approved_creation_count(delivery),
                 acquisition_requests=sum(r.physical_requests for r in lane_results.values()),
-                enrichment_calls=len(opportunities) * 6,
+                enrichment_calls=None,
                 runtime_seconds=time.perf_counter() - started,
                 quota_consumed=plan.quota_consumed,
                 inventory_remaining=plan.inventory_remaining,
@@ -726,7 +733,8 @@ class Orchestrator:
         target_ok = None
         if enrichment is not None and delivery is not None:
             # The target may be satisfied ONLY by delivered FINAL_PASS records.
-            target_ok = report.target_satisfied(plan.target, delivered_final_pass=delivery.created)
+            target_ok = report.target_satisfied(plan.target,
+                delivered_final_pass=_approved_creation_count(delivery) or 0)
 
         all_reconcile = report.all_reconcile()
         if enrichment is not None and delivery is not None:
@@ -851,7 +859,7 @@ class Orchestrator:
                 # efficiency, where it belongs.
                 "jobs_captured": acq_cum.get("net_new_jobs_captured"),
                 "net_new_jobs_captured": acq_cum.get("net_new_jobs_captured"),
-                "provider_jobs_returned": acq_cum.get("jobs_returned_billed"),
+                "provider_jobs_returned": acq_cum.get("provider_rows_returned", acq_cum.get("jobs_returned_billed")),
                 "provider_jobs_billed": acq_cum.get("jobs_quota_consumed"),
                 # Three mutually exclusive dedupe exits, each counted where the
                 # decision is taken. ``historical_duplicates`` is retained as the
@@ -950,6 +958,7 @@ class Orchestrator:
         # unique-kept jobs, returned/billed rows, and provider quota consumed.
         acq_cum: Dict[str, Any] = {
             "jobs_unique_kept": 0, "jobs_returned_billed": 0, "jobs_quota_consumed": 0,
+            "provider_rows_returned": 0,
             "physical_requests": 0, "cross_query_duplicates": 0,
             "cross_source_duplicates": 0, "per_source": {},
             # NET-NEW is the population that actually becomes this week's work.
@@ -978,6 +987,8 @@ class Orchestrator:
         # permanently unreportable, however productive the run had been.
         funnel_cum: Dict[str, Any] = {}
         loss_cum: Dict[str, Any] = {}
+        precontact_rejects: set = set()
+        enrichment_stop = ""
 
         # Pre-Apollo dedupe: snapshot ONCE, then keep a live function-key set so a
         # company+function we CREATE in an earlier slice is not re-enriched in a
@@ -994,6 +1005,7 @@ class Orchestrator:
         existing = snapshot["existing"] if snapshot else None
 
         all_leads: List[Any] = []
+        selected_opportunity_keys: set = set()
         lane_results: Dict[str, LaneResult] = {}
         postings_total = 0
         agg = RealDeliveryReport(mode="topup")
@@ -1026,6 +1038,11 @@ class Orchestrator:
 
         pending_on = bool(getattr(config, "PENDING_WORK_ENABLED", True))
         pending_dir = self.state.store_path("pending_work") if pending_on else None
+        # Other configured lanes have their own request budgets. Run them once,
+        # even when Fantastic has no grant; do not refetch them on every top-up.
+        independent_lanes = {name for name in plan.lanes
+                             if name != "fantastic" and name in plan.lane_runners}
+        independent_done: set = set()
 
         def pending_available():
             if not pending_on:
@@ -1049,8 +1066,15 @@ class Orchestrator:
         # decide whether queued work gets done.
         if gov.run_budget is not None and gov.run_budget <= 0:
             owed_at_start = pending_available()
-            if owed_at_start <= 0:
+            if owed_at_start <= 0 and not independent_lanes:
                 stop_reason = "governor_zero_budget"
+        import fantastic_jobs_adapter as _fja_billing
+        from orchestrator import fantastic_governor as _governor_spend
+        if gov.enabled and gov.ledger is not None:
+            # Adapter totals reset per acquisition call; controller.billed contains
+            # prior slices. A crash cannot leave paid pages out of the monthly cap.
+            _fja_billing.set_billing_hook(lambda consumed: _governor_spend.commit_run(
+                gov, run_id=self.ctx.run_id, billed=controller.billed + consumed))
         if pending_on:
             # Custody must be durable BEFORE the acquisition cursor is. The adapter
             # persists per-source offsets at the end of acquisition -- before the
@@ -1098,6 +1122,7 @@ class Orchestrator:
             decision = controller.decide(
                 quota_remaining=last_quota, apollo_circuit_open=last_circuit,
                 inventory_exhausted=last_inventory, pending_owed=owed_now,
+                independent_acquisition_pending=bool(independent_lanes - independent_done),
                 acquisition_closed=watermark_on and controller.iterations > 0)
             if not decision.should_continue:
                 stop_reason = decision.stop_reason
@@ -1107,18 +1132,18 @@ class Orchestrator:
             # later slice is DEEP only, so the top-of-feed head query is billed at
             # most once per run and top-up never re-runs the fresh-edge query.
             slice_mode = "head_then_deep" if controller.iterations == 0 else "deep"
-            if decision.next_slice <= 0:
-                # A ZERO SLICE IS A DELIBERATE INSTRUCTION, not an empty result:
-                # the acquisition budget is spent and the queue still owes work, so
-                # this iteration drains the queue and contacts no provider. Calling
-                # the lanes with a cap of zero would still open a session and could
-                # still bill -- the opposite of what the decision means.
+            selected_lanes = [name for name in plan.lanes if (
+                (name == "fantastic" and decision.next_slice > 0)
+                or name in independent_lanes - independent_done)]
+            if not selected_lanes:
                 iter_lanes = {}
             else:
                 with self._FantasticSliceCap(decision.next_slice), \
                         self._FantasticAcquireMode(slice_mode):
-                    iter_lanes = self._acquire(plan, resume=(resume and controller.iterations == 0))
-                lane_results = iter_lanes  # last slice's lanes surface in the result
+                    iter_lanes = self._acquire(replace(plan, lanes=selected_lanes),
+                                              resume=(resume and controller.iterations == 0))
+                independent_done.update(selected_lanes)
+                lane_results.update(iter_lanes)
 
             # A FAILED acquisition lane is an operational error (config/provider/parse
             # crash), NOT "inventory exhausted". Stop immediately and mark the run
@@ -1129,22 +1154,20 @@ class Orchestrator:
                     f"{name}: {'; '.join(r.errors) if r.errors else 'lane failed'}"
                     for name, r in failed_lanes)
                 stop_reason = "acquisition_failed"
-                break
+                if not any(r.jobs for r in iter_lanes.values()) and pending_available() <= 0:
+                    break
 
             iter_postings = [j for r in iter_lanes.values() for j in r.jobs]
             kept = len(iter_postings)
             postings_total += kept
 
             fl = iter_lanes.get("fantastic")
-            # BILLED = rows the provider RETURNED (it bills every returned row,
-            # including ones we dedupe/reject), NOT the unique-kept count. Falls back
-            # to kept when the lane exposes no billing counter (non-Fantastic lanes).
-            billed = kept
+            # Only Fantastic job credits debit its controller/governor.
+            billed = 0
             if fl is not None:
                 q = fl.attribution.get("jobs_quota_remaining")
                 last_quota = int(q) if q is not None else last_quota
-                rb = int(fl.attribution.get("raw_records") or 0)
-                billed = rb if rb > 0 else kept
+                _, billed = _lane_billing_totals({"fantastic": fl}, len(fl.jobs))
                 acq_cum["jobs_quota_consumed"] += int(fl.attribution.get("jobs_quota_consumed") or 0)
                 acq_cum["cross_query_duplicates"] += int(fl.attribution.get("cross_query_duplicates") or 0)
                 acq_cum["cross_source_duplicates"] += int(
@@ -1155,6 +1178,7 @@ class Orchestrator:
             # drain state) for EVERY lane, not just Fantastic's shallow three fields.
             _merge_source_counts(acq_cum["per_source"], iter_lanes)
             acq_cum["jobs_unique_kept"] += kept
+            acq_cum["provider_rows_returned"] += _lane_billing_totals(iter_lanes, kept)[0]
             acq_cum["jobs_returned_billed"] += billed
             acq_cum["physical_requests"] += sum(int(r.physical_requests or 0) for r in iter_lanes.values())
             # INVENTORY IS NOT EXHAUSTED WHILE CUSTODY STILL OWES WORK. `kept == 0`
@@ -1224,6 +1248,8 @@ class Orchestrator:
             if pending_on:
                 acq_cum["pending_work_recorded"] = pending_work.record(
                     pending_dir, self.ctx.run_id, opportunities)
+                if not acq_cum["pending_work_recorded"].get("ok"):
+                    raise RuntimeError("Pending-work custody failed; enrichment cannot advance")
                 # Adopt what earlier runs are still owed, once per run. This happens
                 # AFTER net_new_jobs_captured is accumulated, so re-entered work is
                 # never counted as newly captured -- it was bought and counted once,
@@ -1302,10 +1328,12 @@ class Orchestrator:
                     enr_kwargs["exclude_company_keys"] = account_keys
                 deliver_kwargs["existing"] = existing
 
+            selected_opportunity_keys.update(key for key in map(_opportunity_key, opportunities) if key)
             enrichment = plan.enrichment_engine.run(opportunities, **enr_kwargs)
             for st in enrichment.stages:
                 report.add(st)
             all_leads.extend(enrichment.leads)
+            precontact_rejects.update(enrichment.precontact_rejected_posting_ids)
             _accumulate_counts(funnel_cum, getattr(enrichment, "funnel", {}) or {})
             _accumulate_counts(loss_cum, getattr(enrichment, "loss_census", {}) or {})
 
@@ -1329,6 +1357,8 @@ class Orchestrator:
                                 and "apollo" in str(getattr(enrichment, "stop_reason", "")))
             self._ledger_mark_outcomes(ledger, enrichment.leads, delivery,
                                        covered_at_start=covered_at_start)
+            for pid in enrichment.precontact_rejected_posting_ids:
+                ledger.mark(pid, exit_stage="precontact_rejected")
 
             terminal_ids = enrichment.terminal_posting_ids(
                 delivered_lead_keys=getattr(delivery, "delivered_lead_keys", []) or [])
@@ -1415,6 +1445,12 @@ class Orchestrator:
             # CUMULATIVE values. A run killed mid-loop then reports what it had
             # actually achieved instead of disappearing from the week.
             self._ledger_record_slice(acq_cum, funnel_cum, all_leads, agg)
+            if acquisition_error:
+                break  # keep healthy-lane outcomes, but never label the run successful
+            if enrichment.enrichment_incomplete:
+                enrichment_stop = enrichment.stop_reason or "enrichment_incomplete"
+                stop_reason = enrichment_stop
+                break  # preserve the completed slice; resume its tail in a later run
 
         # Record this run's ACTUAL billed credits against the monthly ledger
         # (idempotent per run_id; no-op when the governor is disabled).
@@ -1456,15 +1492,19 @@ class Orchestrator:
         )
 
         enrichment = EnrichmentReport(leads=all_leads, stages=[],
-                                      funnel=funnel_cum, loss_census=loss_cum)
+                                      funnel=funnel_cum, loss_census=loss_cum,
+                                      enrichment_incomplete=bool(enrichment_stop),
+                                      stop_reason=enrichment_stop,
+                                      precontact_rejected_posting_ids=sorted(precontact_rejects))
         capacity = build_capacity_report(
-            raw_postings=postings_total, opportunities=len(all_leads),
-            enrichment=enrichment, delivered_final_pass=agg.created,
-            acquisition_requests=sum(r.physical_requests for r in lane_results.values()),
-            enrichment_calls=len(all_leads) * 6,
+            raw_postings=postings_total, opportunities=len(selected_opportunity_keys),
+            enrichment=enrichment, delivered_final_pass=_approved_creation_count(agg),
+            acquisition_requests=acq_cum["physical_requests"],
+            enrichment_calls=None,
             runtime_seconds=time.perf_counter() - started,
             quota_consumed=plan.quota_consumed, inventory_remaining=plan.inventory_remaining,
-            runs_per_day=plan.runs_per_day, target=plan.target)
+            runs_per_day=plan.runs_per_day,
+            target=(config.RUN_APPROVED_TARGET if run_target_on else plan.target))
 
         all_reconcile = (report.all_reconcile() and agg.reconciles()
                          and agg.enrollment_reconciles())
@@ -1474,7 +1514,7 @@ class Orchestrator:
             status = RunStatus.FAILED
             self.ctx.finish(status, f"acquisition_failed: {acquisition_error}")
         else:
-            status = RunStatus.COMPLETE if all_reconcile else RunStatus.INCOMPLETE
+            status = RunStatus.COMPLETE if all_reconcile and not enrichment_stop else RunStatus.INCOMPLETE
             stop = "" if all_reconcile else "a stage or delivery boundary failed to reconcile"
             self.ctx.finish(status, stop or f"topup:{stop_reason}")
 
@@ -1493,7 +1533,7 @@ class Orchestrator:
         # (it can run to thousands and the ids are already in the pending store), and
         # the delivered lead keys are kept in full because they are the join a later
         # Airtable / Approved Sync reconciliation needs. A count cannot be joined.
-        _sets = ("posting_ids", "opportunity_keys", "attempted_opportunity_keys")
+        _sets = ("posting_ids", "opportunity_keys", "attempted_opportunity_keys", "contact_opportunity_keys")
         recovery_block = {k: v for k, v in recovery_cohort.items() if k not in _sets}
         recovery_block["cohort_postings"] = len(recovery_cohort.get("posting_ids") or ())
         recovery_block["delivered"] = len(recovery_block.get("delivered_lead_keys") or [])
@@ -1505,12 +1545,15 @@ class Orchestrator:
         attempted = len(recovery_cohort.get("attempted_opportunity_keys") or ())
         resumed_opps = int(recovery_block.get("opportunities_resumed") or 0)
         recovery_block["opportunities_attempted"] = attempted
+        recovery_block["opportunities_with_reconciled_outcome"] = attempted
+        recovery_block["opportunities_with_contact"] = len(recovery_cohort.get("contact_opportunity_keys") or ())
         recovery_block["opportunities_without_reconciled_outcome"] = max(
             0, resumed_opps - attempted)
-        recovery_block["opportunity_to_contact_rate"] = (
-            round(recovery_block["with_contact"] / attempted, 4) if attempted else None)
+        recovery_block["opportunity_to_contact_rate"] = _recovery_contact_rate(recovery_cohort)
         recovery_block["rate_denominator"] = (
-            "opportunities_attempted" if attempted else "")
+            "opportunities_with_reconciled_outcome" if recovery_block["opportunity_to_contact_rate"] is not None else "")
+        recovery_block["rate_numerator"] = "opportunities_with_contact"
+        recovery_block["attempt_definition"] = "reconciled outcome; not proof that an Apollo search ran"
         acquisition_block = {
             "iterations": controller.iterations,
             "recovery_cohort": recovery_block,
@@ -1566,12 +1609,11 @@ class Orchestrator:
             return G.build_context(config, run_id=self.ctx.run_id,
                                    provider_jobs_remaining=(int(jr) if jr is not None else None),
                                    provider_reset_at=reset_at)
-        except Exception as exc:  # noqa: BLE001 - a governor failure must fail CONSERVATIVELY
-            print(f"[governor] unavailable ({type(exc).__name__}); granting the daily minimum only")
+        except Exception as exc:  # noqa: BLE001 - never authorize spend on unreadable history
+            print(f"[governor] unavailable ({type(exc).__name__}); acquisition grant is zero")
             from orchestrator.fantastic_governor import GovernorDecision
-            dmin = int(getattr(config, "FANTASTIC_DAILY_MIN_JOBS", 100) or 0)
             return G.GovernorContext(enabled=True, ledger=None, decision=GovernorDecision(
-                run_budget=dmin, reason="governor_error_conservative", remaining_credits=0,
+                run_budget=0, reason="governor_state_unavailable", remaining_credits=0,
                 spendable_credits=0, reserve_credits=0, base_daily_allowance=0,
                 carry_forward_applied=0, days_remaining=0.0, inventory_capped=False,
                 provider_authoritative=False))

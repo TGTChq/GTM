@@ -30,11 +30,13 @@ in flight on 2026-09-06 — `window_reused=True`, `previous_watermark`
 never committed. So roughly 6,205 ids were in `seen_ids` before the first request
 of the 09-06 run went out.
 
-**A duplicate is therefore predominantly a cross-run re-delivery that dedupe
-correctly suppressed** — the provider returning rows an earlier run already took —
-not a within-run double purchase. It is still repeated *paid* delivery: billing
-counts every returned row (`seg["returned"] += 1; quota.jobs_consumed += 1` before
-any disposition), which is why 5,218 wasted credits is real regardless.
+**Correction from the 2026-09-07 full-flow audit:** seeded state explains how
+cross-run duplicates can produce these counters, but response-level IDs were not
+retained for all original requests. It does not establish which of the 5,218
+events belong to each cause, or prove a corresponding 5,218-credit loss. The
+current audit also reproduces undercounting of repeated pages and boundary tails
+in the old adapter, so those counters cannot substitute for original provider
+billing receipts. Historical event attribution remains incomplete.
 
 ### Reconciling ATS: 2,722 billed, 0 kept, `cross_source_duplicates` 0
 

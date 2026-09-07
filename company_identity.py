@@ -14,6 +14,7 @@ from difflib import SequenceMatcher
 from typing import Iterable
 
 from domain_utils import normalize_company_domain
+from source_domains import ATS_DOMAINS
 
 _LEGAL_SUFFIXES = {
     "inc", "incorporated", "llc", "ltd", "limited", "corp", "corporation",
@@ -115,7 +116,7 @@ def is_intermediary_domain(domain_or_url: str | None, blocked_domains: Iterable[
         for blocked in blocked_domains
         if (normalized := normalize_company_domain(blocked))
     }
-    return domain in normalized_blocked
+    return domain in normalized_blocked or domain in ATS_DOMAINS
 
 
 def safe_company_domain(

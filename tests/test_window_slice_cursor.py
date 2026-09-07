@@ -199,8 +199,9 @@ class SliceProgressIsNotDurableUntilCustodyIsTaken(unittest.TestCase):
         feed = _Feed()
         fja.set_custody_hook(lambda _rows: False)
         try:
-            _run(state, feed, BASE, cap=240, seen=set(),
-                 FANTASTIC_WINDOW_SLICING_ENABLED=True)
+            with self.assertRaisesRegex(RuntimeError, "custody failed"):
+                _run(state, feed, BASE, cap=240, seen=set(),
+                     FANTASTIC_WINDOW_SLICING_ENABLED=True)
         finally:
             fja.set_custody_hook(None)
 

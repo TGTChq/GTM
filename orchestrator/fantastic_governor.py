@@ -255,9 +255,11 @@ class GovernorLedger:
                 data = json.load(fh)
             if isinstance(data, dict) and data.get("schema") == LEDGER_SCHEMA:
                 return data
-        except (OSError, ValueError):
-            pass
-        return {}
+        except FileNotFoundError:
+            return {}
+        except (OSError, ValueError) as exc:
+            raise RuntimeError("Unreadable acquisition spend ledger; preserve it for recovery") from exc
+        raise RuntimeError("Invalid acquisition spend ledger; refusing to reset spend")
 
     def save(self) -> None:
         if not self.path:
@@ -271,9 +273,11 @@ class GovernorLedger:
             self.state["updated_at"] = _utcnow().isoformat()
             with open(tmp, "w", encoding="utf-8") as fh:
                 json.dump(self.state, fh)
+                fh.flush()
+                os.fsync(fh.fileno())
             os.replace(tmp, self.path)
-        except OSError as exc:  # never fail a run on ledger I/O
-            logger.warning("governor ledger not persisted: %s", type(exc).__name__)
+        except OSError as exc:
+            raise RuntimeError("Acquisition spend could not be persisted; stop acquisition") from exc
 
     # -- cycle handling ------------------------------------------------------
     @staticmethod
@@ -325,7 +329,9 @@ class GovernorLedger:
         return int(self.state.get("carry_forward", 0) or 0)
 
     def spent_on_day(self, day_iso: str) -> int:
-        return sum(int(r.get("billed", 0) or 0) for r in (self.state.get("runs") or [])
+        records = self.state.get("spend_by_run")
+        rows = records.values() if isinstance(records, dict) else (self.state.get("runs") or [])
+        return sum(int(r.get("billed", 0) or 0) for r in rows
                    if str(r.get("day", "")) == day_iso)
 
     def accrue_carry_forward(self, base_allowance: int, now: datetime,
@@ -360,22 +366,27 @@ class GovernorLedger:
 
     def record_run(self, run_id: str, billed: int, granted: int, now: datetime,
                    decision_reason: str = "") -> None:
-        """Idempotent per run_id: a replayed/duplicate record does not double-count."""
+        """Monotone per run_id, including page commits and compacted run details."""
         runs = list(self.state.get("runs") or [])
-        for r in runs:
-            if r.get("run_id") == run_id:
-                r["billed"] = int(billed); r["granted"] = int(granted)
-                self.state["used"] = sum(int(x.get("billed", 0) or 0) for x in runs)
-                self.state["runs"] = runs[-self.keep_runs:]
-                return
-        runs.append({"run_id": str(run_id), "day": now.date().isoformat(),
-                     "at": now.isoformat(), "billed": int(billed), "granted": int(granted),
-                     "reason": decision_reason})
+        index = self.state.setdefault("spend_by_run", {
+            str(r["run_id"]): {"billed": int(r.get("billed", 0)), "day": r.get("day", "")}
+            for r in runs if r.get("run_id")})
+        previous = index.get(str(run_id), {})
+        old = int(previous.get("billed", 0))
+        total = max(old, int(billed), 0)
+        delta = total - old
+        day = previous.get("day") or now.date().isoformat()
+        index[str(run_id)] = {"billed": total, "day": day}
+        self.state["used"] = self.used + delta
+        self.state["carry_forward"] = max(0, self.carry_forward - delta)
+        entry = next((r for r in runs if r.get("run_id") == run_id), None)
+        if entry is None:
+            entry = {"run_id": str(run_id), "day": day, "at": now.isoformat()}
+            runs.append(entry)
+        entry.update(billed=total, granted=int(granted), reason=decision_reason)
+        # Only verbose details are compacted. Spend and replay identity persist
+        # for the billing cycle and cannot be refunded by a smaller final summary.
         self.state["runs"] = runs[-self.keep_runs:]
-        self.state["used"] = self.used + int(billed)
-        # Spending consumes carry-forward first (it was accrued from unused pace).
-        consumed_carry = min(self.carry_forward, int(billed))
-        self.state["carry_forward"] = self.carry_forward - consumed_carry
 
     def to_dict(self) -> Dict[str, Any]:
         s = dict(self.state)

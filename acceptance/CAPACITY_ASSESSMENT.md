@@ -1,5 +1,26 @@
 # 1,000 new approved leads/day — assessment on measured identities
 
+## Latest correction — original employer identity contamination (2026-09-07)
+
+The 50-counter calibration's original file exposes two shared ATS domains accepted
+as employer domains. Thirteen different employers among its retained lead rows
+were grouped under isolvedhire.com and applicantpro.com, then inherited unrelated
+canonical accounts. This contradicts the earlier claim that the 99.1% "first-party
+domain" statistic ruled out an internal preparation loss: the helper used to
+measure it accepted those platform domains. That percentage is withdrawn as a
+first-party readiness claim until the retained source cohorts are remeasured with
+the corrected identity registry. Existing company/opportunity counts computed by
+the affected helpers also need versioned remeasurement, not silent substitution.
+The retained 26-row output does not reconstruct the lost source opportunities.
+
+Matched provider count windows remain observations of those exact filtered windows.
+They do not prove a sustained approved-contact supply or an inventory ceiling.
+No 1,000/day result or lower permanent ceiling is established. Reusing the unchanged
+provider counts with an old postings/opportunity ratio would compound this error.
+See `COMPANY_HOLD_REVIEW_2026-09-07.md` for the actual evidence and local correction.
+The remaining sections are historical analyses, subject to this correction.
+
+
 Supersedes the earlier capacity sections, which reasoned from posting counts and
 from flag names. This one uses the production identity functions on real retained
 payloads, and states each number's cohort and unit.

@@ -3,6 +3,59 @@
 Living record. Survives compaction. Reopen a closed item only on contradictory
 evidence.
 
+## Current full-flow audit (2026-09-07, verified local release)
+
+Read `FULL_FLOW_AUDIT_2026-09-07.md` first. Twenty-two finding families cover future
+acquisition, historical cursor ordering, funded candidate eligibility, paid-page
+custody, completed functions, independent lanes, terminal rejection cleanup and
+approval/credit measurement. A shared durable paid-reply store now survives run
+retention and changed recovery metadata while current gates re-evaluate the result.
+Changes are on `fix/company-hold-evidence`, following 9126dbc; origin/main remains
+ecfff20. No paid calls, production mutations or external delivery in this audit.
+
+Final offline gate: 3,437 tests / 1,001 subtests; integrity28/0/0; undefined names0;
+diff check clean. Original calibration SHA256 unchanged, two send-safe Approved
+mappings and 13 correctly separate ATS employers reproduced. Controlled throughput
+acceptance proves 1,000 for the current run and 1,200 with continuation, not live
+provider coverage or approvals. Histories and business rules were not reset.
+
+Publication remains blocked by the connected GitHub integration's prior 403.
+The existing single release ZIP is being updated with the cumulative patch and
+exact base/tree verification. The separate private original-evidence ZIP is unchanged.
+Production was re-read: GTM SUCCESS adc36f86-0212-4ea6-aaa1-4bb0b0ec69be on ecfff20,
+cron03UTC; Approved Sync SUCCESS 90bef032-4113-46b4-b56c-6d795a0a6191, cron00UTC.
+Previous effective maintenance1 / acquisition0 / grant0 remains the last verified
+configuration. Release plus post-deployment maintenance and funded output acceptance
+are UNFINISHED. No statement of 1,000/day achieved or external-only limitation.
+
+The historical deployment and validation records below are not this audit's result.
+
+## Latest review: original identities recovered (2026-09-07)
+
+Read `COMPANY_HOLD_REVIEW_2026-09-07.md` first. Original calibration JSON recovered
+in full through 19 supported Railway reads; hash and run identity preserved.
+Four demonstrated corrections are local: shared ATS hosts merged 13 different
+employer representatives into two groups; RMC's two verified contacts were falsely
+held by display identity; cache decisions crossed a changed domain; custody imports
+and summaries counted duplicate run copies as new pending work.
+
+Original-row offline replay now maps both RMC contacts to FINAL_PASS / Approved with
+all send-safe facts passing. The 13 ATS employer representatives remain separate.
+No live approvals or new paid calls resulted. Publication still returns API403 via
+the connected GitHub integration. Both services remain on ecfff20; GTM restored
+SUCCESS deployment adc36f86-0212-4ea6-aaa1-4bb0b0ec69be, cron 0 3 * * *;
+Approved Sync unchanged 0 0 * * *. Maintenance1, acquisition0, grant0, probes cleared.
+Final offline gate: 3,399 tests / 1,001 subtests; integrity27/0/0.
+Two maintenance passes completed rc0 / A/B Accepted True. Recovery 226/226/226 still
+reconciles. Current 5,595 custody rows are PHYSICAL records; unique count is not yet
+remeasured on production with the corrected summary. Do not infer overlap by subtraction.
+
+Brett's latest current-window counts: 6,431 captured / 1,050 contacts / 769 Instantly;
+unknown full-period metrics preserved. Report not sent. 99.1% first-party domain
+readiness and the five-employer conversion interpretation are withdrawn following
+the original shared-host evidence. The 1,000/day target remains unachieved and has
+no established lower permanent ceiling. Remaining sections are historical records.
+
 ## Current checkpoint: throughput correction on base `6cd4fef` (2026-09-06)
 
 Read [THROUGHPUT_FIX_2026-09-06.md](THROUGHPUT_FIX_2026-09-06.md) first. The sections

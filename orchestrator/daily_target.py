@@ -61,9 +61,17 @@ def _path(root: str | os.PathLike) -> Path:
 def _read(path: Path) -> Dict[str, Any]:
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+    except FileNotFoundError:
         return {}
-    return data if isinstance(data, dict) and data.get("schema") == SCHEMA else {}
+    except (OSError, ValueError) as exc:
+        raise RuntimeError(f"Unreadable approval history at {path}; refusing to reset identities") from exc
+    if (not isinstance(data, dict) or data.get("schema") != SCHEMA
+            or not isinstance(data.get("days"), dict)
+            or not isinstance(data.get("ever"), list)
+            or any(not isinstance(key, str) for key in data["ever"])
+            or not isinstance(data.get("runs", {}), dict)):
+        raise RuntimeError(f"Invalid approval history at {path}; refusing to reset identities")
+    return data
 
 
 def _write(path: Path, payload: Dict[str, Any]) -> None:

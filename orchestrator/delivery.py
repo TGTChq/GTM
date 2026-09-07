@@ -50,7 +50,8 @@ class FakeAirtableAdapter:
         if key in self.fail_records:
             raise RuntimeError(f"simulated record failure for {key}")
         self._counter += 1
-        return {"airtable_id": f"rec{self._counter:06d}", "contact_key": key}
+        return {"airtable_id": f"rec{self._counter:06d}", "contact_key": key,
+                "approval_status": record.get("approval_status")}
 
 
 @dataclass
@@ -76,6 +77,7 @@ class DeliveryReport:
     audit: List[Dict[str, Any]] = field(default_factory=list)
     rollback_tokens: List[str] = field(default_factory=list)
     delivered_lead_keys: List[str] = field(default_factory=list)
+    detail: Dict[str, Any] = field(default_factory=dict)
 
     def reconciles(self) -> bool:
         return self.entered == self.created + self.skipped + self.failed
@@ -147,6 +149,7 @@ class DeliveryManager:
                 "company": lead.company.get("name", ""),
                 "email": lead.contact.get("email", ""),
                 "disposition": lead.disposition.value,
+                "approval_status": "Approved" if self.auto_approve else "Pending",
             })
         report.auto_approved_final_pass = len(to_write)
 
@@ -173,6 +176,11 @@ class DeliveryManager:
                     report.audit.append({"event": "record_failed", "contact_key": r["contact_key"],
                                          "error": str(exc)})
 
+        report.detail["airtable"] = {
+            "created_approved_lead_keys": [r["contact_key"] for r in created_records
+                                           if r.get("approval_status") == "Approved"],
+            "created_approval_status_unknown": sum(r.get("approval_status") is None
+                                                    for r in created_records)}
         for rec in created_records:
             report.created += 1
             report.rollback_tokens.append(rec["airtable_id"])

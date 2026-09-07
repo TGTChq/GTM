@@ -257,13 +257,13 @@ class ThreeUnitsAreThreeNumbers(unittest.TestCase):
 
     def test_the_rate_divides_by_attempted_not_by_resumed(self):
         """Work with no outcome must not sit in the bottom of a fraction."""
-        import inspect
-
-        from orchestrator import pipeline
-
-        source = inspect.getsource(pipeline)
-        self.assertIn('recovery_block["with_contact"] / attempted', source)
-        self.assertIn('recovery_block["rate_denominator"]', source)
+        from orchestrator.pipeline import _recovery_contact_rate
+        cohort = _cohort()
+        cohort.update(opportunities_resumed=100, with_contact=3,
+                      attempted_opportunity_keys={"one", "two"}, contact_opportunity_keys={"one"})
+        self.assertEqual(_recovery_contact_rate(cohort), 0.5)
+        cohort["outcomes_with_unknown_opportunity_identity"] = 1
+        self.assertIsNone(_recovery_contact_rate(cohort))
 
     def test_unreconciled_work_is_reported_separately_and_not_as_never_attempted(self):
         import inspect
@@ -278,7 +278,8 @@ class ThreeUnitsAreThreeNumbers(unittest.TestCase):
     def test_attempted_is_recorded_when_a_lead_carries_an_outcome(self):
         cohort = _cohort({"p1"})
         _account_recovery_cohort(cohort, [_lead("p1", contact_key="a@x")], _delivery())
-        self.assertEqual(len(cohort["attempted_opportunity_keys"]), 1)
+        self.assertEqual(len(cohort["attempted_opportunity_keys"]), 0)
+        self.assertEqual(cohort["outcomes_with_unknown_opportunity_identity"], 1)
 
     def test_two_leads_for_one_opportunity_count_that_opportunity_once(self):
         """The denominator is DISTINCT eligible opportunities."""

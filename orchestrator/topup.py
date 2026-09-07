@@ -92,6 +92,7 @@ class TopUpController:
         inventory_exhausted: bool = False,
         pending_owed: int = 0,
         acquisition_closed: bool = False,
+        independent_acquisition_pending: bool = False,
     ) -> TopUpDecision:
         """Decide whether to acquire ANOTHER slice, and how big it may be. Called
         BEFORE each acquisition. Order matters: target satisfaction wins first, then
@@ -131,13 +132,13 @@ class TopUpController:
         elif quota_remaining is not None and quota_remaining <= self.min_quota_remaining:
             starved = "fantastic_quota_floor"
         if starved:
-            if int(pending_owed) > 0:
+            if int(pending_owed) > 0 or independent_acquisition_pending:
                 self.acquisition_suppressed = starved
                 return TopUpDecision(True, "", 0)
             return self._stop(starved)
 
         if inventory_exhausted:
-            if pending_owed > 0:
+            if pending_owed > 0 or independent_acquisition_pending:
                 return TopUpDecision(True, "", 0)
             return self._stop("inventory_exhausted")
         remaining_cap = self.safety_cap_jobs - self.billed

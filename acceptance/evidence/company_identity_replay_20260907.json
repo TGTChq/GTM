@@ -1,0 +1,224 @@
+{
+  "source_sha256": "a3469ca6b1cc6509d4b7bffb59179cae25ffec4330e5a11e53326a1e73e2aa28",
+  "source_bytes": 1869595,
+  "rows": 26,
+  "production_writes": 0,
+  "network_requests": 0,
+  "basis": "retained non-display gates plus current display resolver and mapper",
+  "historical_signature_verified": false,
+  "live_approval_proven": false,
+  "reviewed": [
+    {
+      "job_index": 23,
+      "company": "Resource Management Concepts, Inc.",
+      "bucket": "operations",
+      "retained_company_evidence": {
+        "identity_keys": [
+          "linkedin:resourcemanagementconceptsinc",
+          "domain:rmcweb.com"
+        ],
+        "selected_source": "organization",
+        "selected_transformations": [
+          "corroborated_trailing_legal_suffix_removed"
+        ],
+        "cache_hit": false,
+        "manual_override": false,
+        "identity_conflict": true,
+        "bridging_brand": "",
+        "reasons": [
+          "linkedin_slug_domain_disagreement"
+        ],
+        "candidates": [
+          {
+            "source": "organization",
+            "raw": "Resource Management Concepts, Inc.",
+            "cleaned": "Resource Management Concepts",
+            "transformations": [
+              "corroborated_trailing_legal_suffix_removed"
+            ],
+            "identity_matches": {
+              "linkedin": "prefix",
+              "domain": ""
+            },
+            "ambiguous_separator": false,
+            "malformed_name": false,
+            "verified_canonical_pair": false,
+            "score": 42.2
+          }
+        ]
+      },
+      "original_gate_states": {
+        "job": "PASS",
+        "role": "PASS",
+        "account": "PASS",
+        "display": "NEEDS_CHECK",
+        "contact": "PASS",
+        "email": "PASS"
+      },
+      "before_send_safe": [
+        false,
+        "outbound_company_held_for_review"
+      ],
+      "after_send_safe": [
+        true,
+        "send_safe"
+      ],
+      "after_final_state": "FINAL_PASS",
+      "after_mapped_status": "Approved"
+    },
+    {
+      "job_index": 24,
+      "company": "Resource Management Concepts, Inc.",
+      "bucket": "people_hr",
+      "retained_company_evidence": {
+        "identity_keys": [
+          "linkedin:resourcemanagementconceptsinc",
+          "domain:rmcweb.com"
+        ],
+        "selected_source": "organization",
+        "selected_transformations": [
+          "corroborated_trailing_legal_suffix_removed"
+        ],
+        "cache_hit": false,
+        "manual_override": false,
+        "identity_conflict": true,
+        "bridging_brand": "",
+        "reasons": [
+          "linkedin_slug_domain_disagreement"
+        ],
+        "candidates": [
+          {
+            "source": "organization",
+            "raw": "Resource Management Concepts, Inc.",
+            "cleaned": "Resource Management Concepts",
+            "transformations": [
+              "corroborated_trailing_legal_suffix_removed"
+            ],
+            "identity_matches": {
+              "linkedin": "prefix",
+              "domain": ""
+            },
+            "ambiguous_separator": false,
+            "malformed_name": false,
+            "verified_canonical_pair": false,
+            "score": 42.2
+          }
+        ]
+      },
+      "original_gate_states": {
+        "job": "PASS",
+        "role": "PASS",
+        "account": "PASS",
+        "display": "NEEDS_CHECK",
+        "contact": "PASS",
+        "email": "PASS"
+      },
+      "before_send_safe": [
+        false,
+        "outbound_company_held_for_review"
+      ],
+      "after_send_safe": [
+        true,
+        "send_safe"
+      ],
+      "after_final_state": "FINAL_PASS",
+      "after_mapped_status": "Approved"
+    }
+  ],
+  "shared_ats_rows": [
+    {
+      "job_index": 0,
+      "employer": "Leonhardt Manufacturing Co., Inc.",
+      "retained_company": "Hyundai MOBIS North America Electrified Powertrain, LLC",
+      "retained_domain": "isolvedhire.com",
+      "current_group_key": "leonhardt manufacturing"
+    },
+    {
+      "job_index": 1,
+      "employer": "USOC BioMedical, LLC",
+      "retained_company": "Hyundai MOBIS North America Electrified Powertrain, LLC",
+      "retained_domain": "isolvedhire.com",
+      "current_group_key": "usoc biomedical"
+    },
+    {
+      "job_index": 2,
+      "employer": "Renaissance Academy Charter School",
+      "retained_company": "Hyundai MOBIS North America Electrified Powertrain, LLC",
+      "retained_domain": "isolvedhire.com",
+      "current_group_key": "renaissance academy charter school"
+    },
+    {
+      "job_index": 3,
+      "employer": "Capstone Research Corporation",
+      "retained_company": "Hyundai MOBIS North America Electrified Powertrain, LLC",
+      "retained_domain": "isolvedhire.com",
+      "current_group_key": "capstone research"
+    },
+    {
+      "job_index": 4,
+      "employer": "Pavilion Construction",
+      "retained_company": "Hyundai MOBIS North America Electrified Powertrain, LLC",
+      "retained_domain": "isolvedhire.com",
+      "current_group_key": "pavilion construction"
+    },
+    {
+      "job_index": 5,
+      "employer": "Knowledge Management, Inc.",
+      "retained_company": "Hyundai MOBIS North America Electrified Powertrain, LLC",
+      "retained_domain": "isolvedhire.com",
+      "current_group_key": "knowledge management"
+    },
+    {
+      "job_index": 6,
+      "employer": "Vision Information Technology Consultants LLC",
+      "retained_company": "Hyundai MOBIS North America Electrified Powertrain, LLC",
+      "retained_domain": "isolvedhire.com",
+      "current_group_key": "vision information technology consultants"
+    },
+    {
+      "job_index": 7,
+      "employer": "Metro Group Inc",
+      "retained_company": "Hyundai MOBIS North America Electrified Powertrain, LLC",
+      "retained_domain": "isolvedhire.com",
+      "current_group_key": "metro group"
+    },
+    {
+      "job_index": 15,
+      "employer": "Dayton T. Brown, Inc.",
+      "retained_company": "Cutrale Citrus Juices USA, Inc.",
+      "retained_domain": "applicantpro.com",
+      "current_group_key": "dayton t brown"
+    },
+    {
+      "job_index": 16,
+      "employer": "OzarksGo",
+      "retained_company": "Cutrale Citrus Juices USA, Inc.",
+      "retained_domain": "applicantpro.com",
+      "current_group_key": "ozarksgo"
+    },
+    {
+      "job_index": 17,
+      "employer": "MartinFed",
+      "retained_company": "Cutrale Citrus Juices USA, Inc.",
+      "retained_domain": "applicantpro.com",
+      "current_group_key": "martinfed"
+    },
+    {
+      "job_index": 18,
+      "employer": "Buechel Stone Corporation",
+      "retained_company": "Cutrale Citrus Juices USA, Inc.",
+      "retained_domain": "applicantpro.com",
+      "current_group_key": "buechel stone"
+    },
+    {
+      "job_index": 19,
+      "employer": "Globe Machine Manufacturing",
+      "retained_company": "Cutrale Citrus Juices USA, Inc.",
+      "retained_domain": "applicantpro.com",
+      "current_group_key": "globe machine manufacturing"
+    }
+  ],
+  "distinct_verified_contacts": 2,
+  "ats_distinct_retained_domains": 2,
+  "ats_distinct_current_group_keys": 13
+}
