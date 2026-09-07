@@ -26,7 +26,7 @@ work that was never attempted.
 
 from __future__ import annotations
 
-from typing import Any, Dict, Iterable, List, Mapping, Optional
+from typing import Any, Dict, List, Mapping, Optional
 
 #: unit -> what one increment counts.
 POSTING = "posting"
@@ -192,8 +192,14 @@ def opportunity_reach(*, qualified_postings: Any, opportunities_formed: Any,
     }
 
 
-def decompose(record: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
-    """The whole decomposition for one reporting-ledger record."""
+def decompose(record: Optional[Mapping[str, Any]],
+              hm: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
+    """The whole decomposition for one reporting-ledger record.
+
+    ``hm`` is the observability layer's hiring-manager summary when it is available.
+    Without it the contact stage cannot say whether a search was issued, so that
+    section is omitted rather than guessed at from subtractions.
+    """
     record = dict(record or {})
     metrics = dict(record.get("metrics") or {})
     reasons = dict(record.get("loss_reasons") or {})
@@ -206,9 +212,68 @@ def decompose(record: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
         "overlaps": overlaps(reasons),
         "delivery": delivery_reconciles(metrics.get("airtable_candidates"),
                                         metrics.get("sent_to_airtable"), skips),
+        **({"contact_discovery": contact_discovery(
+            hm, record.get("loss_reasons"), record.get("delivery_skip_breakdown"))}
+           if hm else {"contact_discovery": {
+               "unavailable": "no hiring-manager summary for this run; whether a "
+                              "search was issued cannot be established"}}),
         "reach": opportunity_reach(
             qualified_postings=metrics.get("role_qualified_postings"),
             opportunities_formed=metrics.get("qualified_opportunities"),
             opportunities_with_outcome=metrics.get("airtable_candidates"),
             stop_reason=record.get("stop_reason", "")),
+    }
+
+
+def contact_discovery(hm: Optional[Mapping[str, Any]],
+                      reasons: Optional[Mapping[str, Any]],
+                      skips: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
+    """Split contact-stage absence into the things it can actually be.
+
+    A funnel shows the same hole whether nobody was found, nobody was looked for, or
+    the run stopped first. ``hm_searches`` is stamped per company x bucket when a
+    people-search call is genuinely issued, so it is the one field that separates
+    "searched" from "never searched" -- everything here is built on it rather than
+    on a subtraction.
+
+    THE CROSS-CHECK. ``loss_reasons["hiring_manager_not_found"]`` and the
+    observability layer's ``hm_not_found`` are computed from the same rule (a bucket
+    with no ``hiring_manager_name``) over sets that are meant to be the same. On the
+    2026-09-07 run they disagree, 169 against 147. One of them is wrong and the
+    artifacts do not say which, so the disagreement is REPORTED rather than resolved
+    by preferring one: a consumer that picks the larger silently books 22 buckets as
+    "nobody found" that the other counter says had somebody.
+    """
+    hm = dict(hm or {})
+    reasons = dict(reasons or {})
+    skips = dict(skips or {})
+    eligible = _int(hm.get("eligible_company_buckets"))
+    searched = _int(hm.get("hm_searches"))
+    found = _int(hm.get("hm_found"))
+    observed_not_found = _int(hm.get("hm_not_found"))
+    reported_not_found = _int(reasons.get("hiring_manager_not_found"))
+    disagreement = reported_not_found - observed_not_found
+    return {
+        "unit": hm.get("hm_not_found_unit") or OPPORTUNITY,
+        NEVER_SEARCHED: max(0, eligible - searched),
+        SEARCHED_NO_RESULT: observed_not_found,
+        "searched_and_found": found,
+        FOUND_BUT_WITHHELD: _int(skips.get("send_safe_withheld")),
+        "eligible_buckets": eligible,
+        "searches_issued": searched,
+        "partition_closes": (found + observed_not_found == eligible),
+        "counter_disagreement": {
+            "loss_reasons.hiring_manager_not_found": reported_not_found,
+            "hm_summary.hm_not_found": observed_not_found,
+            "difference": disagreement,
+            "agree": disagreement == 0,
+            "consequence": ("none" if disagreement == 0 else
+                            f"{abs(disagreement)} buckets are booked as 'nobody found' "
+                            "by one counter and not by the other; neither artifact "
+                            "says which is right, so this stays unresolved"),
+        },
+        "not_established": [
+            "whether a search that returned nobody had a searchable domain",
+            "whether a negative came from a cache rather than a call",
+        ],
     }

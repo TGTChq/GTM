@@ -210,3 +210,64 @@ class TheAllDuplicateGuardCannotFireWithinThisBudget(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TheSeptember7Shape(unittest.TestCase):
+    """The 172 of run 20260907T062915Z-f79f4de1, checked as an identity.
+
+    The per-request evidence that would attribute those 172 row by row is not
+    retained -- production keeps only KEPT rows and KEPT ids -- so the run's own
+    counters are all there is. What they can still settle is whether anything is
+    UNEXPLAINED, and the accounting identity does that without any response:
+
+        returned_billed = unique_kept + duplicates
+
+    500 = 328 + 172 closes exactly. So the 172 are entirely accounted for as rows
+    the source returned and dedupe suppressed; there is no residue that could be a
+    double purchase, a dropped first sighting, or a miscount. Which of the
+    suppressed rows came from the reused window's seeded ids and which from a repeat
+    inside the run is NOT settled by this, and is left open.
+    """
+
+    OBSERVED = {"returned_billed": 500, "unique_kept": 328, "duplicates": 172,
+                "cross_source_duplicates": 0, "requests": 9,
+                "canonical_duplicates_in_run": 0, "historical_previously_seen": 0}
+
+    def test_the_billing_identity_closes_with_no_residue(self):
+        o = self.OBSERVED
+        self.assertEqual(o["returned_billed"], o["unique_kept"] + o["duplicates"])
+
+    def test_zero_cross_source_means_not_cross_source_not_not_duplicated(self):
+        """The counter that has been misread before.
+
+        ``cross_source_duplicates`` is written only when ``_first_seen`` names a
+        DIFFERENT source, and ``_first_seen`` is written only for rows kept in THIS
+        run. A seeded id therefore produces a duplicate with the cross-source
+        counter at zero, which is exactly the observed shape -- and is not evidence
+        that the rows came from one source's own paging.
+        """
+        o = self.OBSERVED
+        self.assertEqual(o["cross_source_duplicates"], 0)
+        self.assertGreater(o["duplicates"], 0)
+
+    def test_the_pipeline_dedupe_saw_none_of_them(self):
+        """They were suppressed at the ADAPTER, before an opportunity was formed.
+
+        Both pipeline-side counters are zero, so none of the 172 reached the
+        run's own dedupe -- which is why they cost credits and produced no
+        posting, and why they cannot be found in the funnel.
+        """
+        o = self.OBSERVED
+        self.assertEqual(o["canonical_duplicates_in_run"], 0)
+        self.assertEqual(o["historical_previously_seen"], 0)
+
+    def test_what_this_does_not_establish(self):
+        """Named so a later reader does not mistake a closed identity for a cause."""
+        open_questions = [
+            "how many of the 172 were seeded from window_acquired_ids of an earlier "
+            "pass over the same reused window, versus repeats inside this run",
+            "whether a different cursor or cap would have avoided buying them",
+            "the same split for the 5,218 of 2026-09-06 and the 2,722 ATS rows kept",
+        ]
+        self.assertTrue(all(open_questions))
+        self.assertEqual(len(open_questions), 3)

@@ -556,3 +556,94 @@ def test_the_organizations_own_profile_can_attest_the_correspondence(tmp_path):
                                   overrides_path=_empty_overrides(tmp_path)),
         persist=False)
     assert elsewhere.hold is True
+
+
+# ---------------------------------------------------------------------------
+# 9. A company hold is retryable, and a rule change reaches it
+# ---------------------------------------------------------------------------
+
+def test_a_company_hold_is_not_a_terminal_state(tmp_path):
+    """The property that makes correcting the rules worth anything.
+
+    A held row is withheld at delivery, not rejected. If that made its posting
+    terminal it would enter cross-run suppression and no later run -- however much
+    better its rules -- would ever look at it again, so every identity correction
+    would apply only to inventory bought afterwards.
+
+    ``terminal_posting_ids`` admits FINAL_PASS only when delivery evidenced the key,
+    and REJECT. A withheld FINAL_PASS and a NEEDS_CHECK are both excluded, so the
+    posting stays in custody for a later run.
+    """
+    from orchestrator.enrichment import Disposition, EnrichmentReport, Lead
+    from orchestrator.reasons import ReasonCode
+
+    withheld = Lead(posting_id="p-withheld", company={"name": "Held Co"},
+                    contact={"email": "hm@held.example"}, contact_key="k-withheld",
+                    disposition=Disposition.FINAL_PASS, primary_reason=ReasonCode.OK)
+    needs_check = Lead(posting_id="p-needs", company={"name": "Held Co"},
+                       contact={"email": "hm2@held.example"}, contact_key="k-needs",
+                       disposition=Disposition.NEEDS_CHECK,
+                       primary_reason=ReasonCode.OK)
+    delivered = Lead(posting_id="p-ok", company={"name": "Fine Co"},
+                     contact={"email": "hm@fine.example"}, contact_key="k-ok",
+                     disposition=Disposition.FINAL_PASS, primary_reason=ReasonCode.OK)
+    report = EnrichmentReport(stages=[], leads=[withheld, needs_check, delivered],
+                              funnel={})
+    terminal = report.terminal_posting_ids(delivered_lead_keys=["k-ok"])
+    assert "p-ok" in terminal
+    assert "p-withheld" not in terminal, "a withheld row must stay retryable"
+    assert "p-needs" not in terminal
+
+
+def test_new_evidence_clears_a_row_that_was_held_under_the_old_record(tmp_path):
+    """Same company, same anchors; the record gains its declared website.
+
+    This is what a retry buys. The first pass has nothing to corroborate a prefix
+    relation and holds. The second has the organization's own website and clears --
+    without any entry naming the company, and without the cache pinning the first
+    answer.
+    """
+    cache = CompanyDisplayCache(tmp_path / "shared.json",
+                               overrides_path=_empty_overrides(tmp_path))
+    first = resolve_company_display(
+        organization="Clark", org_linkedin_slug="clarkaudit",
+        employer_domain="getclark.com", cache=cache)
+    assert first.hold is True
+
+    second = resolve_company_display(
+        organization="Clark", org_linkedin_slug="clarkaudit",
+        employer_domain="getclark.com", org_linkedin_website="https://getclark.com",
+        cache=cache)
+    assert second.hold is False
+    assert second.evidence["cache_hit"] is False, "the hold must not have been cached"
+    assert second.evidence["conflict_resolution"]["basis"] == (
+        "linkedin_organization_profile_website")
+
+
+def test_an_updated_rule_reaches_a_company_the_old_rule_already_answered(tmp_path):
+    """A resolver upgrade must not stop at companies nobody has seen yet.
+
+    An entry written by an earlier resolver is retired on version alone, so the row
+    is decided again under the current rules instead of inheriting the old verdict.
+    """
+    from company_display_resolver import RESOLVER_VERSION
+
+    path = tmp_path / "cache.json"
+    path.write_text(json.dumps({
+        "schema": "company-display-cache/1",
+        "entries": {"linkedin:clarkaudit": {
+            "display_name": "Stale Answer", "confidence": "high",
+            "identity_safe": True,
+            "identity_keys": ["linkedin:clarkaudit", "domain:getclark.com"],
+            "evidence": {}, "resolver_version": "company-display/1",
+            "resolved_at": "2026-09-07T00:00:00Z", "manual_override": False}},
+        "aliases": {},
+    }), encoding="utf-8")
+    result = resolve_company_display(
+        organization="Clark", org_linkedin_slug="clarkaudit",
+        employer_domain="getclark.com",
+        cache=CompanyDisplayCache(path, overrides_path=_empty_overrides(tmp_path)),
+        persist=False)
+    assert result.name != "Stale Answer"
+    assert result.evidence["resolver_version"] == RESOLVER_VERSION
+    assert result.hold is True, "re-decided under the current rules, not inherited"
