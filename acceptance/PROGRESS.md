@@ -3,6 +3,33 @@
 Living record. Survives compaction. Reopen a closed item only on contradictory
 evidence.
 
+## Current procedure correction — 2026-09-07, base `c160244`
+
+Both service deployments and origin/main were verified at `c160244`. The earlier
+local-publication blockers below describe their historical checkpoints; they are
+not the deployed state of the cumulative code release.
+
+The user prefers new acquisition for the next execution. The authoritative procedure
+is now `RECOVERY_FIRST_ACCEPTANCE.md` (filename retained for existing references).
+It distinguishes new acquisition from recovery, a resumed batch from a run limit,
+physical Apollo requests from provider credits, and verified approval receipts from
+created-row counts. It withdraws old sizing/forecast assertions and the paid readiness
+script as a free launch prerequisite. The Apollo UI can show the credit balance.
+
+New acquisition can coexist with pending adoption in the current loop. A fresh-only
+cohort must be measured by identity; disabling pending custody is not a safe way to
+exclude recovered work. Production activation and spending remain unauthorized by
+this documentation change: acquisition paused, maintenance on, grant zero.
+
+This correction changes documentation only and was checked against the source and
+current official Apollo endpoint contract. It does not rerun or supersede the release's
+offline gate, execute a provider call, write Airtable, or establish 1,000/day output.
+This new documentation commit still requires publication; deployed runtime code is
+unchanged. Remaining sections are dated evidence and are superseded where they
+conflict with this checkpoint or the current acceptance procedure.
+
+## Historical checkpoints
+
 ## Current full-flow audit (2026-09-07, verified local release)
 
 Read `FULL_FLOW_AUDIT_2026-09-07.md` first. Twenty-two finding families cover future

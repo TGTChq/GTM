@@ -1,5 +1,11 @@
 # Operational status of each capability
 
+**Current procedure:** [acceptance of the next execution](RECOVERY_FIRST_ACCEPTANCE.md).
+The user now prefers new acquisition for the next authorized run. This preference
+does not change the recorded pause, grant or billing. Both service deployments were
+rechecked at `c160244`; the effective-value table below is the dated container
+snapshot, not a fresh read of every variable.
+
 **Rebuilt 2026-09-07 against deployed `7e91cb4`.** The previous version predated the
 throughput release, the full-flow release and the suppression-identity fix, and was
 therefore describing a system that no longer existed.
@@ -89,13 +95,14 @@ even the deliverability reroute.
 
 ## What this means for lead volume today
 
-Nothing downstream of acquisition can produce approved leads: paid acquisition is
-paused and paid enrichment is unfunded. Every capability that could add inventory —
-the 145 ATS boards, functional discovery, historical recovery — is switched off or
-unbudgeted.
+Maintenance stops the pipeline loop. The Apollo run grant is zero. New Fantastic
+acquisition is paused; the additional inventory lanes below are inactive or
+unbudgeted. These are separate conditions: acquiring more jobs is not a prerequisite
+to enriching retained work, and retained work may reuse cached provider evidence.
 
-**Measured production output is 0 approved leads.** None of the capabilities above is
-claimed to have produced any.
+**The cited 50-reservation calibration created 0 Approved rows.** No live execution
+reported here demonstrates the corrected release's output against 1,000/day. This
+does not establish zero Approved rows across the system's entire history.
 
 ## The gap that was here, and is now closed
 
@@ -112,9 +119,14 @@ cannot leak a key into a log.
 **What remains genuinely unreadable is nothing in this table.** The remaining
 unknowns are not configuration:
 
-* the true Apollo credit balance -- verifying it costs a paid call, and none is
-  authorized;
+* the current Apollo credit balance -- read it in the workspace's Plan overview /
+  Credits and activity UI and record its timestamp. A paid probe is not necessary
+  to read the displayed balance, and HTTP 200 would not establish that balance;
 * whether any of the corrected paths raises live yield, which needs a funded run.
 
 Both are recorded in `PROGRESS.md` as external blockers with their concrete missing
 action, not as properties of the code.
+
+The configured Apollo grant counts potentially paid physical requests, not exact
+provider credits. The updated acceptance procedure supersedes historical grant
+estimates and the old automatic-resumption instruction in the readiness script.

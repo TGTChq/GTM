@@ -1,140 +1,148 @@
-# The first production run after Apollo returns
+# Acceptance of the next pipeline execution
 
-**Process the recovered work before buying anything new.** 3,595 postings — **2,998
-company × function opportunities** — are already paid for and in custody. They are
-also the only cohort that can answer the question the interrupted run left open, and
-they cost nothing to answer it with.
+Updated against `c160244` on 2026-09-07. The filename is retained for existing
+references. This replaces the older recovery-first instructions and cost estimates.
 
-No new acquisition spend should be proposed until this run's complete path is
-measured.
+## Objective and present authorization
 
-## Why this cohort, and not a fresh run
+The user prefers **new acquisition** for the next execution. The objective remains
+at least **1,000 distinct, new, Approved Airtable contacts per production run**, with
+continuation above the target while authorized resources remain. Neither an input
+batch of 2,000 postings nor a grant of 1,000 calls is that output objective.
 
-The `opportunity → contact` rate is **unknown**. The one observation comes from the
-2026-09-04 run, which Apollo interrupted partway through contact discovery, so its
-denominator cannot be separated into "searched and found nobody" from "never
-attempted" (see `CAPACITY_ASSESSMENT.md`). A fresh acquisition run would spend
-credits to produce another cohort with the same question attached.
+Preparing this procedure does not resume production. The current instruction keeps
+acquisition paused and billing unchanged, with no unauthorized paid experiment.
+Keep maintenance enabled and the Apollo grant at zero until an explicit execution
+authorization supplies spending limits and delivery scope. Do not buy credits,
+change subscriptions, or infer an unlimited grant from the output target.
 
-The recovered cohort is different in exactly the way that matters: it is a **fixed,
-enumerated set of opportunities**, so its denominator is known before the run starts.
-Whatever fraction of it produces a contact IS the rate, measured rather than inferred.
+## Established state and evidence limits
 
-## Preconditions
+Both services were confirmed deployed on `c160244` through the Railway deployment
+API. The recorded container readback has maintenance on, Fantastic acquisition off,
+and `APOLLO_RECOVERY_BUDGET_CALLS=0`. Recheck deployed commit and effective values
+before launch; repository defaults are not production evidence.
 
-1. `python acceptance/apollo_readiness.py` returns READY. It calls
-   `organizations/enrich` once — free while Apollo refuses, **one lead credit if it
-   succeeds**.
-2. Custody intact: the maintenance pass reports `pending_postings 3595` across two
-   runs, `resumable: true`, `unidentifiable_employer: 0`.
+The retained cohort was reported as **3,595 distinct postings / 3,006 company ×
+function opportunities** after the suppression identity fix. Its previous 2,998
+opportunity count is superseded. That finite backlog does not establish daily supply.
 
-## Configuration — and the budget that actually bounds spend
+The calibration `20260906T202534Z-0395cf0a` created zero Approved rows. Its two
+verified contacts were withheld on company display identity. Offline replay of the
+corrected path is not a production delivery receipt. Do not extend the calibration's
+zero to a claim that the system has never created an Approved row in its history.
 
-**`PENDING_WORK_RESUME_MAX_PER_RUN` is not a budget.** It bounds how much WORK a run
-adopts. 2,000 resumed postings can issue an organisation enrich, a people search and
-one or more person matches each, plus the alternate cascade and the org-id fallback
-behind them — so a workload cap of 2,000 could authorise several times that many
-chargeable calls. The earlier version of this document presented it as the spending
-control. It is not one.
+## Readiness, balance, and spending units
 
-`orchestrator/apollo_budget.py` is. It counts **every chargeable path** — organisation
-enrich, people search, person match, wherever called from, retries included — it is
-**durable across runs** so an interrupted run cannot restart its own budget, and an
-**unset budget is zero, not unlimited**.
+Read remaining credits and their cycle in Apollo's **Plan overview / Credits and
+activity** UI; record the timestamp and workspace. The previously shown approximately
+2,000 credits are a historical observation, not today's verified balance. HTTP 200
+on enrichment proves that request was served; it does not prove a balance.
 
-| variable | value | why |
-|---|---|---|
-| `MAINTENANCE_ONLY` | **`0`** | lets the pipeline run at all |
-| `FANTASTIC_JOBS_ENABLED` | **stays `0`** | **acquires nothing**; the workload is what custody hands back |
-| `PENDING_WORK_RESUME_MAX_PER_RUN` | `2000` | workload cap — *not* a spend cap |
-| `APOLLO_RECOVERY_BUDGET_ENABLED` | **`1`** | off by default, so today the run would refuse |
-| `APOLLO_RECOVERY_BUDGET_ID` | **an authorization label** | a NEW id resets the durable counter; raising the number alone does not |
-| `APOLLO_RECOVERY_BUDGET_CALLS` | **the granted number** | 0 = refuse |
+Do not run `acceptance/apollo_readiness.py` as a free preflight. That legacy script
+makes a direct organization enrichment request outside the durable run budget. Its
+fixed-cost assertions and instruction to resume acquisition after HTTP 200 are not
+launch authorization. Use a useful workload request through the budgeted production
+client as the serving check only after the run itself is authorized.
 
-All three budget settings are required together. `apollo_budget.preflight()` answers
-before any work is adopted and names which one is missing, because a refusal at the
-top costs nothing and a refusal partway through has already spent.
+The durable Apollo budget reserves **potentially paid physical request attempts**
+before organization enrichment and person matching, including retries. Cache reuse
+and [People API Search](https://docs.apollo.io/reference/people-api-search) do not
+consume those reservations; the search endpoint is documented as zero-credit and
+does not return email addresses or phone numbers.
 
-**Deferral needed no new mechanism.** On exhaustion the caller stops, the unfinished
-work never reaches a terminal disposition, and `pending_work` keeps it for a later
-run. Exhaustion is a pause, not a loss — which is what makes a hard ceiling safe to
-set low, and the reason to start low.
+**Calls, credits, and approved contacts are separate units.**
+[People enrichment](https://docs.apollo.io/reference/people-enrichment) pricing
+depends on requested data and options. `APOLLO_RECOVERY_BUDGET_CALLS` is a request
+ceiling, not an exact credit or dollar ceiling. Reconcile provider usage separately;
+do not derive credits from the local counter. If authorization is in credits or
+money, establish an applicable upper cost per allowed request and a conservative
+request ceiling first, or retain the pause. Never assume one call costs one credit.
+Other users of the shared workspace also consume its balance.
 
-### Sizing the grant
+There is no supported forecast here of three paid calls per company, 8,400–12,000
+calls for the backlog, or a recommended 1,000-call grant. The earlier calibration
+counted free search reservations and was interrupted; it cannot price the target.
 
-Worst case is roughly **3 chargeable calls per company** (org enrich + people search +
-one person match), plus cascade and fallback retries where they fire. For the full
-2,998-opportunity cohort across 2,808 companies that is on the order of **8,400–12,000
-calls**; a first acceptance need not authorise all of it.
+## Preparation for new acquisition
 
-**Recommended first grant: 1,000 calls.** Enough to process several hundred
-opportunities end to end and measure the conversion, small enough that being wrong
-about the per-opportunity cost is cheap. The remainder stays in custody, and the run
-summary reports exactly what was consumed and what deferred.
+Prepare one reviewed configuration while maintenance remains on. Variable edits can
+cause redeployments: capture the deployment using the final configuration and avoid
+concurrent pushes or configuration changes during its execution.
 
-That combination is not a special mode — it is the ordinary pipeline with an empty
-lane. Verified by execution in
-`tests/test_recovery_cohort_attribution.py::ARunThatBuysNOTHINGStillDrainsCustody`:
-a lane returning zero jobs still reaches the custody hand-back, `net_new_jobs_captured`
-is 0, and the resumed rows reach the enrichment engine.
+| Setting or control | Requirement before a future authorized run |
+|---|---|
+| `MAINTENANCE_ONLY` | Keep `1` during preparation; clearing it is the final launch action after configuration and authorization checks. |
+| `FANTASTIC_JOBS_ENABLED` | Currently false. New Fantastic jobs require an explicit acquisition allowance and eventual enablement. |
+| Fantastic spending controls | Read the effective monthly governor, remaining allowance, `FANTASTIC_JOBS_MAX_JOBS_PER_RUN`, source caps, and runtime/iteration limits. Keep approved ceilings; do not reset the ledger to manufacture allowance. |
+| `APOLLO_RECOVERY_BUDGET_ENABLED` | Require `1` for a funded execution. Disabled means this control does not enforce its ceiling. |
+| `APOLLO_RECOVERY_BUDGET_ID` | A new, explicitly authorized label. Never reuse spent `calib-2026-09-06-50` or rotate labels automatically. |
+| `APOLLO_RECOVERY_BUDGET_CALLS` | An explicitly authorized positive request count. Current value remains `0`. Changing the ceiling alone preserves consumed requests. |
+| `PENDING_WORK_ENABLED` | Keep enabled so newly purchased work is durably retained before cursor advancement. |
+| `PENDING_WORK_RESUME_MAX_PER_RUN` | Existing `2000` bounds a resumed batch in the top-up loop, not total daily output. Multiple batches can drain in one run. |
+| `RUN_APPROVED_TARGET_ENABLED` / `RUN_APPROVED_TARGET` | Recorded effective values are `true` / `1000`; this already activates when maintenance is cleared. |
+| `RUN_APPROVED_CONTINUE_AFTER_TARGET` | Recorded effective value is `true`; continuing above 1,000 never overrides budgets, runtime guards, or genuine exhaustion. |
+| `ACQUISITION_EXTRA_LANES` | Recorded value is empty. Adding `ats` enables another inventory source, but downstream enrichment can spend Apollo credits. It is optional, not a prerequisite for the new Fantastic cohort. |
+| Airtable and Approved Sync | Record intended write scope, approval gates, and both schedules. A pipeline run can write Airtable and the separate sync can later enroll those rows. Maintenance is a different mode. |
 
-Cost: **0 Fantastic credits**, and Apollo bounded by the grant above.
+New acquisition does **not** mean today's rows are all unseen. Repeated provider
+responses and previously completed jobs remain suppressed. Preserve seen IDs,
+watermarks, source continuations, company/function suppression, caches and custody.
+The existing age and ICP rules remain authoritative.
 
-## What to read from the run
+The ordinary loop can also adopt older pending work after adding newly acquired
+work. There is no independent resume-only switch in the configuration audited here:
+turning off `PENDING_WORK_ENABLED` also disables custody for new acquisitions.
+Do not use that switch to force a fresh-only experiment. Keep attribution separate
+and evaluate the newly acquired cohort separately. If exclusive fresh processing is
+required, that scheduling requirement must be implemented and verified before launch;
+simply enabling acquisition does not provide it.
 
-The run summary prints the cohort in its three units, with the rate naming its own
-denominator:
+## Evidence required from the execution
 
-    RECOVERY COHORT        postings N / opportunities N / leads N
-      attempted            N opportunities -> with_contact N -> final_pass N -> delivered N
-      opp->contact         0.NNNN (denominator: opportunities_attempted)
-      no reconciled outcome N
+1. Preserve exact run ID, deployed commit, UTC window, selected sources, actual query
+   filters, pagination cursors/offsets, physical requests and paid rows.
+2. Separate first occurrences, query/source overlap, previously processed jobs,
+   genuine repeats, rejected jobs, retained pending work and interruption. A
+   duplicate counter alone is not proof of repeated paid provider delivery.
+3. Attribute outcomes through posting identity, company × function opportunity,
+   distinct contact identity and Airtable delivery receipt. Keep fresh acquisition
+   and resumed cohorts separate. If one opportunity contains postings from both,
+   report that overlap; do not count its contact twice or infer fresh-only output
+   by subtracting aggregate totals.
+4. Count output only when a distinct new contact has an actual Approved Airtable
+   receipt and passes existing gates. A creation count, FINAL_PASS, cached result,
+   posting, or existing row is not independently sufficient proof of new approval.
+   For daily output use the union across runs in the stated business timezone.
+5. Report contact-search coverage separately from outcome coverage. A disposition
+   does not prove Apollo search ran. Separate actual search, cached evidence,
+   terminal rejection and work deferred before search; keep unprocessed and
+   unreconciled populations explicit.
+6. Record each stop reason and consumption unit. A local budget stop is not a
+   provider credit refusal. A source failure or iteration limit is not exhausted
+   inventory. Confirm completed work is preserved and unfinished work is resumable,
+   without recycling previous approvals as new output.
+7. Reconcile any authorized downstream enrollment to the same contact identities
+   after Approved Sync. Preserve Brett's accepted report format and unknown metrics;
+   do not send his report as part of technical acceptance.
 
-and `acquisition.recovery_cohort` in the artifact carries the same figures plus
-`delivered_lead_keys`. Attribution is by **posting identity**, the one key the pending
-store, the enrichment leads and the delivery record share, and it counts a recovered
-posting **collapsed into a lead** alongside other work — dropping those would
-understate the cohort exactly where the company+bucket collapse fires.
+## Optional recovery-only execution
 
-Check, in order:
+The backlog can still be processed without new acquisition. In that mode keep
+Fantastic disabled and new acquisition lanes inactive, and measure resumed postings /
+distinct opportunities / distinct approved contacts separately. It costs no new
+Fantastic rows but may require paid Apollo enrichment. It is an alternative cohort,
+not an obligatory prerequisite to the user's preferred new acquisition.
 
-1. `net_new_jobs_captured == 0` — nothing was bought.
-2. `postings_resumed`, `opportunities_resumed` and `leads` — **three different units,
-   reported separately.** Custody stores postings; approvals are capped per company ×
-   function; the stage emits leads. Conflating them is what produced every bad
-   capacity number this week.
-3. `opportunities_attempted` and `opportunity_to_contact_rate` — the rate divides by
-   **distinct opportunities the stage produced an outcome for**, and
-   `rate_denominator` names it. This is the first honest opportunity → contact
-   measurement, because this cohort's denominator is known before the run starts.
-4. `opportunities_without_reconciled_outcome` — work with no outcome. **Not** called
-   "never attempted": an absent outcome is not evidence of an absent attempt.
-5. `pending_work_released` and the new `pending_postings` — custody shrinks only by
-   work that reached a terminal disposition.
-6. The Apollo budget summary — consumed, remaining, deferrals.
-7. `all_reconcile: true`, and the delivery record's `reviewable_reconciles`.
+## Completion criterion
 
-## Then follow it through approval and the normal sync
+Offline regressions establish that particular code defects were corrected and that
+the controller can reach and continue above its target on controlled input. They do
+not establish live contact coverage or a stable 1,000/day minimum.
 
-Approval is automatic for send-safe Fantastic rows
-(`FANTASTIC_AUTO_APPROVE_SEND_SAFE=True`), and enrolment happens in a **different
-service on a different schedule** — GTM Approved Sync, cron `0 0 * * *`. So the
-cohort's path does not finish inside the run that created it.
-
-`delivered_lead_keys` is kept in full for exactly this: after the next Approved Sync,
-join those keys against the Instantly enrolment to get the cohort's complete path.
-
-    resumed -> leads -> with_contact -> final_pass -> Airtable rows -> enrolled
-
-Nothing about that join requires new tooling; it requires the keys, which the run now
-records. **A count could not be joined to anything. A key can.**
-
-## The rule this run establishes
-
-Only after the above reads end-to-end should more acquisition spend be proposed. If
-the cohort converts near the 18.8% the truncated run suggested, more inventory is not
-the lever and buying it would repeat the same result at scale. If it converts far
-higher, the truncation was the story and the capacity arithmetic changes again.
-
-Either way the answer costs **zero acquisition credits**, and it is the cheapest
-question available.
+Report measured new approvals and explicit remaining losses from the authorized
+execution. A single run establishes that run's result; sustained daily capacity
+requires observations across daily windows. Preserve missing evidence as unknown.
+Neither the historical 18.8% / 25.5% figures nor an approximately 111/day projection
+is a supported forecast for the corrected system. A failure to reach the target
+does not, by itself, prove that Apollo is the only remaining limitation.
