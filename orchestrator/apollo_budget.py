@@ -100,6 +100,21 @@ def _write(path: Path, payload: Dict[str, Any]) -> None:
     os.replace(tmp, path)
 
 
+def _opened_authorized(state: Dict[str, Any]) -> int:
+    """The largest ceiling this authorization was ever given.
+
+    Ledgers written before this field existed do not carry it. They are migrated to
+    the only safe lower bound available: a grant cannot have consumed more calls than
+    it was authorized, so ``consumed`` is a floor, and the last persisted
+    ``authorized`` is the other candidate. Taking the maximum can only ever make an
+    old grant harder to reopen, never easier.
+    """
+    recorded = state.get("opened_authorized")
+    if isinstance(recorded, int) and recorded >= 0:
+        return recorded
+    return max(int(state.get("authorized", 0) or 0), int(state.get("consumed", 0) or 0))
+
+
 def load(path: str = "") -> Dict[str, Any]:
     """The durable ledger, reconciled against the CURRENT authorization.
 
@@ -115,27 +130,34 @@ def load(path: str = "") -> Dict[str, Any]:
     if not state or state.get("authorization_id") != auth_id:
         state = {"schema": SCHEMA, "authorization_id": auth_id, "consumed": 0,
                  "by_kind": {k: 0 for k in KINDS}, "opened_at": _now(),
-                 "last_charge_at": "", "deferrals": 0, "authorized": requested}
+                 "last_charge_at": "", "deferrals": 0, "authorized": requested,
+                 "opened_authorized": requested}
         state["requested_calls"] = requested
         state["raised_under_same_id"] = False
     else:
-        # AN OPEN AUTHORIZATION KEEPS THE SIZE IT WAS OPENED WITH.
+        # AN AUTHORIZATION'S CEILING IS A HIGH-WATER MARK FOR ITS ID.
         #
         # Raising the number under an id that already has a ledger does not enlarge
-        # it, and under a SPENT id it does not revive it. Without this, setting the
-        # ceiling to 2,000 beside a spent 200-call grant silently produces 1,800
-        # calls of fresh room under an authorization that was already closed -- a
-        # grant nobody issued, indistinguishable in the ledger from one that was.
-        # I did exactly that against production on 2026-09-07; maintenance was on
-        # and nothing was spent, but only the schedule prevented it.
+        # it, and under a SPENT id it does not revive it. Setting 2,000 beside a
+        # spent 200-call grant would otherwise produce 1,800 calls of fresh room
+        # under an authorization that was already closed -- a grant nobody issued,
+        # indistinguishable in the ledger from one that was.
+        #
+        # THE HIGH-WATER MARK IS THE POINT. Comparing against the LAST PERSISTED
+        # ceiling is not enough, because a refused call persists the ceiling that
+        # refused it: set the limit to 0, let one call defer, and the ledger now
+        # says the grant was opened with 0 -- after which any number reads as a
+        # first grant. `opened_authorized` is written when the id is first seen and
+        # never rises, so that erasure cannot happen.
         #
         # Lowering is still honoured: a ceiling may always be tightened. Only a NEW
         # authorization id adopts a larger number, which is what makes a grant a
         # deliberate, auditable act rather than a config edit.
-        opened_with = int(state.get("authorized", 0) or 0)
+        opened_with = _opened_authorized(state)
+        state["opened_authorized"] = opened_with
         state["requested_calls"] = requested
         state["raised_under_same_id"] = requested > opened_with
-        state["authorized"] = min(requested, opened_with) if opened_with else requested
+        state["authorized"] = min(requested, opened_with)
     state["remaining"] = max(0, int(state["authorized"]) - int(state.get("consumed", 0) or 0))
     state["spent"] = state["remaining"] <= 0 and int(state.get("consumed", 0) or 0) > 0
     state["enabled"] = bool(getattr(config, "APOLLO_RECOVERY_BUDGET_ENABLED", False))
@@ -146,6 +168,19 @@ def enabled() -> bool:
     import config
 
     return bool(getattr(config, "APOLLO_RECOVERY_BUDGET_ENABLED", False))
+
+
+def continuous_mode() -> bool:
+    """Spend whatever the provider serves, with no per-top-up manual grant.
+
+    Deliberately a separate switch from the ceiling. Turning the ceiling OFF would
+    also remove the durable record of what was spent; this keeps the ledger and
+    changes only what gates ACQUISITION, so a deployment can run continuously and
+    still cap a grant if it wants to.
+    """
+    import config
+
+    return bool(getattr(config, "APOLLO_CONTINUOUS_MODE", False))
 
 
 def charge(kind: str, count: int = 1, *, path: str = "") -> Dict[str, Any]:
@@ -166,14 +201,27 @@ def charge(kind: str, count: int = 1, *, path: str = "") -> Dict[str, Any]:
     if str(kind) not in KINDS:
         raise ValueError(f"unknown chargeable kind: {kind!r}")
     want = max(0, int(count))
-    if not state.get("authorization_id") or int(state.get("authorized", 0)) <= 0:
-        state["deferrals"] = int(state.get("deferrals", 0)) + 1
-        _write(target, state)
-        raise BudgetExhausted(state)
-    if int(state.get("consumed", 0)) + want > int(state["authorized"]):
-        state["deferrals"] = int(state.get("deferrals", 0)) + 1
-        _write(target, state)
-        raise BudgetExhausted(state)
+    # CONTINUOUS MODE WITHOUT AN AGGREGATE: the PROVIDER is the ceiling, so a call is
+    # RECORDED rather than refused. Running without a cap must not also mean running
+    # without a count -- the durable ledger still receives every call, which is what
+    # keeps spend auditable when nobody issued a number.
+    #
+    # A configured aggregate still refuses exactly as before, in continuous mode or
+    # out of it: `uncapped` means "no aggregate was set", never "the aggregate was
+    # ignored".
+    uncapped = continuous_mode() and int(state.get("authorized", 0) or 0) <= 0
+    if not uncapped:
+        if not state.get("authorization_id") or int(state.get("authorized", 0)) <= 0:
+            state["deferrals"] = int(state.get("deferrals", 0)) + 1
+            _write(target, state)
+            raise BudgetExhausted(state)
+        if int(state.get("consumed", 0)) + want > int(state["authorized"]):
+            state["deferrals"] = int(state.get("deferrals", 0)) + 1
+            _write(target, state)
+            raise BudgetExhausted(state)
+    else:
+        state["uncapped_continuous_calls"] = int(
+            state.get("uncapped_continuous_calls", 0) or 0) + want
     state["consumed"] = int(state.get("consumed", 0)) + want
     by_kind = dict(state.get("by_kind") or {})
     by_kind[kind] = int(by_kind.get(kind, 0)) + want
@@ -190,7 +238,7 @@ def summary(path: str = "") -> Dict[str, Any]:
     return {k: state.get(k) for k in
             ("enabled", "authorization_id", "authorized", "consumed", "remaining",
              "by_kind", "deferrals", "opened_at", "last_charge_at", "spent",
-             "requested_calls", "raised_under_same_id")}
+             "requested_calls", "raised_under_same_id", "opened_authorized")}
 
 
 def preflight(required: Optional[int] = None, *, path: str = "") -> Dict[str, Any]:
@@ -250,6 +298,29 @@ def paid_acquisition_allowed(path: str = "") -> Dict[str, Any]:
     ``APOLLO_RECOVERY_BUDGET_ENABLED`` false there is no authorization model in
     force at all, and this must not become a second, silent way to stop acquisition.
     """
+    # CONTINUOUS MODE. A standing authorization to spend whatever the provider will
+    # serve, within every other limit. The gate becomes "is Apollo serving?" rather
+    # than "did someone issue a grant today", which is what removes the manual step
+    # after each top-up -- and the answer is free, because a credit refusal is
+    # returned before any work is done.
+    #
+    # It does NOT remove the ceiling: with a positive grant still configured the
+    # aggregate applies as before, and every other control -- quality gates, dedupe,
+    # custody, suppression, the Fantastic governor -- is untouched.
+    if continuous_mode():
+        from orchestrator import apollo_availability
+
+        attempt = apollo_availability.may_attempt()
+        if not attempt["allowed"]:
+            return {"allowed": False, "reason": "provider_refusing",
+                    "detail": ("Apollo refused a chargeable call at "
+                               f"{attempt.get('refusing_since')}; the next attempt is "
+                               f"due after {attempt.get('next_attempt_after')}. "
+                               "Buying postings now would be buying work that cannot "
+                               "be enriched."),
+                    "provider": attempt}
+        return {"allowed": True, "reason": "continuous_mode", "provider": attempt,
+                **summary(path)}
     if not enabled():
         return {"allowed": True, "reason": "budget_not_enabled",
                 "detail": "no authorization model in force; acquisition is unchanged"}

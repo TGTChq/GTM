@@ -31,6 +31,55 @@ window slicing on, send-safe auto-approve on and company × function suppression
 Approved Sync carries `VERIFY_WITH_HUNTER=0`, `ENROLLMENT_PERSON_EMPLOYER_UNIQUENESS=1`
 and `OUTBOUND_WAVE1_ENABLED=1`. Crons unchanged: `0 3 * * *` and `0 0 * * *`.
 
+## Apollo is serving again — measured, 2026-09-07T19:23:17Z
+
+`acceptance/apollo_readiness.py`, run through `railway run --no-local --service GTM`
+under a one-call authorization opened for the purpose:
+
+```
+HTTP 200   x-request-id c4cf22ce-a5ee-4067-aaef-20e546b83ae8
+READY: Apollo served a credit-consuming call.
+```
+
+**What that establishes:** at 19:23:17Z the account served a chargeable
+`organizations/enrich`, so lead credits exist. That call consumed one.
+
+**What it does NOT establish:** how many. A 200 carries no balance; only a refusal
+does, in its `credit_balance` field. The historical 2,045 is not reused and no
+credit-to-call rate is assumed — one reservation is at most one lead credit, which
+bounds spend from above and says nothing about what a call actually costs.
+
+The probe's authorization has been returned to `APOLLO_RECOVERY_BUDGET_CALLS=0`.
+
+## Continuous mode: no manual grant after a top-up
+
+`APOLLO_CONTINUOUS_MODE` replaces "did someone issue a grant today" with "is Apollo
+serving", which is the question that can actually be answered automatically.
+
+**Learning the answer is free.** A credit refusal is returned before any work is
+done, so the run's own first chargeable call already IS the availability check. There
+is no separate probe and no credit spent finding out that there are none.
+
+**The refusal is durable and throttled.** `orchestrator/apollo_availability.py`
+records when the provider last refused, on the mounted volume, so a restart does not
+forget. A refusing provider is retried once `APOLLO_AVAILABILITY_RETRY_HOURS` (6) have
+passed — on a schedule, never once per company and never in a loop.
+
+**Recovery is a side effect of the next run succeeding.** The moment a chargeable call
+goes through, the record flips to serving and paid acquisition resumes. No new
+authorization id, no variable edit, no person.
+
+**What it does not relax.** The durable ledger still records every call, so spend
+stays auditable with no cap set. A configured aggregate still refuses exactly as
+before. Quality gates, contact and email validation, dedupe, suppression, custody and
+the Fantastic governor are all untouched. `SERVING` is a memory of the last answer,
+never a prediction: the next refusal flips it straight back.
+
+Verified offline before arming — exhaustion, restart and automatic recovery
+(`tests/test_continuous_apollo_operation.py`, 14 tests), including that an unknown or
+corrupt record reads as "attempt" because a failed attempt is free while a wrongly
+withheld one costs a day.
+
 ## No credits: what happens, and how it comes back
 
 **Exhaustion is a pause, not a loss, and not a relabelling.** Both our own
