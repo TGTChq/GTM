@@ -110,14 +110,34 @@ def load(path: str = "") -> Dict[str, Any]:
 
     target = _path(path)
     state = _read(target)
-    authorized = max(0, int(getattr(config, "APOLLO_RECOVERY_BUDGET_CALLS", 0) or 0))
+    requested = max(0, int(getattr(config, "APOLLO_RECOVERY_BUDGET_CALLS", 0) or 0))
     auth_id = str(getattr(config, "APOLLO_RECOVERY_BUDGET_ID", "") or "").strip()
     if not state or state.get("authorization_id") != auth_id:
         state = {"schema": SCHEMA, "authorization_id": auth_id, "consumed": 0,
                  "by_kind": {k: 0 for k in KINDS}, "opened_at": _now(),
-                 "last_charge_at": "", "deferrals": 0}
-    state["authorized"] = authorized
-    state["remaining"] = max(0, authorized - int(state.get("consumed", 0) or 0))
+                 "last_charge_at": "", "deferrals": 0, "authorized": requested}
+        state["requested_calls"] = requested
+        state["raised_under_same_id"] = False
+    else:
+        # AN OPEN AUTHORIZATION KEEPS THE SIZE IT WAS OPENED WITH.
+        #
+        # Raising the number under an id that already has a ledger does not enlarge
+        # it, and under a SPENT id it does not revive it. Without this, setting the
+        # ceiling to 2,000 beside a spent 200-call grant silently produces 1,800
+        # calls of fresh room under an authorization that was already closed -- a
+        # grant nobody issued, indistinguishable in the ledger from one that was.
+        # I did exactly that against production on 2026-09-07; maintenance was on
+        # and nothing was spent, but only the schedule prevented it.
+        #
+        # Lowering is still honoured: a ceiling may always be tightened. Only a NEW
+        # authorization id adopts a larger number, which is what makes a grant a
+        # deliberate, auditable act rather than a config edit.
+        opened_with = int(state.get("authorized", 0) or 0)
+        state["requested_calls"] = requested
+        state["raised_under_same_id"] = requested > opened_with
+        state["authorized"] = min(requested, opened_with) if opened_with else requested
+    state["remaining"] = max(0, int(state["authorized"]) - int(state.get("consumed", 0) or 0))
+    state["spent"] = state["remaining"] <= 0 and int(state.get("consumed", 0) or 0) > 0
     state["enabled"] = bool(getattr(config, "APOLLO_RECOVERY_BUDGET_ENABLED", False))
     return state
 
@@ -169,7 +189,8 @@ def summary(path: str = "") -> Dict[str, Any]:
     state = load(path)
     return {k: state.get(k) for k in
             ("enabled", "authorization_id", "authorized", "consumed", "remaining",
-             "by_kind", "deferrals", "opened_at", "last_charge_at")}
+             "by_kind", "deferrals", "opened_at", "last_charge_at", "spent",
+             "requested_calls", "raised_under_same_id")}
 
 
 def preflight(required: Optional[int] = None, *, path: str = "") -> Dict[str, Any]:
@@ -191,7 +212,10 @@ def preflight(required: Optional[int] = None, *, path: str = "") -> Dict[str, An
         out["reason"] = "APOLLO_RECOVERY_BUDGET_CALLS is 0 -- nothing is authorized"
         return out
     if int(state.get("remaining", 0)) <= 0:
-        out["reason"] = "authorized budget already consumed"
+        out["reason"] = ("authorized budget already consumed; a NEW "
+                         "APOLLO_RECOVERY_BUDGET_ID is required"
+                         if state.get("raised_under_same_id") else
+                         "authorized budget already consumed")
         return out
     if required is not None and int(state["remaining"]) < int(required):
         out["reason"] = (f"only {state['remaining']} calls remain, {required} "
@@ -242,7 +266,9 @@ def paid_acquisition_allowed(path: str = "") -> Dict[str, Any]:
         return {"allowed": False, "reason": "enrichment_authorization_spent",
                 "detail": (f"authorization {state.get('authorization_id')} is spent "
                            f"({state.get('consumed')} of {state.get('authorized')}); "
-                           "a NEW id is required, re-using this one resumes it"),
+                           "a NEW id is required. Raising the call count under this "
+                           "id grants nothing -- an open authorization keeps the "
+                           "size it was opened with"),
                 **summary(path)}
     return {"allowed": True, "reason": "authorized", **summary(path)}
 

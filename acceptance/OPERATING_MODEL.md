@@ -80,13 +80,26 @@ window is 03:00Z plus the run's duration.
 
 1. **Sources** — `ACQUISITION_EXTRA_LANES=ats`. Free inventory, no provider credits.
 2. **Ceiling in force** — `APOLLO_RECOVERY_BUDGET_ENABLED=true`.
-3. **Per-grant cost ceiling** — `APOLLO_RECOVERY_BUDGET_CALLS`. Pre-set, so that
-   resuming later is a single action. See the sizing note below.
-4. **Acquisition armed** — `FANTASTIC_JOBS_ENABLED=1`. Safe to leave on permanently
-   *because* paid lanes now stand down without an enrichment authorization.
-5. **Maintenance cleared** — `MAINTENANCE_ONLY=0`. Last.
+3. **Per-grant cost ceiling** — `APOLLO_RECOVERY_BUDGET_CALLS`. Currently `0`.
+4. **Acquisition armed** — `FANTASTIC_JOBS_ENABLED=1`. **BLOCKED HERE** — refused by
+   the permission layer. Safe to leave on permanently *because* paid lanes stand down
+   without an enrichment authorization.
+5. **Maintenance cleared** — `MAINTENANCE_ONLY=0`. **BLOCKED HERE** — same refusal.
+   Last step.
 
-The service is then ARMED: the `0 3 * * *` cron runs every night on its own.
+Steps 1 and 2 are done. **Steps 3–5 need a hand**, and until 4 and 5 are applied the
+service is not running on a schedule at all — no top-up of Apollo will change that.
+
+```bash
+railway api 'mutation { variableUpsert(input: {projectId: "898f2e3a-1c1e-4b00-b9a6-686cf0432282", environmentId: "bae427bd-64a6-4f4e-8f56-fbd406985434", serviceId: "3a41d0d7-cd66-4f53-baa6-886266ddbbed", name: "FANTASTIC_JOBS_ENABLED", value: "1"}) }'
+```
+
+```bash
+railway api 'mutation { variableUpsert(input: {projectId: "898f2e3a-1c1e-4b00-b9a6-686cf0432282", environmentId: "bae427bd-64a6-4f4e-8f56-fbd406985434", serviceId: "3a41d0d7-cd66-4f53-baa6-886266ddbbed", name: "MAINTENANCE_ONLY", value: "0"}) }'
+```
+
+Apply them outside the 03:00Z window. The service is then ARMED and the `0 3 * * *`
+cron runs every night on its own, standing paid lanes down until a grant exists.
 
 ## The three states, and what each night does
 
@@ -128,7 +141,21 @@ redeploy is needed beyond the one the variable change itself triggers, and no co
 is reset by deploying.
 
 To change the appetite rather than renew it, set `APOLLO_RECOVERY_BUDGET_CALLS`
-instead — that is the cost dial, and it takes effect on the next new grant.
+instead — that is the cost dial, and it takes effect **on the next new grant**. An
+authorization that is already open keeps the size it was opened with; the ceiling can
+always be *lowered*, never raised in place.
+
+> **Why that rule exists.** On 2026-09-07 I set the ceiling to 2,000 on the live
+> service while the SPENT 200-call id was still in place. That handed a closed
+> authorization 1,800 calls of fresh room — a grant nobody issued, and one that would
+> have been indistinguishable in the ledger from a real one. Maintenance was on and
+> the cron had not fired, so nothing was spent; only the schedule prevented it. The
+> ceiling was reverted to 0 within four minutes, and the module now refuses the
+> manoeuvre outright rather than relying on the operator not to make it.
+
+That is also what makes pre-arming safe: `APOLLO_RECOVERY_BUDGET_CALLS` can sit at
+its operating value beside a spent id and grant nothing at all, so resumption is one
+variable with no window in which the old authorization is quietly enlarged.
 
 ### Why the balance cannot size this, and why that is survivable
 
@@ -144,11 +171,15 @@ bounds spend at **no more than N lead credits**, without knowing the balance. An
 ceiling above the balance is not overconsumption: credits that do not exist cannot be
 spent, so Apollo refuses first and the run pauses cleanly.
 
-`APOLLO_RECOVERY_BUDGET_CALLS` is therefore set to **2,000**: an explicit ceiling of
-at most 2,000 potentially paid requests per grant, an order of magnitude above the
-only grant ever exercised (200, on 2026-09-07), and bounded whatever the balance turns
-out to be. It is a cap, not a forecast — nothing here predicts how many Approved rows
-2,000 requests produce, and the 2026-09-07 run is not a rate.
+A ceiling of **2,000** is the suggested starting value: an explicit cap of at most
+2,000 potentially paid requests per grant, an order of magnitude above the only grant
+ever exercised (200, on 2026-09-07), and bounded whatever the balance turns out to be.
+It is a cap, not a forecast — nothing predicts how many Approved rows 2,000 requests
+produce, and the 2026-09-07 run is not a rate.
+
+It is **not set on the service**: it was set and then reverted to `0` (see the box
+above), and setting it now would be inert anyway while the spent id stands. Set it in
+the same session as the new id.
 
 ## What is proved, and what is not
 
