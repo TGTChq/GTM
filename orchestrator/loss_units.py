@@ -225,7 +225,8 @@ def decompose(record: Optional[Mapping[str, Any]],
         "delivery": delivery_reconciles(metrics.get("airtable_candidates"),
                                         metrics.get("sent_to_airtable"), skips),
         **({"contact_discovery": contact_discovery(
-            hm, record.get("loss_reasons"), record.get("delivery_skip_breakdown"))}
+            hm, record.get("loss_reasons"), record.get("delivery_skip_breakdown"),
+            (hm or {}).get("stats"))}
            if hm else {"contact_discovery": {
                "unavailable": "no hiring-manager summary for this run; whether a "
                               "search was issued cannot be established"}}),
@@ -241,7 +242,8 @@ def decompose(record: Optional[Mapping[str, Any]],
 
 def contact_discovery(hm: Optional[Mapping[str, Any]],
                       reasons: Optional[Mapping[str, Any]],
-                      skips: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
+                      skips: Optional[Mapping[str, Any]],
+                      stats: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
     """Report marginal observations without treating them as a causal partition.
 
     hm_observability.hm_summary counts eligible lead rows and their diagnostic
@@ -286,9 +288,38 @@ def contact_discovery(hm: Optional[Mapping[str, Any]],
             "consequence": ("neither artifact links the populations here; a difference "
                             "requires scope and identity reconciliation, not choosing a counter"),
         },
+        # A NEGATIVE THAT COST NOTHING is separable, and only from the run's own
+        # stats. hiring_manager checks a zero-title negative cache BEFORE the client
+        # call and, on a hit, sets no search flag at all -- so a cached negative is
+        # neither a search nor a silent absence. It is the one part of "why is there
+        # no contact" the artifacts can answer, and only when stats are supplied.
+        "provider_interaction": _provider_interaction(stats),
         "not_established": [
             "distinct opportunity membership and overlap of these observations",
             "physical requests issued and completed during this run",
-            "whether an absent contact came from a cache, incomplete search or rejection",
+            "whether an absent contact came from an incomplete search or a rejection",
         ],
+    }
+
+
+def _provider_interaction(stats: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
+    """Counters the run stamps itself about search attempts and cached negatives.
+
+    ``row2_people_search_calls_total`` is incremented immediately before the client
+    call, inside the try -- so it counts attempts ENTERED, including any that raised.
+    It is not a count of completed searches, and nothing here treats it as one.
+    """
+    if stats is None:
+        return {"available": False,
+                "why": "the run's hiring-manager stats were not supplied"}
+    return {
+        "available": True,
+        "search_attempts_entered": _int(stats.get("row2_people_search_calls_total")),
+        "negative_cache_hits": _int(stats.get("people_search_negative_cache_hit")),
+        "incomplete_searches": _int(stats.get("people_search_incomplete")),
+        "companies_with_a_search_attempt": _int(
+            stats.get("row2_companies_with_people_search_call")),
+        "caution": ("attempts are counted before the call returns; a cached negative "
+                    "sets no search flag, so it is neither an attempt nor a silent "
+                    "absence"),
     }

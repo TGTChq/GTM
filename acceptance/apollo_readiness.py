@@ -14,6 +14,20 @@ COST, both cases, stated because "zero-cost probe" is only true of the failing o
 There is no zero-cost readiness signal: ``auth/health`` returns 200 throughout, so
 the only way to learn that credits are back is to attempt a credit-consuming call.
 
+THIS PROBE IS INSIDE THE DURABLE CEILING. It used to issue that request with a raw
+client, outside ``apollo_budget`` -- so the one call a spend ceiling is least able
+to afford, the one made precisely when nobody is sure what the account will do, was
+the one call the ceiling did not see. It now reserves before the request like every
+other chargeable call, so an availability check cannot spend outside the authorized
+aggregate and cannot escape the record of what was spent.
+
+That also enforces the distinction that matters when credits come back: **Apollo's
+balance and our internal authorization are different things.** Topping up the
+provider does not renew a grant that is zero or spent. If the probe refuses on the
+budget, no amount of Apollo credit will change it -- a NEW ``APOLLO_RECOVERY_BUDGET_ID``
+with a positive ``APOLLO_RECOVERY_BUDGET_CALLS`` is required, and re-using a spent id
+resumes its consumed counter rather than starting a fresh grant.
+
 Run it before restoring ``FANTASTIC_JOBS_ENABLED=1``. Resume on this, never on a
 date: ``next_billing_date`` is what Apollo reports, not a promise. A cycle can roll
 over without restoring lead credits if the plan allotment is the binding limit, if
@@ -22,6 +36,7 @@ an additional-usage cap is set, or if a payment is failing.
     PYTHONPATH=. railway run --no-local --service GTM -- python acceptance/apollo_readiness.py
 
 Exit codes:  0 READY   1 STILL REFUSING   2 UNEXPECTED (look before resuming)
+             3 NOT AUTHORIZED HERE -- the internal grant, not Apollo, is the blocker
 """
 
 from __future__ import annotations
@@ -43,6 +58,25 @@ def main() -> int:
         print("UNEXPECTED: no APOLLO_API_KEY in this environment")
         return 2
     print("apollo key tail4=%s (never printed in full)" % key[-4:])
+
+    # RESERVE BEFORE REQUESTING, exactly as the run does. A probe that spends
+    # outside the ceiling makes the ceiling unverifiable at the only moment anyone
+    # consults it.
+    from orchestrator import apollo_budget
+
+    try:
+        apollo_budget.charge(apollo_budget.KIND_ORG_ENRICH)
+    except apollo_budget.BudgetExhausted as exhausted:
+        state = getattr(exhausted, "state", {}) or {}
+        print("NOT AUTHORIZED HERE: the internal grant refuses this probe.")
+        print("  authorization_id  %s" % (state.get("authorization_id") or "(unset)"))
+        print("  authorized        %s" % state.get("authorized"))
+        print("  consumed          %s" % state.get("consumed"))
+        print("This is OUR ceiling, not Apollo's balance. Adding provider credits")
+        print("does not renew it, and re-using a spent authorization id resumes its")
+        print("consumed counter. Grant a NEW APOLLO_RECOVERY_BUDGET_ID with a")
+        print("positive APOLLO_RECOVERY_BUDGET_CALLS to make this probe possible.")
+        return 3
 
     headers = {"X-Api-Key": key, "Content-Type": "application/json",
                "Accept": "application/json", "Cache-Control": "no-cache"}
