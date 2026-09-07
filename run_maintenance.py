@@ -640,6 +640,58 @@ def _stream_field_counts(path: Path, fields, chunk: int = 4 << 20) -> dict:
     return {f: dict(c.most_common(20)) for f, c in found.items() if c}
 
 
+def preserve_run_artifacts(root: Path, run_ids, *, max_bytes: int = 64_000_000) -> dict:
+    """Copy a run's PER-LEAD evidence into the maintenance backup area.
+
+    The ordinary backup keeps each run's top-level JSON, which is what the reporting
+    layer reads. It does not keep `enrichment/` or `qualification/` -- and those are
+    the only files that can say WHY a particular lead was withheld. Retention prunes
+    under `run_artifacts`, so the evidence that explains a decision can disappear
+    while the decision's summary survives.
+
+    Bounded by a byte cap per file, because the same directory holds 143 MB corpora
+    for a full acquisition run and a volume with 14 GB free is not a place to copy
+    those by accident. Files over the cap are named and skipped rather than silently
+    omitted.
+    """
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    dest_root = root / "maintenance_backups" / stamp / "per_lead"
+    out = {"destination": str(dest_root), "runs": []}
+    for run_id in run_ids:
+        src = root / "run_artifacts" / run_id
+        row: Dict[str, Any] = {"run_id": run_id, "copied": [], "skipped_large": [],
+                               "bytes": 0, "unavailable": ""}
+        if not src.is_dir():
+            row["unavailable"] = "run directory absent"
+            out["runs"].append(row)
+            continue
+        for sub in ("enrichment", "qualification"):
+            base = src / sub
+            if not base.is_dir():
+                continue
+            for path in sorted(base.rglob("*")):
+                if not path.is_file():
+                    continue
+                try:
+                    size = path.stat().st_size
+                except OSError:
+                    continue
+                rel = path.relative_to(src)
+                # POSIX form: an evidence record must not vary with the OS that
+                # wrote it. Production is Linux; this also runs on Windows.
+                name = rel.as_posix()
+                if size > max_bytes:
+                    row["skipped_large"].append({"name": name, "bytes": size})
+                    continue
+                dst = dest_root / run_id / rel
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(path, dst)
+                row["copied"].append({"name": name, "bytes": size})
+                row["bytes"] += size
+        out["runs"].append(row)
+    return out
+
+
 def send_safe_forensics(root: Path, run_ids, *, limit: int = 200) -> dict:
     """WHY a lead was withheld as not send-safe, per lead, from its own stored facts.
 
@@ -1345,6 +1397,9 @@ def main(argv=None) -> int:
 
         _say("4c0c. EXECUTION RECONCILE (stage-entry evidence, not a payload recount)")
         print(json.dumps(execution_reconcile(root, ids), indent=2, default=str))
+
+        _say("4c0f. PRESERVE PER-LEAD EVIDENCE (retention cannot reach a backup)")
+        print(json.dumps(preserve_run_artifacts(root, ids), indent=2, default=str))
 
         _say("4c0e. SEND-SAFE FORENSICS (why a lead was withheld, per lead, offline)")
         print(json.dumps(send_safe_forensics(root, ids), indent=2, default=str))

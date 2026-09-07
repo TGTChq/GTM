@@ -973,3 +973,54 @@ class WithholdingIsExplainedPerLeadNotCounted(unittest.TestCase):
         for forbidden in ("push_leads", "request_with_retry", "patch", "update",
                           "create", "write_text"):
             self.assertNotIn(forbidden, called)
+
+
+class PerLeadEvidenceIsPreservedBeforeRetentionCanReachIt(unittest.TestCase):
+    """The ordinary backup keeps each run's top-level JSON -- what the reporting layer
+    reads. It does not keep `enrichment/` or `qualification/`, and those are the only
+    files that can say WHY a particular lead was withheld. Retention prunes under
+    `run_artifacts`, so the evidence explaining a decision can vanish while the
+    decision's summary survives."""
+
+    def _root(self, files):
+        import tempfile as _tempfile
+        from pathlib import Path as _Path
+
+        root = _Path(_tempfile.mkdtemp())
+        for rel, payload in files.items():
+            path = root / "run_artifacts" / "r1" / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(payload, encoding="utf-8")
+        return root
+
+    def test_per_lead_files_are_copied_out_of_the_pruned_tree(self):
+        root = self._root({"enrichment/jobs_enriched_x.json": '{"jobs":[]}',
+                           "qualification/nonpass.json": "[]"})
+        row = run_maintenance.preserve_run_artifacts(root, ["r1"])["runs"][0]
+        names = {c["name"] for c in row["copied"]}
+        self.assertIn("enrichment/jobs_enriched_x.json", names)
+        self.assertIn("qualification/nonpass.json", names)
+
+    def test_a_huge_corpus_is_named_and_skipped_not_silently_omitted(self):
+        """The same directory holds 143 MB corpora for a full acquisition run, and a
+        volume with 14 GB free is not a place to copy those by accident."""
+        root = self._root({"enrichment/small.json": "{}",
+                           "enrichment/huge.json": " " * 5000})
+        row = run_maintenance.preserve_run_artifacts(root, ["r1"], max_bytes=1000)["runs"][0]
+        self.assertEqual([s["name"] for s in row["skipped_large"]],
+                         ["enrichment/huge.json"])
+        self.assertTrue(row["copied"])
+
+    def test_the_original_is_never_moved_or_removed(self):
+        root = self._root({"enrichment/jobs_enriched_x.json": '{"jobs":[]}'})
+        run_maintenance.preserve_run_artifacts(root, ["r1"])
+        self.assertTrue((root / "run_artifacts" / "r1" / "enrichment"
+                         / "jobs_enriched_x.json").is_file())
+
+    def test_a_missing_run_is_reported_not_crashed(self):
+        import tempfile
+        from pathlib import Path
+
+        row = run_maintenance.preserve_run_artifacts(
+            Path(tempfile.mkdtemp()), ["nope"])["runs"][0]
+        self.assertEqual(row["unavailable"], "run directory absent")
