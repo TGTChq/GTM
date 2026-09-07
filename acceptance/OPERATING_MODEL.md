@@ -137,33 +137,49 @@ Reservations count **request attempts by kind**, not provider credits. What Apol
 charges for a request depends on the response and the plan, so the ceiling bounds
 requests and says so.
 
-## Activation order
+## Activation order — DONE 2026-09-07T19:55Z
 
-Budgets and sources first, maintenance last. **Never publish during a run** — the
-window is 03:00Z plus the run's duration.
+Applied in order, budgets and sources first, maintenance last, and 7 hours clear of
+the 03:00Z window:
 
-1. **Sources** — `ACQUISITION_EXTRA_LANES=ats`. Free inventory, no provider credits.
-2. **Ceiling in force** — `APOLLO_RECOVERY_BUDGET_ENABLED=true`.
-3. **Per-grant cost ceiling** — `APOLLO_RECOVERY_BUDGET_CALLS`. Currently `0`.
-4. **Acquisition armed** — `FANTASTIC_JOBS_ENABLED=1`. **BLOCKED HERE** — refused by
-   the permission layer. Safe to leave on permanently *because* paid lanes stand down
-   without an enrichment authorization.
-5. **Maintenance cleared** — `MAINTENANCE_ONLY=0`. **BLOCKED HERE** — same refusal.
-   Last step.
+| step | variable | value |
+|---|---|---|
+| 1 sources | `ACQUISITION_EXTRA_LANES` | `ats` — 145 direct boards, no provider credits |
+| 2 ledger | `APOLLO_RECOVERY_BUDGET_ENABLED` | `true` — every call still recorded |
+| 3 spend gate | `APOLLO_CONTINUOUS_MODE` | `true` — the provider is the ceiling, no manual grant |
+| 4 acquisition | `FANTASTIC_JOBS_ENABLED` | `1` |
+| 5 maintenance | `MAINTENANCE_ONLY` | `0` |
 
-Steps 1 and 2 are done. **Steps 3–5 need a hand**, and until 4 and 5 are applied the
-service is not running on a schedule at all — no top-up of Apollo will change that.
+Deployed commit `1927dbe` on both services. Crons unchanged: `0 3 * * *` and
+`0 0 * * *`. **The first run under this configuration is 2026-09-08T03:00:00Z and has
+not happened yet** — nothing in this file is a result.
 
-```bash
-railway api 'mutation { variableUpsert(input: {projectId: "898f2e3a-1c1e-4b00-b9a6-686cf0432282", environmentId: "bae427bd-64a6-4f4e-8f56-fbd406985434", serviceId: "3a41d0d7-cd66-4f53-baa6-886266ddbbed", name: "FANTASTIC_JOBS_ENABLED", value: "1"}) }'
-```
+`APOLLO_RECOVERY_BUDGET_CALLS` stays `0` and no arbitrary 2,000-call cap was
+reinstated: in continuous mode a call with no aggregate configured is RECORDED rather
+than refused, so spend stays auditable without a number nobody could justify. The
+`luis-20260907-balance-probe-1` id is inert in this mode and gates nothing.
 
-```bash
-railway api 'mutation { variableUpsert(input: {projectId: "898f2e3a-1c1e-4b00-b9a6-686cf0432282", environmentId: "bae427bd-64a6-4f4e-8f56-fbd406985434", serviceId: "3a41d0d7-cd66-4f53-baa6-886266ddbbed", name: "MAINTENANCE_ONLY", value: "0"}) }'
-```
+### What the 03:00Z run will do
 
-Apply them outside the 03:00Z window. The service is then ARMED and the `0 3 * * *`
-cron runs every night on its own, standing paid lanes down until a grant exists.
+Acquire from Fantastic and the free ATS boards, adopt what custody still owes with the
+two populations attributed separately, enrich against Apollo while it serves, and
+deliver send-safe rows toward a target of 1,000 distinct NEW Approved with
+continue-after-target, so a good night is not truncated at the goal.
+
+If Apollo refuses partway: the charge is globally fatal, the loop stops, approvals
+already delivered are counted, unfinished postings stay in custody, and the refusal is
+recorded. Subsequent runs then stand paid acquisition down -- buying nothing -- while
+still attempting one controlled call once the retry interval has elapsed. The first
+call that RETURNS lifts it automatically, with no new authorization and no variable
+change.
+
+### What is still not readable
+
+**The Apollo lead-credit BALANCE.** `auth/health` returns 200 whether or not credits
+remain, and a successful chargeable call carries no balance either -- only a refusal
+does, in `credit_balance`. The count is therefore unknown, and continuous mode is the
+answer to that rather than a workaround: the provider's own refusal is the ceiling, it
+costs nothing to discover, and recovery from it is automatic.
 
 ## The three states, and what each night does
 
