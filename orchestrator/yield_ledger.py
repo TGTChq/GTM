@@ -24,7 +24,13 @@ from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List, Optional
 
+from orchestrator import source_cost
+
 logger = logging.getLogger(__name__)
+
+#: Distinguishes "the caller said this source costs nothing" from "the caller never
+#: mentioned it". ``None`` already means "known to be unknown", so it cannot serve.
+_MISSING = object()
 
 LEDGER_SCHEMA = "yield-ledger/1"
 
@@ -234,13 +240,21 @@ class YieldLedger:
     def summary(self, *, billed_by_source: Optional[Dict[str, int]] = None) -> Dict[str, Any]:
         rows = list(self.rows.values())
         sources = self.by_source(billed_by_source=billed_by_source)
+        # A free lane reports no billing total because it has no bill, not because a
+        # provider failed to answer. Summing therefore stops only on a source whose
+        # cost is genuinely UNKNOWN -- see orchestrator.source_cost.
+        total = source_cost.run_total(
+            {label: {"credits": group.get("credits"), "basis": group.get("billing_basis")}
+             for label, group in sources.items()}) if billed_by_source is not None else {
+            "credits": None, "basis": "unavailable", "unknown_cost_sources": [],
+            "known_zero_cost_sources": []}
         return {
             "enabled": self.enabled, "rows": len(rows), "written": self.written,
             "errors": self.errors,
-            "credits": (sum(g["credits"] for g in sources.values())
-                        if billed_by_source is not None and all(
-                            g["credits"] is not None for g in sources.values()) else None),
-            "billing_basis": "source_returned_billed" if billed_by_source is not None else "unavailable",
+            "credits": total["credits"],
+            "billing_basis": total["basis"],
+            "unknown_cost_sources": total["unknown_cost_sources"],
+            "known_zero_cost_sources": total["known_zero_cost_sources"],
             "send_safe": sum(1 for r in rows if r.send_safe),
             "net_new_send_safe": sum(1 for r in rows if r.net_new_send_safe),
             # PER SOURCE, for this run only. The whole business question is
@@ -273,14 +287,31 @@ class YieldLedger:
             g["airtable_created"] += 1 if r.airtable_created else 0
             g["net_new_send_safe"] += 1 if r.net_new_send_safe else 0
             g["apollo_credits"] += int(r.apollo_credits or 0)
-        # A source with paid replies but zero kept IDs must still appear.
+        # A source with paid replies but zero kept IDs must still appear, with the
+        # SAME shape as every other group -- a caller reading `send_safe` off one of
+        # these must not get a missing key where every sibling has a zero.
         for source in billed_by_source or {}:
-            out.setdefault(source, {"recorded_rows": 0, "net_new": 0,
-                "airtable_created": 0, "net_new_send_safe": 0})
+            out.setdefault(source, {
+                "recorded_rows": 0, "net_new": 0, "previously_seen": 0,
+                "duplicate_in_run": 0, "icp_pass": 0, "hm_found": 0, "send_safe": 0,
+                "airtable_created": 0, "net_new_send_safe": 0, "apollo_credits": 0})
         for source, g in out.items():
-            credits = (billed_by_source or {}).get(source)
+            credits = (billed_by_source or {}).get(source, _MISSING)
+            if credits is _MISSING:
+                # The caller did not mention this source at all. Classify it rather
+                # than calling it unavailable: a free lane's zero is a fact.
+                cost = (source_cost.source_cost(source, {}) if billed_by_source is not None
+                        else {"credits": None, "basis": "unavailable"})
+                credits, basis = cost["credits"], cost["basis"]
+            else:
+                basis = (source_cost.BILLED if credits is not None
+                         else (source_cost.PAID_BILLING_ABSENT
+                               if source_cost.is_paid_source(source)
+                               else source_cost.UNCLASSIFIED))
+                if credits == 0 and source_cost.is_free_source(source):
+                    basis = source_cost.KNOWN_ZERO
             g["credits"] = credits
-            g["billing_basis"] = "source_returned_billed" if credits is not None else "unavailable"
+            g["billing_basis"] = basis
             measured_outcomes = self.enabled and not self.errors
             g["outcome_measurement"] = "measured" if measured_outcomes else "unavailable"
             g["net_new_per_1k_credits"] = (

@@ -482,6 +482,26 @@ def _company_identity_keys_from_fields(fields: Dict) -> Set[str]:
     company = normalize_company_name(fields.get("Company"))
     if company:
         keys.add(f"name:{company}")
+    # THE STABLE IDENTIFIER THE RESOLVER ALREADY DECIDED ON.
+    #
+    # `Outbound Company Identity` holds the resolver's key -- `linkedin:<slug>` or
+    # `domain:<host>` -- and every row it wrote carries it. Suppression read only
+    # Website and Company, so the one identifier chosen precisely because it is
+    # stable was the one identifier it ignored: an organization posting under two
+    # domains (a careers subdomain, a regional site, a domain moved mid-rebrand)
+    # produced two disjoint key sets and two active rows for one company x function.
+    #
+    # This can only ADD matches, and only between rows that already agree on a
+    # LinkedIn organization -- two different companies never share a slug. A held
+    # row carries no identity key and so is unaffected. The same shared-platform
+    # rule applies: a `domain:` identity on an ATS host is still not an identity.
+    identity = str(fields.get("Outbound Company Identity") or "").strip().lower()
+    if identity.startswith("domain:"):
+        host = normalize_company_domain(identity.split(":", 1)[1])
+        if host and not is_intermediary_domain(host, config.INTERMEDIARY_JOB_DOMAINS):
+            keys.add(f"domain:{host}")
+    elif identity.startswith("linkedin:") and len(identity) > len("linkedin:"):
+        keys.add(identity)
     return keys
 
 
@@ -493,6 +513,7 @@ def _company_identity_keys_from_job(job: Dict) -> Set[str]:
             else job.get("employer_website")
         ),
         "Company": job.get("employer_name"),
+        "Outbound Company Identity": job.get("outbound_company_identity_key"),
     }
     return _company_identity_keys_from_fields(fields)
 
@@ -511,6 +532,7 @@ def _company_function_keys_from_fields(fields: Dict) -> Set[str]:
 
 def _company_function_keys_from_job(job: Dict) -> Set[str]:
     fields = {
+        "Outbound Company Identity": job.get("outbound_company_identity_key"),
         "Website": (
             f"https://{job.get('company_domain')}"
             if job.get("company_domain")

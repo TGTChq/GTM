@@ -9,28 +9,104 @@ from run_maintenance import send_safe_forensics
 from tests.test_fantastic_send_safe_auto_approval import _fantastic_job
 
 
+#: The five company holds the 2026-09-07 run produced, as the RECORD carried them.
+#: ``other_name`` is the second published name the provider returned for the same
+#: posting where it returned one -- Endeavor's rebrand is only legible because the
+#: record names the company twice, once per anchor, so dropping it would test a
+#: record production never saw.
 REVIEWED = [
-    ("EndeavorB2B", "endeavorb2b", "endeavorbusinessmedia.com"),
-    ("BS&B Safety Systems", "bsbsafetysystems", "bsbsystems.com"),
-    ("Kai", "kaisecurity", "kai.security"),
-    ("Nash", "", "usenash.com"),
-    ("Zwicker & Associates, P.C.", "zwickerassociatespc", "zwickerpc.com"),
+    ("EndeavorB2B", "endeavorb2b", "endeavorbusinessmedia.com", "Endeavor Business Media"),
+    ("BS&B Safety Systems", "bsbsafetysystems", "bsbsystems.com", "BS&B SAFETY SYSTEMS, LLC.."),
+    ("Kai", "kaisecurity", "kai.security", ""),
+    ("Nash", "", "usenash.com", ""),
+    ("Zwicker & Associates, P.C.", "zwickerassociatespc", "zwickerpc.com", ""),
 ]
 
 
-@pytest.mark.parametrize("name,slug,domain", REVIEWED)
-def test_reviewed_identity_resolves_without_relaxing_other_identities(tmp_path, name, slug, domain):
-    overrides = Path(__file__).resolve().parents[1] / "company_display_overrides.json"
-    cache = CompanyDisplayCache(tmp_path / "cache.json", overrides_path=overrides)
-    inputs = dict(organization=name, org_linkedin_slug=slug, employer_domain=domain)
-    before = resolve_company_display(**inputs, cache=CompanyDisplayCache(tmp_path / "empty"), persist=False)
-    after = resolve_company_display(**inputs, cache=cache, persist=False)
-    assert before.hold is True
-    assert after.hold is False
-    assert after.name == name
-    assert after.evidence["manual_override"] is True
+def _no_overrides(tmp_path):
+    """A resolver with an EMPTY overrides file: nothing may come from a name list."""
+    path = tmp_path / "no_overrides.json"
+    path.write_text(json.dumps({"entries": {}, "aliases": {}}))
+    return path
+
+
+@pytest.mark.parametrize("name,slug,domain,other_name", REVIEWED)
+def test_reviewed_identity_resolves_with_no_manual_entry_at_all(tmp_path, name, slug, domain, other_name):
+    """The five 2026-09-07 holds clear from EVIDENCE, not from being listed.
+
+    They were first cleared by five hand-written equivalences. That fixed those five
+    companies and nothing else: a sixth company with the same shape stayed held. This
+    asserts the replacement -- an empty overrides file, and they still resolve --
+    which is the only version of the fix that reaches a company never seen before.
+    """
+    cache = CompanyDisplayCache(tmp_path / "cache.json", overrides_path=_no_overrides(tmp_path))
+    # The rebrand publishes the CURRENT name on LinkedIn and the former one as the
+    # organization, so the record is built the way the provider returned it.
+    inputs = (dict(organization=other_name, org_linkedin_name=name) if other_name
+              else dict(organization=name))
+    inputs.update(org_linkedin_slug=slug, employer_domain=domain)
+    result = resolve_company_display(**inputs, cache=cache, persist=False)
+    assert result.hold is False
+    assert result.name == name
+    assert result.evidence["manual_override"] is False
+    # Changing either identifier is a DIFFERENT organization and must stay held: the
+    # evidence is about this name and these anchors, never about the name alone.
     for other in ({"employer_domain": "unrelated.example"}, {"org_linkedin_slug": "unrelated"}):
-        assert resolve_company_display(**{**inputs, **other}, cache=cache, persist=False).hold
+        moved = resolve_company_display(**{**inputs, **other}, cache=cache, persist=False)
+        assert moved.hold, f"{other} must not inherit the resolved identity"
+
+
+def test_no_manual_override_survives_that_the_general_path_already_reaches(tmp_path):
+    """A hand-written equivalence is only legitimate where no rule can reach.
+
+    This is what stops the list growing back. Every entry in the shipped overrides
+    file is re-resolved from its OWN recorded evidence with overrides disabled; any
+    entry the general resolver already produces the same name for is redundant and
+    fails here, so the next person cannot quietly add one instead of extending the
+    evidence rules.
+    """
+    overrides = Path(__file__).resolve().parents[1] / "company_display_overrides.json"
+    data = json.loads(overrides.read_text(encoding="utf-8"))
+    redundant = []
+    for index, (key, entry) in enumerate(data["entries"].items()):
+        evidence = entry.get("evidence") or {}
+        slug = evidence.get("org_linkedin_slug") or (
+            key.split(":", 1)[1] if key.startswith("linkedin:") else "")
+        domain = evidence.get("domain") or next(
+            (k.split(":", 1)[1] for k in entry.get("identity_keys", []) if k.startswith("domain:")), "")
+        general = resolve_company_display(
+            organization=evidence.get("organization") or entry["display_name"],
+            org_linkedin_name=evidence.get("org_linkedin_name") or "",
+            org_linkedin_slug=slug, employer_domain=domain,
+            cache=CompanyDisplayCache(tmp_path / f"c{index}.json",
+                                      overrides_path=_no_overrides(tmp_path)),
+            persist=False)
+        if not general.hold and general.name == entry["display_name"]:
+            redundant.append(key)
+        else:
+            assert entry["evidence"].get("retained_because"), (
+                f"{key} is not reachable by a general rule; say why it must be manual")
+    assert not redundant, (
+        f"these overrides are already produced by the evidence rules: {redundant}")
+
+
+def test_a_parent_domain_still_holds_and_says_what_is_missing(tmp_path):
+    """Minth North America on minthgroup.com -- the shape that must NOT resolve.
+
+    A subsidiary posting under its group's domain looks exactly like the cases above
+    minus the thing that makes them safe: no ordered subset of "Minth North America"
+    spells ``minthgroup``. It stayed held through the whole change, and the hold now
+    names the evidence that would settle it instead of being anonymous.
+    """
+    result = resolve_company_display(
+        organization="Minth North America", org_linkedin_name="Minth North America, Inc.",
+        org_linkedin_slug="minthnorthamericainc", employer_domain="minthgroup.com",
+        cache=CompanyDisplayCache(tmp_path / "c.json", overrides_path=_no_overrides(tmp_path)),
+        persist=False)
+    assert result.hold is True
+    assert "linkedin_slug_domain_disagreement" in result.evidence["reasons"]
+    need = " ".join(result.evidence["missing_evidence"]["need"])
+    assert "declared website" in need and "BOTH identifiers" in need
 
 
 def _corpus(tmp_path, jobs):
@@ -133,12 +209,13 @@ def test_source_yield_counts_billed_repeats_and_zero_kept_sources(tmp_path):
     assert absent["fantastic_jobs_ats"]["airtable_created_per_1k_credits"] is None
 
 
-@pytest.mark.parametrize("name,slug,domain", REVIEWED)
-def test_resolved_company_does_not_promote_unverified_email_or_unsafe_contact(tmp_path, name, slug, domain):
+@pytest.mark.parametrize("name,slug,domain,other_name", REVIEWED)
+def test_resolved_company_does_not_promote_unverified_email_or_unsafe_contact(tmp_path, name, slug, domain, other_name):
     from airtable_client import _job_to_fields, send_safe_facts
     cache = CompanyDisplayCache(tmp_path / "cache", overrides_path=
         Path(__file__).resolve().parents[1] / "company_display_overrides.json")
-    display = resolve_company_display(organization=name, org_linkedin_slug=slug,
+    display = resolve_company_display(organization=other_name or name,
+        org_linkedin_name=name if other_name else "", org_linkedin_slug=slug,
         employer_domain=domain, cache=cache, persist=False)
     job = _fantastic_job(canonical_company_name=name, company_domain=domain,
         hiring_manager_email=f"fixture@{domain}", outbound_company_name=display.name,

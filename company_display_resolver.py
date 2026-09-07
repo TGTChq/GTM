@@ -15,14 +15,32 @@ import sys
 import threading
 import unicodedata
 from dataclasses import asdict, dataclass
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, Optional
 
+from company_anchor_evidence import (
+    best_derivation,
+    domain_anchor_forms,
+    organization_attests_correspondence,
+    rename_correspondence,
+    slug_anchor_forms,
+)
 from domain_utils import normalize_company_domain
 
 
-RESOLVER_VERSION = "company-display/1"
+#: Bumped when the DECISION changes, not when the file does. A cached name carries
+#: the version that produced it, and :meth:`CompanyDisplayCache.lookup` ignores an
+#: entry from an older one, so an improvement reaches companies already in the cache
+#: instead of being pinned behind the first answer they ever got.
+RESOLVER_VERSION = "company-display/2"
 CACHE_SCHEMA = "company-display-cache/1"
+
+#: How long a machine-resolved entry may be reused. Anchors change under the same
+#: company -- a rebrand, a moved domain -- so evidence gathered once must not decide
+#: forever. Human-reviewed overrides are exempt: they are a decision, not a cached
+#: computation, and they are re-reviewed by editing the overrides file.
+CACHE_TTL_DAYS = 45
 
 _LEGAL_SUFFIX_RE = re.compile(
     r"(?:,?\s+)(incorporated|inc\.?|llc\.?|l\.l\.c\.?|ltd\.?|limited|"
@@ -88,6 +106,47 @@ def _anchor_match(name_key: str, anchor: str) -> str:
     if len(anchor) >= 4 and name_key.startswith(anchor) and len(anchor) / len(name_key) >= 0.45:
         return "extension"
     return ""
+
+
+#: Anchor readings that rest on a naming CONVENTION rather than on the identifier's
+#: own letters. Agreement reached only through one of these is real but weaker, and
+#: is capped below high confidence for the same reason a bridged conflict is.
+_CONVENTION_FORMS = frozenset({"vanity_prefix_stripped"})
+
+
+def _forms_agreement(slug_forms, domain_forms) -> Dict[str, Any]:
+    """Do the two identifiers agree under ANY readable spelling of each?
+
+    A domain has more than one honest reading -- the second-level label, the whole
+    domain including a brand TLD, the label without a registrar vanity prefix. The
+    old test compared one spelling of each and called a mismatch a conflict, which
+    is how ``kai.security`` came to "disagree" with the slug ``kaisecurity``: the
+    two are the same string once the TLD is not discarded.
+
+    Agreement under any pairing settles the disagreement, because every form names
+    the same registered domain -- but HOW it was reached is kept, because a vanity
+    prefix is a convention we applied, not something the domain states. Reading
+    ``getclark.com`` as "clark" is very probably right and is not a fact, so a row
+    that agrees only that way is treated exactly like a bridged conflict: sendable,
+    never high.
+    """
+    if not slug_forms or not domain_forms:
+        return {"conflict": False, "agreed_on": None, "convention_only": False}
+    strong = None
+    weak = None
+    for s in slug_forms:
+        for d in domain_forms:
+            if _anchors_conflict(s.key, d.key):
+                continue
+            pair = {"linkedin_form": s.form, "domain_form": d.form,
+                    "linkedin_key": s.key, "domain_key": d.key}
+            if s.form in _CONVENTION_FORMS or d.form in _CONVENTION_FORMS:
+                weak = weak or pair
+            else:
+                strong = strong or pair
+    agreed = strong or weak
+    return {"conflict": agreed is None, "agreed_on": agreed,
+            "convention_only": bool(agreed is not None and strong is None)}
 
 
 def _anchors_conflict(slug_anchor: str, domain_anchor: str) -> bool:
@@ -157,6 +216,155 @@ def _bridging_brand(chosen: Optional[Dict[str, Any]],
         and key in slug_anchor and key in domain_anchor
     ]
     return max(bridging, key=len) if bridging else ""
+
+
+def _identity_match(cleaned: str, raw: str, forms, primary: str,
+                    legal_cleanup: bool) -> tuple[str, Optional[Dict[str, Any]]]:
+    """How strongly one published name is corroborated by one stable identifier.
+
+    Returns ``("exact"|"derived"|"prefix"|"extension"|"legal"|"", derivation)``.
+
+    The existing string tiers are evaluated first and unchanged, so nothing that
+    resolved before resolves differently. What is new is the fallback: when no
+    spelling of the identifier matches the name as a string, ask whether the
+    identifier can be CONSTRUCTED from the name's own words. That is what lets
+    ``bsbsystems.com`` corroborate "BS&B Safety Systems" without any entry naming
+    either of them -- and what still refuses ``minthgroup.com`` for "Minth North
+    America", because a parent's domain is not built from the subsidiary's words.
+    """
+    key = _name_key(cleaned, drop_legal=True)
+    raw_key = _name_key(raw)
+    match = _anchor_match(key, primary)
+    if match:
+        return match, None
+    if legal_cleanup and _anchor_match(raw_key, primary) == "exact":
+        return "legal", None
+    derivation = best_derivation(cleaned, forms) or best_derivation(raw, forms)
+    if derivation:
+        return ("exact" if derivation.exact else "derived"), derivation.to_dict()
+    return "", None
+
+
+def _derives_both(candidate: Optional[Dict[str, Any]]) -> bool:
+    """Is this one published name the source of BOTH stable identifiers?
+
+    The general form of the old bridging-brand test. That test asked whether the
+    name was literally *contained* in both anchor strings, which only ever held for
+    decorations around an unchanged brand. This asks whether both anchors can be
+    CONSTRUCTED from the name -- so a domain that drops an interior word
+    (``bsbsystems`` from "BS&B Safety Systems") counts, while a parent's domain
+    (``minthgroup`` for "Minth North America") still does not, because no ordered
+    subset of those words spells it.
+    """
+    if not candidate:
+        return False
+    matches = candidate.get("identity_matches") or {}
+    return bool(matches.get("linkedin")) and bool(matches.get("domain"))
+
+
+def _resolve_conflict(chosen, evaluated, slug_forms, domain_forms,
+                      attestation: Dict[str, Any],
+                      bridging_brand: str) -> Dict[str, Any]:
+    """Evidence, if any, that two disagreeing identifiers name one organization.
+
+    Tried strongest-first, and every branch returns WHAT it relied on. Nothing here
+    compares one company to another: each test is about a single provider record,
+    which is why homonyms cannot be merged by any of them -- two companies never
+    appear in one record's organization fields.
+    """
+    if _derives_both(chosen):
+        return {"resolved": True, "reason": "identity_conflict_resolved_by_shared_derivation",
+                "basis": "both_identifiers_derived_from_one_published_name",
+                "derivations": chosen.get("identity_derivations") or {}}
+    if attestation.get("attested"):
+        return {"resolved": True, "reason": "identity_conflict_resolved_by_organization_profile",
+                "basis": attestation["basis"],
+                "linkedin_declared_website": attestation["linkedin_declared_website"]}
+    # A rebrand: the provider returned two names for one record, each exactly
+    # corroborated by a DIFFERENT identifier. Unrelated pairings cannot produce that
+    # shape, and the leading-token bar keeps a coincidental prefix from bridging.
+    by_slug = [c for c in evaluated if (c["identity_matches"].get("linkedin") == "exact")]
+    by_domain = [c for c in evaluated if (c["identity_matches"].get("domain") == "exact")]
+    if by_slug and by_domain:
+        related = rename_correspondence([by_slug[0]["cleaned"], by_domain[0]["cleaned"]])
+        if related.get("related"):
+            return {"resolved": True,
+                    "reason": "identity_conflict_resolved_by_attested_rename",
+                    "basis": related["basis"],
+                    "shared_leading_token": related["shared_leading_token"],
+                    # The LinkedIn page is the organization's current self-description
+                    # and the slug survives a rebrand, so it names the company today.
+                    "display_name": by_slug[0]["cleaned"],
+                    "superseded_name": by_domain[0]["cleaned"]}
+    if bridging_brand:
+        return {"resolved": True, "reason": "identity_conflict_bridged_by_shared_brand",
+                "basis": "published_name_contained_in_both_anchors",
+                "bridging_brand": bridging_brand}
+    return {"resolved": False}
+
+
+def _missing_evidence(reasons, slug_forms, domain_forms,
+                      attestation: Dict[str, Any], evaluated) -> Dict[str, Any]:
+    """What would settle this hold, stated as a fact about the record.
+
+    A hold with no explanation is indistinguishable from a hold that cannot be
+    explained. Naming the gap is what lets an operator tell "we lack an anchor" from
+    "the anchors describe different organizations", without re-deriving either.
+    """
+    have = {"linkedin_slug": bool(slug_forms), "employer_domain": bool(domain_forms),
+            "published_name": bool(evaluated)}
+    need: list[str] = []
+    if "no_company_name_candidate" in reasons:
+        need.append("a published organization name on the posting")
+    if "no_stable_linkedin_or_domain_identity" in reasons:
+        need.append("a LinkedIn organization slug or an employer domain")
+    if "linkedin_slug_domain_disagreement" in reasons:
+        need.append("a correspondence tying this slug to this domain: the LinkedIn "
+                    "organization's own declared website, or a published name from "
+                    "which BOTH identifiers can be constructed")
+    if "selected_name_not_corroborated_by_identity" in reasons:
+        need.append("a published name that the slug or the domain is built from")
+    if "identity_consistent_candidates_disagree" in reasons:
+        need.append("which of the corroborated names the organization publishes today")
+    if "unresolved_multi_entity_or_franchise_name" in reasons:
+        need.append("the single employer behind a multi-entity or franchise label")
+    if "malformed_or_coded_company_name" in reasons:
+        need.append("a human-readable organization name")
+    return {"have": have, "need": need or ["no evidence gap recorded for this reason"],
+            "linkedin_declared_website": attestation.get("linkedin_declared_website", ""),
+            "anchor_forms": {"linkedin": [f.form for f in slug_forms],
+                             "domain": [f.form for f in domain_forms]}}
+
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _cache_entry_is_current(entry: Dict[str, Any]) -> bool:
+    """Is a cached machine decision still usable?
+
+    Two independent reasons it may not be, and either one retires it:
+
+    * it was produced by an older resolver, so it predates a decision change;
+    * it is older than :data:`CACHE_TTL_DAYS`, so the anchors behind it may have
+      moved under the same company.
+
+    An entry with no recorded age is treated as stale rather than as fresh: entries
+    written before this field existed carry a decision whose age is unknown, and
+    re-resolving one costs nothing but a recomputation.
+    """
+    if str(entry.get("resolver_version") or "") != RESOLVER_VERSION:
+        return False
+    stamp = str(entry.get("resolved_at") or "").strip()
+    if not stamp:
+        return False
+    try:
+        resolved = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    if resolved.tzinfo is None:
+        resolved = resolved.replace(tzinfo=timezone.utc)
+    return (_utc_now() - resolved) <= timedelta(days=max(1, int(CACHE_TTL_DAYS)))
 
 
 @dataclass(frozen=True)
@@ -255,6 +463,7 @@ class CompanyDisplayCache:
                 "identity_keys": identity_keys,
                 "evidence": result.evidence,
                 "resolver_version": RESOLVER_VERSION,
+                "resolved_at": _utc_now().isoformat().replace("+00:00", "Z"),
                 "manual_override": False,
             }
             entries[result.identity_key] = entry
@@ -359,6 +568,14 @@ def resolve_company_display(
     domain = normalize_company_domain(employer_domain or org_linkedin_website)
     slug_anchor = slug
     domain_anchor = _domain_brand(domain)
+    slug_forms = slug_anchor_forms(slug)
+    domain_forms = domain_anchor_forms(domain)
+    # The organization's own LinkedIn page states its website. When that website is
+    # the employer domain we are holding, LinkedIn -- not us -- is asserting that
+    # this slug and this domain belong to one organization, which is the strongest
+    # correspondence obtainable without leaving the provider record.
+    attestation = organization_attests_correspondence(org_linkedin_website,
+                                                      employer_domain)
     identity_keys = [key for key in (
         f"linkedin:{slug}" if slug else "",
         f"domain:{domain}" if domain else "",
@@ -375,7 +592,15 @@ def resolve_company_display(
         identity_safe = bool(cached.get("identity_safe", False)) and bool(identity_keys) and (
             set(identity_keys) <= cached_keys
         )
-        if identity_safe and (manual or cached.get("confidence") in {"high", "medium"}):
+        # A machine-resolved entry is EVIDENCE WITH AN AGE. It was computed by one
+        # resolver version from anchors as they stood on one day, and both can move:
+        # a rebrand changes the anchors, an improvement changes the answer. Without
+        # this check a company resolved once was pinned to that first answer forever,
+        # so every later correction reached only companies never seen before.
+        # Human-reviewed overrides are exempt -- they are a decision, not a cached
+        # computation, and are revised by editing the overrides file.
+        fresh = manual or _cache_entry_is_current(cached)
+        if identity_safe and fresh and (manual or cached.get("confidence") in {"high", "medium"}):
             confidence = "high" if manual else str(cached.get("confidence") or "medium")
             return CompanyDisplayResult(
                 normalize_display_text(cached["display_name"]), confidence, False,
@@ -389,21 +614,21 @@ def resolve_company_display(
                 },
             )
 
-    conflict = _anchors_conflict(slug_anchor, domain_anchor)
+    agreement = _forms_agreement(slug_forms, domain_forms)
+    conflict = bool(agreement["conflict"])
     canonical_raw_key = _name_key(canonical_company_name)
     evaluated: list[Dict[str, Any]] = []
     for source, raw in _candidate_sources(organization, org_linkedin_name, canonical_company_name):
         cleaned, transformations = _clean_candidate(raw, slug_anchor, domain_anchor)
-        key = _name_key(cleaned, drop_legal=True)
-        raw_key = _name_key(raw)
-        matches = {
-            "linkedin": _anchor_match(key, slug_anchor),
-            "domain": _anchor_match(key, domain_anchor),
-        }
-        if "corroborated_trailing_legal_suffix_removed" in transformations:
-            for label, anchor in (("linkedin", slug_anchor), ("domain", domain_anchor)):
-                if not matches[label] and _anchor_match(raw_key, anchor) == "exact":
-                    matches[label] = "legal"
+        legal_cleanup = "corroborated_trailing_legal_suffix_removed" in transformations
+        matches: Dict[str, str] = {}
+        derivations: Dict[str, Any] = {}
+        for label, forms, primary in (("linkedin", slug_forms, slug_anchor),
+                                      ("domain", domain_forms, domain_anchor)):
+            matches[label], derivation = _identity_match(
+                cleaned, raw, forms, primary, legal_cleanup)
+            if derivation:
+                derivations[label] = derivation
         exact = sum(value == "exact" for value in matches.values())
         weak = sum(bool(value) for value in matches.values())
         ambiguous = bool(_AMBIGUOUS_SEPARATOR_RE.search(cleaned))
@@ -424,6 +649,7 @@ def resolve_company_display(
             "cleaned": cleaned,
             "transformations": transformations,
             "identity_matches": matches,
+            "identity_derivations": derivations,
             "ambiguous_separator": ambiguous,
             "malformed_name": malformed,
             "verified_canonical_pair": verified_canonical_pair,
@@ -436,7 +662,13 @@ def resolve_company_display(
     # the brand BOTH of them are built from. Computed once, after the candidate is
     # chosen, because it is a fact about that candidate.
     bridging_brand = _bridging_brand(chosen, slug_anchor, domain_anchor) if conflict else ""
-    name = str((chosen or {}).get("cleaned") or "")
+    bridge = _resolve_conflict(chosen, evaluated, slug_forms, domain_forms,
+                               attestation, bridging_brand) if conflict else {}
+    name = str(bridge.get("display_name") or (chosen or {}).get("cleaned") or "")
+    if bridge.get("display_name") and bridge["display_name"] != (chosen or {}).get("cleaned"):
+        # A rename picks the name the LinkedIn slug corroborates, so the candidate
+        # the evidence actually selected is the one reported downstream.
+        chosen = next((c for c in evaluated if c["cleaned"] == bridge["display_name"]), chosen)
     confidence = "low"
     identity_safe = False
     reasons: list[str] = []
@@ -445,7 +677,7 @@ def resolve_company_display(
         reasons.append("no_company_name_candidate")
     elif not identity_keys:
         reasons.append("no_stable_linkedin_or_domain_identity")
-    elif conflict and not bridging_brand:
+    elif conflict and not bridge.get("resolved"):
         reasons.append("linkedin_slug_domain_disagreement")
     elif chosen["ambiguous_separator"]:
         reasons.append("unresolved_multi_entity_or_franchise_name")
@@ -483,25 +715,40 @@ def resolve_company_display(
         else:
             reasons.append("selected_name_not_corroborated_by_identity")
 
-    if conflict and bridging_brand and identity_safe:
-        # The anchors still differ as strings. The bridging brand proved they are
-        # decorations of one name, not that they are the same legal entity, so such
-        # a row is never promoted to high confidence -- it stays sendable at medium.
+    if agreement["convention_only"] and identity_safe and confidence == "high":
+        # The identifiers only line up once a registrar vanity prefix is read off.
+        # That is a convention, so it cannot carry a row to the confidence reserved
+        # for identifiers that spell the name outright.
+        confidence = "medium"
+        reasons.append("identifiers_agree_only_after_vanity_prefix")
+    if conflict and bridge.get("resolved") and identity_safe:
+        # The anchors still differ as strings. The evidence proved they name one
+        # organization, not that they are the same legal entity, so such a row is
+        # never promoted to high confidence -- it stays sendable at medium.
         confidence = "medium" if confidence == "high" else confidence
-        reasons.append("identity_conflict_bridged_by_shared_brand")
+        reasons.append(str(bridge.get("reason") or "identity_conflict_bridged_by_shared_brand"))
 
     hold = confidence == "low" or not identity_safe or not name
     evidence = {
         "identity_keys": identity_keys,
         "selected_source": (chosen or {}).get("source", ""),
         "selected_transformations": (chosen or {}).get("transformations", []),
+        "selected_derivations": (chosen or {}).get("identity_derivations", {}),
         "cache_hit": False,
         "manual_override": False,
         "identity_conflict": conflict,
+        "identifier_agreement": agreement,
         "bridging_brand": bridging_brand,
+        "conflict_resolution": {k: v for k, v in bridge.items() if k != "display_name"},
+        "resolver_version": RESOLVER_VERSION,
         "reasons": reasons,
         "candidates": evaluated,
     }
+    if hold:
+        # A hold is a request for evidence, not a verdict. Name the evidence that
+        # would settle it so the gap is actionable instead of anonymous.
+        evidence["missing_evidence"] = _missing_evidence(
+            reasons, slug_forms, domain_forms, attestation, evaluated)
     result = CompanyDisplayResult(
         name=name, confidence=confidence, hold=hold, identity_key=identity_key,
         identity_safe=identity_safe, evidence=evidence,

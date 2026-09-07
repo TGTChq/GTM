@@ -1,0 +1,280 @@
+{
+  "summary": {
+    "holds_corrected": 6,
+    "still_held": 12,
+    "newly_held": 0,
+    "unchanged": 4
+  },
+  "rows": [
+    {
+      "id": "endeavor",
+      "before": "hold",
+      "after": "resolve/medium",
+      "verdict": "HOLD CORRECTED",
+      "after_reasons": [
+        "display_name_exactly_corroborated_by_identity",
+        "identity_conflict_resolved_by_attested_rename"
+      ],
+      "note": "rebrand: each published name is corroborated by a different identifier",
+      "missing_evidence": []
+    },
+    {
+      "id": "bsb",
+      "before": "hold",
+      "after": "resolve/medium",
+      "verdict": "HOLD CORRECTED",
+      "after_reasons": [
+        "display_name_exactly_corroborated_by_identity",
+        "identity_conflict_resolved_by_shared_derivation"
+      ],
+      "note": "domain drops an interior word of the company's own name",
+      "missing_evidence": []
+    },
+    {
+      "id": "kai",
+      "before": "hold",
+      "after": "resolve/high",
+      "verdict": "HOLD CORRECTED",
+      "after_reasons": [
+        "display_name_exactly_corroborated_by_identity"
+      ],
+      "note": "brand TLD: the whole domain spells the slug",
+      "missing_evidence": []
+    },
+    {
+      "id": "nash",
+      "before": "hold",
+      "after": "resolve/medium",
+      "verdict": "HOLD CORRECTED",
+      "after_reasons": [
+        "display_name_weakly_corroborated_by_identity"
+      ],
+      "note": "registrar vanity prefix on a domain-only record",
+      "missing_evidence": []
+    },
+    {
+      "id": "zwicker",
+      "before": "hold",
+      "after": "resolve/medium",
+      "verdict": "HOLD CORRECTED",
+      "after_reasons": [
+        "display_name_exactly_corroborated_by_identity",
+        "identity_conflict_resolved_by_shared_derivation"
+      ],
+      "note": "domain keeps the first and last words of the name",
+      "missing_evidence": []
+    },
+    {
+      "id": "minth",
+      "before": "hold",
+      "after": "hold",
+      "verdict": "still held (justified)",
+      "after_reasons": [
+        "linkedin_slug_domain_disagreement"
+      ],
+      "note": "SUBSIDIARY on a parent group domain -- must stay separate",
+      "missing_evidence": [
+        "a correspondence tying this slug to this domain: the LinkedIn organization's own declared website, or a published name from which BOTH identifiers can be constructed"
+      ]
+    },
+    {
+      "id": "shared_ats",
+      "before": "hold",
+      "after": "hold",
+      "verdict": "still held (justified)",
+      "after_reasons": [
+        "selected_name_not_corroborated_by_identity"
+      ],
+      "note": "shared applicant-tracking host is not an employer identity",
+      "missing_evidence": [
+        "a published name that the slug or the domain is built from"
+      ]
+    },
+    {
+      "id": "shared_ats_2",
+      "before": "hold",
+      "after": "hold",
+      "verdict": "still held (justified)",
+      "after_reasons": [
+        "selected_name_not_corroborated_by_identity"
+      ],
+      "note": "a second employer on the same host must not inherit the first",
+      "missing_evidence": [
+        "a published name that the slug or the domain is built from"
+      ]
+    },
+    {
+      "id": "parent_brand",
+      "before": "hold",
+      "after": "hold",
+      "verdict": "still held (justified)",
+      "after_reasons": [
+        "linkedin_slug_domain_disagreement"
+      ],
+      "note": "subsidiary brand on the parent's domain",
+      "missing_evidence": [
+        "a correspondence tying this slug to this domain: the LinkedIn organization's own declared website, or a published name from which BOTH identifiers can be constructed"
+      ]
+    },
+    {
+      "id": "unrelated",
+      "before": "hold",
+      "after": "hold",
+      "verdict": "still held (justified)",
+      "after_reasons": [
+        "selected_name_not_corroborated_by_identity"
+      ],
+      "note": "the published name is built into neither identifier",
+      "missing_evidence": [
+        "a published name that the slug or the domain is built from"
+      ]
+    },
+    {
+      "id": "gov_portal",
+      "before": "hold",
+      "after": "hold",
+      "verdict": "still held (justified)",
+      "after_reasons": [
+        "linkedin_slug_domain_disagreement"
+      ],
+      "note": "a government portal domain is shared by every agency on it",
+      "missing_evidence": [
+        "a correspondence tying this slug to this domain: the LinkedIn organization's own declared website, or a published name from which BOTH identifiers can be constructed"
+      ]
+    },
+    {
+      "id": "acronym",
+      "before": "hold",
+      "after": "hold",
+      "verdict": "still held (justified)",
+      "after_reasons": [
+        "linkedin_slug_domain_disagreement"
+      ],
+      "note": "an INITIALISM -- deliberately not derivable, three letters collide",
+      "missing_evidence": [
+        "a correspondence tying this slug to this domain: the LinkedIn organization's own declared website, or a published name from which BOTH identifiers can be constructed"
+      ]
+    },
+    {
+      "id": "acronym_collision",
+      "before": "hold",
+      "after": "hold",
+      "verdict": "still held (justified)",
+      "after_reasons": [
+        "linkedin_slug_domain_disagreement"
+      ],
+      "note": "a shared opening fragment is not a shared identity",
+      "missing_evidence": [
+        "a correspondence tying this slug to this domain: the LinkedIn organization's own declared website, or a published name from which BOTH identifiers can be constructed"
+      ]
+    },
+    {
+      "id": "vanity_trap",
+      "before": "hold",
+      "after": "hold",
+      "verdict": "still held (justified)",
+      "after_reasons": [
+        "selected_name_not_corroborated_by_identity"
+      ],
+      "note": "'the' is NOT a vanity prefix -- a domain-only record cannot read theresa.com as the company Resa, and there is no second identifier to corroborate it",
+      "missing_evidence": [
+        "a published name that the slug or the domain is built from"
+      ]
+    },
+    {
+      "id": "homonym_prefix",
+      "before": "resolve/high",
+      "after": "resolve/high",
+      "verdict": "unchanged",
+      "after_reasons": [
+        "display_name_exactly_corroborated_by_identity"
+      ],
+      "note": "KNOWN GAP, unchanged by this work: the pre-existing prefix tier reads a name that OPENS a longer slug as the same brand decorated, which is what lets clark/clarkaudit through. It cannot tell that apart from a homonym whose brand happens to open another organization's slug. Verified to behave identically on the deployed resolver, so it is a limitation to state rather than a regression to fix here; narrowing it would re-hold clark and carpe.",
+      "missing_evidence": []
+    },
+    {
+      "id": "franchise",
+      "before": "hold",
+      "after": "hold",
+      "verdict": "still held (justified)",
+      "after_reasons": [
+        "linkedin_slug_domain_disagreement"
+      ],
+      "note": "property under an operator's corporate domain",
+      "missing_evidence": [
+        "a correspondence tying this slug to this domain: the LinkedIn organization's own declared website, or a published name from which BOTH identifiers can be constructed"
+      ]
+    },
+    {
+      "id": "malformed",
+      "before": "hold",
+      "after": "hold",
+      "verdict": "still held (justified)",
+      "after_reasons": [
+        "malformed_or_coded_company_name"
+      ],
+      "note": "a coded or malformed label is not a company name",
+      "missing_evidence": [
+        "a human-readable organization name"
+      ]
+    },
+    {
+      "id": "no_anchor",
+      "before": "hold",
+      "after": "hold",
+      "verdict": "still held (justified)",
+      "after_reasons": [
+        "no_stable_linkedin_or_domain_identity"
+      ],
+      "note": "no stable identifier at all",
+      "missing_evidence": [
+        "a LinkedIn organization slug or an employer domain"
+      ]
+    },
+    {
+      "id": "vanity_get",
+      "before": "resolve/medium",
+      "after": "resolve/medium",
+      "verdict": "unchanged",
+      "after_reasons": [
+        "display_name_weakly_corroborated_by_identity"
+      ],
+      "note": "registrar vanity prefix plus a decorated slug",
+      "missing_evidence": []
+    },
+    {
+      "id": "brand_tld_ai",
+      "before": "resolve/high",
+      "after": "resolve/high",
+      "verdict": "unchanged",
+      "after_reasons": [
+        "display_name_exactly_corroborated_by_identity"
+      ],
+      "note": "brand TLD on a company never reviewed by hand",
+      "missing_evidence": []
+    },
+    {
+      "id": "dropped_word",
+      "before": "hold",
+      "after": "resolve/medium",
+      "verdict": "HOLD CORRECTED",
+      "after_reasons": [
+        "display_name_exactly_corroborated_by_identity",
+        "identity_conflict_resolved_by_shared_derivation"
+      ],
+      "note": "same shape as BS&B, a company that has never been seen",
+      "missing_evidence": []
+    },
+    {
+      "id": "legal_suffix",
+      "before": "resolve/medium",
+      "after": "resolve/medium",
+      "verdict": "unchanged",
+      "after_reasons": [
+        "display_name_exactly_corroborated_by_identity"
+      ],
+      "note": "trailing legal suffix only",
+      "missing_evidence": []
+    }
+  ]
+}

@@ -1,5 +1,46 @@
 # TGTC completion — progress record
 
+## Company identity resolved generally — 2026-09-07, base `e97fc3c`
+
+Full record: [COMPANY_IDENTITY_GENERAL_2026-09-07.md](COMPANY_IDENTITY_GENERAL_2026-09-07.md).
+
+**Correction to the section below.** It called the 06:29Z run "the first production
+evidence of the corrected release". That is wrong in a way worth stating plainly:
+the run executed at `43ee7ba`, so it PRECEDES both PR #116 and the identity work and
+validates neither. Its exhausted 200-call grant explains why it stopped and nothing
+more -- it is not evidence that the remaining defects were resolved, and the run in
+fact exposed three of them. The figures in that section are the run's own and stand;
+the claim that they validate a later release does not.
+
+Five company holds were cleared by five hand-written equivalences. That cleared five
+companies and no others. They are now cleared by RULES that derive a stable
+identifier from a company's own published name -- a brand TLD read whole, a
+registrar vanity prefix, an ordered subset of the name's words, and a rebrand
+attested by two names each corroborated by a different identifier. Six of the seven
+manual entries are deleted as redundant; the one that survives is an initialism,
+which is deliberately not derivable because short initialisms collide across
+unrelated companies.
+
+Measured on one corpus, deployed resolver versus this one: **6 holds corrected**
+(the five production companies plus one that appears in no list), **12 still held**
+and each justified -- subsidiary under a parent domain, two employers on one
+applicant-tracking host, a government portal, a franchise, an initialism, a shared
+opening fragment -- **0 newly held**, and **1 known gap stated** rather than hidden.
+
+Two further identity defects the work exposed: the display cache had no version or
+age check on read, so the first answer a company ever got was the answer it kept and
+every later correction reached only companies never seen before; and Airtable stores
+the resolver's stable key while suppression ignored it, so one organization posting
+under two domains produced two active rows for one company x function. Separately, a
+free lane is no longer indistinguishable from a paid provider that failed to report
+its billing.
+
+**No live improvement is claimed.** No run has executed since, so how many rows this
+releases in production is unmeasured. What remains open is the individual
+explanation of the 27 withheld contacts: the scan is uncapped, but reading it needs
+a maintenance pass, and the temporary cron change that triggers one is refused in
+this session. The exact action is recorded in the acceptance file above.
+
 ## First funded production run since the corrections — 2026-09-07, base `43ee7ba`
 
 **E1 and E2 below are answered.** A funded run executed at 06:29:15Z under grant
@@ -42,6 +83,9 @@ recovery opportunities are recorded as having **no reconciled outcome**, because
 run stopped before reaching them. These are not conversion rates for the system, they
 are rates over the part of each cohort the grant actually paid to reach. They are not
 comparable to each other and must not be extrapolated to a daily figure.
+
+**This run PRECEDES PR #116 and the identity work** (it executed at `43ee7ba`) and
+validates neither. It exposed three defects rather than clearing them.
 
 **What this confirms about goal requirements (a), (b) and (f):** acquisition made
 useful progress inside its budget with overlap and duplicates accounted separately

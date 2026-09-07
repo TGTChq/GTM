@@ -18,8 +18,35 @@
 > measured. **What production is set to right now is unknown from here**; re-read it
 > from the next container printout rather than restating this table.
 >
-> Unchanged and independently re-verified 2026-09-07: both services deployed at
-> `43ee7ba`, GTM cron `0 3 * * *`, Approved Sync cron `0 0 * * *`.
+> Unchanged and independently re-verified 2026-09-07: GTM cron `0 3 * * *`,
+> Approved Sync cron `0 0 * * *`.
+
+## Container readback AFTER the funded run — 2026-09-07T07:02Z
+
+The safe state was restored after the 06:29Z run, and this is read from the
+container's own `EFFECTIVE CAPABILITY FLAGS` printout on deployment
+`243827b0-dcca-48c7-819b-ce28fd613692` (a maintenance pass at 06:54:55Z), not from
+variable names, deployment counts or intent:
+
+| flag | value | meaning |
+|---|---|---|
+| `FANTASTIC_JOBS_ENABLED` | `false` | paid acquisition PAUSED |
+| `MAINTENANCE_ONLY` | `true` | the pipeline loop cannot run |
+| `APOLLO_RECOVERY_BUDGET_CALLS` | `0` | the enrichment grant is ZERO |
+| `APOLLO_RECOVERY_BUDGET_ID` | `luis-20260907-newjobs-2045-stage1` | the SPENT grant, consumed 200 of 200 |
+| `PENDING_WORK_ENABLED` / batch | `true` / `2000` | custody on |
+| `RUN_APPROVED_TARGET_ENABLED` / target | `true` / `1000` | active the moment maintenance clears |
+| `ACQUISITION_EXTRA_LANES` | `""` | the 145 ATS boards still never built |
+| `VERIFY_WITH_HUNTER` | `false` | no second email opinion on GTM |
+
+**A caution about that grant id.** `APOLLO_RECOVERY_BUDGET_CALLS=0` under a SPENT
+authorization id is safe -- zero calls grants nothing. But the budget counter is
+keyed by authorization id, and it already records 200 consumed under this one.
+Raising the call count without also changing the id would resume the spent grant
+rather than open a new one. A new authorization must always get a NEW id.
+
+Nothing in this table was changed by the identity work; it is a reading, not an
+action. It was current at 07:02Z and a later change would not be visible here.
 
 Both service deployments were rechecked at `c160244`; the effective-value table below
 is the dated container snapshot, not a fresh read of every variable.

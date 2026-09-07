@@ -66,28 +66,74 @@ def test_anchors_conflict_is_unchanged(slug, domain, conflicts):
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize(
-    "name,slug,domain,brand",
+    "name,slug,domain,brand,route",
     [
-        ("Clark", "clarkaudit", "getclark.com", "clark"),
-        ("Blueground", "bluegroundco", "theblueground.com", "blueground"),
-        ("Carpe", "carpe1", "mycarpe.com", "carpe"),
+        # ``get``/``my`` are registrar vanity prefixes, so these two AGREE once the
+        # prefix is read off -- there was never a disagreement to bridge.
+        ("Clark", "clarkaudit", "getclark.com", "clark", "vanity_agreement"),
+        ("Carpe", "carpe1", "mycarpe.com", "carpe", "vanity_agreement"),
+        # ``the`` is NOT a vanity prefix here: stripping it would read
+        # ``theresa.com`` as the company "Resa". So this stays a real conflict and
+        # is bridged the original way, by the name sitting inside both anchors.
+        ("Blueground", "bluegroundco", "theblueground.com", "blueground", "bridged"),
     ],
 )
-def test_real_branded_domain_pairs_clear_at_medium(tmp_path, name, slug, domain, brand):
+def test_real_branded_domain_pairs_clear_at_medium(tmp_path, name, slug, domain, brand, route):
+    """The OUTCOME these pairs must have. How it is reached changed; what is
+    guaranteed did not: they clear, they are identity-safe, and they clear at
+    medium -- never high.
+
+    They used to reach that outcome as a BRIDGED CONFLICT: the anchors were read as
+    disagreeing and the published name, being literally inside both, bridged them.
+    Reading the vanity prefix off the domain shows there was no disagreement to
+    bridge (``getclark`` IS ``clark``), so `identity_conflict` is now False for
+    them. The cap survives the change, because the agreement rests on a registrar
+    convention rather than on the domain's own letters.
+    """
     result = _resolve(tmp_path, name, slug, domain)
     assert result.hold is False
     assert result.identity_safe is True
     assert result.confidence == "medium"
-    assert result.evidence["identity_conflict"] is True
-    assert result.evidence["bridging_brand"] == brand
-    assert "identity_conflict_bridged_by_shared_brand" in result.evidence["reasons"]
+    agreement = result.evidence["identifier_agreement"]
+    if route == "vanity_agreement":
+        assert agreement["conflict"] is False
+        assert agreement["convention_only"] is True
+        assert agreement["agreed_on"]["domain_form"] == "vanity_prefix_stripped"
+        assert agreement["agreed_on"]["domain_key"] == brand
+    else:
+        assert agreement["conflict"] is True
+        assert result.evidence["bridging_brand"] == brand
+        assert "identity_conflict_bridged_by_shared_brand" in result.evidence["reasons"]
 
 
-def test_a_bridged_conflict_is_never_promoted_to_high(tmp_path):
-    """Corroboration proves the NAME, not that the anchors are one legal entity."""
+def test_a_convention_only_agreement_is_never_promoted_to_high(tmp_path):
+    """Corroboration proves the NAME, not that the anchors are one legal entity.
+
+    ``clark`` and ``getclark.com`` line up only because we strip a prefix a
+    registrar era made conventional. That is very probably right and it is not a
+    fact the domain states, so it must not buy the confidence reserved for an
+    identifier that spells the name outright.
+    """
     exact = _resolve(tmp_path, "Clark", "clark", "getclark.com")
     assert exact.confidence == "medium"
-    assert exact.evidence["bridging_brand"] == "clark"
+    assert "identifiers_agree_only_after_vanity_prefix" in exact.evidence["reasons"]
+    assert exact.evidence["identifier_agreement"]["convention_only"] is True
+
+
+def test_a_brand_tld_is_not_a_disagreement(tmp_path):
+    """``kai.security`` and the slug ``kaisecurity`` are the same string.
+
+    Splitting the domain on its first dot threw away half the brand and reported a
+    conflict against an identifier that matched exactly. Reading the whole domain
+    is a literal fact about it, not a convention, so this one DOES reach high.
+    """
+    result = _resolve(tmp_path, "Kai", "kaisecurity", "kai.security")
+    assert result.hold is False
+    assert result.confidence == "high"
+    agreement = result.evidence["identifier_agreement"]
+    assert agreement["conflict"] is False
+    assert agreement["convention_only"] is False
+    assert agreement["agreed_on"]["domain_form"] == "domain_full_label_key"
 
 
 # ---------------------------------------------------------------------------

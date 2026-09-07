@@ -2,24 +2,6 @@
   "schema": "company-display-overrides/1",
   "resolver_version": "company-display/1",
   "entries": {
-    "linkedin:socradar": {
-      "display_name": "SOCRadar",
-      "confidence": "high",
-      "identity_safe": true,
-      "identity_keys": [
-        "linkedin:socradar",
-        "domain:socradar.io"
-      ],
-      "evidence": {
-        "source": "reviewed_fantastic_audit_2026-08-17",
-        "organization": "SOCRadar",
-        "org_linkedin_name": "SOCRadar® Extended Threat Intelligence",
-        "org_linkedin_slug": "socradar",
-        "domain": "socradar.io"
-      },
-      "resolver_version": "company-display/1",
-      "manual_override": true
-    },
     "linkedin:resourcemanagementconceptsinc": {
       "display_name": "Resource Management Concepts",
       "confidence": "high",
@@ -44,149 +26,14 @@
             "supports": "The exact LinkedIn company page names Resource Management Concepts, Inc. and links to rmcweb.com."
           }
         ],
-        "scope": "Display identity for this exact reviewed LinkedIn and domain pair only; no ICP, contact, email, freshness or approval override."
-      },
-      "resolver_version": "company-display/1",
-      "manual_override": true
-    },
-    "linkedin:endeavorb2b": {
-      "display_name": "EndeavorB2B",
-      "confidence": "high",
-      "identity_safe": true,
-      "identity_keys": [
-        "linkedin:endeavorb2b",
-        "domain:endeavorbusinessmedia.com"
-      ],
-      "evidence": {
-        "source": "reviewed_live_hold_identity_2026-09-07",
-        "reviewed_at": "2026-09-07",
-        "observed_run": "20260907T062915Z-f79f4de1",
-        "sources": [
-          {
-            "url": "https://www.endeavorb2b.com/newsroom-posts/endeavor-business-media-rebrands-as-endeavorb2b/",
-            "supports": "Official August 13, 2025 announcement identifies the former and current company names."
-          },
-          {
-            "url": "https://www.endeavorbusinessmedia.com/",
-            "supports": "The former domain redirects to endeavorb2b.com."
-          },
-          {
-            "url": "https://www.linkedin.com/company/endeavorb2b",
-            "supports": "The company profile uses the current brand and exact reviewed slug."
-          }
-        ],
-        "scope": "Only the listed identity anchors. Display naming only; contact, email, role, ICP, freshness, deduplication and approval gates still apply. No measured live uplift."
-      },
-      "resolver_version": "company-display/1",
-      "manual_override": true
-    },
-    "linkedin:bsbsafetysystems": {
-      "display_name": "BS&B Safety Systems",
-      "confidence": "high",
-      "identity_safe": true,
-      "identity_keys": [
-        "linkedin:bsbsafetysystems",
-        "domain:bsbsystems.com"
-      ],
-      "evidence": {
-        "source": "reviewed_live_hold_identity_2026-09-07",
-        "reviewed_at": "2026-09-07",
-        "observed_run": "20260907T062915Z-f79f4de1",
-        "sources": [
-          {
-            "url": "https://bsbsystems.com/en/Contact/",
-            "supports": "Corporate contact page identifies BS&B Safety Systems on this domain."
-          },
-          {
-            "url": "https://www.linkedin.com/company/bs%26b-safety-systems",
-            "supports": "The company profile links to bsbsystems.com."
-          }
-        ],
-        "scope": "Only the listed identity anchors. Display naming only; contact, email, role, ICP, freshness, deduplication and approval gates still apply. No measured live uplift."
-      },
-      "resolver_version": "company-display/1",
-      "manual_override": true
-    },
-    "linkedin:kaisecurity": {
-      "display_name": "Kai",
-      "confidence": "high",
-      "identity_safe": true,
-      "identity_keys": [
-        "linkedin:kaisecurity",
-        "domain:kai.security"
-      ],
-      "evidence": {
-        "source": "reviewed_live_hold_identity_2026-09-07",
-        "reviewed_at": "2026-09-07",
-        "observed_run": "20260907T062915Z-f79f4de1",
-        "sources": [
-          {
-            "url": "https://www.kai.security/",
-            "supports": "Official Kai site links to linkedin.com/company/kai-security/posts/ in its footer."
-          }
-        ],
-        "scope": "Only the listed identity anchors. Display naming only; contact, email, role, ICP, freshness, deduplication and approval gates still apply. No measured live uplift."
-      },
-      "resolver_version": "company-display/1",
-      "manual_override": true
-    },
-    "domain:usenash.com": {
-      "display_name": "Nash",
-      "confidence": "high",
-      "identity_safe": true,
-      "identity_keys": [
-        "domain:usenash.com"
-      ],
-      "evidence": {
-        "source": "reviewed_live_hold_identity_2026-09-07",
-        "reviewed_at": "2026-09-07",
-        "observed_run": "20260907T062915Z-f79f4de1",
-        "sources": [
-          {
-            "url": "https://www.nash.ai/legal/privacy-policy",
-            "supports": "Nash Technologies Inc. explicitly identifies the usenash.com website as its service."
-          },
-          {
-            "url": "https://docs.usenash.com/home",
-            "supports": "Official documentation identifies the service and brand as Nash."
-          }
-        ],
-        "scope": "Only the listed identity anchors. Display naming only; contact, email, role, ICP, freshness, deduplication and approval gates still apply. No measured live uplift."
-      },
-      "resolver_version": "company-display/1",
-      "manual_override": true
-    },
-    "linkedin:zwickerassociatespc": {
-      "display_name": "Zwicker & Associates, P.C.",
-      "confidence": "high",
-      "identity_safe": true,
-      "identity_keys": [
-        "linkedin:zwickerassociatespc",
-        "domain:zwickerpc.com"
-      ],
-      "evidence": {
-        "source": "reviewed_live_hold_identity_2026-09-07",
-        "reviewed_at": "2026-09-07",
-        "observed_run": "20260907T062915Z-f79f4de1",
-        "sources": [
-          {
-            "url": "https://www.linkedin.com/company/zwicker-%26-associates-p-c-/",
-            "supports": "The company profile explicitly names the firm and links to zwickerpc.com."
-          }
-        ],
-        "scope": "Only the listed identity anchors. Display naming only; contact, email, role, ICP, freshness, deduplication and approval gates still apply. No measured live uplift."
+        "scope": "Display identity for this exact reviewed LinkedIn and domain pair only; no ICP, contact, email, freshness or approval override.",
+        "retained_because": "rmcweb.com is an INITIALISM of 'Resource Management Concepts'. Deriving an anchor from initials is deliberately absent from company_anchor_evidence: three- and four-letter initialisms collide across unrelated companies, so a general rule for them would merge organizations rather than recognise one. This entry is human-reviewed evidence for one organization, not a rule."
       },
       "resolver_version": "company-display/1",
       "manual_override": true
     }
   },
   "aliases": {
-    "domain:socradar.io": "linkedin:socradar",
-    "domain:rmcweb.com": "linkedin:resourcemanagementconceptsinc",
-    "domain:endeavorbusinessmedia.com": "linkedin:endeavorb2b",
-    "domain:bsbsystems.com": "linkedin:bsbsafetysystems",
-    "domain:kai.security": "linkedin:kaisecurity",
-    "domain:usenash.com": "domain:usenash.com",
-    "domain:zwickerpc.com": "linkedin:zwickerassociatespc"
+    "domain:rmcweb.com": "linkedin:resourcemanagementconceptsinc"
   }
 }
