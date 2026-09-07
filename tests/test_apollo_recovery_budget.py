@@ -113,8 +113,18 @@ class ItIsDurableAcrossRuns(unittest.TestCase):
             with self.assertRaises(ab.BudgetExhausted):
                 ab.charge(ab.KIND_PERSON_MATCH)
 
-    def test_raising_the_number_alone_does_not_reset_the_count(self):
-        """A silent ceiling raise is a config drift, not a grant."""
+    def test_raising_the_number_alone_grants_nothing(self):
+        """A silent ceiling raise is a config drift, not a grant.
+
+        The docstring was always right; the assertion was not. It checked only that
+        `consumed` survived, and accepted `remaining` growing from 0 to 8 -- which
+        IS the grant it says must not happen. That gap is what let a spent 200-call
+        authorization take 1,800 calls of fresh room on the live service when the
+        ceiling was raised beside it on 2026-09-07.
+
+        An open authorization keeps the size it was opened with. Only a new id
+        adopts a larger number; see the sibling test below.
+        """
         path = str(Path(tempfile.mkdtemp()) / "budget.json")
         with _cfg(APOLLO_RECOVERY_BUDGET_CALLS=2,
                   APOLLO_RECOVERY_BUDGET_STATE_PATH=path):
@@ -122,7 +132,11 @@ class ItIsDurableAcrossRuns(unittest.TestCase):
         with _cfg(APOLLO_RECOVERY_BUDGET_CALLS=10,
                   APOLLO_RECOVERY_BUDGET_STATE_PATH=path):
             self.assertEqual(ab.summary()["consumed"], 2)
-            self.assertEqual(ab.summary()["remaining"], 8)
+            self.assertEqual(ab.summary()["authorized"], 2, "the ceiling did not grow")
+            self.assertEqual(ab.summary()["remaining"], 0)
+            self.assertTrue(ab.summary()["raised_under_same_id"])
+            with self.assertRaises(ab.BudgetExhausted):
+                ab.charge(ab.KIND_PERSON_MATCH)
 
     def test_a_new_authorization_id_starts_a_fresh_count(self):
         path = str(Path(tempfile.mkdtemp()) / "budget.json")

@@ -69,11 +69,18 @@ class TheCeilingIsDurableAndCoversEveryPaidRequest(unittest.TestCase):
             with self.assertRaises(budget.BudgetExhausted):
                 budget.charge(budget.KIND_ORG_ENRICH, path=str(self.path))
 
-    def test_reusing_a_spent_authorization_resumes_it_instead_of_renewing_it(self):
-        """The trap the operating notes name: raise the calls, keep the id.
+    def test_a_spent_authorization_cannot_be_revived_by_raising_its_number(self):
+        """Raise the calls, keep the id -- and it grants NOTHING.
 
-        The consumed counter belongs to the AUTHORIZATION, so re-using a spent id
-        with a bigger number continues that grant rather than opening a new one.
+        This is not hypothetical. On 2026-09-07 I set the ceiling to 2,000 on the
+        live service while the SPENT 200-call id was still in place, which handed
+        that closed authorization 1,800 calls of fresh room. Maintenance was on and
+        the cron had not fired, so nothing was spent -- but only the schedule
+        prevented it, and a grant nobody issued would have been indistinguishable in
+        the ledger from one that was.
+
+        An open authorization now keeps the size it was opened with. Only a NEW id
+        adopts a larger number.
         """
         with self._cfg("grant-spent", 2):
             budget.charge(budget.KIND_ORG_ENRICH, path=str(self.path))
@@ -82,8 +89,38 @@ class TheCeilingIsDurableAndCoversEveryPaidRequest(unittest.TestCase):
                 budget.charge(budget.KIND_ORG_ENRICH, path=str(self.path))
         with self._cfg("grant-spent", 5):   # same id, larger number
             state = budget.load(str(self.path))
-            self.assertEqual(state["consumed"], 2, "the spent grant was resumed")
-            self.assertEqual(state["remaining"], 3)
+            self.assertEqual(state["authorized"], 2, "the ceiling did not grow")
+            self.assertEqual(state["remaining"], 0)
+            self.assertTrue(state["spent"])
+            self.assertTrue(state["raised_under_same_id"])
+            with self.assertRaises(budget.BudgetExhausted):
+                budget.charge(budget.KIND_ORG_ENRICH, path=str(self.path))
+
+    def test_an_open_authorization_may_still_be_tightened(self):
+        """A ceiling can always be lowered; only growth needs a new grant."""
+        with self._cfg("grant-open", 10):
+            budget.charge(budget.KIND_ORG_ENRICH, path=str(self.path))
+        with self._cfg("grant-open", 3):
+            state = budget.load(str(self.path))
+            self.assertEqual(state["authorized"], 3)
+            self.assertEqual(state["remaining"], 2)
+
+    def test_pre_setting_the_ceiling_beside_a_spent_id_is_inert(self):
+        """What makes a one-action resumption safe to arm in advance.
+
+        The ceiling can be set today, beside a spent id, and grant nothing until a
+        new id is issued -- so resuming later is one variable rather than two, with
+        no window in which the old authorization is quietly enlarged.
+        """
+        with self._cfg("spent-one", 1):
+            budget.charge(budget.KIND_ORG_ENRICH, path=str(self.path))
+        with self._cfg("spent-one", 2000):
+            self.assertFalse(
+                budget.paid_acquisition_allowed(str(self.path))["allowed"])
+        with self._cfg("fresh-one", 2000):
+            allowed = budget.paid_acquisition_allowed(str(self.path))
+            self.assertTrue(allowed["allowed"])
+            self.assertEqual(allowed["remaining"], 2000)
 
     def test_a_new_authorization_id_is_what_opens_a_fresh_grant(self):
         with self._cfg("grant-old", 1):
