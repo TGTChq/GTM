@@ -841,6 +841,25 @@ def _print_run_summary(ctx, mode, result, state) -> None:
         # WINDOW CURSOR: the acceptance evidence for the persisted per-source
         # offset. "Resumed from where the last run stopped" is only provable by
         # printing the offset read at open next to the one written at close.
+        fresh = ((result.get("acquisition") or {}).get("fresh_cohort") or {})
+        if int(fresh.get("postings_acquired") or 0):
+            frate = fresh.get("opportunity_to_contact_rate")
+            line("FRESH COHORT",
+                 f"postings {fresh.get('postings_acquired')} / opportunities "
+                 f"{fresh.get('opportunities_acquired')} / leads {fresh.get('leads')}")
+            line("  attempted",
+                 f"{fresh.get('opportunities_attempted')} opportunities -> with_contact "
+                 f"{fresh.get('with_contact')} -> final_pass {fresh.get('final_pass')} "
+                 f"-> delivered {fresh.get('delivered')}")
+            line("  opp->contact",
+                 f"{frate if frate is not None else 'unknown'} "
+                 f"(denominator: {fresh.get('rate_denominator') or 'none'})")
+        _overlap = int(((result.get("acquisition") or {}).get("cohort_overlap_leads")) or 0)
+        if _overlap:
+            # Printed so the two cohorts are never simply added: a collapsed lead can
+            # belong to both, and it is counted in each.
+            line("  cohort overlap",
+                 f"{_overlap} lead(s) belong to BOTH cohorts -- do not sum")
         rec = ((result.get("acquisition") or {}).get("recovery_cohort") or {})
         if int(rec.get("opportunities_resumed") or 0):
             # A recovery-first run's whole point is this line: the cohort's complete
