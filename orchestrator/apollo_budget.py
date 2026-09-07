@@ -201,3 +201,53 @@ def preflight(required: Optional[int] = None, *, path: str = "") -> Dict[str, An
         return out
     out["ok"] = True
     return out
+
+
+#: Lanes whose rows cost the provider nothing. A free lane may run with no
+#: enrichment authorization: it accumulates no billed inventory, and the postings it
+#: finds are queued in custody at no cost until a grant exists.
+FREE_LANE_PREFIXES = ("ats",)
+
+
+def paid_acquisition_allowed(path: str = "") -> Dict[str, Any]:
+    """May a run BUY postings it has no authorization to enrich?
+
+    No. A posting is only worth its price once a contact can be found for it, and
+    contact discovery is what the recovery grant authorizes. Buying ahead of the
+    grant converts money into backlog: custody preserves every row, so nothing is
+    lost, but nothing is produced either and the next authorization is spent
+    enriching inventory bought at a worse moment.
+
+    This is a gate on PAID acquisition only. It never stops custody, enrichment,
+    delivery or a free lane, and it is not a run failure -- a run with no
+    authorization is a recoverable wait that costs nothing.
+
+    Deliberately permissive when the ceiling is switched off: with
+    ``APOLLO_RECOVERY_BUDGET_ENABLED`` false there is no authorization model in
+    force at all, and this must not become a second, silent way to stop acquisition.
+    """
+    if not enabled():
+        return {"allowed": True, "reason": "budget_not_enabled",
+                "detail": "no authorization model in force; acquisition is unchanged"}
+    state = load(path)
+    if not state.get("authorization_id"):
+        return {"allowed": False, "reason": "no_enrichment_authorization",
+                "detail": "APOLLO_RECOVERY_BUDGET_ID is unset; an unset grant is zero",
+                **summary(path)}
+    if int(state.get("authorized", 0) or 0) <= 0:
+        return {"allowed": False, "reason": "no_enrichment_authorization",
+                "detail": "APOLLO_RECOVERY_BUDGET_CALLS is 0; nothing is authorized",
+                **summary(path)}
+    if int(state.get("remaining", 0) or 0) <= 0:
+        return {"allowed": False, "reason": "enrichment_authorization_spent",
+                "detail": (f"authorization {state.get('authorization_id')} is spent "
+                           f"({state.get('consumed')} of {state.get('authorized')}); "
+                           "a NEW id is required, re-using this one resumes it"),
+                **summary(path)}
+    return {"allowed": True, "reason": "authorized", **summary(path)}
+
+
+def is_free_lane(name: Any) -> bool:
+    text = str(name or "").strip().lower()
+    return any(text == prefix or text.startswith(f"{prefix}_")
+               for prefix in FREE_LANE_PREFIXES)

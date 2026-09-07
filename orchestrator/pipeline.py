@@ -40,7 +40,7 @@ from orchestrator.run_ledger import (
     reason_census_from_parts,
 )
 from orchestrator.runcontrol import RunContext, RunStatus
-from orchestrator import source_cost
+from orchestrator import apollo_budget, source_cost
 from orchestrator.runlock import RunLock, RunLockHeld
 from orchestrator.state import StateManager
 from orchestrator.suppression import SuppressionStore
@@ -1098,6 +1098,10 @@ class Orchestrator:
         # adopting a single row -- because the FANTASTIC daily allowance was spent.
         # A credit ceiling for the source the run is deliberately not using must not
         # decide whether queued work gets done.
+        # Resolved ONCE per run, before any lane runs, so a mid-run charge cannot
+        # flip acquisition on and off between slices.
+        paid_acquisition = apollo_budget.paid_acquisition_allowed()
+        acq_cum["paid_acquisition_authorization"] = paid_acquisition
         if gov.run_budget is not None and gov.run_budget <= 0:
             owed_at_start = pending_available()
             if owed_at_start <= 0 and not independent_lanes:
@@ -1169,6 +1173,25 @@ class Orchestrator:
             selected_lanes = [name for name in plan.lanes if (
                 (name == "fantastic" and decision.next_slice > 0)
                 or name in independent_lanes - independent_done)]
+            # BUYING AHEAD OF THE GRANT IS NOT SAVING, IT IS BACKLOG.
+            #
+            # A posting is worth its price only once a contact can be found for it,
+            # and contact discovery is exactly what the recovery grant authorizes.
+            # With no authorization the run would buy Fantastic rows, stop at its
+            # first chargeable Apollo call, and leave the rows in custody -- nothing
+            # lost, nothing produced, and the next grant spent on inventory bought at
+            # a worse moment. So paid lanes stand down while free ones continue: a
+            # free lane accumulates no billed inventory.
+            #
+            # This is what makes leaving FANTASTIC_JOBS_ENABLED on permanently safe,
+            # and therefore what reduces resuming after a top-up to ONE action.
+            if selected_lanes and not paid_acquisition["allowed"]:
+                stood_down = [n for n in selected_lanes if not apollo_budget.is_free_lane(n)]
+                if stood_down:
+                    selected_lanes = [n for n in selected_lanes
+                                      if apollo_budget.is_free_lane(n)]
+                    acq_cum["paid_acquisition_stood_down"] = {
+                        "lanes": stood_down, **paid_acquisition}
             if not selected_lanes:
                 iter_lanes = {}
             else:
