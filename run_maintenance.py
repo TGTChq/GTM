@@ -640,6 +640,59 @@ def _stream_field_counts(path: Path, fields, chunk: int = 4 << 20) -> dict:
     return {f: dict(c.most_common(20)) for f, c in found.items() if c}
 
 
+#: Capability flags whose EFFECTIVE value decides whether something is operational.
+#: Values only -- never a credential, never a key, never a token.
+_EFFECTIVE_FLAGS = (
+    "FANTASTIC_JOBS_ENABLED", "MAINTENANCE_ONLY", "PENDING_WORK_ENABLED",
+    "APOLLO_RECOVERY_BUDGET_ENABLED", "APOLLO_RECOVERY_BUDGET_CALLS",
+    "APOLLO_RECOVERY_BUDGET_ID", "APOLLO_CACHE_ENABLED",
+    "APOLLO_MAX_PERSON_MATCH_CALLS_PER_RUN",
+    "RUN_APPROVED_TARGET_ENABLED", "RUN_APPROVED_TARGET",
+    "RUN_APPROVED_CONTINUE_AFTER_TARGET",
+    "DAILY_APPROVED_TARGET_ENABLED", "DAILY_APPROVED_TARGET",
+    "APPROVED_RESERVE_FLOOR", "NET_NEW_SEND_SAFE_TARGET",
+    "PENDING_WORK_RESUME_MAX_PER_RUN",
+    "ATS_DIRECT_ACQUISITION_ENABLED", "ACQUISITION_EXTRA_LANES",
+    "FANTASTIC_WINDOW_SLICING_ENABLED", "FANTASTIC_FUNCTIONAL_DISCOVERY_ENABLED",
+    "FANTASTIC_HISTORICAL_RECOVERY_ENABLED",
+    "FANTASTIC_HISTORICAL_RECOVERY_MAX_ROWS_PER_RUN",
+    "FANTASTIC_AUTO_APPROVE_SEND_SAFE", "AIRTABLE_WRITE_SEND_SAFE_ONLY",
+    "AIRTABLE_SUPPRESS_EXISTING_COMPANY_FUNCTION", "AIRTABLE_SUPPRESS_ACCOUNT_LEVEL",
+    "ENROLLMENT_PERSON_EMPLOYER_UNIQUENESS", "VERIFY_WITH_HUNTER",
+    "ALTERNATE_CONTACT_CASCADE_ENABLED",
+    "APOLLO_ORG_ID_ZERO_PEOPLE_FALLBACK_ENABLED",
+)
+
+#: Substrings that mark a name as a secret. A value is printed only when the name
+#: matches none of them -- an allowlist of names is not enough on its own, because
+#: the list above is edited by hand and one careless addition would leak a key.
+_SECRET_MARKERS = ("KEY", "TOKEN", "SECRET", "PASSWORD", "WEBHOOK", "DSN", "URL")
+
+
+def effective_flags() -> dict:
+    """The capability flags AS THE CONTAINER SEES THEM.
+
+    The Railway OAuth path returns variable names but withholds their values, so
+    "what production is actually set to" could only be recorded as intent -- and
+    `OPERATIONAL_STATUS.md` had to mark most rows "not readable". A repository default
+    is NOT production: `MAINTENANCE_ONLY` reads False in the repo and is 1 in
+    production, which is exactly the sort of gap that turns a status table into
+    fiction.
+
+    The container can simply say. This prints values for capability flags only, and
+    refuses any name that looks like a credential regardless of the list above,
+    because the list is hand-edited and one careless addition would leak a key into a
+    log that gets pasted into a report.
+    """
+    out: Dict[str, Any] = {}
+    for name in _EFFECTIVE_FLAGS:
+        if any(marker in name for marker in _SECRET_MARKERS):
+            out[name] = "<withheld: name looks like a credential>"
+            continue
+        out[name] = getattr(config, name, "<absent>")
+    return out
+
+
 def preserve_run_artifacts(root: Path, run_ids, *, max_bytes: int = 64_000_000) -> dict:
     """Copy a run's PER-LEAD evidence into the maintenance backup area.
 
@@ -1411,6 +1464,9 @@ def main(argv=None) -> int:
 
     _say("1. BACKUP (before any mutation)")
     print(json.dumps(backup(root, out), indent=2))
+
+    _say("1b. EFFECTIVE CAPABILITY FLAGS (values as the container sees them)")
+    print(json.dumps(effective_flags(), indent=2, default=str))
 
     _say("2. VOLUME INVENTORY")
     print(json.dumps(inventory(root), indent=2))

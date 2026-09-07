@@ -1,69 +1,80 @@
 # Operational status of each capability
 
-Read back from the running services, not from the code. A capability that is
-implemented but disabled, unfunded or unreachable is **not** operational and is not
+**Rebuilt 2026-09-07 against deployed `a71159a`.** The previous version predated the
+throughput release, the full-flow release and the suppression-identity fix, and was
+therefore describing a system that no longer existed.
+
+Read back from the running services where the container prints it. A capability that
+is implemented but disabled, unfunded or unreachable is **not** operational and is not
 counted as improving production.
 
-Effective values read from GTM and GTM Approved Sync on 2026-09-06.
+## How to read the evidence column
 
-| capability | flag / setting | effective | operational? |
-|---|---|---|---|
-| Paid acquisition (Fantastic) | `FANTASTIC_JOBS_ENABLED` | **False** | **PAUSED** — deliberate containment while Apollo is refusing |
-| Window slice cursor | `FANTASTIC_WINDOW_SLICING_ENABLED` / `..._SLICE_HOURS` | True / 6 | **ON**, but unexercised in production — acquisition is paused. Validated offline only |
-| Custody of paid-for work | `PENDING_WORK_ENABLED` | True | **ON**; exercised by the production maintenance pass |
-| Send-safe auto-approval | `FANTASTIC_AUTO_APPROVE_SEND_SAFE` | True (both services) | **ON** — verified on the real field builder |
-| Airtable function suppression | `AIRTABLE_SUPPRESS_EXISTING_COMPANY_FUNCTION` | True | **ON** — one active row per company × role bucket, cross-run |
-| Account-level suppression | `AIRTABLE_SUPPRESS_ACCOUNT_LEVEL` | False | off by design |
-| Enrollment person/employer dedupe | `ENROLLMENT_PERSON_EMPLOYER_UNIQUENESS` | True (both) | **ON** — one enrollment per person-employer PAIR; does not cap an employer |
-| Alternate-contact cascade | `ALTERNATE_CONTACT_CASCADE_ENABLED` | True (GTM) / False (Sync) | **ON in GTM**, but cannot run while Apollo refuses |
-| Org-ID zero-people fallback | `APOLLO_ORG_ID_ZERO_PEOPLE_FALLBACK_ENABLED` | True | **UNREACHABLE while Apollo refuses.** Wired at `hiring_manager.py:1300`, but its guard requires `org.found` and `org.organization_id` — i.e. a successful `organizations/enrich`, the very call returning 422. So not even its 0-credit People Search can run. Paid enrichment of any recovered bucket is separately deferred (`APOLLO_ORG_ID_FALLBACK_MAX_PAID_MATCHES_PER_RUN = 0`). Never exercised |
-| Overall paid-match ceiling | `APOLLO_MAX_PERSON_MATCH_CALLS_PER_RUN` | 0 | off by design — it would limit already-authorized work |
-| Functional discovery | `FANTASTIC_FUNCTIONAL_DISCOVERY_ENABLED` | **False** | **NOT OPERATIONAL.** Implemented and tested; classification integration verified; live incremental yield unmeasured |
-| Historical recovery (6m cursor) | `FANTASTIC_HISTORICAL_RECOVERY_ENABLED` / `..._MAX_ROWS_PER_RUN` | **False / 0** | **NOT OPERATIONAL.** Implemented and offline-verified; needs a flag *and* a row budget, neither granted |
-| Direct ATS boards (145) | `ATS_DIRECT_ACQUISITION_ENABLED` = True; `ACQUISITION_EXTRA_LANES` = **unset** | — | **NOT OPERATIONAL, and now MEASURED.** Swept read-only 2026-09-06: 145/145 boards, **20,293 open postings, 134 companies, 615 company × function opportunities, ~464 postings/day**, 0 provider credits. Needs one authorized variable (`ACQUISITION_EXTRA_LANES=ats`), not the denied start-command change — but it is acquisition, and acquisition is paused |
-| Wellfound / Y Combinator | enabled | — | **ON**, and now **MEASURED**: 24.4 and 8.0 postings/day over five matched windows. They reported `already_drained_this_window` on 2026-09-06 on a flag the OFFSET path set, which is no longer honoured without slice evidence — see the transition note below |
-| Weekly report → Slack | start command `--slack --if-due friday` | — | **ON**; next due Friday 2026-09-11 |
-| Maintenance mode | `MAINTENANCE_ONLY` | set to 1 for the passes on 2026-09-06 | **must be returned to 0** before normal acquisition resumes |
+The Railway OAuth path returns variable NAMES but withholds their VALUES, so for most
+settings "what production is set to" is not directly readable through supported
+access. This table therefore separates three very different things, and does not
+present the third as the first:
 
-## What that means for lead volume today
+* **container** — the deployed container printed it during a maintenance pass. This is
+  evidence.
+* **not readable** — the variable exists on the service; its value is withheld by
+  OAuth. Recorded intent only.
+* **code default** — the repository default. **This is not production.** Local defaults
+  and production differ on at least `MAINTENANCE_ONLY`, which reads `False` in the
+  repo and is `1` in production.
 
-Nothing downstream of acquisition can run: Apollo refuses every credit-consuming
-call, so contact discovery, the alternate cascade and the org-ID fallback are all
-inert regardless of their flags. Two acquisition paths that could add inventory —
-functional discovery and the 145 direct ATS boards — are switched off, and the
-historical backfill has no budget.
+## Verified from the container
 
-None of those are claimed as contributing to production output.
+| fact | value | source |
+|---|---|---|
+| Deployed commit, both services | `a71159a` | Railway deployment API |
+| GTM cron | `0 3 * * *` | Railway API |
+| Approved Sync cron | `0 0 * * *` | Railway API |
+| Paid acquisition | `FANTASTIC_JOBS_ENABLED=False` | container |
+| Maintenance mode | delegates to `run_maintenance`; **no run directory, lane runner, engine or delivery manager is created** | container |
+| Package integrity | `checked=28 mismatch=0 absent=0` | container |
+| ATS board registry | `145 from ats_board_registry (145 tracked) err=none` | container |
+| Provider credentials present | Apollo, Hunter, Fantastic, RapidAPI, Airtable | container preflight |
 
+Credentials being **present** is not the same as a capability being **funded** or
+**enabled**. Apollo's key is present and the recovery grant is zero.
 
-## One transition cost, so it is not a surprise
+## Capability status
 
-The window in flight (`2026-08-30T03:03:20Z` → `2026-09-04T10:02:11Z`) was paged by
-the OFFSET cursor and is largely acquired already, but nothing records WHICH
-`date_created` ranges were covered — an offset cannot be translated into slices.
+| capability | state | why |
+|---|---|---|
+| Paid acquisition (Fantastic) | **PAUSED** | `FANTASTIC_JOBS_ENABLED=False`, verified in the container |
+| Paid enrichment (Apollo) | **UNFUNDED** | `APOLLO_RECOVERY_BUDGET_CALLS=0`; an unset grant is zero, not unlimited. The 50-reservation grant `calib-2026-09-06-50` is spent and is not reused |
+| Custody of paid-for work | **ON, exercised** | 3,595 distinct postings, `resumable: true`, `unidentifiable_employer: 0` |
+| Sep 6 recovery | **DONE** | 226/226/226, with `new_capture_agrees` and `recovery_agrees` reconciling separately |
+| Reporting A/B | **PASSING** | `ACCEPTED: True` on production files, nine ledger entries |
+| Employer identity (enrichment) | **FIXED, deployed** | shared ATS hosts rejected as employer identity |
+| Employer identity (Airtable suppression) | **FIXED, deployed** | `b4d1796`; measured +24 companies / +8 opportunities on custody |
+| Send-safe auto-approval | **ON** | container: `send_safe_auto_approve=ON` |
+| Per-run approved target | **NOT ACTIVE** | `RUN_APPROVED_TARGET_ENABLED` defaults from `NET_NEW_SEND_SAFE_TARGET > 0`; production value not readable. Irrelevant while maintenance mode is on, because the pipeline loop never runs |
+| Daily approved target + reserve | **NOT ACTIVE** | `DAILY_APPROVED_TARGET_ENABLED` default False |
+| Window slice cursor | **ON in code, NEVER EXERCISED in production** | acquisition is paused, so it has run only offline and against 0-credit count probes |
+| Apollo person cache | **NOT VERIFIED LIVE** | `APOLLO_CACHE_ENABLED` default False; production value not readable. Do not claim reuse until a run shows it |
+| Direct ATS boards (145) | **NOT ACTIVE** | registry loads cleanly, but the lane is built only when `"ats"` is in `--lanes` and the start command passes `--lanes fantastic`. `ACQUISITION_EXTRA_LANES` now makes this one authorized variable instead of a start-command change — it is unset |
+| Functional discovery | **NOT OPERATIONAL** | flag off; live incremental yield unmeasured |
+| Historical recovery (6m) | **NOT OPERATIONAL** | needs a flag *and* a row budget; neither granted |
+| Wellfound / Y Combinator | **ENABLED, contributed nothing** on 09-06 | reported `already_drained_this_window` on offset-era flags |
+| Weekly report → Slack | **ON** | start command carries `--slack --if-due friday` |
 
-So if acquisition were resumed **while that window is still open**, the slice cursor
-would re-page it slice by slice and `seen_ids` would dedupe essentially all of it:
-one window's worth of spend for near-zero net-new. The run summary would show it
-plainly (`cursor: date_created slices`, slices drained, `kept` ≈ 0).
+## What this means for lead volume today
 
-The same window also carries `window_drained_sources` entries the offset path wrote
-— which is why Wellfound and Y Combinator contributed nothing on 09-06. Those flags
-assert only that one index stopped returning rows, the exact claim the slice cursor
-exists because it cannot be trusted; honoured as-is they would silence a source for
-a window no slice ever paged, and its inventory would expire unexamined. In sliced
-mode a `drained` flag with **no recorded slice for the window** is therefore treated
-as stale. It can only cause more inspection, never less, and it applies to exactly
-one window: slices record from the first sliced pass, and the state is cleared
-whenever a window opens.
+Nothing downstream of acquisition can produce approved leads: paid acquisition is
+paused and paid enrichment is unfunded. Every capability that could add inventory —
+the 145 ATS boards, functional discovery, historical recovery — is switched off or
+unbudgeted.
 
-It resolves itself if acquisition stays paused. The window's upper bound is
-2026-09-04T10:02Z, so once the 7-day frame floor passes it — **2026-09-11T10:02Z** —
-the window is unreachable, `open()` starts a fresh one, and the slice cursor begins
-on a window it owns from the first request. Apollo's own next billing date is
-2026-09-18, so on the current trajectory the transition is free.
+**Measured production output is 0 approved leads.** None of the capabilities above is
+claimed to have produced any.
 
-If acquisition must resume sooner, the cheapest options are to accept the one-time
-re-walk (bounded by the governor) or to run with
-`FANTASTIC_WINDOW_SLICING_ENABLED=0` until the window expires. Both are fine; the
-first is simpler and self-correcting.
+## The honest gap in this table
+
+`RUN_APPROVED_TARGET_ENABLED`, `APOLLO_CACHE_ENABLED` and several others are marked
+"not readable" rather than given a value. That is a real limitation of the supported
+access path, and the correct response is to read them from a container that prints
+them rather than to assume. The maintenance pass prints only a subset today; extending
+that printout is the concrete next step for closing this gap, and it costs nothing.

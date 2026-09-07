@@ -1024,3 +1024,40 @@ class PerLeadEvidenceIsPreservedBeforeRetentionCanReachIt(unittest.TestCase):
         row = run_maintenance.preserve_run_artifacts(
             Path(tempfile.mkdtemp()), ["nope"])["runs"][0]
         self.assertEqual(row["unavailable"], "run directory absent")
+
+
+class EffectiveFlagsAreReadFromTheContainerNotAssumed(unittest.TestCase):
+    """The Railway OAuth path returns variable NAMES but withholds their VALUES, so
+    `OPERATIONAL_STATUS.md` had to mark most rows "not readable" and record intent.
+
+    A repository default is not production: `MAINTENANCE_ONLY` reads False in the repo
+    and is 1 in production. That is exactly the gap that turns a status table into
+    fiction, and the container can simply say."""
+
+    def test_capability_flags_are_reported_with_their_values(self):
+        flags = run_maintenance.effective_flags()
+        self.assertIn("FANTASTIC_JOBS_ENABLED", flags)
+        self.assertIn("MAINTENANCE_ONLY", flags)
+        self.assertIn("APOLLO_RECOVERY_BUDGET_CALLS", flags)
+        self.assertGreater(len(flags), 20)
+
+    def test_an_absent_flag_says_absent_rather_than_guessing(self):
+        with mock.patch.object(run_maintenance, "_EFFECTIVE_FLAGS",
+                               ("NO_SUCH_SETTING_AT_ALL",)):
+            self.assertEqual(run_maintenance.effective_flags(),
+                             {"NO_SUCH_SETTING_AT_ALL": "<absent>"})
+
+    def test_a_credential_name_is_withheld_even_if_someone_adds_it(self):
+        """The flag list is hand-edited. One careless addition must not leak a key
+        into a log that gets pasted into a report, so the guard is on the NAME and
+        does not depend on the list being curated correctly."""
+        for leaked in ("APOLLO_API_KEY", "AIRTABLE_TOKEN", "SOME_SECRET",
+                       "DB_PASSWORD", "SLACK_WEEKLY_REPORT_WEBHOOK_URL"):
+            with mock.patch.object(run_maintenance, "_EFFECTIVE_FLAGS", (leaked,)):
+                value = run_maintenance.effective_flags()[leaked]
+            self.assertIn("withheld", str(value), f"{leaked} was printed")
+
+    def test_no_currently_listed_flag_is_a_credential(self):
+        for name in run_maintenance._EFFECTIVE_FLAGS:
+            self.assertNotIn("withheld", str(run_maintenance.effective_flags()[name]),
+                             f"{name} looks like a credential; remove it from the list")
