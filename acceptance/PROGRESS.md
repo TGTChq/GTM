@@ -1,5 +1,27 @@
 # TGTC completion — progress record
 
+## Follow-up on PR #114 — fresh cohort units, base `0d0e3e8`
+
+Both deployed services were independently verified at `0d0e3e8`. Its new fresh
+cohort serialized `with_contact / opportunities_attempted`, unlike recovery's
+existing distinct-opportunity numerator and unknown-identity guard. An offline
+execution of the actual orchestrator reproduced **2.0 instead of 1.0** for two
+contact rows at one opportunity, and **2.0 instead of unknown** when an outcome's
+opportunity identity was missing. Both regressions failed on the deployed base.
+
+The correction reuses the recovery rate helper for fresh work, reports the same
+numerator, denominator, unreconciled remainder and evidence limitation, and labels
+reconciled outcomes without implying Apollo search occurred. It also counts postings
+from the deduplicated acquisition/adoption counters, not a join set containing both
+canonical keys and raw provider-ID aliases. The recovery execution test now verifies
+one posting remains one; the new fresh integration fixture preserves Beta's missing
+outcome beside Acme's two contacts. No rate clipping or default-zero conversion.
+
+This is an observation correction, not evidence of higher live yield. Changes are
+local until published; no provider requests, external delivery, production settings,
+budgets or business gates were changed. The two-cohort focused gate passed 34 tests
+with external sockets and DNS blocked. See the patch commit for the full gate result.
+
 Living record. Survives compaction. Reopen a closed item only on contradictory
 evidence.
 

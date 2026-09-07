@@ -112,7 +112,7 @@ class TheCohortIsFollowedThroughEveryStage(unittest.TestCase):
 
 
 class TheRunResultCarriesItInAJoinableShape(unittest.TestCase):
-    def test_the_identity_set_is_not_serialised_but_its_size_is(self):
+    def test_the_identity_alias_set_is_not_serialised_as_a_posting_count(self):
         import inspect
 
         from orchestrator import pipeline
@@ -120,7 +120,7 @@ class TheRunResultCarriesItInAJoinableShape(unittest.TestCase):
         source = inspect.getsource(pipeline)
         self.assertIn('recovery_block = {k: v for k, v in recovery_cohort.items() if k not in _sets}',
                       source)
-        self.assertIn('recovery_block["cohort_postings"] = len(', source)
+        self.assertNotIn('recovery_block["cohort_postings"] = len(recovery_cohort.get("posting_ids")', source)
 
     def test_it_is_published_under_acquisition(self):
         import inspect
@@ -233,7 +233,8 @@ class ARunThatBuysNOTHINGStillDrainsCustody(unittest.TestCase):
 
         cohort = (result.get("acquisition") or {}).get("recovery_cohort") or {}
         self.assertEqual(cohort.get("postings_resumed"), 1)
-        self.assertGreaterEqual(cohort.get("cohort_postings", 0), 1)
+        self.assertEqual(cohort.get("cohort_postings"), 1,
+                         "provider ID and canonical key identify ONE posting")
         for internal in ("posting_ids", "opportunity_keys",
                          "attempted_opportunity_keys"):
             self.assertNotIn(internal, cohort, "identity sets are not serialised")
