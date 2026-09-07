@@ -705,6 +705,69 @@ The pass produced a 2-line log and was rerun. The pass script is now a single
 parameterised `pass.sh` rather than a chain of sed-edited copies, which is how the
 broken one got written.
 
+### Release published and deployed (2026-09-07T00:05Z-00:20Z)
+
+**The GitHub blocker did not apply to this access.** Codex's connected integration got
+`403 Resource not accessible by integration` on create-tree; an ordinary authenticated
+`git push` and `gh pr create` worked first time. Two PRs, both green, both merged, both
+deployed to BOTH services:
+
+    PR #108  fix(throughput): recovery batch continuation, checkpoint identity, budget
+    PR #109  feat(maintenance): preserve the per-lead evidence retention would reach
+
+    origin/main            40f2b03
+    GTM                    SUCCESS  40f2b03   cron 0 3 * * *
+    GTM Approved Sync      SUCCESS  40f2b03   cron 0 0 * * *
+
+`origin/main` was the patch base `6cd4fef` exactly, so nothing intervening needed
+preserving, and the applied tree reproduced the release hash
+`fe71f8710685e11e373e8da6e717fd61d089975f` byte for byte.
+
+Offline gate, empty environment, `ci_no_network` blocking sockets AND DNS:
+**3,381 passed / 1 skipped / 1,001 subtests**, integrity 27/0/0, undefined names 0,
+`git diff --check` clean.
+
+### The two withheld contacts: ANSWERED
+
+Not a budget problem and not a verification problem.
+
+    examined 26   send_safe 0   withheld 26
+      missing_email                      24
+      outbound_company_held_for_review    2   <- the two verified contacts
+
+Both: `Email Validation PASS`, `Contact Alignment PASS`, `Apollo Email Status
+verified`, current validation version, valid fingerprint -- and **Outbound Hold set on
+the COMPANY side**. The contact was fine; the outbound company display could not be
+resolved at high/medium confidence.
+
+That is an already-documented blocker class: on 2026-08-28 the whole Approved backlog
+was unenrollable with 133 of 153 company holds from `linkedin_slug_domain_disagreement`.
+The narrower `fix/company-anchor-conflict` fix has never been deployed. Full record in
+`WITHHELD_CONTACTS_EXPLAINED.md`.
+
+### Maintenance enforcement VERIFIED from inside the container
+
+The brief's correction is accepted: the calibration preflight says `airtable=write`,
+so describing that run as "external delivery disabled" was wrong. It created zero rows
+because all 26 candidates were withheld.
+
+That was a PIPELINE run (`MAINTENANCE_ONLY=0`). A MAINTENANCE pass is a different
+execution mode, and the container printed the enforcement directly:
+
+    MAINTENANCE_ONLY: delegating to run_maintenance; no run directory, lane runner,
+    engine or delivery manager is created.
+    exists=True  FANTASTIC_JOBS_ENABLED=False
+    package_integrity    checked=27 mismatch=0 absent=0 (OK)
+
+No delivery manager is constructed, so no Airtable or Instantly write is reachable;
+an import guard test independently forbids the writer and every request path.
+
+### Brett acceptance re-run on isolated copies
+
+`ACCEPTED: True` -- text identical, values identical -- across **nine** ledger entries
+including all three 2026-09-06 recovery/calibration attempts. Backfill wrote nothing;
+the durable record already answered.
+
 ### Final state — 2026-09-06T15:30Z
 
     origin/main   afd92db, deployed to both services (SUCCESS)
