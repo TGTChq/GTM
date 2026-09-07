@@ -94,6 +94,28 @@ def _opportunity_key(job) -> str:
     return f"{company}|{bucket}"
 
 
+def _cohort_overlap(fresh, recovery, leads) -> int:
+    """Leads belonging to BOTH cohorts, so the two are never simply added.
+
+    The company+bucket collapse folds several postings into one lead, and one of them
+    may be freshly acquired while another was resumed from custody. Such a lead is
+    genuinely part of each cohort and is counted in each; reporting how many there are
+    is what stops a reader summing the two and counting that contact twice.
+    """
+    fresh_ids = fresh.get("posting_ids") or set()
+    rec_ids = recovery.get("posting_ids") or set()
+    if not fresh_ids or not rec_ids:
+        return 0
+    both = 0
+    for lead in leads or []:
+        ids = {str(getattr(lead, "posting_id", "") or "")}
+        ids |= {str(r) for r in (getattr(lead, "related_posting_ids", []) or [])}
+        ids.discard("")
+        if (ids & fresh_ids) and (ids & rec_ids):
+            both += 1
+    return both
+
+
 def _account_recovery_cohort(cohort, leads, delivery) -> None:
     """Follow the recovered cohort through ONE slice's enrichment and delivery.
 
@@ -1027,6 +1049,17 @@ class Orchestrator:
         daily_on = bool(getattr(config, "DAILY_APPROVED_TARGET_ENABLED", False))
         run_target_on = bool(getattr(config, "RUN_APPROVED_TARGET_ENABLED", False))
         daily_dir = self.state.store_path("daily_target") if daily_on or run_target_on else None
+        #: THE FRESH-ACQUISITION COHORT, symmetric to the recovery one below.
+        #: Without it "what did new acquisition produce" could only be answered by
+        #: subtracting recovery from the run total -- arithmetic across two
+        #: populations that the acceptance guide explicitly forbids, and which is
+        #: wrong whenever one opportunity contains postings from both.
+        fresh_cohort: Dict[str, Any] = {
+            "postings_acquired": 0, "opportunities_acquired": 0,
+            "leads": 0, "with_contact": 0,
+            "final_pass": 0, "needs_check": 0, "rejected": 0, "other": 0,
+            "delivered_lead_keys": [], "posting_ids": set(),
+            "opportunity_keys": set(), "attempted_opportunity_keys": set()}
         recovery_cohort: Dict[str, Any] = {
             "postings_resumed": 0, "opportunities_resumed": 0,
             "leads": 0, "with_contact": 0,
@@ -1206,6 +1239,21 @@ class Orchestrator:
             acq_cum["canonical_duplicates_in_run"] += dedup_attr["canonical_duplicates_in_run"]
             acq_cum["postings_missing_identity"] += dedup_attr["missing_identity"]
             acq_cum["net_new_jobs_captured"] += len(opportunities)
+            # Recorded HERE -- after dedupe, before adoption appends resumed rows --
+            # because this is the only point at which `opportunities` is exactly the
+            # newly acquired set.
+            for _j in opportunities:
+                _k = posting_identity(_j)[1]
+                if _k:
+                    fresh_cohort["posting_ids"].add(_k)
+                _jid = str(_j.get("job_id") or _j.get("posting_id") or "")
+                if _jid:
+                    fresh_cohort["posting_ids"].add(_jid)
+                _opp = _opportunity_key(_j)
+                if _opp:
+                    fresh_cohort["opportunity_keys"].add(_opp)
+            fresh_cohort["postings_acquired"] += len(opportunities)
+            fresh_cohort["opportunities_acquired"] = len(fresh_cohort["opportunity_keys"])
             acq_cum["dedupe_reconciles"] = bool(
                 acq_cum["dedupe_reconciles"] and dedup_attr["reconciles"])
             _merge_source_counts(acq_cum["per_source"], {}, dedup_attr)
@@ -1342,6 +1390,14 @@ class Orchestrator:
                 known_delivered=supp.delivered_leads(), **deliver_kwargs)
 
             _account_recovery_cohort(recovery_cohort, enrichment.leads, delivery)
+            _account_recovery_cohort(fresh_cohort, enrichment.leads, delivery)
+            # A lead can belong to BOTH when the company+bucket collapse merged a
+            # freshly acquired posting with a resumed one. It is counted in each
+            # cohort -- it really is part of each -- so the overlap is reported
+            # explicitly and nobody adds the two and double-counts the contact.
+            _both = _cohort_overlap(fresh_cohort, recovery_cohort, enrichment.leads)
+            acq_cum["cohort_overlap_leads"] = (
+                int(acq_cum.get("cohort_overlap_leads") or 0) + _both)
 
             # Count explicit Approved statuses returned by Airtable, attributed to
             # this run and the business day. A created Pending row is not approval.
@@ -1554,8 +1610,20 @@ class Orchestrator:
             "opportunities_with_reconciled_outcome" if recovery_block["opportunity_to_contact_rate"] is not None else "")
         recovery_block["rate_numerator"] = "opportunities_with_contact"
         recovery_block["attempt_definition"] = "reconciled outcome; not proof that an Apollo search ran"
+        fresh_block = {k: v for k, v in fresh_cohort.items() if k not in _sets}
+        fresh_block["cohort_postings"] = len(fresh_cohort.get("posting_ids") or ())
+        fresh_block["delivered"] = len(fresh_block.get("delivered_lead_keys") or [])
+        _fresh_attempted = len(fresh_cohort.get("attempted_opportunity_keys") or ())
+        fresh_block["opportunities_attempted"] = _fresh_attempted
+        fresh_block["opportunity_to_contact_rate"] = (
+            round(fresh_block["with_contact"] / _fresh_attempted, 4)
+            if _fresh_attempted else None)
+        fresh_block["rate_denominator"] = (
+            "opportunities_attempted" if _fresh_attempted else "")
         acquisition_block = {
             "iterations": controller.iterations,
+            "fresh_cohort": fresh_block,
+            "cohort_overlap_leads": int(acq_cum.get("cohort_overlap_leads") or 0),
             "recovery_cohort": recovery_block,
             "final_stop_reason": stop_reason,
             "acquisition_error": acquisition_error,
