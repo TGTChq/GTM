@@ -847,13 +847,15 @@ def _print_run_summary(ctx, mode, result, state) -> None:
             line("FRESH COHORT",
                  f"postings {fresh.get('postings_acquired')} / opportunities "
                  f"{fresh.get('opportunities_acquired')} / leads {fresh.get('leads')}")
-            line("  attempted",
-                 f"{fresh.get('opportunities_attempted')} opportunities -> with_contact "
+            line("  outcomes",
+                 f"{fresh.get('opportunities_with_reconciled_outcome')} opportunities; contact rows "
                  f"{fresh.get('with_contact')} -> final_pass {fresh.get('final_pass')} "
                  f"-> delivered {fresh.get('delivered')}")
             line("  opp->contact",
                  f"{frate if frate is not None else 'unknown'} "
                  f"(denominator: {fresh.get('rate_denominator') or 'none'})")
+            line("  no reconciled outcome",
+                 fresh.get("opportunities_without_reconciled_outcome"))
         _overlap = int(((result.get("acquisition") or {}).get("cohort_overlap_leads")) or 0)
         if _overlap:
             # Printed so the two cohorts are never simply added: a collapsed lead can
@@ -869,8 +871,8 @@ def _print_run_summary(ctx, mode, result, state) -> None:
             line("RECOVERY COHORT",
                  f"postings {rec.get('postings_resumed')} / opportunities "
                  f"{rec.get('opportunities_resumed')} / leads {rec.get('leads')}")
-            line("  attempted",
-                 f"{rec.get('opportunities_attempted')} opportunities -> with_contact "
+            line("  outcomes",
+                 f"{rec.get('opportunities_with_reconciled_outcome')} opportunities; contact rows "
                  f"{rec.get('with_contact')} -> final_pass {rec.get('final_pass')} "
                  f"-> delivered {rec.get('delivered')}")
             line("  opp->contact",

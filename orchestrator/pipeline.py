@@ -1591,7 +1591,9 @@ class Orchestrator:
         # Airtable / Approved Sync reconciliation needs. A count cannot be joined.
         _sets = ("posting_ids", "opportunity_keys", "attempted_opportunity_keys", "contact_opportunity_keys")
         recovery_block = {k: v for k, v in recovery_cohort.items() if k not in _sets}
-        recovery_block["cohort_postings"] = len(recovery_cohort.get("posting_ids") or ())
+        # posting_ids includes canonical keys AND provider-id aliases for joins;
+        # its size is not a posting count. Adoption already counts distinct work.
+        recovery_block["cohort_postings"] = int(recovery_block.get("postings_resumed") or 0)
         recovery_block["delivered"] = len(recovery_block.get("delivered_lead_keys") or [])
         # ATTEMPTED vs UNATTEMPTED, kept apart. A conversion rate divides by the
         # opportunities the stage actually produced an outcome for; the remainder is
@@ -1611,15 +1613,21 @@ class Orchestrator:
         recovery_block["rate_numerator"] = "opportunities_with_contact"
         recovery_block["attempt_definition"] = "reconciled outcome; not proof that an Apollo search ran"
         fresh_block = {k: v for k, v in fresh_cohort.items() if k not in _sets}
-        fresh_block["cohort_postings"] = len(fresh_cohort.get("posting_ids") or ())
+        fresh_block["cohort_postings"] = int(fresh_block.get("postings_acquired") or 0)
         fresh_block["delivered"] = len(fresh_block.get("delivered_lead_keys") or [])
         _fresh_attempted = len(fresh_cohort.get("attempted_opportunity_keys") or ())
         fresh_block["opportunities_attempted"] = _fresh_attempted
-        fresh_block["opportunity_to_contact_rate"] = (
-            round(fresh_block["with_contact"] / _fresh_attempted, 4)
-            if _fresh_attempted else None)
+        fresh_block["opportunities_with_reconciled_outcome"] = _fresh_attempted
+        fresh_block["opportunities_with_contact"] = len(fresh_cohort.get("contact_opportunity_keys") or ())
+        fresh_block["opportunities_without_reconciled_outcome"] = max(
+            0, int(fresh_block.get("opportunities_acquired") or 0) - _fresh_attempted)
+        # Use the same units and unknown-identity rule as recovery. Two contact
+        # rows for one opportunity are not a 200% opportunity conversion rate.
+        fresh_block["opportunity_to_contact_rate"] = _recovery_contact_rate(fresh_cohort)
         fresh_block["rate_denominator"] = (
-            "opportunities_attempted" if _fresh_attempted else "")
+            "opportunities_with_reconciled_outcome" if fresh_block["opportunity_to_contact_rate"] is not None else "")
+        fresh_block["rate_numerator"] = "opportunities_with_contact"
+        fresh_block["attempt_definition"] = "reconciled outcome; not proof that an Apollo search ran"
         acquisition_block = {
             "iterations": controller.iterations,
             "fresh_cohort": fresh_block,
