@@ -75,53 +75,80 @@ requests and says so.
 
 ## Activation order
 
-Budgets and sources first; maintenance last. **Do not publish during a run** — the
+Budgets and sources first, maintenance last. **Never publish during a run** — the
 window is 03:00Z plus the run's duration.
 
-1. ~~Sources~~ — done: `ACQUISITION_EXTRA_LANES=ats`. Free inventory, no credits.
-2. ~~Budget enforcement~~ — confirmed: `APOLLO_RECOVERY_BUDGET_ENABLED=true`.
-3. **Apollo authorization — BLOCKED, see below.**
-4. `FANTASTIC_JOBS_ENABLED=1`.
-5. `MAINTENANCE_ONLY=0`. Last.
+1. **Sources** — `ACQUISITION_EXTRA_LANES=ats`. Free inventory, no provider credits.
+2. **Ceiling in force** — `APOLLO_RECOVERY_BUDGET_ENABLED=true`.
+3. **Per-grant cost ceiling** — `APOLLO_RECOVERY_BUDGET_CALLS`. Pre-set, so that
+   resuming later is a single action. See the sizing note below.
+4. **Acquisition armed** — `FANTASTIC_JOBS_ENABLED=1`. Safe to leave on permanently
+   *because* paid lanes now stand down without an enrichment authorization.
+5. **Maintenance cleared** — `MAINTENANCE_ONLY=0`. Last.
 
-### What blocks step 3, exactly
+The service is then ARMED: the `0 3 * * *` cron runs every night on its own.
 
-**The Apollo lead-credit balance cannot be read from here at zero cost.** `auth/health`
-returns 200 whether or not credits remain, so the only signal is attempting a
-credit-consuming call — and that call now correctly requires a grant. Sizing
-`APOLLO_RECOVERY_BUDGET_CALLS` without the balance risks exactly the overconsumption
-that is not authorized, so the number is not chosen here.
+## The three states, and what each night does
 
-**The missing datum:** the workspace's lead-credit balance, from Apollo's Plan overview
-/ Credits and activity screen, with the timestamp it was read.
+**No authorization** (`APOLLO_RECOVERY_BUDGET_ID` unset or spent). The run starts,
+resolves the authorization once before any lane, and **stands paid lanes down** —
+recorded as `paid_acquisition_stood_down`, not a failure. Free lanes still run,
+custody still drains as far as it can without a chargeable call, delivery still
+writes what completed, and unfinished postings stay in custody. **Nothing is bought.**
+This is the recoverable wait: it costs nothing and repeats nightly until authorized.
 
-Two commands, once that number exists. Both need a **new** id — the current one is
-spent, and re-using it resumes its counter:
+Buying ahead of the grant would not be saving. A posting is worth its price only once
+a contact can be found for it; bought early it becomes backlog, and the next
+authorization is spent on inventory acquired at a worse moment.
+
+**Authorized.** Acquisition runs, enrichment spends against the durable ceiling,
+delivery writes send-safe rows, and the per-run objective is 1,000 distinct NEW
+Approved with `CONTINUE_AFTER_TARGET` so a good night is not truncated at the goal.
+
+**Authorization spent mid-run.** The charge is globally fatal by design: the loop
+stops, completed work is preserved, the rest stays in custody, and the approvals
+already delivered in the final batch are still counted. The next night stands paid
+lanes down until a new grant exists.
+
+## Resuming after a top-up: ONE action
+
+**Apollo's balance and this authorization are different things, and topping up the
+provider changes nothing here.** With `APOLLO_RECOVERY_BUDGET_CALLS` pre-set, the
+whole of resumption is one variable:
 
 ```bash
 railway api 'mutation { variableUpsert(input: {projectId: "898f2e3a-1c1e-4b00-b9a6-686cf0432282", environmentId: "bae427bd-64a6-4f4e-8f56-fbd406985434", serviceId: "3a41d0d7-cd66-4f53-baa6-886266ddbbed", name: "APOLLO_RECOVERY_BUDGET_ID", value: "<NEW-ID>"}) }'
 ```
 
-```bash
-railway api 'mutation { variableUpsert(input: {projectId: "898f2e3a-1c1e-4b00-b9a6-686cf0432282", environmentId: "bae427bd-64a6-4f4e-8f56-fbd406985434", serviceId: "3a41d0d7-cd66-4f53-baa6-886266ddbbed", name: "APOLLO_RECOVERY_BUDGET_CALLS", value: "<N>"}) }'
-```
+`<NEW-ID>` must be one never used before — a date and purpose is enough, e.g.
+`luis-20260910-operating-1`. A NEW id is what resets the consumed counter; re-using a
+spent id **resumes** it and grants nothing, which is enforced and tested rather than
+merely documented. The next `0 3 * * *` run picks it up. Nothing else changes: no
+redeploy is needed beyond the one the variable change itself triggers, and no counter
+is reset by deploying.
 
-**Sizing `<N>`.** One reservation is one potentially paid request attempt, not one
-credit. The 2026-09-07 run consumed 200 reservations reaching 184 companies and
-produced 56 contacts and 28 Airtable rows. Nothing establishes a rate from that — the
-run was interrupted, and requests and credits are different units — so `<N>` should be
-set from the balance and the appetite for one day's spend, not from a projected yield.
+To change the appetite rather than renew it, set `APOLLO_RECOVERY_BUDGET_CALLS`
+instead — that is the cost dial, and it takes effect on the next new grant.
 
-Then steps 4 and 5, same mutation shape with `FANTASTIC_JOBS_ENABLED=1` and
-`MAINTENANCE_ONLY=0`.
+### Why the balance cannot size this, and why that is survivable
 
-### Why acquisition and maintenance were not flipped here
+The lead-credit balance is not readable from here at zero cost: `auth/health` returns
+200 with or without credits, and the only true signal is a credit-consuming call,
+which now correctly requires a grant. **There is no automatic detection of a top-up**,
+and adding credit alone will not restart anything.
 
-With the Apollo grant at zero, a run enables paid Fantastic acquisition and then stops
-at its first chargeable Apollo call. It would buy postings it cannot enrich and produce
-**zero** Approved contacts. Custody would preserve them, so nothing is lost — but it is
-spend with no output, and the authorization is explicitly for operating within
-available credits without overconsumption. Steps 4 and 5 belong after step 3.
+What makes that survivable is the unit. **One reservation is at most one lead
+credit** — a reservation is taken per potentially paid request attempt, and a refused
+attempt costs a reservation while costing Apollo nothing. So a ceiling of N calls
+bounds spend at **no more than N lead credits**, without knowing the balance. And a
+ceiling above the balance is not overconsumption: credits that do not exist cannot be
+spent, so Apollo refuses first and the run pauses cleanly.
+
+`APOLLO_RECOVERY_BUDGET_CALLS` is therefore set to **2,000**: an explicit ceiling of
+at most 2,000 potentially paid requests per grant, an order of magnitude above the
+only grant ever exercised (200, on 2026-09-07), and bounded whatever the balance turns
+out to be. It is a cap, not a forecast — nothing here predicts how many Approved rows
+2,000 requests produce, and the 2026-09-07 run is not a rate.
 
 ## What is proved, and what is not
 
