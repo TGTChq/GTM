@@ -50,9 +50,14 @@ interleaved; a complete, per-contact reconstruction is not available from those 
 
 ## Verification
 
-Final offline gate: **3,477 passed / 1,001 subtests passed**, with sockets and DNS
-blocked and an empty environment. Integrity **30 checked / 0 mismatch / 0 absent**;
-undefined names **0**; `git diff --check` clean. No live improvement is claimed.
+Final offline gate: **3,476 passed / 1 skipped / 1,001 subtests passed**, with
+sockets and DNS blocked and an empty environment. Integrity **30 checked / 0
+mismatch / 0 absent**; undefined names **0**; `git diff --check` clean. No live
+improvement is claimed.
+
+The count reproduced on publication is 3,476, not the 3,477 first recorded here:
+the base is 3,458 and this patch adds exactly 18 tests. The corrected figure is the
+one that re-runs.
 
 The first nine regressions fail on the base: five false company-display holds,
 the scan stopping at 200, and absent completeness/population accounting. The
@@ -93,3 +98,48 @@ maintenance dispatcher. A deployment is not evidence that maintenance executed.
 Finish the original 27-contact reconciliation before claiming all retentions are
 resolved. Additional aliases need their own identity evidence; do not blanket-
 release them. This patch requires no other attachment and replaces no prior patch.
+
+## Independent corroboration from production (read-only, added at publication)
+
+The claims above were re-checked against the run's own reporting-ledger record and
+run summary, read from Railway deployment logs rather than from this patch's
+author. Deployment `d7f67a8b-7d87-4a00-96c2-44009d3c2181` (live 06:23:23Z ->
+06:46:20Z) carries run `20260907T062915Z-f79f4de1`, started 06:29:15Z, finished
+06:45:27Z, `state: incomplete`, `stop_reason: topup:apollo_circuit_open`.
+
+| ledger metric | value | what it confirms |
+|---|---|---|
+| `provider_jobs_billed` / `provider_jobs_returned` | 500 / 500 | the billed population |
+| `jobs_captured` = `net_new_jobs_captured` | 328 | kept rows, not credits |
+| `cross_query_duplicates` (`fantastic_jobs_ats.duplicates`) | 172 | 500 - 328 |
+| `contacts_found` | 56 | 28 created + 27 withheld + 1 person/employer duplicate |
+| `sent_to_airtable` | 28 | an Airtable creation, not an Approved status |
+| `postings_resumed` | 2,000 | custody re-entered paid-for work |
+| `jobs_reviewed` | 2,328 | 328 fresh + 2,000 resumed |
+
+The defect this patch fixes is printed verbatim in that run's summary:
+
+```
+  fantastic_jobs_ats  credits=328 ... airtable/1k=67.1
+jobs_returned_billed  500
+```
+
+`credits=328` is the retained-ID imputation; 500 rows were billed. The published
+yield per credit was therefore overstated by 52%. With the source-returned total
+the same run reads 44.0 Airtable creations per 1,000 billed rows.
+
+The run also separated the two populations it processed, which is what makes the
+above readable at all:
+
+```
+FRESH COHORT     postings 328 / opportunities 273 / leads 73   opp->contact 0.411
+RECOVERY COHORT  postings 2000 / opportunities 1663 / leads 153 opp->contact 0.1765
+  cohort overlap 4 lead(s) belong to BOTH cohorts -- do not sum
+```
+
+Both rates carry `denominator: opportunities_with_reconciled_outcome`, and 200
+fresh / 1,510 recovery opportunities are recorded as having no reconciled outcome
+rather than as failures. `cohort_postings` is 328, not 328 plus its aliases.
+
+None of this establishes 1,000 Approved contacts per run, and none of it is a
+forecast: the run was interrupted on its Apollo authorization after 184 companies.
