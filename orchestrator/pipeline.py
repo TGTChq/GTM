@@ -40,6 +40,7 @@ from orchestrator.run_ledger import (
     reason_census_from_parts,
 )
 from orchestrator.runcontrol import RunContext, RunStatus
+from orchestrator import source_cost
 from orchestrator.runlock import RunLock, RunLockHeld
 from orchestrator.state import StateManager
 from orchestrator.suppression import SuppressionStore
@@ -1658,10 +1659,12 @@ class Orchestrator:
             "lanes": {lane: r.to_dict() for lane, r in lane_results.items()},
             "acquisition": acquisition_block,
             "governor": {**gov.to_dict(), "quota_refresh": quota_refresh},
-            "yield_ledger": ledger.summary(billed_by_source={
-                source: (int(values["returned_billed"]) if source.startswith("fantastic_jobs_") else 0)
-                for source, values in acq_cum["per_source"].items()
-                if "returned_billed" in values}),
+            "yield_ledger": ledger.summary(
+                billed_by_source=source_cost.billed_by_source(acq_cum["per_source"])),
+            "source_cost": {
+                "per_source": source_cost.costs_by_source(acq_cum["per_source"]),
+                **source_cost.run_total(source_cost.costs_by_source(acq_cum["per_source"])),
+            },
             "emails": emails_block,
             "waterfall": report.to_dict(),
             "enrichment": enrichment.to_dict(),
