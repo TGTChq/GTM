@@ -19,19 +19,20 @@ identical and both held; `vanity_get_attested` clears. `sibling_companies` passe
 every shape test a rebrand passes and is held, which is what separates it from
 `endeavor_attested`.
 
-**Losses now carry their units** (`orchestrator/loss_units.py`, reproduced on the
-real 2026-09-07 record). The flat reason map spans four non-addable units, repeats
-two populations under different names, and contains one inside another: `unverified`
-includes `no_contact`, so **only 11 opportunities had an email that failed to verify,
-not 155** -- the other 144 never had a contact. Delivery reconciles exactly
-(199 = 28 + 171, remainder 0), all 203 eligible buckets were genuinely searched, and
-the `hiring_manager_not_found` 169 against `hm_not_found` 147 disagreement is
-reported rather than resolved by preferring one.
+**Loss-counter interpretation corrected after review of `81d0dc3`.** The earlier
+claim of 11 email-verification failures was an unsupported subtraction of 155
+dispositions and 144 writer skips. Neither their containment nor the remaining
+records' email outcomes was established. Missing counters now remain unknown;
+agreeing aliases count once; units and potentially overlapping reasons are not added.
+The 203 search flags are observations on lead rows, possibly replayed from checkpoints,
+not physical-request receipts. The 169/147 difference stays unresolved. Delivery
+arithmetic still closes (199 = 28 + 171); this proves neither approval status nor
+the correctness of a skip.
 
-**The 172 duplicates close as an identity** -- 500 billed = 328 kept + 172 -- with no
-residue that could be a double purchase or a dropped first sighting. How they split
-between window-reuse seeding and within-run repeats stays OPEN: production retains no
-response-level ids.
+**The duplicate arithmetic closes** -- 500 billed = 328 kept + 172. A balanced
+partition does NOT exclude repeated purchases or incorrectly discarded first sightings.
+The stage counters locate the recorded loss at the adapter; its response-level
+attribution remains open because the historical response IDs were not retained.
 
 **Capacity, offline, through the real orchestrator:** 1,500 distinct new Approved in
 one run; 3,524 owed against a 2,000-row batch all drained in one run, so the batch is

@@ -1,27 +1,8 @@
-"""Loss reasons carry UNITS, and several of them count the same population twice.
+"""Describe recorded loss counters without inventing population intersections.
 
-A run reports a flat ``loss_reasons`` map. Read as a list it invites exactly the
-wrong arithmetic -- the 2026-09-07 run's map sums to well over its own opportunity
-count, because it mixes four units and repeats two populations under different
-labels:
-
-* ``REJECT_*`` are **postings**, rejected before any opportunity is formed.
-* ``hiring_manager_not_found`` is a **company x function** opportunity.
-* ``no_contact`` / ``send_safe_withheld`` are **delivery rows** -- opportunities that
-  reached the writer.
-* ``unverified`` / ``needs_check`` are **dispositions** over the same opportunities.
-
-And the repeats: ``email_unverified`` and ``unverified`` are one population under two
-names, as are ``not_icp`` and ``rejected``. ``unverified`` also CONTAINS
-``no_contact`` -- an opportunity with no email at all is not verified either -- so
-adding the two counts the same opportunities twice and then calls the sum a loss.
-
-WHAT THIS MODULE REFUSES TO DO. It does not infer a cause from a counter. "Nothing
-was found" and "we never looked" produce the same absence in a funnel, and only
-stage-entry evidence separates them, so a population the artifacts cannot classify is
-returned as ``unattributed`` rather than assigned to the provider or to the budget.
-The five categories below exist precisely so that "Apollo found nobody" cannot absorb
-work that was never attempted.
+Missing counts are unknown. Equal units do not prove disjoint populations, and a
+missing contact does not prove a completed search. This module observes counters;
+it never makes approval, suppression, retry, budget or run-stop decisions.
 """
 
 from __future__ import annotations
@@ -32,7 +13,7 @@ from typing import Any, Dict, List, Mapping, Optional
 POSTING = "posting"
 OPPORTUNITY = "company_x_function_opportunity"
 DELIVERY_ROW = "delivery_row"
-DISPOSITION = "opportunity_disposition"
+DISPOSITION = "lead_disposition"
 
 #: The five outcomes the user of this data has to be able to tell apart. Each is a
 #: statement about what HAPPENED, not about who is to blame for it.
@@ -57,12 +38,12 @@ REASON_UNITS: Dict[str, tuple] = {
     "not_icp": (OPPORTUNITY, "account_gate", INTERNAL_FILTER),
     "rejected": (OPPORTUNITY, "account_gate", INTERNAL_FILTER),
     "company_unresolved": (OPPORTUNITY, "identity", INTERNAL_FILTER),
-    "hiring_manager_not_found": (OPPORTUNITY, "contact_discovery", SEARCHED_NO_RESULT),
+    "hiring_manager_not_found": (OPPORTUNITY, "contact_discovery", UNATTRIBUTED),
     "unverified": (DISPOSITION, "email_validation", UNATTRIBUTED),
     "email_unverified": (DISPOSITION, "email_validation", UNATTRIBUTED),
     "needs_check": (DISPOSITION, "contact_gate", UNATTRIBUTED),
     "reroute": (DISPOSITION, "contact_gate", UNATTRIBUTED),
-    "no_contact": (DELIVERY_ROW, "delivery", SEARCHED_NO_RESULT),
+    "no_contact": (DELIVERY_ROW, "delivery", UNATTRIBUTED),
     "send_safe_withheld": (DELIVERY_ROW, "delivery", FOUND_BUT_WITHHELD),
     "company_function_suppressed": (DELIVERY_ROW, "delivery", INTERNAL_FILTER),
     "account_suppressed": (DELIVERY_ROW, "delivery", INTERNAL_FILTER),
@@ -78,30 +59,50 @@ ALIAS_GROUPS: List[tuple] = [
     ("account_gate_rejections", ("not_icp", "rejected")),
 ]
 
-#: Containment, not aliasing: the left label's population INCLUDES the right one.
-#: An opportunity with no email at all is also an unverified one.
-CONTAINMENTS: List[tuple] = [
-    ("unverified", "no_contact",
-     "an opportunity with no contact has no verified email either"),
-]
+def _int(value: Any) -> Optional[int]:
+    """Accept nonnegative integer counters; absence and malformed data stay unknown."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if value >= 0 else None
+    if isinstance(value, str) and value.strip().isascii() and value.strip().isdecimal():
+        try:
+            return int(value.strip())
+        except ValueError:
+            pass
+    return None
 
 
-def _int(value: Any) -> int:
-    try:
-        return int(value or 0)
-    except (TypeError, ValueError):
-        return 0
+def _sum(values) -> Optional[int]:
+    values = list(values)
+    return sum(values) if all(v is not None for v in values) else None
+
+
+def _population_count(labels: Mapping[str, Optional[int]]) -> Optional[int]:
+    """Only a single counter or agreeing aliases establish one population count.
+
+    Multiple non-alias labels may overlap, even when their units match. Writer
+    arithmetic is handled separately using the writer's own skip partition.
+    """
+    groups = {label: name for name, aliases in ALIAS_GROUPS for label in aliases}
+    populations: Dict[str, List[Optional[int]]] = {}
+    for label, count in labels.items():
+        populations.setdefault(groups.get(label, label), []).append(count)
+    if len(populations) != 1:
+        return None
+    values = next(iter(populations.values()))
+    return values[0] if None not in values and len(set(values)) == 1 else None
 
 
 def classify(reasons: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
     """Group one run's loss reasons by unit, stage and category.
 
-    Sums are reported PER UNIT and never across units, because a posting, an
-    opportunity and a delivery row are not addable.
+    Retain individual observations. Totals require both common units and evidence
+    that labels describe one population; equal units alone are insufficient.
     """
-    by_unit: Dict[str, Dict[str, int]] = {}
-    by_category: Dict[str, Dict[str, int]] = {}
-    unknown: Dict[str, int] = {}
+    by_unit: Dict[str, Dict[str, Optional[int]]] = {}
+    by_category: Dict[str, Dict[str, Optional[int]]] = {}
+    unknown: Dict[str, Optional[int]] = {}
     for label, raw in (reasons or {}).items():
         count = _int(raw)
         entry = REASON_UNITS.get(str(label))
@@ -112,18 +113,23 @@ def classify(reasons: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
         by_unit.setdefault(unit, {})[str(label)] = count
         by_category.setdefault(category, {})[str(label)] = count
     return {
-        "by_unit": {unit: {"labels": labels, "sum_within_unit": sum(labels.values())}
+        "by_unit": {unit: {"labels": labels, "sum_within_unit": _population_count(labels)}
                     for unit, labels in sorted(by_unit.items())},
-        "by_category": {c: {"labels": l, "sum_within_category": sum(l.values())}
+        "by_category": {c: {"labels": l,
+                             "units": {label: REASON_UNITS[label][0] for label in l},
+                             "sum_within_category": (
+                                 _population_count(l)
+                                 if len({REASON_UNITS[label][0] for label in l}) == 1
+                                 else None)}
                         for c, l in sorted(by_category.items())},
         "unclassified_labels": unknown,
-        "note": ("counts are summed only WITHIN a unit; across units they are "
-                 "different populations and adding them is meaningless"),
+        "note": ("null means a population total is not established; common units "
+                 "do not establish disjointness, and aliases count once"),
     }
 
 
 def overlaps(reasons: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
-    """Which labels repeat one population, and which contains which."""
+    """Expose known aliases; do not subtract unlinked cross-stage populations."""
     present = {str(k): _int(v) for k, v in (reasons or {}).items()}
     aliases = []
     for name, labels in ALIAS_GROUPS:
@@ -131,17 +137,23 @@ def overlaps(reasons: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
         if len(found) > 1:
             aliases.append({
                 "group": name, "labels": found,
-                "counts_agree": len(set(found.values())) == 1,
-                "double_counted_if_summed": sum(found.values()) - max(found.values()),
+                "counts_agree": (len(set(found.values())) == 1
+                                 if None not in found.values() else None),
+                "double_counted_if_summed": (
+                    sum(found.values()) - next(iter(found.values()))
+                    if None not in found.values() and len(set(found.values())) == 1
+                    else None),
             })
     contained = []
-    for outer, inner, why in CONTAINMENTS:
+    for outer, inner in [("unverified", "no_contact")]:
         if outer in present and inner in present:
             contained.append({
                 "outer": outer, "outer_count": present[outer],
-                "inner": inner, "inner_count": present[inner], "why": why,
-                "outer_excluding_inner": present[outer] - present[inner],
-                "consistent": present[outer] >= present[inner],
+                "inner": inner, "inner_count": present[inner],
+                "established": False,
+                "why": "different stages and units; linked identities and email outcomes required",
+                "outer_excluding_inner": None,
+                "consistent": None,
             })
     return {"alias_groups": aliases, "containments": contained}
 
@@ -150,15 +162,16 @@ def delivery_reconciles(submitted: Any, created: Any,
                         skips: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
     """Does the writer's own arithmetic close?
 
-    ``submitted = created + every skip``. When it does, the delivery-row unit is
-    fully explained and nothing there needs attributing to a provider. When it does
-    not, the remainder is named and left unattributed.
+    ``submitted = created + every skip`` is a numeric partition of the writer's
+    receipt. It does not establish approval status or the correctness of a skip.
     """
-    total_skips = sum(_int(v) for v in (skips or {}).values())
+    total_skips = _sum(_int(v) for v in skips.values()) if skips is not None else None
     submitted_n, created_n = _int(submitted), _int(created)
-    remainder = submitted_n - created_n - total_skips
+    remainder = (submitted_n - created_n - total_skips
+                 if None not in (submitted_n, created_n, total_skips) else None)
     return {"submitted": submitted_n, "created": created_n, "skips": total_skips,
-            "unexplained": remainder, "reconciles": remainder == 0,
+            "unexplained": remainder,
+            "reconciles": remainder == 0 if remainder is not None else None,
             "unit": DELIVERY_ROW}
 
 
@@ -167,26 +180,25 @@ def opportunity_reach(*, qualified_postings: Any, opportunities_formed: Any,
                       stop_reason: str = "") -> Dict[str, Any]:
     """How much of the qualified inventory the run actually reached.
 
-    The distinction the funnel cannot make on its own. Postings that qualified but
-    whose opportunity was never formed, and opportunities formed but never given an
-    outcome, are WORK NOT ATTEMPTED -- they are not evidence about contact coverage,
-    and attributing them to the provider or to a spent budget would be inventing a
-    cause for an absence.
+    The two opportunity counts must describe distinct opportunities in the same
+    cohort. A missing outcome alone says neither whether work was attempted nor
+    why it lacks an outcome. The run's stop reason does not supply that linkage.
     """
     qualified = _int(qualified_postings)
     formed = _int(opportunities_formed)
     with_outcome = _int(opportunities_with_outcome)
-    interrupted = bool(stop_reason) and "target_met" not in str(stop_reason)
+    missing = (formed - with_outcome
+               if None not in (formed, with_outcome) and with_outcome <= formed
+               else None)
     return {
         "qualified_postings": qualified,
         "opportunities_formed": formed,
         "opportunities_with_outcome": with_outcome,
-        "opportunities_without_outcome": max(0, formed - with_outcome),
-        "category_for_those_without_outcome": (INTERRUPTED if interrupted
-                                               else NEVER_SEARCHED),
+        "opportunities_without_outcome": missing,
+        "category_for_those_without_outcome": UNATTRIBUTED if missing != 0 else None,
         "stop_reason": str(stop_reason or ""),
         "qualified_postings_per_formed_opportunity": (
-            round(qualified / formed, 2) if formed else None),
+            round(qualified / formed, 2) if qualified is not None and formed else None),
         "caution": ("qualified POSTINGS collapse into far fewer opportunities, so "
                     "the ratio is a collapse factor and not a loss"),
     }
@@ -203,7 +215,7 @@ def decompose(record: Optional[Mapping[str, Any]],
     record = dict(record or {})
     metrics = dict(record.get("metrics") or {})
     reasons = dict(record.get("loss_reasons") or {})
-    skips = dict(record.get("delivery_skip_breakdown") or {})
+    skips = record.get("delivery_skip_breakdown")
     return {
         "run_id": record.get("run_id", ""),
         "stop_reason": record.get("stop_reason", ""),
@@ -220,7 +232,9 @@ def decompose(record: Optional[Mapping[str, Any]],
         "reach": opportunity_reach(
             qualified_postings=metrics.get("role_qualified_postings"),
             opportunities_formed=metrics.get("qualified_opportunities"),
-            opportunities_with_outcome=metrics.get("airtable_candidates"),
+            # Airtable candidates are delivery rows, not distinct opportunities.
+            # No linked outcome-opportunity count is persisted in this ledger.
+            opportunities_with_outcome=None,
             stop_reason=record.get("stop_reason", "")),
     }
 
@@ -228,21 +242,13 @@ def decompose(record: Optional[Mapping[str, Any]],
 def contact_discovery(hm: Optional[Mapping[str, Any]],
                       reasons: Optional[Mapping[str, Any]],
                       skips: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
-    """Split contact-stage absence into the things it can actually be.
+    """Report marginal observations without treating them as a causal partition.
 
-    A funnel shows the same hole whether nobody was found, nobody was looked for, or
-    the run stopped first. ``hm_searches`` is stamped per company x bucket when a
-    people-search call is genuinely issued, so it is the one field that separates
-    "searched" from "never searched" -- everything here is built on it rather than
-    on a subtraction.
-
-    THE CROSS-CHECK. ``loss_reasons["hiring_manager_not_found"]`` and the
-    observability layer's ``hm_not_found`` are computed from the same rule (a bucket
-    with no ``hiring_manager_name``) over sets that are meant to be the same. On the
-    2026-09-07 run they disagree, 169 against 147. One of them is wrong and the
-    artifacts do not say which, so the disagreement is REPORTED rather than resolved
-    by preferring one: a consumer that picks the larger silently books 22 buckets as
-    "nobody found" that the other counter says had somebody.
+    hm_observability.hm_summary counts eligible lead rows and their diagnostic
+    booleans. hiring_manager stamps the search flag before calling the client and
+    can replay it from a bucket checkpoint. It is not a count of physical requests
+    or proof of search completion during this run. The separate marginal counts
+    do not identify intersections, unique opportunities or cache-only results.
     """
     hm = dict(hm or {})
     reasons = dict(reasons or {})
@@ -252,28 +258,37 @@ def contact_discovery(hm: Optional[Mapping[str, Any]],
     found = _int(hm.get("hm_found"))
     observed_not_found = _int(hm.get("hm_not_found"))
     reported_not_found = _int(reasons.get("hiring_manager_not_found"))
-    disagreement = reported_not_found - observed_not_found
+    disagreement = (reported_not_found - observed_not_found
+                    if None not in (reported_not_found, observed_not_found) else None)
+    observed_partition = (found + observed_not_found == eligible
+                          if None not in (found, observed_not_found, eligible) else None)
     return {
-        "unit": hm.get("hm_not_found_unit") or OPPORTUNITY,
-        NEVER_SEARCHED: max(0, eligible - searched),
-        SEARCHED_NO_RESULT: observed_not_found,
-        "searched_and_found": found,
-        FOUND_BUT_WITHHELD: _int(skips.get("send_safe_withheld")),
+        "unit": "lead_observation",
+        "reported_unit": hm.get("hm_not_found_unit"),
+        NEVER_SEARCHED: None,
+        SEARCHED_NO_RESULT: None,
+        "searched_and_found": None,
+        FOUND_BUT_WITHHELD: {
+            "count": _int(skips.get("send_safe_withheld")),
+            "unit": DELIVERY_ROW, "included_in_contact_partition": False},
         "eligible_buckets": eligible,
-        "searches_issued": searched,
-        "partition_closes": (found + observed_not_found == eligible),
+        "searches_issued": None,
+        "observed": {"eligible_rows": eligible, "rows_marked_search_called": searched,
+                     "rows_with_manager_name": found,
+                     "rows_without_manager_name": observed_not_found,
+                     "name_partition_closes": observed_partition},
+        "partition_closes": None,
         "counter_disagreement": {
             "loss_reasons.hiring_manager_not_found": reported_not_found,
             "hm_summary.hm_not_found": observed_not_found,
             "difference": disagreement,
-            "agree": disagreement == 0,
-            "consequence": ("none" if disagreement == 0 else
-                            f"{abs(disagreement)} buckets are booked as 'nobody found' "
-                            "by one counter and not by the other; neither artifact "
-                            "says which is right, so this stays unresolved"),
+            "agree": disagreement == 0 if disagreement is not None else None,
+            "consequence": ("neither artifact links the populations here; a difference "
+                            "requires scope and identity reconciliation, not choosing a counter"),
         },
         "not_established": [
-            "whether a search that returned nobody had a searchable domain",
-            "whether a negative came from a cache rather than a call",
+            "distinct opportunity membership and overlap of these observations",
+            "physical requests issued and completed during this run",
+            "whether an absent contact came from a cache, incomplete search or rejection",
         ],
     }

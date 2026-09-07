@@ -44,12 +44,14 @@ HM = {"hm_not_found_unit": "company_x_role_bucket", "eligible_company_buckets": 
 
 
 class TheFlatMapIsNotAddable(unittest.TestCase):
-    def test_the_reasons_span_four_units_and_are_summed_only_within_each(self):
+    def test_reason_labels_keep_their_units_without_assuming_disjointness(self):
         by_unit = lu.classify(RECORD["loss_reasons"])["by_unit"]
         self.assertEqual(set(by_unit), {lu.POSTING, lu.OPPORTUNITY, lu.DELIVERY_ROW,
                                         lu.DISPOSITION})
-        self.assertEqual(by_unit[lu.POSTING]["sum_within_unit"], 325)
-        self.assertEqual(by_unit[lu.DELIVERY_ROW]["sum_within_unit"], 171)
+        self.assertEqual(by_unit[lu.POSTING]["labels"]["REJECT_QUALITY_GUARD_OTHER"], 226)
+        self.assertEqual(by_unit[lu.DELIVERY_ROW]["labels"]["no_contact"], 144)
+        self.assertIsNone(by_unit[lu.POSTING]["sum_within_unit"])
+        self.assertIsNone(by_unit[lu.DELIVERY_ROW]["sum_within_unit"])
 
     def test_no_label_is_left_unclassified(self):
         self.assertEqual(lu.classify(RECORD["loss_reasons"])["unclassified_labels"], {})
@@ -71,20 +73,16 @@ class TwoLabelsOnePopulation(unittest.TestCase):
         aliases = {g["group"]: g for g in lu.overlaps(RECORD["loss_reasons"])["alias_groups"]}
         self.assertEqual(aliases["account_gate_rejections"]["double_counted_if_summed"], 19)
 
-    def test_only_eleven_opportunities_had_an_email_that_failed_verification(self):
-        """The correction that changes the diagnosis.
+    def test_email_failure_count_cannot_be_derived_from_unlinked_stage_totals(self):
+        """155 dispositions minus 144 writer skips does not establish 11 failures.
 
-        Read flat, ``email_unverified: 155`` says email verification is the biggest
-        single loss and points at the provider. It is not a separate population:
-        ``unverified`` CONTAINS ``no_contact``, because an opportunity with no
-        contact at all has no verified email either. 155 minus 144 leaves **11**
-        opportunities that actually had an email and failed to verify it. The other
-        144 never had a contact to verify.
+        Even demonstrated set containment would require checking the remaining
+        records' email validation outcomes before assigning a verification failure.
         """
         contained = lu.overlaps(RECORD["loss_reasons"])["containments"]
         self.assertEqual(len(contained), 1)
-        self.assertEqual(contained[0]["outer_excluding_inner"], 11)
-        self.assertTrue(contained[0]["consistent"])
+        self.assertIsNone(contained[0]["outer_excluding_inner"])
+        self.assertFalse(contained[0]["established"])
 
 
 class TheDeliveryRowUnitIsFullyExplained(unittest.TestCase):
@@ -101,13 +99,15 @@ class TheDeliveryRowUnitIsFullyExplained(unittest.TestCase):
 
 
 class SearchedVersusNeverSearched(unittest.TestCase):
-    def test_every_eligible_bucket_was_actually_searched_in_this_run(self):
+    def test_summary_preserves_observed_flags_without_claiming_physical_searches(self):
         c = lu.contact_discovery(HM, RECORD["loss_reasons"],
                                  RECORD["delivery_skip_breakdown"])
-        self.assertEqual(c[lu.NEVER_SEARCHED], 0)
-        self.assertEqual(c[lu.SEARCHED_NO_RESULT], 147)
-        self.assertEqual(c["searched_and_found"], 56)
-        self.assertTrue(c["partition_closes"])
+        self.assertEqual(c["observed"]["rows_marked_search_called"], 203)
+        self.assertEqual(c["observed"]["rows_without_manager_name"], 147)
+        self.assertEqual(c["observed"]["rows_with_manager_name"], 56)
+        self.assertTrue(c["observed"]["name_partition_closes"])
+        self.assertIsNone(c["searches_issued"])
+        self.assertIsNone(c["partition_closes"])
 
     def test_the_two_not_found_counters_disagree_and_that_is_reported(self):
         """169 against 147, and neither artifact says which is right.
@@ -130,14 +130,16 @@ class SearchedVersusNeverSearched(unittest.TestCase):
     def test_found_but_withheld_is_its_own_category(self):
         c = lu.contact_discovery(HM, RECORD["loss_reasons"],
                                  RECORD["delivery_skip_breakdown"])
-        self.assertEqual(c[lu.FOUND_BUT_WITHHELD], 27)
+        self.assertEqual(c[lu.FOUND_BUT_WITHHELD]["count"], 27)
+        self.assertEqual(c[lu.FOUND_BUT_WITHHELD]["unit"], lu.DELIVERY_ROW)
+        self.assertFalse(c[lu.FOUND_BUT_WITHHELD]["included_in_contact_partition"])
 
 
 class WorkNeverAttemptedIsNotCoverage(unittest.TestCase):
-    def test_opportunities_without_an_outcome_are_attributed_to_the_interruption(self):
+    def test_writer_candidate_count_cannot_establish_opportunities_without_outcome(self):
         r = lu.decompose(RECORD, HM)["reach"]
-        self.assertEqual(r["opportunities_without_outcome"], 4)
-        self.assertEqual(r["category_for_those_without_outcome"], lu.INTERRUPTED)
+        self.assertIsNone(r["opportunities_without_outcome"])
+        self.assertEqual(r["category_for_those_without_outcome"], lu.UNATTRIBUTED)
 
     def test_the_posting_to_opportunity_ratio_is_a_collapse_not_a_loss(self):
         """1,984 qualified postings against 203 opportunities is 9.77 postings each.
@@ -154,7 +156,7 @@ class WorkNeverAttemptedIsNotCoverage(unittest.TestCase):
                                  opportunities_with_outcome=10,
                                  stop_reason="run_approved_target_met")
         self.assertEqual(r["opportunities_without_outcome"], 0)
-        self.assertEqual(r["category_for_those_without_outcome"], lu.NEVER_SEARCHED)
+        self.assertIsNone(r["category_for_those_without_outcome"])
 
 
 if __name__ == "__main__":  # pragma: no cover
