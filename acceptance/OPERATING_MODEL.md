@@ -66,8 +66,23 @@ forget. A refusing provider is retried once `APOLLO_AVAILABILITY_RETRY_HOURS` (6
 passed — on a schedule, never once per company and never in a loop.
 
 **Recovery is a side effect of the next run succeeding.** The moment a chargeable call
-goes through, the record flips to serving and paid acquisition resumes. No new
+RETURNS, the record flips to serving and paid acquisition resumes. No new
 authorization id, no variable edit, no person.
+
+**A clock is not a response, and a reservation is not a response.** Two questions are
+kept apart, because collapsing them was a real defect:
+
+| question | answered by | what lifts a refusal |
+|---|---|---|
+| may a controlled check be attempted? | `may_attempt()` | the retry interval elapsing |
+| may paid inventory be bought? | `acquisition_allowed()` | **only a served response** |
+
+An elapsed interval permits ONE attempt at Apollo; it does not permit buying, because
+nothing new has been learned yet. And `record_served` is written from the success path
+of a chargeable request only -- never at reservation, never on an exception path,
+never on a timer. Recording it at reservation meant zero HTTP requests could clear a
+refusal. **The wait applies to enrichment calls too**: a refusing provider asked again
+per company is exactly the retry storm the interval exists to prevent.
 
 **What it does not relax.** The durable ledger still records every call, so spend
 stays auditable with no cap set. A configured aggregate still refuses exactly as

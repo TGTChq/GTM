@@ -57,7 +57,7 @@ class Exhaustion(_Base):
             out = budget.paid_acquisition_allowed(str(self.budget_path))
         self.assertFalse(out["allowed"])
         self.assertEqual(out["reason"], "provider_refusing")
-        self.assertIn("cannot be enriched", out["detail"])
+        self.assertIn("not bought until a call actually succeeds", out["detail"])
 
     def test_the_refusal_is_recorded_with_when_and_why(self):
         with self.cfg():
@@ -128,17 +128,29 @@ class Restart(_Base):
 
 
 class AutomaticRecovery(_Base):
-    def test_a_refusing_provider_is_left_alone_until_the_interval_elapses(self):
-        """Controlled: retried on a schedule, not once per company."""
+    def test_an_elapsed_interval_permits_a_CHECK_and_not_a_PURCHASE(self):
+        """Corrected: this test used to assert the defect.
+
+        It read "interval elapsed, therefore acquisition allowed" -- which is how a
+        refusing provider silently re-enabled buying after seven hours, with no new
+        answer from Apollo. The interval governs whether a controlled attempt may be
+        made; only a served response governs whether inventory may be bought.
+        """
         with self.cfg():
             av.record_refusal("credits", path=str(self.avail_path))
             blocked = budget.paid_acquisition_allowed(str(self.budget_path))
             self.assertFalse(blocked["allowed"])
-            self.assertTrue(blocked["provider"]["next_attempt_after"])
+            self.assertFalse(av.may_attempt(path=str(self.avail_path))["allowed"])
+
             self._age_last_attempt(7)
-            allowed = budget.paid_acquisition_allowed(str(self.budget_path))
-        self.assertTrue(allowed["allowed"])
-        self.assertEqual(allowed["provider"]["reason"], "retry_interval_elapsed")
+            after = budget.paid_acquisition_allowed(str(self.budget_path))
+            self.assertFalse(after["allowed"], "a clock is not a response")
+            self.assertTrue(after["check_due"], "but a controlled retry is now due")
+            self.assertTrue(av.may_attempt(path=str(self.avail_path))["allowed"])
+
+            av.record_served(path=str(self.avail_path))
+            self.assertTrue(
+                budget.paid_acquisition_allowed(str(self.budget_path))["allowed"])
 
     def test_a_served_call_restores_operation_with_no_human_step(self):
         """The whole point: no new grant, no variable edit, no person.
