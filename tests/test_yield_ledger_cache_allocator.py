@@ -48,9 +48,10 @@ class LedgerTests(unittest.TestCase):
         L.mark("fantastic_1", send_safe=True, net_new_send_safe=True)
         L.flush()
         agg = aggregate_yield(self.path, by="title_family")["account_executive"]
-        self.assertEqual(agg["credits"], 3)
+        self.assertIsNone(agg["credits"])
+        self.assertEqual(agg["recorded_rows"], 3)
         self.assertEqual(agg["net_new_send_safe"], 1)
-        self.assertAlmostEqual(agg["yield"], 1 / 3)
+        self.assertIsNone(agg["yield"], "retained IDs do not include all paid repeats")
         self.assertEqual(L.rows["r|2"].exit_stage, "collapsed")
 
     def test_failure_never_raises(self):

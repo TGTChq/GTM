@@ -1,20 +1,19 @@
-"""North-star yield ledger: one durable, append-safe row per PAID Fantastic job.
+"""Outcome ledger: one durable row per observed provider ID in this run.
 
-Purpose: finally compute **net-new send-safe / Fantastic job credit** by source,
-title family, role bucket, industry, headcount band, job age and acquisition mode.
+The adapter can discard billed repeats before this ledger sees them. Per-ID rows
+therefore cannot establish paid volume. Use explicit source billing totals for
+run-level economics; historical per-segment costs are unknown without that join.
 
 Guarantees:
 * Analytics only -- a ledger failure NEVER affects pipeline execution (every write
   is wrapped; errors are counted, not raised).
 * Idempotent -- keyed by ``(run_id, provider_job_id)``; re-running a run rewrites
   the same logical rows (a JSONL append plus a per-run dedupe index), never
-  double-counts credits.
+  duplicates outcomes.
 * No secrets / PII -- emails, names and keys are never stored; only outcomes.
-* One row per PAID job -- rows the provider returned (and billed) but that never
-  became a Lead (qualification reject, dedupe) are still recorded, with the stage
-  at which they exited. Collapsed postings (N postings -> 1 lead) are attributed
-  so that send-safe credit lands on exactly ONE posting (the lead's primary) and
-  the others carry ``collapsed_into`` -- per-credit yields are never inflated.
+* Qualification and downstream dedupe outcomes remain recorded for the IDs seen
+  here. Missing upstream replies have no invented identities. Collapsed postings
+  attribute each send-safe outcome to the primary posting only.
 """
 from __future__ import annotations
 
@@ -84,7 +83,7 @@ class LedgerRow:
     date_posted: str = ""
     date_created: str = ""
     job_age_days: Optional[int] = None
-    fantastic_credits: int = 1       # 1 per returned row
+    fantastic_credits: int = 1       # legacy imputation per retained ID, NOT a bill
     # outcomes (filled as the pipeline progresses; defaults = "not reached")
     exit_stage: str = "acquired"     # acquired|dedup_previously_seen|dedup_in_run|qual_reject|collapsed|enriched
     previously_seen: bool = False
@@ -232,12 +231,16 @@ class YieldLedger:
             logger.warning("yield ledger flush failed: %s", type(exc).__name__)
             return 0
 
-    def summary(self) -> Dict[str, Any]:
+    def summary(self, *, billed_by_source: Optional[Dict[str, int]] = None) -> Dict[str, Any]:
         rows = list(self.rows.values())
+        sources = self.by_source(billed_by_source=billed_by_source)
         return {
             "enabled": self.enabled, "rows": len(rows), "written": self.written,
             "errors": self.errors,
-            "credits": sum(r.fantastic_credits for r in rows),
+            "credits": (sum(g["credits"] for g in sources.values())
+                        if billed_by_source is not None and all(
+                            g["credits"] is not None for g in sources.values()) else None),
+            "billing_basis": "source_returned_billed" if billed_by_source is not None else "unavailable",
             "send_safe": sum(1 for r in rows if r.send_safe),
             "net_new_send_safe": sum(1 for r in rows if r.net_new_send_safe),
             # PER SOURCE, for this run only. The whole business question is
@@ -245,19 +248,19 @@ class YieldLedger:
             # actionable per source -- a source can only be defunded once its own
             # yield is known. Every input is already on the row; nothing here costs
             # a request.
-            "by_source": self.by_source(),
+            "by_source": sources,
         }
 
-    def by_source(self) -> Dict[str, Dict[str, Any]]:
+    def by_source(self, *, billed_by_source: Optional[Dict[str, int]] = None) -> Dict[str, Dict[str, Any]]:
         """This run's credits and outcomes grouped by ``_acquisition_source``."""
         out: Dict[str, Dict[str, Any]] = {}
         for r in self.rows.values():
             g = out.setdefault(str(r.source or "unattributed"), {
-                "credits": 0, "net_new": 0, "previously_seen": 0, "duplicate_in_run": 0,
+                "recorded_rows": 0, "net_new": 0, "previously_seen": 0, "duplicate_in_run": 0,
                 "icp_pass": 0, "hm_found": 0, "send_safe": 0,
                 "airtable_created": 0, "net_new_send_safe": 0, "apollo_credits": 0,
             })
-            g["credits"] += int(r.fantastic_credits or 0)
+            g["recorded_rows"] += 1
             if r.exit_stage == "dedup_previously_seen":
                 g["previously_seen"] += 1
             elif r.exit_stage == "dedup_in_run":
@@ -270,20 +273,31 @@ class YieldLedger:
             g["airtable_created"] += 1 if r.airtable_created else 0
             g["net_new_send_safe"] += 1 if r.net_new_send_safe else 0
             g["apollo_credits"] += int(r.apollo_credits or 0)
-        for g in out.values():
-            credits = g["credits"]
+        # A source with paid replies but zero kept IDs must still appear.
+        for source in billed_by_source or {}:
+            out.setdefault(source, {"recorded_rows": 0, "net_new": 0,
+                "airtable_created": 0, "net_new_send_safe": 0})
+        for source, g in out.items():
+            credits = (billed_by_source or {}).get(source)
+            g["credits"] = credits
+            g["billing_basis"] = "source_returned_billed" if credits is not None else "unavailable"
+            measured_outcomes = self.enabled and not self.errors
+            g["outcome_measurement"] = "measured" if measured_outcomes else "unavailable"
             g["net_new_per_1k_credits"] = (
-                round(1000.0 * g["net_new"] / credits, 1) if credits else None)
+                round(1000.0 * g["net_new"] / credits, 1) if credits and measured_outcomes else None)
             g["airtable_created_per_1k_credits"] = (
-                round(1000.0 * g["airtable_created"] / credits, 1) if credits else None)
+                round(1000.0 * g["airtable_created"] / credits, 1) if credits and measured_outcomes else None)
             g["net_new_send_safe_per_1k_credits"] = (
-                round(1000.0 * g["net_new_send_safe"] / credits, 1) if credits else None)
+                round(1000.0 * g["net_new_send_safe"] / credits, 1) if credits and measured_outcomes else None)
         return out
 
 
 def aggregate_yield(path: str, *, by: str = "title_family") -> Dict[str, Dict[str, Any]]:
-    """Offline analysis helper: net-new send-safe per credit grouped by a dimension
-    over the whole ledger file. Never used on the hot path."""
+    """Observed outcomes by dimension; missing paid repeats prevent cost estimates.
+
+    An imputed credit on each retained ID is not the request's billed population.
+    Keep rates unknown so the allocator cannot treat biased samples as evidence.
+    """
     out: Dict[str, Dict[str, Any]] = {}
     try:
         with open(path, encoding="utf-8") as fh:
@@ -293,12 +307,14 @@ def aggregate_yield(path: str, *, by: str = "title_family") -> Dict[str, Dict[st
                 except ValueError:
                     continue
                 k = str(rec.get(by) or "unknown")
-                g = out.setdefault(k, {"credits": 0, "send_safe": 0, "net_new_send_safe": 0})
-                g["credits"] += int(rec.get("fantastic_credits", 1) or 0)
+                g = out.setdefault(k, {"credits": None, "recorded_rows": 0,
+                                       "send_safe": 0, "net_new_send_safe": 0})
+                g["recorded_rows"] += 1
                 g["send_safe"] += 1 if rec.get("send_safe") else 0
                 g["net_new_send_safe"] += 1 if rec.get("net_new_send_safe") else 0
     except OSError:
         return out
     for g in out.values():
-        g["yield"] = (g["net_new_send_safe"] / g["credits"]) if g["credits"] else 0.0
+        g["yield"] = None
+        g["billing_basis"] = "unavailable_per_segment"
     return out

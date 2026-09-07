@@ -23,7 +23,7 @@ from tests.test_pipeline_run_ledger import TOPUP_CONFIG, _Budget
 class RecoveryProductionLoop(unittest.TestCase):
     def exercise(self, total, batch, target, *, watermark=True, prior=0, approved=True,
                  continue_after=False, deferred=False, own_pending=False, same_employer=False,
-                 delivery_failed=False):
+                 delivery_failed=False, interrupted=False):
         root = Path(tempfile.mkdtemp())
         jobs = [{"job_id": f"owed-{i}", "posting_id": f"owed-{i}",
                  "employer_name": f"Company {i}", "company_name": f"Company {i}",
@@ -60,6 +60,8 @@ class RecoveryProductionLoop(unittest.TestCase):
                     leads[0].related_posting_ids = [l.posting_id for l in leads[1:]]
                     leads = leads[:1]
                 return EnrichmentReport(stages=[], leads=leads,
+                    enrichment_incomplete=interrupted,
+                    stop_reason="apollo_budget_exhausted" if interrupted else "",
                     funnel={"qualification_input": len(opportunities)})
 
         class Delivery:
@@ -118,6 +120,13 @@ class RecoveryProductionLoop(unittest.TestCase):
         result, reached, _, _ = self.exercise(7, 3, 3, approved=False)
         self.assertEqual(len(reached), 7)
         self.assertNotEqual(result["topup"]["final_stop_reason"], "run_approved_target_met")
+
+    def test_budget_break_reports_approvals_delivered_in_the_final_slice(self):
+        result, _, _, _ = self.exercise(7, 3, 3, interrupted=True)
+        assert result["delivery"]["created"] == 3
+        assert result["acquisition"]["cumulative"]["run_approved_goal"]["approved_this_run"] == 3
+        assert result["topup"]["target_reached"] is True
+        assert result["topup"]["final_stop_reason"] == "apollo_budget_exhausted"
 
     def test_thousand_is_a_minimum_not_a_stop_when_more_work_is_available(self):
         result, reached, _, _ = self.exercise(1200, 200, 1000, continue_after=True)

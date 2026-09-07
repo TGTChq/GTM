@@ -949,6 +949,11 @@ def _print_run_summary(ctx, mode, result, state) -> None:
     line("QUALIFIED", funnel.get("target_role_eligible", funnel.get("icp_eligible_companies")))
     line("CONTACTS_FOUND", contacts)
     line("SENT_TO_AIRTABLE", at_created)
+    from orchestrator.delivery_evidence import delivery_evidence
+    receipts = delivery_evidence(deliv)
+    print("---- Original Airtable receipts ----")
+    print(json.dumps({"event": "airtable_delivery_receipts", "run_id": ctx.run_id,
+                      **receipts}, default=str), flush=True)
     print("---- Funnel ----")
     line("raw_postings", raw)
     line("unique_opportunities", unique)
