@@ -39,27 +39,53 @@ present the third as the first:
 Credentials being **present** is not the same as a capability being **funded** or
 **enabled**. Apollo's key is present and the recovery grant is zero.
 
-## Capability status
+## Capability status — now container-verified
 
-| capability | state | why |
+Effective values printed by the deployed container 2026-09-07T04:55Z. These are
+production, not repository defaults.
+
+| capability | effective value | state |
 |---|---|---|
-| Paid acquisition (Fantastic) | **PAUSED** | `FANTASTIC_JOBS_ENABLED=False`, verified in the container |
-| Paid enrichment (Apollo) | **UNFUNDED** | `APOLLO_RECOVERY_BUDGET_CALLS=0`; an unset grant is zero, not unlimited. The 50-reservation grant `calib-2026-09-06-50` is spent and is not reused |
-| Custody of paid-for work | **ON, exercised** | 3,595 distinct postings, `resumable: true`, `unidentifiable_employer: 0` |
-| Sep 6 recovery | **DONE** | 226/226/226, with `new_capture_agrees` and `recovery_agrees` reconciling separately |
-| Reporting A/B | **PASSING** | `ACCEPTED: True` on production files, nine ledger entries |
-| Employer identity (enrichment) | **FIXED, deployed** | shared ATS hosts rejected as employer identity |
-| Employer identity (Airtable suppression) | **FIXED, deployed** | `b4d1796`; measured +24 companies / +8 opportunities on custody |
-| Send-safe auto-approval | **ON** | container: `send_safe_auto_approve=ON` |
-| Per-run approved target | **NOT ACTIVE** | `RUN_APPROVED_TARGET_ENABLED` defaults from `NET_NEW_SEND_SAFE_TARGET > 0`; production value not readable. Irrelevant while maintenance mode is on, because the pipeline loop never runs |
-| Daily approved target + reserve | **NOT ACTIVE** | `DAILY_APPROVED_TARGET_ENABLED` default False |
-| Window slice cursor | **ON in code, NEVER EXERCISED in production** | acquisition is paused, so it has run only offline and against 0-credit count probes |
-| Apollo person cache | **NOT VERIFIED LIVE** | `APOLLO_CACHE_ENABLED` default False; production value not readable. Do not claim reuse until a run shows it |
-| Direct ATS boards (145) | **NOT ACTIVE** | registry loads cleanly, but the lane is built only when `"ats"` is in `--lanes` and the start command passes `--lanes fantastic`. `ACQUISITION_EXTRA_LANES` now makes this one authorized variable instead of a start-command change — it is unset |
-| Functional discovery | **NOT OPERATIONAL** | flag off; live incremental yield unmeasured |
-| Historical recovery (6m) | **NOT OPERATIONAL** | needs a flag *and* a row budget; neither granted |
-| Wellfound / Y Combinator | **ENABLED, contributed nothing** on 09-06 | reported `already_drained_this_window` on offset-era flags |
-| Weekly report → Slack | **ON** | start command carries `--slack --if-due friday` |
+| Paid acquisition (Fantastic) | `FANTASTIC_JOBS_ENABLED=false` | **PAUSED** |
+| Paid enrichment budget | `APOLLO_RECOVERY_BUDGET_CALLS=0` | **UNFUNDED**; the `calib-2026-09-06-50` grant is spent and not reused |
+| Overall paid-match ceiling | `APOLLO_MAX_PERSON_MATCH_CALLS_PER_RUN=0` | off by design (0 = no ceiling here) |
+| Custody | `PENDING_WORK_ENABLED`, batch `2000` | **ON**; 3,595 distinct postings, resumable |
+| **Per-run approved target** | `RUN_APPROVED_TARGET_ENABLED=true`, `RUN_APPROVED_TARGET=1000`, `CONTINUE_AFTER_TARGET=true` | **ACTIVE** |
+| **Apollo person cache** | `APOLLO_CACHE_ENABLED=true` | **ON** |
+| Daily target + rolling reserve | `DAILY_APPROVED_TARGET_ENABLED=false`, `APPROVED_RESERVE_FLOOR=0` | **NOT ACTIVE** |
+| Legacy send-safe target | `NET_NEW_SEND_SAFE_TARGET=1000` | active; this is what self-enabled the run target on upgrade |
+| Window slice cursor | `FANTASTIC_WINDOW_SLICING_ENABLED=true` | ON in code, **never exercised in production** — acquisition is paused |
+| Direct ATS boards (145) | `ATS_DIRECT_ACQUISITION_ENABLED=true`, `ACQUISITION_EXTRA_LANES=""` | **NOT ACTIVE**; registry loads 145 cleanly, the lane is never built |
+| Functional discovery | `false` | **NOT OPERATIONAL** |
+| Historical recovery | `false`, rows `0` | **NOT OPERATIONAL** |
+| Send-safe auto-approval | `FANTASTIC_AUTO_APPROVE_SEND_SAFE=true` | **ON** |
+| Send-safe-only writing | `AIRTABLE_WRITE_SEND_SAFE_ONLY=true` | **ON** — why 2 verified contacts produced 0 rows |
+| Company × function suppression | `true` | **ON** |
+| Account-level suppression | `AIRTABLE_SUPPRESS_ACCOUNT_LEVEL=false` | **OFF** — confirms the report defect that once blamed it |
+| Enrollment person-employer uniqueness | `true` | **ON**; does not cap an employer |
+| **Second email opinion** | `VERIFY_WITH_HUNTER=false` | **OFF on GTM** |
+| Alternate-contact cascade | `true` | ON, but unreachable while enrichment is unfunded |
+| Org-ID zero-people fallback | `true` | ON, but unreachable while enrichment is unfunded |
+
+### Two claims this readback CORRECTED
+
+The previous version of this file marked both "not readable" and guessed conservatively.
+The container disagreed:
+
+* **Per-run approved target is ACTIVE, not inactive.** `RUN_APPROVED_TARGET_ENABLED`
+  defaults from `NET_NEW_SEND_SAFE_TARGET > 0`, which is 1000 in production, so the
+  upgrade switched it on. It is harmless today only because maintenance mode stops the
+  pipeline loop ever running — but it would take effect the moment maintenance is
+  cleared, and that should be a decision rather than a surprise.
+* **The Apollo person cache is ON, not unverified.** Verified-match reuse is live.
+
+### One earlier finding now established rather than inferred
+
+`VERIFY_WITH_HUNTER=false` on GTM. The claim that no second opinion ran was previously
+made from ABSENT `hunter_status` fields, and the full-flow audit correctly downgraded
+it to "not established" after finding the forensics had been reading the wrong field
+name. The flag itself now settles it: on GTM there is no second opinion at all, not
+even the deliverability reroute.
 
 ## What this means for lead volume today
 
