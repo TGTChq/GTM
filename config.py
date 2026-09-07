@@ -1421,6 +1421,12 @@ ACQUISITION_EXTRA_LANES = os.getenv("ACQUISITION_EXTRA_LANES", "")
 # deliberate act; with it off the loop behaves exactly as before.
 DAILY_APPROVED_TARGET_ENABLED = _env_bool("DAILY_APPROVED_TARGET_ENABLED", False)
 DAILY_APPROVED_TARGET = _env_int("DAILY_APPROVED_TARGET", 1000)
+# Upgrade existing top-up deployments to the per-run approved objective. Earlier
+# runs/reserves cannot satisfy it. Acquisition flags and spending limits are intact;
+# deployments without top-up opt in explicitly, and an explicit 0 retains legacy mode.
+RUN_APPROVED_TARGET_ENABLED = _env_bool("RUN_APPROVED_TARGET_ENABLED", NET_NEW_SEND_SAFE_TARGET > 0)
+RUN_APPROVED_TARGET = _env_int("RUN_APPROVED_TARGET", 1000)
+RUN_APPROVED_CONTINUE_AFTER_TARGET = _env_bool("RUN_APPROVED_CONTINUE_AFTER_TARGET", True)
 # Inventory varies -- the measured weekend window held a fifth of a weekday's
 # postings -- so a strong day banks the shortfall a weak day draws down.
 APPROVED_RESERVE_FLOOR = _env_int("APPROVED_RESERVE_FLOOR", 0)

@@ -1,10 +1,8 @@
-"""Distinct new APPROVED leads per business day, and the rolling reserve.
+"""Distinct new APPROVED leads attributed to a run and a business day.
 
-WHY THE TARGET IS NOT A RUN COUNTER.
-
-The objective is at least 1,000 distinct new approved leads **per day** -- not per
-run, not postings reviewed, not Apollo calls made, not leads attempted. Those are all
-inputs, and every one of them has at some point been mistaken for the output.
+The production run target counts new approvals from that run. Earlier runs cannot
+satisfy it. The daily union is retained separately for reporting and the legacy
+daily target mode. Neither postings nor API calls are approved leads.
 
 Three consequences shape this module:
 
@@ -86,6 +84,7 @@ def _load(root: str | os.PathLike) -> Dict[str, Any]:
 
 def record_approved(root: str | os.PathLike, keys: Iterable[str], *,
                     now: Optional[datetime] = None,
+                    run_id: str = "",
                     retain_days: int = 45) -> Dict[str, Any]:
     """Add approved lead keys to today's total. Returns the day's state.
 
@@ -98,6 +97,8 @@ def record_approved(root: str | os.PathLike, keys: Iterable[str], *,
     state = _load(root)
     ever = set(state.get("ever") or [])
     today = set((state["days"].get(day) or {}).get("keys") or [])
+    runs = state.setdefault("runs", {})
+    run_keys = set(runs.get(run_id) or []) if run_id else set()
     added = 0
     for key in keys:
         key = str(key or "").strip().lower()
@@ -105,19 +106,26 @@ def record_approved(root: str | os.PathLike, keys: Iterable[str], *,
             continue
         ever.add(key)
         today.add(key)
+        run_keys.add(key)
         added += 1
     state["days"][day] = {"keys": sorted(today), "count": len(today),
                           "updated_at": _now().isoformat()}
-    # Bounded: the lifetime set is what makes "new" meaningful, so it is trimmed by
-    # DAY rather than by size -- dropping a recent key would let a lead be counted
-    # twice, which is the one error this store exists to prevent.
+    # Trim daily display history only. Lifetime and per-run identities remain
+    # durable, so retention cannot make a repeated delivery new again.
     cutoff = (datetime.fromisoformat(day) - timedelta(days=max(1, retain_days))).date().isoformat()
     kept_days = {d: v for d, v in state["days"].items() if d >= cutoff}
     state["days"] = kept_days
-    state["ever"] = sorted(set().union(*[set(v.get("keys") or []) for v in kept_days.values()])
-                           if kept_days else set())
+    # History retention must never make an old approved identity new again.
+    state["ever"] = sorted(ever)
+    if run_id:
+        runs[run_id] = sorted(run_keys)
     _write(_path(root), state)
-    return {"day": day, "added": added, "approved_today": len(today)}
+    return {"day": day, "added": added, "approved_today": len(today),
+            "run_id": run_id, "approved_this_run": len(run_keys)}
+
+
+def approved_for_run(root: str | os.PathLike, run_id: str) -> int:
+    return len(set((_load(root).get("runs") or {}).get(run_id) or []))
 
 
 def approved_today(root: str | os.PathLike, *, now: Optional[datetime] = None) -> int:

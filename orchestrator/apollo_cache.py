@@ -48,7 +48,8 @@ def normalize_domain(value: str) -> str:
         return ""
     s = re.sub(r"^https?://", "", s).split("/")[0].split("?")[0]
     s = s[4:] if s.startswith("www.") else s
-    if any(h in s for h in ("linkedin.com", "facebook.com", "twitter.com", "x.com", "instagram.com")):
+    if any(s == h or s.endswith("." + h)
+           for h in ("linkedin.com", "facebook.com", "twitter.com", "x.com", "instagram.com")):
         return ""
     return s if "." in s else ""
 

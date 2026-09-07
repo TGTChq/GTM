@@ -199,23 +199,11 @@ _STAKEHOLDER_ROWS = (
 #: At most this many actions reach the stakeholder message.
 _MAX_ACTIONS = 3
 
-#: How far from seven days a period may be and still be called a week.
-_WEEK_TOLERANCE_DAYS = 0.75
-
-
 def _period_label(window) -> str:
-    """One short line naming the period the numbers actually cover.
-
-    "Week of ..." is only true when the span IS about a week. An anchored window
-    is whatever elapsed since the last report -- a retry, a first anchored run, or
-    a mid-period read is routinely a day or two -- and labelling that a week
-    presents a partial period as a completed one.
-    """
+    """Exact boundaries and timezone for both weekly and partial periods."""
     days = (window.end_utc - window.start_utc).total_seconds() / 86400.0
-    if abs(days - 7.0) <= _WEEK_TOLERANCE_DAYS:
-        return f"Week of {window.label}"
-    return (f"Period: {window.start_local:%b %d %H:%M} - "
-            f"{window.end_local:%b %d %H:%M %Z} ({days:.1f} days)")
+    return (f"Period: {window.start_local:%b %d, %Y %H:%M %Z} - "
+            f"{window.end_local:%b %d, %Y %H:%M %Z} ({days:.1f} days)")
 
 
 def _count(metric: Optional[Metric]) -> str:
@@ -329,7 +317,8 @@ def render_stakeholder_summary(report: WeeklyReport) -> str:
     actions = list(report.actions)[:_MAX_ACTIONS]
     if actions:
         for index, action in enumerate(actions, start=1):
-            lines.extend(_wrap(f"{index}. {action.action}", indent="", hanging="   "))
+            text = action.stakeholder_action or action.action
+            lines.extend(_wrap(f"{index}. {text}", indent="", hanging="   "))
     else:
         lines.extend(_wrap(
             "No action is proposed: no comparable funnel boundary could be measured "

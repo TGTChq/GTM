@@ -125,8 +125,16 @@ class MaintenanceOnlyReachesNoPipelineCode(unittest.TestCase):
         for node in ast.walk(tree):
             if isinstance(node, ast.ImportFrom) and node.module == "airtable_client":
                 imported.update(a.name for a in node.names)
-        self.assertTrue(imported <= {"_company_identity_keys_from_job"},
+        # PURE helpers only. The guard's purpose is that maintenance can never reach
+        # the WRITER: `_job_to_fields` and `send_safe_facts` build and inspect a row
+        # in memory and make no HTTP call, so asking the gate why a lead was withheld
+        # is a read. `push_leads` and anything that issues a request stay forbidden,
+        # and a separate test asserts none of them is called.
+        self.assertTrue(imported <= {"_company_identity_keys_from_job",
+                                     "_job_to_fields", "send_safe_facts"},
                         f"unexpected airtable_client imports: {imported}")
+        for writer in ("push_leads", "request_with_retry", "_base_url", "_headers"):
+            self.assertNotIn(writer, imported)
 
     def test_it_never_sends_slack(self):
         """Checked as CODE, not as prose: no slack module, no webhook read, no
@@ -769,6 +777,15 @@ class OutcomeForensicsDecomposesOnlyWhatTheArtifactsSupport(unittest.TestCase):
         self.assertEqual(row["hunter_status"]["(absent)"], 1)
         self.assertEqual(row["hunter_status"]["valid"], 1)
 
+    def test_reads_the_fields_the_hiring_manager_actually_persists(self):
+        root = self._root({"jobs_enriched_2026-09-06.json": {"jobs": [
+            {"job_id": "j1", "hiring_manager_email": "a@x.com",
+             "apollo_email_status": "unverified", "hunter_email_status": "valid",
+             "_final_primary_reason": "unverified_email_deliverability"}]}})
+        row = run_maintenance.outcome_forensics(root, ["r1"])["runs"][0]
+        self.assertEqual(row["hunter_status"], {"valid": 1})
+        self.assertEqual(row["email_unverified_breakdown"], {"address_apollo_status=unverified": 1})
+
     def test_the_giant_postings_file_is_not_parsed_as_lead_rows(self):
         root = self._root({"postings.json": {"jobs": [{"job_id": "j1"}] * 3},
                            "leads.json": {"leads": [{"hm_reason": "not_icp"}]}})
@@ -865,3 +882,94 @@ class StreamedCountsAreNotSummedAcrossFiles(unittest.TestCase):
             self.assertEqual(entry["counts"]["email_status"], {"verified": 3})
         self.assertEqual(row["apollo_email_status"], {},
                          "streamed counts must not inflate the aggregate")
+
+    def test_small_duplicate_snapshots_are_also_kept_per_file(self):
+        import json
+        import tempfile
+        from pathlib import Path
+
+        root = Path(tempfile.mkdtemp())
+        enr = root / "run_artifacts" / "r1" / "enrichment"
+        enr.mkdir(parents=True)
+        payload = {"stats": {"company_criteria_reason__headcount": 1},
+                   "leads": [{"email_status": "verified", "hm_reason": "email_unverified"}]}
+        for name in ("checkpoint.json", "final.json"):
+            (enr / name).write_text(json.dumps(payload))
+        row = run_maintenance.outcome_forensics(root, ["r1"])["runs"][0]
+        self.assertEqual(row["apollo_email_status"], {})
+        self.assertEqual(row["icp_reason_families"], {})
+        self.assertEqual(len(row["parsed_files"]), 2)
+        for file in row["parsed_files"]:
+            self.assertEqual(file["apollo_email_status"], {"verified": 1})
+        self.assertEqual(row["aggregation_status"]["apollo_email_status"], "multiple_files_unreconciled")
+
+
+class WithholdingIsExplainedPerLeadNotCounted(unittest.TestCase):
+    """The 2026-09-06 calibration produced two verified contacts, created zero rows,
+    and recorded only `send_safe_withheld: 2`. A count cannot explain a withholding,
+    and neither can a larger budget -- the two are unrelated.
+
+    `send_safe_facts` is deterministic, offline and fail-closed, returning the FIRST
+    failing fact. Rebuilding a retained lead's fields with the production
+    `_job_to_fields` and re-asking the gate reproduces exactly the decision delivery
+    made, with the reason it never wrote down."""
+
+    def _root(self, jobs, run_id="r1"):
+        import json as _json
+        import tempfile as _tempfile
+        from pathlib import Path as _Path
+
+        root = _Path(_tempfile.mkdtemp())
+        enr = root / "run_artifacts" / run_id / "enrichment"
+        enr.mkdir(parents=True, exist_ok=True)
+        (enr / "jobs_enriched_2026-09-06.json").write_text(
+            _json.dumps({"jobs": jobs}), encoding="utf-8")
+        return root
+
+    def test_a_run_with_no_per_lead_rows_says_it_cannot_explain(self):
+        import tempfile
+        from pathlib import Path
+
+        root = Path(tempfile.mkdtemp())
+        (root / "run_artifacts" / "r1" / "enrichment").mkdir(parents=True)
+        row = run_maintenance.send_safe_forensics(root, ["r1"])["runs"][0]
+        self.assertEqual(row["examined"], 0)
+        self.assertTrue(any("cannot be explained" in u for u in row["unavailable"]))
+
+    def test_every_examined_lead_gets_a_named_first_failing_fact(self):
+        root = self._root([{"job_id": "j1", "employer_name": "Acme",
+                            "company_name": "Acme", "job_title": "Head of Sales"}])
+        row = run_maintenance.send_safe_forensics(root, ["r1"])["runs"][0]
+        self.assertEqual(row["examined"], 1)
+        self.assertEqual(row["withheld"], 1)
+        self.assertTrue(row["reasons"], "a withholding without a reason is the bug")
+        self.assertNotIn("", row["reasons"])
+
+    def test_a_verified_contact_that_is_still_withheld_is_singled_out(self):
+        """The exact unexplained population from the calibration."""
+        root = self._root([{
+            "job_id": "j1", "employer_name": "Acme", "company_name": "Acme",
+            "job_title": "Head of Sales",
+            "hiring_manager_email": "hm@acme.example",
+            "apollo_email_status": "verified",
+        }])
+        row = run_maintenance.send_safe_forensics(root, ["r1"])["runs"][0]
+        if row["verified_withheld"]:
+            entry = row["verified_withheld"][0]
+            self.assertTrue(entry["reason"])
+            self.assertIn("outbound_hold", entry)
+
+    def test_it_never_writes_or_repairs_anything(self):
+        """A rebuilt row is used to ASK the gate, never to change it -- and patching
+        a signed display field without re-signing is a known way to break approval."""
+        import ast
+        import inspect
+        import textwrap
+
+        tree = ast.parse(textwrap.dedent(
+            inspect.getsource(run_maintenance.send_safe_forensics)))
+        called = {getattr(n.func, "attr", "") for n in ast.walk(tree)
+                  if isinstance(n, ast.Call)}
+        for forbidden in ("push_leads", "request_with_retry", "patch", "update",
+                          "create", "write_text"):
+            self.assertNotIn(forbidden, called)

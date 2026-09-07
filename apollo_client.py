@@ -248,6 +248,7 @@ def _organization_enrichment_request(
         f"{APOLLO_BASE_URL}/organizations/enrich",
         headers=_headers(),
         params=params,
+        before_attempt=lambda: _charge_recovery_budget("organization_enrich"),
     )
     data = safe_json(response)
     debug_dump(debug_name, data)
@@ -306,7 +307,6 @@ def enrich_organization(
 ) -> OrgEnrichment:
     if not any((domain, name, website)):
         return OrgEnrichment(found=False)
-    _charge_recovery_budget("organization_enrich")
 
     normalized_domain = _domain(domain)
     params: Dict[str, str] = {}
@@ -478,7 +478,8 @@ def search_people_at_company(domain: str, titles: List[str]) -> List[Dict[str, A
     domain = _domain(domain)
     if not domain or not titles:
         return []
-    _charge_recovery_budget("people_search")
+    # mixed_people/api_search costs 0 credits. Do not consume a paid-call grant
+    # for discovery; request/page limits still apply to both search selectors.
 
     per_page = 25
     max_pages = max(1, int(getattr(config, "APOLLO_PEOPLE_SEARCH_MAX_PAGES", 1)))
@@ -619,7 +620,6 @@ def search_people_by_org_id(organization_id: str, titles: List[str],
 
 def match_person(person: Dict[str, Any]) -> PersonMatch:
     """Enrich a person while preserving search-result identity for Hunter fallback."""
-    _charge_recovery_budget("person_match")
     person_id = person.get("id") or person.get("person_id")
     org = _organization_from_person(person)
     base = PersonMatch(
@@ -654,6 +654,7 @@ def match_person(person: Dict[str, Any]) -> PersonMatch:
             f"{APOLLO_BASE_URL}/people/match",
             headers=_headers(),
             params=params,
+            before_attempt=lambda: _charge_recovery_budget("person_match"),
         )
         data = safe_json(response)
         debug_dump(

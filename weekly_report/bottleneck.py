@@ -96,27 +96,21 @@ SUBSET_BOUNDARIES = frozenset({"review", "contact_discovery"})
 #: created are nested under opportunities that entered contact discovery, so that
 #: collapsed pair remains a real, if multi-stage, loss.
 #:
-#: A pair listed here is still measured, still reported in the document, and still
-#: eligible to be the headline the moment a reason code recorded at that boundary
-#: makes the difference attributable.
+#: Both counters remain measured, but a reason code cannot prove a subset
+#: relationship. Report recorded delivery outcomes separately from conversion.
 NON_NESTED_PAIRS = frozenset({("contacts_found", "sent_to_airtable")})
 
 #: Reason codes whose remedy is well understood, mapped to the action to take.
 REASON_ACTIONS = {
     "no_search_domain": (
-        "Employer domain is unresolved on most postings, so no hiring-manager search "
-        "can run. Extend COMPANY_DOMAIN_ALIASES_JSON for the recognisable employers in "
-        "reports/domain_alias_candidates_*.csv, or shift acquisition toward sources "
-        "that expose a first-party domain."
+        "Resolve the employer identities on affected postings before retrying contact discovery."
     ),
     "hiring_manager_not_found": (
         "Apollo returned no hiring manager for the company x role bucket. Review the "
         "alternate-hiring-manager recovery path before spending more acquisition budget."
     ),
     "email_unverified": (
-        "Contacts resolve but their email never reaches verified status. Only Apollo "
-        "can promote an email to verified, so check Apollo credit state before assuming "
-        "a coverage problem."
+        "Separate missing contacts, unverified addresses and identity conflicts before choosing a recovery action."
     ),
     "apollo_email_not_verified": (
         "Rows are blocked on Apollo verification. Confirm Apollo credit availability "
@@ -127,32 +121,23 @@ REASON_ACTIONS = {
         "is being spent acquiring postings the ICP filter rejects."
     ),
     "company_unresolved": (
-        "Company identity could not be resolved from the posting. This is a source-quality "
-        "problem; prefer feeds that carry the employer over aggregator feeds."
+        "Check the affected employer records and resolve their identity conflicts before retrying."
     ),
     "company_function_suppressed": (
         "Deliverable leads were suppressed because the company+function already exists in "
         "Airtable. Confirm this is the intended dedupe policy for the week."
     ),
     "account_suppressed": (
-        "Account-level suppression removed deliverable leads. Verify "
-        "AIRTABLE_SUPPRESS_ACCOUNT_LEVEL is deliberately on."
+        "Confirm the intended policy for employers already represented in Airtable."
     ),
     "not_final_pass": (
-        "Leads reached delivery but were not FINAL_PASS, so they could not auto-approve."
+        "Check the missing approval facts on withheld leads and recover any that meet the sending requirements."
     ),
     "already_delivered": (
         "Leads were skipped as already delivered; this is idempotency working, not loss."
     ),
     "delivery_unreconciled": (
-        "The delivery step could not account for these rows: it submitted them, did "
-        "not create them, and recorded no skip reason. Its own reconciliation flag "
-        "reports the failure. NOTE THE POPULATION -- this count is over the rows "
-        "SUBMITTED to the writer, which includes leads with no contact and is "
-        "therefore larger than the contacts counted upstream; it may exceed the "
-        "difference at this boundary without contradicting it. Read the run's "
-        "delivery record before treating it as a yield problem: an unnamed skip "
-        "category looks identical to a loss."
+        "Reconcile the rows delivery could not account for against Airtable and recover any failed writes."
     ),
 }
 
@@ -181,13 +166,10 @@ ACQUISITION_REACHED_PROVIDER_ACTION = (
 
 STAGE_ACTIONS = {
     "acquisition": (
-        "Acquisition captured nothing this window, so no funnel stage had input. Fix "
-        "acquisition entry before reading or acting on any downstream number."
+        "Check acquisition entry and the recovered-work queue to explain why no new postings were captured."
     ),
     "review": (
-        "Runs captured more postings than they reviewed. Check each run's stop_reason and "
-        "topup.final_stop_reason to find out why the run did not finish the batch it "
-        "acquired."
+        "Resolve the interruptions that left newly acquired postings unreviewed, then resume them."
     ),
     "qualification": (
         "The qualification gate is the largest measured loss. Review acquisition targeting: "
@@ -195,9 +177,7 @@ STAGE_ACTIONS = {
         "filters."
     ),
     "contact_discovery": (
-        "Contact discovery is the largest measured loss. The constraint is the "
-        "hiring-manager/domain layer rather than acquisition volume, so adding jobs is "
-        "unlikely to increase output until this boundary improves."
+        "Reconcile incomplete contact searches and recorded no-matches, then retry eligible unfinished work."
     ),
     "airtable_delivery": (
         "Contacts are found but not written to Airtable. Review the delivery skip breakdown "
@@ -253,9 +233,11 @@ class Action:
     priority: int
     action: str
     basis: str
+    stakeholder_action: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
-        return {"priority": self.priority, "action": self.action, "basis": self.basis}
+        return {"priority": self.priority, "action": self.action, "basis": self.basis,
+                "stakeholder_action": self.stakeholder_action or self.action}
 
 
 def identify(
@@ -327,20 +309,34 @@ def identify(
     # bought 6,205 provider rows. A total outage and an unmeasured period are
     # different findings with different fixes.
     if (captured is not None and captured.status == STATUS_MEASURED
-            and int(captured.value or 0) == 0):
+            and int(captured.value or 0) == 0
+            and captured.cohort != "new_capture_excluding_recovered_work"
+            and not any(m.available and (m.value or 0) > 0 for key, m in available
+                        if key != "jobs_captured")):
         stops = collections.Counter(
             str(getattr(run, "stop_reason", "") or "unrecorded") for run in (runs or ()))
         zero_budget = sum(n for reason, n in stops.items() if "governor_zero_budget" in reason)
-        reached = max(0, run_count - zero_budget)
+        # A non-budget stop label does not prove that a provider call happened.
+        # Only emitted acquisition request counters support that claim.
+        request_counts = []
+        for run in runs:
+            ledger = run.artifact("ledger")
+            result = run.artifact("orchestrator_result")
+            count = ledger.get("physical_requests")
+            if count is None:
+                count = ((result.get("acquisition") or {}).get("cumulative") or {}).get("physical_requests")
+            if isinstance(count, int) and not isinstance(count, bool) and count >= 0:
+                request_counts.append(count)
+        reached = sum(count > 0 for count in request_counts)
         parts = [f"Acquisition captured 0 jobs across {run_count} "
-                 f"run{'s' if run_count != 1 else ''}, so no funnel stage had input."]
+                 f"run{'s' if run_count != 1 else ''}."]
         if zero_budget:
-            parts.append(f"The credit governor granted zero budget on {zero_budget} of them "
-                         f"(stop_reason governor_zero_budget), so no provider request was made.")
+            parts.append(f"{zero_budget} recorded acquisition budget stops.")
         if reached:
-            parts.append(f"{reached} run{'s' if reached != 1 else ''} had budget and reached "
-                         f"the provider but still captured nothing.")
-        if not stops:
+            parts.append(f"{reached} run{'s' if reached != 1 else ''} recorded acquisition requests.")
+        if len(request_counts) < run_count:
+            parts.append("Provider request activity is not measured for every run.")
+        if not stops or set(stops) == {"unrecorded"}:
             parts.append("No run stop reason was recorded, so the failure mode cannot be "
                          "narrowed from the artifacts in this window.")
         return Bottleneck(
@@ -351,8 +347,9 @@ def identify(
             lost=0,
             statement=" ".join(parts),
             evidence=sorted(set(captured.evidence)) + ["run_manifest.stop_reason"],
-            top_reasons=[{"reason": reason, "count": count}
-                         for reason, count in stops.most_common(5)],
+            top_reasons=([{"reason": reason, "count": count}
+                          for reason, count in stops.most_common(5)]
+                         + ([{"reason": "acquisition_requests_observed", "count": reached}] if reached else [])),
             unmeasured_boundaries=unmeasured,
         )
 
@@ -368,6 +365,8 @@ def identify(
         )
 
     worst: Optional[Bottleneck] = None
+    delivery_finding: Optional[Bottleneck] = None
+    unattributed_delivery: set = set()
     #: Every boundary that showed a positive difference, eligible or not. The
     #: document keeps all of them; only an eligible one may be the headline.
     observed: List[Bottleneck] = []
@@ -437,6 +436,30 @@ def identify(
                 continue
         entered = int(from_metric.value or 0)
         advanced = int(to_metric.value or 0)
+        if (from_key, to_key) in NON_NESTED_PAIRS:
+            incomparable.append({"boundary": boundary_name, "reason": (
+                "Contacts found and Airtable creations are not proven subsets; "
+                "recorded skip reasons do not make their difference a measured loss.")})
+            scoped = {r: c for r, c in reasons.items()
+                      if r in REASONS_BY_BOUNDARY.get(boundary_name, ()) and int(c or 0) > 0}
+            if scoped:
+                top = sorted(scoped.items(), key=lambda item: (-int(item[1]), item[0]))[:5]
+                if "delivery_unreconciled" in scoped:
+                    statement = (f"Delivery could not account for {int(scoped['delivery_unreconciled']):,} "
+                                 "submitted rows. Reconcile their outcomes against Airtable.")
+                else:
+                    reason, count = top[0]
+                    statement = f"Delivery recorded {int(count):,} outcomes attributed to {reason.replace('_', ' ')}."
+                delivery_finding = Bottleneck(
+                    kind="delivery_outcomes", boundary=boundary_name,
+                    from_metric=from_key, to_metric=to_key,
+                    top_reasons=[{"reason": r, "count": c} for r, c in top],
+                    statement=statement + " Contacts found and Airtable creations do not establish a conversion rate.",
+                    evidence=sorted(set(from_metric.evidence) | set(to_metric.evidence)),
+                    unmeasured_boundaries=unmeasured)
+            elif entered > advanced:
+                unattributed_delivery.add(boundary_name)
+            continue
         lost = entered - advanced
         if lost <= 0:
             continue
@@ -464,32 +487,32 @@ def identify(
         ]
         observed.append(candidate)
 
-    # ELIGIBILITY. A boundary may be named as THE bottleneck only if its difference
-    # is actionable: either the two counters are nested, so the difference is a set
-    # of records that entered and did not advance, or a reason code recorded AT that
-    # boundary attributes it.
+    # A reason code cannot make incompatible populations comparable. Those pairs
+    # were kept out of the subtraction above; recorded outcomes remain separate.
     #
     # Checked on the METRIC PAIR, not the boundary label, because a label collapses
     # when the stage between two counters is unmeasured -- and the pair is what
     # decides whether the subtraction means anything.
     eligible = [c for c in observed
-                if (c.from_metric, c.to_metric) not in NON_NESTED_PAIRS
-                or c.top_reasons]
+                if (c.from_metric, c.to_metric) not in NON_NESTED_PAIRS]
     for candidate in eligible:
         if worst is None or (candidate.lost or 0) > (worst.lost or 0):
             worst = candidate
 
+    if delivery_finding is not None and (worst is None or int(reasons.get("delivery_unreconciled") or 0) > 0):
+        delivery_finding.incomparable_boundaries = incomparable
+        return delivery_finding
+
     if worst is None:
-        ineligible = sorted({c.boundary for c in observed})
+        ineligible = sorted({c.boundary for c in observed} | unattributed_delivery)
         if ineligible:
             return Bottleneck(
                 kind="no_attributable_boundary",
                 statement=(
                     "No boundary this window can be named as the bottleneck. "
                     + ", ".join(b.replace("_", " ") for b in ineligible)
-                    + (" shows a difference, but its two counters are not a proven "
-                       "subset and no reason code was recorded there, so the "
-                       "difference is a transition and not a measured loss.")
+                    + (" cannot be compared using the recorded units, populations "
+                       "and run coverage. No loss rate can be established at those boundaries.")
                 ),
                 unmeasured_boundaries=unmeasured,
                 incomparable_boundaries=incomparable,
@@ -573,9 +596,10 @@ def action_plan(
     """A short, evidence-anchored plan. Deterministic for a given report."""
     actions: List[Action] = []
 
-    def add(text: str, basis: str) -> None:
+    def add(text: str, basis: str, stakeholder_text: str = "") -> None:
         if len(actions) < max_actions and not any(a.action == text for a in actions):
-            actions.append(Action(priority=len(actions) + 1, action=text, basis=basis))
+            actions.append(Action(priority=len(actions) + 1, action=text, basis=basis,
+                                  stakeholder_action=stakeholder_text))
 
     if bottleneck.kind == "no_pipeline_activity":
         add(
@@ -583,6 +607,7 @@ def action_plan(
             "the artifact root; a week with zero runs is a scheduling, start-command or "
             "artifact-access problem, not a yield problem.",
             "run_artifacts: 0 runs attributed to the window",
+            "Confirm scheduled runs completed and that their results are accessible.",
         )
     elif bottleneck.kind == "acquisition_failure":
         add(
@@ -590,6 +615,12 @@ def action_plan(
             "of the funnel.",
             "lanes.json reported lane errors",
         )
+    elif bottleneck.kind == "delivery_outcomes":
+        add(STAGE_ACTIONS["airtable_delivery"], "recorded delivery outcomes; no comparable contact-to-creation rate")
+        for entry in bottleneck.top_reasons:
+            remedy = REASON_ACTIONS.get(str(entry.get("reason")))
+            if remedy:
+                add(remedy, f"recorded delivery reason {entry.get('reason')} = {entry.get('count')}")
     elif bottleneck.kind == "funnel_boundary":
         basis = (f"largest measured loss: {bottleneck.lost} records at the "
                  f"{bottleneck.boundary} boundary ({bottleneck.loss_pct}%)")
@@ -620,6 +651,7 @@ def action_plan(
                 "runs in this window carry a reporting-ledger loss_reasons block.",
                 f"{bottleneck.lost} records lost at {bottleneck.boundary} with no "
                 "recorded reason codes",
+                "Recover the missing outcome reasons before attributing the measured drop to a cause.",
             )
     elif bottleneck.kind == "acquisition_entry":
         add(
@@ -627,17 +659,21 @@ def action_plan(
             f"jobs_captured = 0 across {sum(int(e.get('count') or 0) for e in bottleneck.top_reasons)} "
             "run(s) in this window",
         )
-        reached_provider = True
+        reached_provider = any(entry.get("reason") == "acquisition_requests_observed"
+                               for entry in bottleneck.top_reasons)
         for entry in bottleneck.top_reasons:
             reason = str(entry.get("reason") or "")
             remedy = next((text for key, text in ACQUISITION_STOP_ACTIONS.items()
                            if key in reason), "")
             if remedy:
-                reached_provider = False
-                add(remedy, f"stop_reason {reason} on {entry.get('count')} run(s)")
+                public = ("Reconcile the available acquisition budget and provider balance before resuming."
+                          if "governor_zero_budget" in reason else
+                          "Resolve the recorded source error before restarting acquisition.")
+                add(remedy, f"stop_reason {reason} on {entry.get('count')} run(s)", public)
         if reached_provider and bottleneck.top_reasons:
             add(ACQUISITION_REACHED_PROVIDER_ACTION,
-                "runs had budget and reached the provider yet captured 0 jobs")
+                "runs recorded acquisition requests yet captured 0 jobs",
+                "Check requested date ranges, available inventory and duplicate counts to explain the empty acquisition.")
     elif bottleneck.kind == "entry_not_established":
         add(
             "Some runs in this period did not record net-new captured postings, so "
@@ -655,7 +691,7 @@ def action_plan(
     # Evidence-gap chores are appended ONLY when no concrete production problem was
     # identified. Telling Brett to "instrument sent_to_instantly" while acquisition
     # is down buries the finding that matters under housekeeping.
-    if bottleneck.kind not in ("acquisition_entry", "acquisition_failure", "funnel_boundary"):
+    if bottleneck.kind not in ("acquisition_entry", "acquisition_failure", "funnel_boundary", "delivery_outcomes"):
         # ONE CAUSE, ONE ACTION. When several metrics are incomplete because the SAME
         # runs were silent, they are not several problems -- they are one run that did
         # not report, seen from three angles. Emitting a chore per metric filled the
@@ -672,7 +708,16 @@ def action_plan(
                 continue
             if silent and _shares_cause(metric, metrics, silent):
                 continue
-            add(remedy, f"evidence gap on {metric}")
+            public = {
+                "sent_to_instantly": "Confirm successful imports directly in Instantly for the reporting period.",
+                "jobs_captured": "Record new postings from every run so the weekly total can be verified.",
+                "jobs_reviewed": "Confirm which runs reached review and preserve their reviewed-posting counts.",
+                "qualified_opportunities": "Record how many qualified company and role opportunities entered contact discovery.",
+                "contacts_found": "Preserve the number of contacts found by every run.",
+                "sent_to_airtable": "Reconcile successful Airtable writes and failed deliveries for every run.",
+                "review_rate_pct": "Separate recovered postings from new acquisitions before calculating review rates.",
+            }.get(metric, "Restore the missing measurements before comparing this period's results.")
+            add(remedy, f"evidence gap on {metric}", public)
 
     if not actions:
         # This text may ONLY be used when nothing was measured to be lost. Emitting

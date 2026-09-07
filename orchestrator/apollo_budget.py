@@ -12,9 +12,10 @@ budget spends without limit.
 
 This is the opposite in every one of those respects:
 
-* it counts **every chargeable path** -- organisation enrich, people search, person
-  match -- wherever they are called from, including the cascade, the org-id fallback
-  and any retry, because a retry costs exactly what the first attempt cost;
+* it reserves **potentially paid physical requests** -- organisation enrich and
+  person match, including retries. People API Search is documented as 0 credits.
+  Reservations are an upper bound on request attempts, NOT measured provider
+  credits: response data and the workspace plan determine the actual charge;
 * it is **durable across runs**, so an interrupted run cannot restart the budget by
   restarting itself. That is the failure that turned a credit ceiling into a daily
   allowance the last time one existed;
@@ -77,9 +78,19 @@ def _path(explicit: str = "") -> Path:
 def _read(path: Path) -> Dict[str, Any]:
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+    except FileNotFoundError:
         return {}
-    return data if isinstance(data, dict) and data.get("schema") == SCHEMA else {}
+    except (OSError, ValueError) as exc:
+        raise BudgetExhausted({"authorization_id": "unreadable-ledger",
+                               "authorized": 0, "consumed": 0,
+                               "state_error": type(exc).__name__}) from exc
+    if (not isinstance(data, dict) or data.get("schema") != SCHEMA
+            or type(data.get("consumed")) is not int or data["consumed"] < 0
+            or not isinstance(data.get("by_kind"), dict)):
+        raise BudgetExhausted({"authorization_id": "invalid-ledger",
+                               "authorized": 0, "consumed": 0,
+                               "state_error": "invalid_budget_state"})
+    return data
 
 
 def _write(path: Path, payload: Dict[str, Any]) -> None:
@@ -126,6 +137,10 @@ def charge(kind: str, count: int = 1, *, path: str = "") -> Dict[str, Any]:
     """
     if not enabled():
         return {"charged": False, "reason": "budget_not_enabled"}
+    if kind == KIND_PEOPLE_SEARCH:
+        # Retain the legacy kind for historical ledger compatibility; never refund
+        # earlier reservations or reset an exhausted grant during migration.
+        return {"charged": False, "reason": "zero_credit_endpoint"}
     target = _path(path)
     state = load(path)
     if str(kind) not in KINDS:

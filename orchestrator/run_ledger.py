@@ -85,6 +85,7 @@ LEDGER_METRIC_KEYS = (
     "net_new_jobs_captured",
     "unique_opportunities",
     "jobs_reviewed",
+    "postings_resumed",
     "qualified_opportunities",
     "companies_considered",
     "contacts_found",
@@ -526,6 +527,7 @@ _BACKFILL_FIELDS = (
      (("orchestrator_result", "acquisition.cumulative.cross_source_duplicates"),)),
     ("unique_opportunities", (("waterfall", "unit_totals.opportunities"),)),
     ("jobs_reviewed", (("orchestrator_result", "enrichment.funnel.qualification_input"),)),
+    ("postings_resumed", (("orchestrator_result", "acquisition.cumulative.pending_work_resumed.adopted"),)),
     # Only the contact-discovery entry counter may answer "qualified
     # opportunities". A pre-2026-09-05 run does not carry it, and backfilling the
     # looser target_role_eligible in its place would reintroduce exactly the

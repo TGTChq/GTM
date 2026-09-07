@@ -6,7 +6,7 @@ import json
 import logging
 import time
 from pathlib import Path
-from typing import Any, Dict, Iterable
+from typing import Any, Callable, Dict, Iterable
 
 import requests
 
@@ -54,12 +54,17 @@ def request_with_retry(
     json_body: Dict[str, Any] | None = None,
     max_retries: int | None = None,
     timeout: int | None = None,
+    before_attempt: Callable[[], None] | None = None,
 ) -> requests.Response:
     retries = max_retries or config.MAX_HTTP_RETRIES
     timeout_value = timeout or config.REQUEST_TIMEOUT_SECONDS
     last_error: Exception | None = None
 
     for attempt in range(1, retries + 1):
+        # A caller's authorization must cover each physical request, including
+        # retries. Keep this outside the retry handler: refusal is not retryable.
+        if before_attempt is not None:
+            before_attempt()
         if attempt > 1:
             # Annotation only: declares that the next physical attempt is a
             # retry. No-op unless a measurement trace is installed, and it

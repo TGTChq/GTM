@@ -58,10 +58,10 @@ class AnUnsetBudgetIsZeroNotUnlimited(unittest.TestCase):
 
 
 class ItCoversEveryChargeablePath(unittest.TestCase):
-    def test_all_three_kinds_draw_on_ONE_aggregate(self):
-        with _cfg(APOLLO_RECOVERY_BUDGET_CALLS=3):
+    def test_only_potentially_paid_kinds_draw_on_the_aggregate(self):
+        with _cfg(APOLLO_RECOVERY_BUDGET_CALLS=2):
             ab.charge(ab.KIND_ORG_ENRICH)
-            ab.charge(ab.KIND_PEOPLE_SEARCH)
+            self.assertFalse(ab.charge(ab.KIND_PEOPLE_SEARCH)["charged"])
             ab.charge(ab.KIND_PERSON_MATCH)
             self.assertEqual(ab.summary()["remaining"], 0)
             with self.assertRaises(ab.BudgetExhausted):
@@ -91,6 +91,15 @@ class ItCoversEveryChargeablePath(unittest.TestCase):
 
 
 class ItIsDurableAcrossRuns(unittest.TestCase):
+    def test_a_corrupt_ledger_cannot_restore_a_spent_grant(self):
+        with _cfg() as _:
+            target = Path(config.APOLLO_RECOVERY_BUDGET_STATE_PATH)
+            target.write_text('{"schema":')
+            before = target.read_bytes()
+            with self.assertRaises(ab.BudgetExhausted):
+                ab.charge(ab.KIND_PERSON_MATCH)
+            self.assertEqual(target.read_bytes(), before)
+
     def test_a_second_run_does_not_get_a_fresh_budget(self):
         """The failure that turns an aggregate ceiling into a daily allowance."""
         path = str(Path(tempfile.mkdtemp()) / "budget.json")
@@ -170,17 +179,15 @@ class TheChargePointsAreTheChargeableCalls(unittest.TestCase):
     `APOLLO_MAX_PERSON_MATCH_CALLS_PER_RUN` made -- one endpoint, described as an
     overall ceiling."""
 
-    def test_all_three_entry_points_charge(self):
-        import inspect
-
+    def test_free_search_does_not_consume_an_exhausted_paid_grant(self):
         import apollo_client
-
-        for func, kind in ((apollo_client.enrich_organization, "organization_enrich"),
-                           (apollo_client.search_people_at_company, "people_search"),
-                           (apollo_client.match_person, "person_match")):
-            source = inspect.getsource(func)
-            self.assertIn(f'_charge_recovery_budget("{kind}")', source,
-                          f"{func.__name__} must draw on the budget")
+        with _cfg(APOLLO_RECOVERY_BUDGET_CALLS=0), mock.patch.object(
+                apollo_client, "request_with_retry") as request, mock.patch.object(
+                apollo_client, "safe_json", return_value={"people": []}):
+            self.assertEqual(apollo_client.search_people_at_company("acme.com", ["CEO"]), [])
+            self.assertEqual(apollo_client.search_people_by_org_id("org1", ["CEO"]), [])
+            self.assertEqual(request.call_count, 2)
+            self.assertEqual(ab.summary()["consumed"], 0)
 
     def test_the_ordinary_path_is_untouched_when_the_budget_is_off(self):
         """Default OFF has to mean no behaviour change at all, or enabling recovery

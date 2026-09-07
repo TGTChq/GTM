@@ -21,7 +21,9 @@ fixture responses and make zero network calls. The seam is restored on exit.
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
+import os
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -369,6 +371,7 @@ class RealEnrichmentStage:
     def __init__(self, *, target_final_pass: Optional[int] = None, workdir: Optional[str] = None):
         self.target_final_pass = target_final_pass
         self.workdir = Path(workdir or tempfile.mkdtemp())
+        self._run_budgets_initialized = False
         #: CollapseResult from the last run when company collapse is enabled.
         self.collapse = None
 
@@ -378,12 +381,29 @@ class RealEnrichmentStage:
         from qualification_pipeline import run_precontact_qualification
         import hiring_manager
 
-        qual_dir = self.workdir / "qualification"
-        enr_dir = self.workdir / "enrichment"
+        # Stable, input-addressed batches preserve evidence and resume identity.
+        # Previously every batch overwrote postings and Step 3 outputs, and the
+        # company-only checkpoint could return another opening's contact.
+        encoded_rows = sorted(json.dumps(row, sort_keys=True, default=str) for row in opportunities)
+        batch_key = hashlib.sha256(json.dumps(encoded_rows).encode()).hexdigest()
+        qual_dir = self.workdir / "qualification" / batch_key
+        enr_dir = self.workdir / "enrichment" / batch_key
         qual_dir.mkdir(parents=True, exist_ok=True)
         enr_dir.mkdir(parents=True, exist_ok=True)
-        raw = self.workdir / "postings.json"
-        raw.write_text(json.dumps({"jobs": opportunities}), encoding="utf-8")
+        raw = qual_dir / "postings.json"
+        self._write_postings(raw, opportunities)
+        # Keep the historical reader/recovery path as the distinct input union,
+        # never merely the last batch. This records inputs, not new acquisitions.
+        census_path = self.workdir / "postings.json"
+        previous = json.loads(census_path.read_text(encoding="utf-8"))["jobs"] if census_path.exists() else []
+        from retrieval_measurement.accounting import posting_identity
+        by_identity = {}
+        for row in previous + opportunities:
+            strength, key = posting_identity(row)
+            identity = (strength, key) if key and strength != "none" else (
+                "payload", json.dumps(row, sort_keys=True, default=str))
+            by_identity[identity] = row
+        self._write_postings(census_path, list(by_identity.values()))
 
         # Keep every real-module write UNDER the run root. The legacy config
         # output dirs are overridden only for the duration of this block and
@@ -409,13 +429,25 @@ class RealEnrichmentStage:
             step3 = hiring_manager.run_hiring_manager_identification(
                 qual_path, target_final_pass_leads=self.target_final_pass,
                 exclude_company_keys=exclude_company_keys,
-                exclude_company_function_keys=exclude_company_function_keys)
+                exclude_company_function_keys=exclude_company_function_keys,
+                reset_run_budgets=not self._run_budgets_initialized)
+            self._run_budgets_initialized = True
 
         leads = self._load_leads(step3.output_path)
         report = self._to_report(qual, step3, leads)
         if self.collapse is not None:
             report.funnel["company_collapse"] = dict(self.collapse.metrics)
         return report
+
+    @staticmethod
+    def _write_postings(path: Path, rows: List[Dict[str, Any]]) -> None:
+        # Failure propagates before paid work starts; never erase older custody.
+        temp = path.with_suffix(".json.tmp")
+        with temp.open("w", encoding="utf-8") as stream:
+            json.dump({"jobs": rows}, stream, default=str)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temp, path)
 
     def _collapse_qualified(self, qual_path: str, qual_dir: Path,
                             *, suppressed_function_keys=None) -> str:
@@ -978,8 +1010,9 @@ class RealDelivery:
         # skipped because they were already delivered. NEVER a failed row, NEVER a
         # person-employer collapse loser.
         rep.delivered_lead_keys = sorted(
-            set(result.get("persisted_lead_keys", []) or [])
-            | {l.contact_key for l in candidates if l.contact_key in known_delivered})
+            (set(result.get("persisted_lead_keys", []) or [])
+             | {l.contact_key for l in candidates if l.contact_key in known_delivered})
+            - set(result.get("failed_lead_keys", []) or []))
         rep.detail = {"airtable": result,
                       "other_skips": sum(rep.skip_breakdown().values()) - rep.skipped_existing,
                       "withheld_before_submit": rep.skipped_already_delivered + len(dup_losers)

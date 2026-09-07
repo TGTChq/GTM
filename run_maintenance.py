@@ -107,13 +107,14 @@ def reconcile(root: Path, run_id: str) -> dict:
     """Reconcile ONE run's retained payloads against what its result claims.
 
     Counting units are kept apart deliberately: `postings.json` holds NORMALIZED
-    OPPORTUNITIES, while `net_new_jobs_captured` counts postings that survived
-    cross-run dedupe. They are expected to agree for a run that reached enrichment,
-    and any difference is reported rather than explained away.
+    posting inputs, while `net_new_jobs_captured` counts new acquisitions only.
+    Recovery inputs have their own execution marker and must reconcile separately.
     """
     run_dir = root / "run_artifacts" / run_id
     out = {"run_id": run_id, "artifact_dir_present": run_dir.is_dir(),
            "net_new_jobs_captured": None, "opportunities_retained": None,
+           "new_postings_retained": None, "resumed_postings_retained": None,
+           "postings_resumed_reported": None,
            "identities_distinct": None, "unavailable": []}
     if not run_dir.is_dir():
         out["unavailable"].append("run_artifacts directory absent")
@@ -126,6 +127,9 @@ def reconcile(root: Path, run_id: str) -> dict:
             out["net_new_jobs_captured"] = (
                 ((data.get("acquisition") or {}).get("cumulative") or {})
                 .get("net_new_jobs_captured"))
+            out["postings_resumed_reported"] = (
+                (((data.get("acquisition") or {}).get("cumulative") or {})
+                 .get("pending_work_resumed") or {}).get("adopted"))
         except (OSError, ValueError) as exc:
             out["unavailable"].append(f"orchestrator_result unreadable: {type(exc).__name__}")
     else:
@@ -138,6 +142,9 @@ def reconcile(root: Path, run_id: str) -> dict:
             data = json.loads(postings.read_text(encoding="utf-8"))
             jobs = [j for j in (data.get("jobs") or []) if isinstance(j, dict)]
             out["opportunities_retained"] = len(jobs)
+            resumed = sum(j.get("_resumed_from_pending") is True for j in jobs)
+            out["resumed_postings_retained"] = resumed
+            out["new_postings_retained"] = len(jobs) - resumed
             keys = set()
             for job in jobs:
                 try:
@@ -152,8 +159,13 @@ def reconcile(root: Path, run_id: str) -> dict:
     else:
         out["unavailable"].append("enrichment/postings.json absent (pruned or never written)")
 
-    a, b = out["net_new_jobs_captured"], out["opportunities_retained"]
-    out["agrees"] = (a == b) if (a is not None and b is not None) else None
+    a, b = out["net_new_jobs_captured"], out["new_postings_retained"]
+    out["new_capture_agrees"] = (a == b) if (a is not None and b is not None) else None
+    reported, retained = out["postings_resumed_reported"], out["resumed_postings_retained"]
+    out["recovery_agrees"] = ((reported == retained) if reported is not None
+                              else (True if retained == 0 else None))
+    checks = (out["new_capture_agrees"], out["recovery_agrees"])
+    out["agrees"] = False if False in checks else (None if None in checks else True)
     return out
 
 
@@ -628,6 +640,86 @@ def _stream_field_counts(path: Path, fields, chunk: int = 4 << 20) -> dict:
     return {f: dict(c.most_common(20)) for f, c in found.items() if c}
 
 
+def send_safe_forensics(root: Path, run_ids, *, limit: int = 200) -> dict:
+    """WHY a lead was withheld as not send-safe, per lead, from its own stored facts.
+
+    The 2026-09-06 calibration produced two verified contacts and created zero rows:
+    both were `send_safe_withheld`, and delivery recorded only the aggregate, so the
+    reason was never written down. Increasing a budget cannot explain a withholding,
+    and neither can a count.
+
+    `send_safe_facts` is deterministic, offline and fail-closed: it returns the FIRST
+    failing fact. Rebuilding each retained lead's Airtable fields with the production
+    `_job_to_fields` and re-running the gate reproduces exactly the decision delivery
+    made, with the reason it never emitted.
+
+    Reads only. No provider is contacted, nothing is written to Airtable, and no
+    field is repaired -- a rebuilt row is used to ASK the gate, never to change it.
+    """
+    from airtable_client import _job_to_fields, send_safe_facts
+
+    out = {"unit_note": "per-lead send-safe gate reasons, recomputed offline",
+           "runs": []}
+    for run_id in run_ids:
+        enr = root / "run_artifacts" / run_id / "enrichment"
+        row: Dict[str, Any] = {"run_id": run_id, "examined": 0, "send_safe": 0,
+                               "withheld": 0, "reasons": {}, "verified_withheld": [],
+                               "unavailable": []}
+        if not enr.is_dir():
+            row["unavailable"].append("no enrichment directory")
+            out["runs"].append(row)
+            continue
+        reasons: Dict[str, int] = {}
+        # `rglob` ALREADY matches the top level, so unioning it with `glob` visits
+        # every top-level file twice -- the same double-count that reported 2,068
+        # statuses for 1,034 leads. Deduplicated by resolved path.
+        for path in sorted({q.resolve() for q in enr.rglob("jobs_enriched*.json")}):
+            data = _read_json(path)
+            jobs = data.get("jobs") if isinstance(data, dict) else data
+            if not isinstance(jobs, list):
+                continue
+            for job in jobs:
+                if not isinstance(job, dict):
+                    continue
+                if row["examined"] >= limit:
+                    break
+                try:
+                    fields = _job_to_fields(job)
+                    ok, reason = send_safe_facts(fields)
+                except Exception as exc:  # noqa: BLE001 - one bad row never stops it
+                    reason, ok = f"recompute_error:{type(exc).__name__}", False
+                    fields = {}
+                row["examined"] += 1
+                if ok:
+                    row["send_safe"] += 1
+                    continue
+                row["withheld"] += 1
+                reasons[reason] = reasons.get(reason, 0) + 1
+                # The specific population the calibration left unexplained: a
+                # contact Apollo DID verify that was still withheld.
+                if str(fields.get("Apollo Email Status") or "").strip().lower() == "verified":
+                    if len(row["verified_withheld"]) < 25:
+                        row["verified_withheld"].append({
+                            "reason": reason,
+                            "final_decision": fields.get("Final Decision"),
+                            "email_validation": fields.get("Email Validation"),
+                            "contact_alignment": fields.get("Contact Alignment"),
+                            "outbound_hold": bool(fields.get("Outbound Hold")),
+                            "validation_version": fields.get("Validation Version"),
+                            "has_fingerprint": bool(
+                                str(fields.get("Validation Fingerprint") or "").strip()),
+                        })
+            if row["examined"] >= limit:
+                break
+        row["reasons"] = dict(sorted(reasons.items(), key=lambda kv: (-kv[1], kv[0])))
+        if not row["examined"]:
+            row["unavailable"].append(
+                "no jobs_enriched* rows -- the per-lead facts are not retained for "
+                "this run, so its withholding cannot be explained from evidence")
+        out["runs"].append(row)
+    return out
+
+
 def outcome_forensics(root: Path, run_ids) -> dict:
     """Decompose the hiring-manager outcomes from whatever the run actually wrote.
 
@@ -660,6 +752,7 @@ def outcome_forensics(root: Path, run_ids) -> dict:
         hunter_status: Counter = Counter()
         hm_reason: Counter = Counter()
         streamed: list = []
+        parsed: list = []
 
         def _walk_stats(obj) -> None:
             """ICP reason families, wherever they are nested.
@@ -697,7 +790,7 @@ def outcome_forensics(root: Path, run_ids) -> dict:
             if size > 25_000_000:
                 counts = _stream_field_counts(
                     path, ("email_status", "apollo_email_status", "hm_reason",
-                           "primary_reason"))
+                           "primary_reason", "_final_primary_reason", "hunter_email_status"))
                 streamed.append({"file": str(path.relative_to(enr)),
                                  "bytes": size, "counts": counts})
                 # DELIBERATELY NOT folded into the aggregate counters. The 09-04 run
@@ -707,6 +800,15 @@ def outcome_forensics(root: Path, run_ids) -> dict:
                 # the honest form, and the reader can see which file each came from.
                 continue
             data = _read_json(path)
+            # The same output occurs in checkpoints and final artifacts at ANY
+            # file size. Keep per-file populations; only join with run identities
+            # and proven coverage, which this diagnostic scanner does not have.
+            icp.clear()
+            email.clear()
+            apollo_status.clear()
+            hunter_status.clear()
+            hm_reason.clear()
+            file_rows = 0
             _walk_stats(data)
             candidates = []
             if isinstance(data, list):
@@ -720,34 +822,49 @@ def outcome_forensics(root: Path, run_ids) -> dict:
                 if not isinstance(rec, dict):
                     continue
                 rows_scanned += 1
+                file_rows += 1
                 st = str(rec.get("apollo_email_status") or rec.get("email_status")
                          or (rec.get("metadata") or {}).get("apollo_status") or "").lower()
                 if st:
                     apollo_status[st] += 1
-                hs = str((rec.get("metadata") or {}).get("hunter_status")
+                hs = str(rec.get("hunter_email_status")
+                         or (rec.get("metadata") or {}).get("hunter_status")
                          or rec.get("hunter_status") or "").lower()
                 hunter_status[hs or "(absent)"] += 1
-                reason = str(rec.get("hm_reason") or rec.get("primary_reason")
+                reason = str(rec.get("_final_primary_reason") or rec.get("hm_reason") or rec.get("primary_reason")
                              or rec.get("reason") or "").lower()
                 if reason:
                     hm_reason[reason] += 1
-                addr = str(rec.get("email") or rec.get("contact_email") or "").strip()
+                addr = str(rec.get("hiring_manager_email") or rec.get("email")
+                           or rec.get("contact_email") or "").strip()
                 if reason in ("email_unverified", "unverified_email",
                               "unverified_email_deliverability"):
                     email["no_address" if not addr else
                           f"address_apollo_status={st or 'absent'}"] += 1
+            parsed.append({"file": str(path.relative_to(enr)), "rows_scanned": file_rows,
+                           "icp_reason_families": dict(icp), "apollo_email_status": dict(apollo_status),
+                           "hunter_status": dict(hunter_status), "hm_reasons": dict(hm_reason),
+                           "email_unverified_breakdown": dict(email)})
         row["streamed_large_files"] = streamed
+        row["parsed_files"] = parsed
         row["rows_scanned"] = rows_scanned
-        row["icp_reason_families"] = dict(icp.most_common())
-        row["apollo_email_status"] = dict(apollo_status.most_common())
-        row["hunter_status"] = dict(hunter_status.most_common())
-        row["hm_reasons"] = dict(hm_reason.most_common(15))
-        row["email_unverified_breakdown"] = dict(email.most_common())
-        if not rows_scanned:
+        row["rows_scanned_unit"] = "parsed_row_occurrences_not_distinct_leads"
+        row["aggregation_status"] = {}
+        for metric in ("icp_reason_families", "apollo_email_status", "hunter_status",
+                       "hm_reasons", "email_unverified_breakdown"):
+            sources = [file for file in parsed if file[metric]]
+            row[metric] = sources[0][metric] if len(sources) == 1 else {}
+            row["aggregation_status"][metric] = (
+                "single_file_evidence_not_run_total" if len(sources) == 1 else
+                "multiple_files_unreconciled" if sources else "unavailable")
+            if len(sources) > 1:
+                row["not_decomposable"].append(
+                    f"{metric}: multiple file populations have no proven disjointness; see parsed_files")
+        if not rows_scanned and not streamed:
             row["not_decomposable"].append(
                 "no per-lead rows in the enrichment artifacts -- the stage totals "
                 "cannot be split from this run's evidence")
-        if not icp:
+        if not any(file["icp_reason_families"] for file in parsed):
             row["not_decomposable"].append(
                 "no company_criteria_reason__* stats -- the not_icp total cannot be "
                 "attributed to an ICP rule from this run's evidence")
@@ -1228,6 +1345,9 @@ def main(argv=None) -> int:
 
         _say("4c0c. EXECUTION RECONCILE (stage-entry evidence, not a payload recount)")
         print(json.dumps(execution_reconcile(root, ids), indent=2, default=str))
+
+        _say("4c0e. SEND-SAFE FORENSICS (why a lead was withheld, per lead, offline)")
+        print(json.dumps(send_safe_forensics(root, ids), indent=2, default=str))
 
         _say("4c0d. OUTCOME FORENSICS (decompose only what the artifacts support)")
         print(json.dumps(outcome_forensics(root, ids), indent=2, default=str))

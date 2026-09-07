@@ -45,6 +45,17 @@ class TheCountIsDistinctAndDurable(unittest.TestCase):
 
 
 class OnlyNEWLeadsCount(unittest.TestCase):
+    def test_daily_retention_cannot_turn_a_historical_identity_into_a_new_lead(self):
+        root = tempfile.mkdtemp()
+        old = datetime(2026, 1, 1, 18, 0, tzinfo=timezone.utc)
+        recent = datetime(2026, 9, 6, 18, 0, tzinfo=timezone.utc)
+        dt.record_approved(root, ["old@x.com"], now=old, run_id="old-run")
+        dt.record_approved(root, ["fresh@x.com"], now=recent, run_id="new-run")
+        result = dt.record_approved(root, ["old@x.com"], now=recent, run_id="new-run")
+        self.assertEqual(result["added"], 0)
+        self.assertEqual(dt.approved_for_run(root, "old-run"), 1)
+        self.assertEqual(dt.approved_for_run(root, "new-run"), 1)
+
     def test_a_lead_approved_on_an_earlier_day_is_not_todays_output(self):
         """Recycling the backlog is the one way to hit the target while delivering
         nothing, so it must be arithmetically impossible."""
@@ -188,7 +199,8 @@ class TheLoopStopsOnTheDAILYAPPROVEDGoal(unittest.TestCase):
                     mode="auto_approve", entered=len(leads),
                     reviewable_submitted=len(leads), created=len(leads),
                     delivered_lead_keys=keys,
-                    detail={"airtable": {"created_lead_keys": keys},
+                    detail={"airtable": {"created_lead_keys": keys,
+                                         "created_approved_lead_keys": keys},
                             "withheld_before_submit": 0})
 
         def runner(_m):

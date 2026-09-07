@@ -3,6 +3,49 @@
 Living record. Survives compaction. Reopen a closed item only on contradictory
 evidence.
 
+## Current checkpoint: throughput correction on base `6cd4fef` (2026-09-06)
+
+Read [THROUGHPUT_FIX_2026-09-06.md](THROUGHPUT_FIX_2026-09-06.md) first. The sections
+below are historical records and contain superseded deployment, credit and capacity
+claims. The new investigation reproduced internal recovery/approval/budget defects;
+internal completion is **not** established. The user's current objective is at least
+1,000 distinct new Approved Airtable leads **per production run**, continuing beyond
+that when authorized resources permit, with the daily union recorded separately.
+
+**Retry after renewed user instruction:** Railway tools now work. Direct status,
+configuration and deployment reads confirm GTM on `6cd4fef`, cron `0 3 * * *`, and
+Approved Sync successful with cron `0 0 * * *`. OAuth returns variable names only;
+current pause/budget values were not exposed. No variables, cron or state were changed.
+GitHub create-tree was retried with all 35 reviewed files and again returned
+**403 `Resource not accessible by integration`**. No remote branch/PR/new release
+exists. User authorization is present; the connected GitHub integration still needs
+repository write access. Do not bypass the provider denial via another route.
+
+Original calibration logs are now recovered from deployment
+`0c2692c8-e7eb-469f-8069-0f38989671bd`, including all nine emitted ledger entries.
+The preflight says `airtable=write`, contradicting the previous claim that external
+delivery was disabled for that calibration. It created zero because all 26 rows
+were withheld, not because delivery was structurally disabled. The log provides no
+per-lead send-safe reason for the two verified contacts. No new paid run was made.
+
+Local re-rendering of those original entries includes three runs in the completed
+Aug 28–Sep 04 Pacific week, and six in the current Sep 04–Sep 06 13:28 Pacific
+window. The latter reports 6,431 captured and 1,050 contacts; missing review,
+qualification and Instantly evidence remains missing. This is original-log/ledger
+validation, not fresh heavy-artifact versus ledger acceptance. Evidence is under
+`acceptance/evidence/*20260906.json`; see the checkpoint's latest access section.
+
+The user asks to conserve the remaining Apollo credits and finish everything that
+can be established offline. Do not convert offline machinery validation into a
+claim of 1,000 live approvals, or into proof no further improvement is possible.
+
+The old 50-counter calibration charged free People API Search calls to its internal
+grant and did not count physical paid retries. Its claimed ≥8,300-call/day floor and
+44,000/day forecast are withdrawn in `CALIBRATION_50_CALLS.md`; actual provider credit
+usage and sustainable approved-lead capacity remain unmeasured.
+
+---
+
 **Deployed:** `origin/main = 6b0d117`.
 **Acquisition:** PAUSED (`FANTASTIC_JOBS_ENABLED=False` on GTM). Billing untouched.
 **Cron:** GTM `0 3 * * *`, Approved Sync `0 0 * * *` — both verified after every pass.
