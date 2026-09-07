@@ -60,10 +60,11 @@ def _empty_overrides(tmp_path) -> Path:
     return path
 
 
-def _resolve(tmp_path, *, name, slug="", domain="", other_name="", tag="c"):
+def _resolve(tmp_path, *, name, slug="", domain="", other_name="", website="",
+             tag="c"):
     return resolve_company_display(
         organization=name, org_linkedin_name=other_name, org_linkedin_slug=slug,
-        employer_domain=domain,
+        employer_domain=domain, org_linkedin_website=website,
         cache=CompanyDisplayCache(tmp_path / f"{tag}.json",
                                   overrides_path=_empty_overrides(tmp_path)),
         persist=False)
@@ -90,10 +91,28 @@ def test_corpus_row_meets_its_expectation(row):
 
 def test_the_corpus_actually_contains_unseen_companies():
     """Guards the guard: a corpus of only the five fixed cases proves nothing."""
-    reviewed = {"endeavor", "bsb", "kai", "nash", "zwicker"}
+    reviewed = {"endeavor_attested", "endeavor_bare", "bsb", "kai", "nash", "zwicker"}
     unseen_resolves = [r["id"] for r in resolve_corpus()
                        if not r["hold"] and r["id"] not in reviewed]
     assert len(unseen_resolves) >= 4, unseen_resolves
+
+
+def test_string_identical_pairs_are_separated_only_by_corroboration():
+    """The homonym fix, stated as the property that makes it general.
+
+    ``Apple``/``applebank``/``apple.com`` and ``Clark``/``clarkaudit``/
+    ``getclark.com`` stand in the SAME string relation. No rule reading only those
+    strings can clear one and hold the other, so any rule that tried was wrong about
+    one of them. What separates them here is the organization's own declared
+    website, and nothing else -- which is why it works on companies never seen.
+    """
+    rows = {r["id"]: r for r in resolve_corpus()}
+    assert rows["homonym_prefix"]["relation"] == rows["vanity_get_bare"]["relation"]
+    assert rows["homonym_prefix"]["hold"] is True
+    assert rows["vanity_get_bare"]["hold"] is True          # same shape, same outcome
+    assert rows["vanity_get_attested"]["hold"] is False     # corroborated, so it clears
+    # And an attestation pointing somewhere else corroborates nothing.
+    assert rows["homonym_counter_attested"]["hold"] is True
 
 
 # ---------------------------------------------------------------------------
@@ -367,10 +386,12 @@ def test_one_organization_under_two_domains_is_one_company_for_suppression():
     """Two domains, one LinkedIn organization -- previously two rows for one company."""
     left = _company_identity_keys_from_fields({
         "Website": "https://acme.com", "Company": "Acme",
-        "Outbound Company Identity": "linkedin:acmeco"})
+        "Outbound Company Identity": "linkedin:acmeco",
+        "Outbound Company Confidence": "high"})
     right = _company_identity_keys_from_fields({
         "Website": "https://acme-careers.example", "Company": "Acme Global",
-        "Outbound Company Identity": "linkedin:acmeco"})
+        "Outbound Company Identity": "linkedin:acmeco",
+        "Outbound Company Confidence": "medium"})
     assert left & right == {"linkedin:acmeco"}
 
 
@@ -395,7 +416,8 @@ def test_a_held_row_carries_no_identity_and_suppresses_nothing_extra():
 def test_the_identity_key_stays_function_aware():
     """Acme+Marketing and Acme+Sales remain distinct opportunities."""
     fields = {"Website": "https://acme.com", "Company": "Acme", "Role Bucket": "marketing",
-              "Outbound Company Identity": "linkedin:acmeco"}
+              "Outbound Company Identity": "linkedin:acmeco",
+              "Outbound Company Confidence": "high"}
     marketing = _company_function_keys_from_fields(fields)
     sales = _company_function_keys_from_fields({**fields, "Role Bucket": "gtm_revenue"})
     assert "linkedin:acmeco|bucket:marketing" in marketing
@@ -421,7 +443,8 @@ def test_a_second_batch_for_the_same_organization_is_suppressed_by_identity(tmp_
     existing = {first["lead_key"]: {"id": "rec1", "fields": {
         "Lead Key": first["lead_key"], "Company": "Kai",
         "Website": "https://kai.security", "Role Bucket": "gtm_revenue",
-        "Outbound Company Identity": display.identity_key, "Status": "Pending"}}}
+        "Outbound Company Identity": display.identity_key,
+        "Outbound Company Confidence": display.confidence, "Status": "Pending"}}}
     second = _job_for(display, email="b@kai-eu.example", domain="kai-eu.example")
     second["employer_name"] = second["canonical_company_name"] = "Kai Security Europe"
     # Neither legacy key can bridge these two rows.
@@ -504,7 +527,7 @@ def test_one_name_sourcing_both_identifiers_resolves_at_medium(tmp_path):
     assert result.hold is False
     assert result.confidence == "medium", "a resolved conflict is never promoted to high"
     resolution = result.evidence["conflict_resolution"]
-    assert resolution["basis"] == "both_identifiers_derived_from_one_published_name"
+    assert resolution["basis"] == "both_identifiers_accounted_for_by_one_published_name"
     assert resolution["derivations"]["domain"]["rule"] == "token_subsequence"
 
 
