@@ -173,8 +173,14 @@ class YieldEvidenceProducerTests(unittest.TestCase):
         ])
         self.assertEqual(refresh_yield_table(self.ledger, self.table), 2)
         table = json.load(open(self.table, encoding="utf-8"))
-        self.assertAlmostEqual(table["Account Executive"]["yield"], 0.5)
-        self.assertAlmostEqual(table["Accountant"]["yield"], 0.0)
+        self.assertIsNone(table["Account Executive"]["yield"])
+        self.assertIsNone(table["Accountant"]["yield"])
+        self.assertEqual(table["Account Executive"]["net_new_send_safe"], 1)
+        self.assertEqual(table["Account Executive"]["recorded_rows"], 2)
+        # No proven billed denominator: the real allocator must stay broad.
+        from orchestrator.segment_allocator import segments_from_table
+        allocation = allocate(1000, segments_from_table(table, []), enabled=True)
+        self.assertEqual(allocation.mode, "broad")
 
     def test_metric_is_net_new_per_billed_job_not_gross(self):
         """North star: never optimise raw FINAL_PASS."""
@@ -184,7 +190,10 @@ class YieldEvidenceProducerTests(unittest.TestCase):
              "send_safe": True, "net_new_send_safe": False},
         ])
         refresh_yield_table(self.ledger, self.table)
-        self.assertEqual(json.load(open(self.table, encoding="utf-8"))["F"]["yield"], 0.0)
+        entry = json.load(open(self.table, encoding="utf-8"))["F"]
+        self.assertIsNone(entry["yield"])
+        self.assertEqual(entry["net_new_send_safe"], 0)
+        self.assertEqual(entry["send_safe"], 1)
 
     def test_missing_ledger_leaves_the_table_untouched(self):
         from orchestrator.segment_allocator import refresh_yield_table

@@ -1508,6 +1508,19 @@ class Orchestrator:
                 stop_reason = enrichment_stop
                 break  # preserve the completed slice; resume its tail in a later run
 
+        # An incomplete enrichment slice can still deliver Approved contacts.
+        # Refresh after the final delivery: a circuit/budget break does not visit
+        # the next loop header, where this snapshot was previously left stale.
+        if run_target_on:
+            target = max(0, int(config.RUN_APPROVED_TARGET))
+            have = daily_target.approved_for_run(daily_dir, self.ctx.run_id)
+            acq_cum["run_approved_goal"] = {
+                "run_id": self.ctx.run_id, "target": target,
+                "approved_this_run": have, "remaining": max(0, target - have),
+                "measurement": ("partial" if ((agg.detail.get("airtable") or {}).get(
+                    "created_approval_status_unknown", 0)) else "measured"),
+                "met": target > 0 and have >= target}
+
         # Record this run's ACTUAL billed credits against the monthly ledger
         # (idempotent per run_id; no-op when the governor is disabled).
         self._commit_governor(gov, billed=controller.billed)
@@ -1645,7 +1658,10 @@ class Orchestrator:
             "lanes": {lane: r.to_dict() for lane, r in lane_results.items()},
             "acquisition": acquisition_block,
             "governor": {**gov.to_dict(), "quota_refresh": quota_refresh},
-            "yield_ledger": ledger.summary(),
+            "yield_ledger": ledger.summary(billed_by_source={
+                source: (int(values["returned_billed"]) if source.startswith("fantastic_jobs_") else 0)
+                for source, values in acq_cum["per_source"].items()
+                if "returned_billed" in values}),
             "emails": emails_block,
             "waterfall": report.to_dict(),
             "enrichment": enrichment.to_dict(),

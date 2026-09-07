@@ -782,7 +782,7 @@ def _retained_company_hold_facts(job: dict) -> dict:
     }
 
 
-def send_safe_forensics(root: Path, run_ids, *, limit: int = 200) -> dict:
+def send_safe_forensics(root: Path, run_ids, *, limit: int | None = None) -> dict:
     """WHY a lead was withheld as not send-safe, per lead, from its own stored facts.
 
     The 2026-09-06 calibration produced two verified contacts and created zero rows:
@@ -800,6 +800,10 @@ def send_safe_forensics(root: Path, run_ids, *, limit: int = 200) -> dict:
     field is repaired -- a rebuilt row is used to ASK the gate, never to change it.
     """
     from airtable_client import _job_to_fields, send_safe_facts
+    from orchestrator.delivery_evidence import delivery_evidence
+
+    if limit is not None and limit < 0:
+        raise ValueError("limit must be nonnegative or None")
 
     out = {"unit_note": "per-lead send-safe gate reasons, recomputed offline",
            "evaluation_basis": "retained_leads_current_mapper_and_gate",
@@ -809,9 +813,15 @@ def send_safe_forensics(root: Path, run_ids, *, limit: int = 200) -> dict:
         enr = root / "run_artifacts" / run_id / "enrichment"
         row: Dict[str, Any] = {"run_id": run_id, "examined": 0, "send_safe": 0,
                                "withheld": 0, "reasons": {}, "verified_withheld": [],
-                               "unavailable": []}
+                               "unavailable": [], "files": [], "omitted_by_limit": 0,
+                               "scan_complete": True,
+                               "population_unit": "retained_row_occurrences",
+                               "population_identity_reconciled": False}
+        result = _read_json(root / "run_artifacts" / run_id / "orchestrator_result.json")
+        row["original_delivery"] = delivery_evidence(result.get("delivery") or {})
         if not enr.is_dir():
             row["unavailable"].append("no enrichment directory")
+            row["scan_complete"] = False
             out["runs"].append(row)
             continue
         reasons: Dict[str, int] = {}
@@ -819,32 +829,50 @@ def send_safe_forensics(root: Path, run_ids, *, limit: int = 200) -> dict:
         # every top-level file twice -- the same double-count that reported 2,068
         # statuses for 1,034 leads. Deduplicated by resolved path.
         for path in sorted({q.resolve() for q in enr.rglob("jobs_enriched*.json")}):
-            data = _read_json(path)
+            rel = path.relative_to(enr.resolve()).as_posix()
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError) as exc:
+                row["unavailable"].append(f"{rel}: {type(exc).__name__}")
+                row["scan_complete"] = False
+                continue
             jobs = data.get("jobs") if isinstance(data, dict) else data
             if not isinstance(jobs, list):
+                row["unavailable"].append(f"{rel}: jobs array absent")
+                row["scan_complete"] = False
                 continue
+            file_row = {"artifact": rel, "rows": len(jobs), "examined": 0,
+                        "send_safe": 0, "reasons": {}}
+            row["files"].append(file_row)
             for job_index, job in enumerate(jobs):
                 if not isinstance(job, dict):
+                    row["unavailable"].append(f"{rel}[{job_index}]: not an object")
+                    row["scan_complete"] = False
                     continue
-                if row["examined"] >= limit:
-                    break
+                if limit is not None and row["examined"] >= limit:
+                    row["omitted_by_limit"] += 1
+                    row["scan_complete"] = False
+                    continue
                 try:
                     fields = _job_to_fields(job)
                     ok, reason = send_safe_facts(fields)
                 except Exception as exc:  # noqa: BLE001 - one bad row never stops it
                     reason, ok = f"recompute_error:{type(exc).__name__}", False
                     fields = {}
+                    row["scan_complete"] = False
                 row["examined"] += 1
+                file_row["examined"] += 1
                 if ok:
                     row["send_safe"] += 1
+                    file_row["send_safe"] += 1
                     continue
                 row["withheld"] += 1
                 reasons[reason] = reasons.get(reason, 0) + 1
+                file_row["reasons"][reason] = file_row["reasons"].get(reason, 0) + 1
                 # The specific population the calibration left unexplained: a
                 # contact Apollo DID verify that was still withheld.
                 if str(fields.get("Apollo Email Status") or "").strip().lower() == "verified":
-                    if len(row["verified_withheld"]) < 25:
-                        row["verified_withheld"].append({
+                    row["verified_withheld"].append({
                             "artifact": path.relative_to(enr.resolve()).as_posix(),
                             "job_index": job_index,
                             "reason": reason,
@@ -861,16 +889,31 @@ def send_safe_forensics(root: Path, run_ids, *, limit: int = 200) -> dict:
                                 str(fields.get("Validation Fingerprint") or "").strip()),
                             "company_facts": _retained_company_hold_facts(job),
                             "checks_after_first_failure": "not_evaluated",
-                        })
-            if row["examined"] >= limit:
-                break
+                    })
         row["reasons"] = dict(sorted(reasons.items(), key=lambda kv: (-kv[1], kv[0])))
         if not row["examined"]:
+            row["scan_complete"] = False
             row["unavailable"].append(
                 "no jobs_enriched* rows -- the per-lead facts are not retained for "
                 "this run, so its withholding cannot be explained from evidence")
         out["runs"].append(row)
     return out
+
+
+def print_send_safe_forensics(result: dict) -> None:
+    """One self-contained JSON log line per record, never interleaved pretty JSON.
+
+    Company evidence is already allowlisted by _retained_company_hold_facts. No
+    contact emails, raw lead keys or fingerprints are emitted here.
+    """
+    basis = {k: v for k, v in result.items() if k != "runs"}
+    for run in result.get("runs", []):
+        summary = {k: v for k, v in run.items() if k not in {"verified_withheld", "files"}}
+        print(json.dumps({"event": "send_safe_forensics_summary", **basis, **summary}, default=str), flush=True)
+        for file in run.get("files", []):
+            print(json.dumps({"event": "send_safe_forensics_file", "run_id": run["run_id"], **file}, default=str), flush=True)
+        for entry in run.get("verified_withheld", []):
+            print(json.dumps({"event": "send_safe_forensics_contact", "run_id": run["run_id"], **entry}, default=str), flush=True)
 
 
 def outcome_forensics(root: Path, run_ids) -> dict:
@@ -1192,6 +1235,8 @@ def provenance_probe(root: Path) -> dict:
     Read-only, and small: funnel counters and a skip breakdown are a few dozen
     integers per run. The heavy `postings.json` is never opened here.
     """
+    from orchestrator.delivery_evidence import delivery_evidence
+
     rows = []
     artifacts = root / "run_artifacts"
     if not artifacts.is_dir():
@@ -1229,6 +1274,7 @@ def provenance_probe(root: Path) -> dict:
             "delivery_entered": (delivery or {}).get("entered"),
             "delivery_reviewable_submitted": (delivery or {}).get("reviewable_submitted"),
             "delivery_created": (delivery or {}).get("created"),
+            "original_delivery": delivery_evidence(delivery or {}),
             "delivery_failed": (delivery or {}).get("failed"),
             "delivery_already_delivered": (delivery or {}).get("skipped_already_delivered"),
             "delivery_person_employer_duplicate": (delivery or {}).get("person_employer_duplicate"),
@@ -1506,7 +1552,7 @@ def main(argv=None) -> int:
         print(json.dumps(preserve_run_artifacts(root, ids), indent=2, default=str))
 
         _say("4c0e. SEND-SAFE FORENSICS (why a lead was withheld, per lead, offline)")
-        print(json.dumps(send_safe_forensics(root, ids), indent=2, default=str))
+        print_send_safe_forensics(send_safe_forensics(root, ids))
 
         _say("4c0d. OUTCOME FORENSICS (decompose only what the artifacts support)")
         print(json.dumps(outcome_forensics(root, ids), indent=2, default=str))
