@@ -911,6 +911,64 @@ identity defect above was ours.
 3. Whether the identity fix actually raises distinct-employer yield is **unmeasured**
    in production; it is demonstrated only on the retained artifact.
 
+### A defect the cumulative patch missed, found by checking my own number
+
+After deploying the full-flow release I asked whether the capacity figure I had just
+reported used the corrected identity path. **It did not.**
+
+The release stopped the ENRICHMENT side deriving employer identity from a recognized
+ATS host. It left `_company_identity_keys_from_fields` -- the keyer Airtable
+SUPPRESSION decides on -- unchanged, so the collapse survived where it costs leads:
+
+    Dayton T. Brown, Inc.  ->  {domain:applicantpro.com, name:dayton t brown}
+    OzarksGo               ->  {domain:applicantpro.com, name:ozarksgo}
+    shared key             ->  domain:applicantpro.com
+
+`AIRTABLE_SUPPRESS_EXISTING_COMPANY_FUNCTION` allows one active row per company x
+function, so every employer after the first on that platform was withheld as a
+duplicate of a company it has nothing to do with. Fixed in PR #112, deployed
+`b4d1796`. It SHARPENS suppression: `name:` still carries identity, same domain still
+matches, same company x function still matches, different functions stay distinct --
+all pinned, because a fix that quietly stopped suppressing real duplicates would cost
+more than the defect.
+
+### MEASURED on production data, not asserted
+
+Same custody corpus, same maintenance step, before and after the fix:
+
+    keyer          companies   company x function opportunities
+    collapsing         2,808                              2,998
+    corrected          2,832                              3,006
+    recovered            +24                                 +8
+
+**Small on THIS corpus, and that is the honest result.** Custody is dominated by
+LinkedIn-sourced postings whose `company_domain` is usually a real employer domain.
+The impact scales with how much inventory arrives through shared platforms: on the
+calibration's ATS-sourced rows the same defect showed 13 distinct employers collapsed
+into 2 domains. It would matter most for the 145 direct ATS boards, which are exactly
+the source that is not yet active.
+
+So: the defect is real, reproduced, fixed and measured -- and its blast radius on the
+inventory we hold today is **+0.27% opportunities**, not a throughput unlock. Recorded
+that way rather than as a win.
+
+The previously reported 2,998 was computed through the collapsing keyer and was a
+floor; 3,006 is the current measurement on the same corpus.
+
+### Everything else re-verified on `b4d1796`
+
+    package_integrity    checked=28 mismatch=0 absent=0 (OK)
+    exists=True  FANTASTIC_JOBS_ENABLED=False
+    new_capture_agrees / recovery_agrees / agrees   all true
+    custody resumable: true      Brett A/B  ACCEPTED: True
+    jobs_captured census=6431 reported=6431 agrees=True
+
+Offline gate after the fix: **3,444 passed / 1 skipped / 1,001 subtests**, integrity
+28/0/0.
+
+Cron verified `0 3 * * *` / `0 0 * * *` after a transient API error interrupted the
+readback mid-pass -- the restore itself had already applied.
+
 ### Final state — 2026-09-06T15:30Z
 
     origin/main   afd92db, deployed to both services (SUCCESS)
