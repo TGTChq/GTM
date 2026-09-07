@@ -1,10 +1,28 @@
 # Operational status of each capability
 
 **Current procedure:** [acceptance of the next execution](RECOVERY_FIRST_ACCEPTANCE.md).
-The user now prefers new acquisition for the next authorized run. This preference
-does not change the recorded pause, grant or billing. Both service deployments were
-rechecked at `c160244`; the effective-value table below is the dated container
-snapshot, not a fresh read of every variable.
+
+> **STALE AS OF 2026-09-07 06:29Z. Read this warning before the table.**
+>
+> A funded production run executed at 06:29:15Z (`20260907T062915Z-f79f4de1`, grant
+> `luis-20260907-newjobs-2045-stage1`, 200 calls fully consumed) with **acquisition
+> enabled and maintenance cleared**. Five further deployments followed it, which is
+> what variable changes produce. The effective-value table below is a container
+> snapshot from **2026-09-07T04:55Z — before that run** — and Railway's OAuth path
+> withholds variable values, so it can no longer be read as current state.
+>
+> Specifically: the rows saying paid acquisition is PAUSED, the Apollo grant is
+> UNFUNDED, and the window slice cursor was "never exercised in production" were all
+> true at 04:55Z and were all falsified by 06:29Z. The run acquired 328 net-new
+> postings and drained 3 of 17 `date_created` slices. See `PROGRESS.md` for what it
+> measured. **What production is set to right now is unknown from here**; re-read it
+> from the next container printout rather than restating this table.
+>
+> Unchanged and independently re-verified 2026-09-07: both services deployed at
+> `43ee7ba`, GTM cron `0 3 * * *`, Approved Sync cron `0 0 * * *`.
+
+Both service deployments were rechecked at `c160244`; the effective-value table below
+is the dated container snapshot, not a fresh read of every variable.
 
 **Rebuilt 2026-09-07 against deployed `7e91cb4`.** The previous version predated the
 throughput release, the full-flow release and the suppression-identity fix, and was
@@ -100,9 +118,15 @@ acquisition is paused; the additional inventory lanes below are inactive or
 unbudgeted. These are separate conditions: acquiring more jobs is not a prerequisite
 to enriching retained work, and retained work may reuse cached provider evidence.
 
-**The cited 50-reservation calibration created 0 Approved rows.** No live execution
-reported here demonstrates the corrected release's output against 1,000/day. This
-does not establish zero Approved rows across the system's entire history.
+**The cited 50-reservation calibration created 0 Approved rows.** This does not
+establish zero Approved rows across the system's entire history.
+
+**Superseded 2026-09-07:** a live execution of the corrected release now exists.
+Run `20260907T062915Z-f79f4de1` created 28 Airtable rows from 199 submitted, found
+56 contacts of which 55 were verified, and stopped on its Apollo authorization after
+184 companies with 1,984 role-qualified postings still in hand. It does **not**
+demonstrate output against 1,000/day, and an Airtable creation is not an Approved
+status -- but "no live execution" is no longer accurate.
 
 ## The gap that was here, and is now closed
 

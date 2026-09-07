@@ -1,5 +1,83 @@
 # TGTC completion — progress record
 
+## First funded production run since the corrections — 2026-09-07, base `43ee7ba`
+
+**E1 and E2 below are answered.** A funded run executed at 06:29:15Z under grant
+`luis-20260907-newjobs-2045-stage1` (200 calls, consumed 200 of 200) with acquisition
+enabled and maintenance cleared. Read from the Railway deployment that carried it
+(`d7f67a8b-7d87-4a00-96c2-44009d3c2181`, live 06:23:23Z -> 06:46:20Z), not inferred.
+
+Run `20260907T062915Z-f79f4de1`, 06:29:15Z -> 06:45:27Z, `state: incomplete`,
+`stop_reason: topup:apollo_circuit_open`.
+
+| what the run did | value |
+|---|---|
+| billed / returned provider rows | 500 / 500 |
+| kept (net-new) postings | 328 |
+| duplicate provider rows inside the buy | 172 |
+| postings resumed from custody | 2,000 |
+| postings reviewed | 2,328 (328 fresh + 2,000 resumed) |
+| role-qualified postings | 1,984 |
+| companies reached before the grant ran out | 184 |
+| contacts found / verified | 56 / 55 |
+| Airtable rows submitted / created | 199 / 28 |
+| withheld before creation | 27 send-safe + 1 person/employer duplicate |
+| still owed enrichment afterwards | 3,524 postings across 4 runs, incl. this run's own 252 |
+
+**The binding constraint on this run was the Apollo authorization, and nothing else.**
+It held 1,984 role-qualified postings and reached 184 companies before the 200-call
+grant was exhausted; the circuit then opened and completed work was preserved. That
+is a statement about this run's stop condition, not a rate, a ceiling or a forecast.
+
+**What the run measured, in its own units:**
+
+```
+FRESH COHORT     postings 328 / opportunities 273 / leads 73   opp->contact 0.411
+RECOVERY COHORT  postings 2000 / opportunities 1663 / leads 153 opp->contact 0.1765
+  cohort overlap 4 lead(s) belong to BOTH cohorts -- do not sum
+```
+
+Both denominators are `opportunities_with_reconciled_outcome`; 200 fresh and 1,510
+recovery opportunities are recorded as having **no reconciled outcome**, because the
+run stopped before reaching them. These are not conversion rates for the system, they
+are rates over the part of each cohort the grant actually paid to reach. They are not
+comparable to each other and must not be extrapolated to a daily figure.
+
+**What this confirms about goal requirements (a), (b) and (f):** acquisition made
+useful progress inside its budget with overlap and duplicates accounted separately
+(500 billed vs 328 kept vs 172 duplicates); paid-for work persisted and resumed
+without repurchase (2,000 adopted, 252 re-preserved); and the two populations were
+kept apart so the fresh acquisition's contribution is measurable on its own.
+
+**Not established, and not claimed:** 1,000 distinct new Approved contacts per run.
+28 rows were created, and an Airtable creation is not an Approved status. The run
+was interrupted. No scaling from 184 companies to any daily number is supported.
+
+### One live defect this run exposed, now corrected
+
+Its own summary printed `fantastic_jobs_ats credits=328 ... airtable/1k=67.1` beside
+`jobs_returned_billed 500`. The per-source ledger imputed one credit per RETAINED id,
+so the 172 rows the adapter discarded before the ledger saw them were invisible and
+yield per credit was overstated by 52%. PR #116 uses the source-returned billing
+total: the same run reads 44.0 creations per 1,000 billed rows. It also fixes a stale
+per-run Approved goal (a budget break skipped the loop header that refreshed it, so a
+run that created 28 rows reported 0), reaches every retained row in the send-safe
+scan instead of stopping at 200, exposes the original Airtable writer receipts
+independently of any recomputation, and resolves five reviewed company display
+identities without relaxing the resolver's general matching rules.
+
+### Current production settings are NOT verified
+
+Five further deployments followed the run (06:46:20Z, 06:54:55Z, 07:03:15Z on GTM),
+which is what a variable change produces. Railway's OAuth path returns variable names
+and withholds values, so **whether acquisition is presently paused, whether
+maintenance is on, and what the Apollo grant now holds are unknown from here.** Do not
+restate the pre-run pause as current fact. Both services are deployed at `43ee7ba`
+and the crons are unchanged: GTM `0 3 * * *`, Approved Sync `0 0 * * *`. The next
+scheduled run is 2026-09-08 03:00Z.
+
+The spent grant `luis-20260907-newjobs-2045-stage1` must never be reset or reused.
+
 ## Follow-up on PR #114 — fresh cohort units, base `0d0e3e8`
 
 Both deployed services were independently verified at `0d0e3e8`. Its new fresh
@@ -1053,9 +1131,10 @@ the rate itself, which is currently **unknown**.
 
 | # | blocked action | the exact missing thing | what it answers |
 |---|---|---|---|
-| **E1** | A funded recovery run | a NEW `APOLLO_RECOVERY_BUDGET_ID` and a positive `APOLLO_RECOVERY_BUDGET_CALLS`. The `calib-2026-09-06-50` grant is spent and is never reused | the opportunity -> contact -> approved rate on a cohort whose denominator is known before the run starts |
-| **E2** | Production resumption | existing authorization; `MAINTENANCE_ONLY=0` then `FANTASTIC_JOBS_ENABLED=1`, in that order | whether the slice cursor, the per-run target and the identity fixes behave live |
-| **E3** | Apollo balance | a read-only billing screen, or one paid probe | the reported ~2,000 credits are UNVERIFIED; no paid probe was made |
+| ~~E1~~ | **ANSWERED 2026-09-07** by grant `luis-20260907-newjobs-2045-stage1` (200 calls, fully consumed) | -- | measured on the part of each cohort it paid to reach: fresh 0.411, recovery 0.1765, both over reconciled outcomes only. 200 fresh + 1,510 recovery opportunities were never reached |
+| ~~E2~~ | **ANSWERED 2026-09-07**: the run was `live_acquisition_and_enrichment`, acquired 328 net-new and drained 3 of 17 `date_created` slices | -- | the slice cursor, custody adoption and the cohort split all behaved live; the per-run target reported a stale count and is fixed in PR #116 |
+| **E1'** | A grant large enough to finish a cohort | a NEW `APOLLO_RECOVERY_BUDGET_ID` sized to the 3,524 postings still owed, not 200 calls | an opportunity -> approved rate over a cohort that is actually completed, which 2026-09-07 could not produce |
+| **E3** | Apollo balance | a read-only billing screen | still UNVERIFIED. 200 calls succeeded on 2026-09-07, so the balance was at least that; no probe was made and no total is established |
 | E4 | 145 ATS boards | `ACQUISITION_EXTRA_LANES=ats` (one authorized variable; no credits) | free inventory, and the corpus where the identity fix should matter most |
 
 ## Resumable checkpoint
@@ -1074,5 +1153,8 @@ the rate itself, which is currently **unknown**.
    a few minutes ahead, **do not push during the window**, capture the deployment that
    is CURRENT at capture time, and always restore `0 3 * * *`.
 
-**Unfinished:** demonstrated production output against the 1,000/day target. Every
-prerequisite upstream of E1/E2 is complete, deployed and verified.
+**Unfinished:** demonstrated production output against the 1,000/day target. The
+2026-09-07 run is the first production evidence of the corrected release, and it
+does not reach that target: 28 Airtable rows created from a 200-call authorization
+that ran out after 184 companies. What remains is a grant sized to complete a
+cohort, not another code correction.
