@@ -1,6 +1,6 @@
 # Operational status of each capability
 
-**Rebuilt 2026-09-07 against deployed `a71159a`.** The previous version predated the
+**Rebuilt 2026-09-07 against deployed `7e91cb4`.** The previous version predated the
 throughput release, the full-flow release and the suppression-identity fix, and was
 therefore describing a system that no longer existed.
 
@@ -27,7 +27,7 @@ present the third as the first:
 
 | fact | value | source |
 |---|---|---|
-| Deployed commit, both services | `a71159a` | Railway deployment API |
+| Deployed commit, both services | `7e91cb4` | Railway deployment API |
 | GTM cron | `0 3 * * *` | Railway API |
 | Approved Sync cron | `0 0 * * *` | Railway API |
 | Paid acquisition | `FANTASTIC_JOBS_ENABLED=False` | container |
@@ -97,10 +97,24 @@ unbudgeted.
 **Measured production output is 0 approved leads.** None of the capabilities above is
 claimed to have produced any.
 
-## The honest gap in this table
+## The gap that was here, and is now closed
 
-`RUN_APPROVED_TARGET_ENABLED`, `APOLLO_CACHE_ENABLED` and several others are marked
-"not readable" rather than given a value. That is a real limitation of the supported
-access path, and the correct response is to read them from a container that prints
-them rather than to assume. The maintenance pass prints only a subset today; extending
-that printout is the concrete next step for closing this gap, and it costs nothing.
+An earlier version of this section said `RUN_APPROVED_TARGET_ENABLED`,
+`APOLLO_CACHE_ENABLED` and several others were "not readable", because the Railway
+OAuth path returns variable names and withholds their values -- and proposed extending
+the container printout as the free next step.
+
+That was done (`7e91cb4`): the maintenance pass now prints the effective value of every
+capability flag, and the table above is sourced from it. Values only, with the
+credential guard on the NAME rather than on a curated list, so a careless addition
+cannot leak a key into a log.
+
+**What remains genuinely unreadable is nothing in this table.** The remaining
+unknowns are not configuration:
+
+* the true Apollo credit balance -- verifying it costs a paid call, and none is
+  authorized;
+* whether any of the corrected paths raises live yield, which needs a funded run.
+
+Both are recorded in `PROGRESS.md` as external blockers with their concrete missing
+action, not as properties of the code.
