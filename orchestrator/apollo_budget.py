@@ -310,16 +310,17 @@ def paid_acquisition_allowed(path: str = "") -> Dict[str, Any]:
     if continuous_mode():
         from orchestrator import apollo_availability
 
-        attempt = apollo_availability.may_attempt()
-        if not attempt["allowed"]:
+        # ACQUISITION NEEDS A RESPONSE, NOT A CLOCK. `may_attempt` says whether a
+        # controlled check at Apollo is due; it is deliberately NOT consulted here,
+        # because an elapsed interval means nothing new has been learned. Only a
+        # served response lifts a refusal for buying.
+        buying = apollo_availability.acquisition_allowed()
+        if not buying["allowed"]:
             return {"allowed": False, "reason": "provider_refusing",
-                    "detail": ("Apollo refused a chargeable call at "
-                               f"{attempt.get('refusing_since')}; the next attempt is "
-                               f"due after {attempt.get('next_attempt_after')}. "
-                               "Buying postings now would be buying work that cannot "
-                               "be enriched."),
-                    "provider": attempt}
-        return {"allowed": True, "reason": "continuous_mode", "provider": attempt,
+                    "detail": buying["detail"],
+                    "check_due": apollo_availability.may_attempt()["allowed"],
+                    "provider": buying}
+        return {"allowed": True, "reason": "continuous_mode", "provider": buying,
                 **summary(path)}
     if not enabled():
         return {"allowed": True, "reason": "budget_not_enabled",

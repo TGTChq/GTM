@@ -262,6 +262,7 @@ def _organization_enrichment_request(
         params=params,
         before_attempt=lambda: _charge_recovery_budget("organization_enrich"),
     )
+    _record_provider_served()
     data = safe_json(response)
     debug_dump(debug_name, data)
     return data
@@ -283,6 +284,21 @@ def _unresolved_organization(
 
 
 
+def _record_provider_served() -> None:
+    """The provider answered a chargeable request. Called ONLY after a response.
+
+    ``request_with_retry`` raises for a non-retryable error status and only returns
+    on a response that passed ``raise_for_status``, so reaching this line is the
+    evidence -- not the reservation before it, and not a timer.
+    """
+    try:
+        from orchestrator import apollo_availability
+
+        apollo_availability.record_served()
+    except Exception:  # noqa: BLE001 - bookkeeping never affects a result
+        pass
+
+
 def _charge_recovery_budget(kind: str) -> None:
     """Draw one chargeable call against the durable recovery budget, if one is set.
 
@@ -299,13 +315,22 @@ def _charge_recovery_budget(kind: str) -> None:
     """
     from orchestrator import apollo_availability, apollo_budget
 
-    # A charge about to be issued means the previous one was not refused. Recording
-    # it here rather than on each response keeps the write off the hot path: the
-    # function is idempotent once the state is already SERVING.
-    try:
-        apollo_availability.record_served()
-    except Exception:  # noqa: BLE001 - bookkeeping never blocks a call
-        pass
+    # THE WAIT APPLIES TO ENRICHMENT, NOT ONLY TO ACQUISITION. A refusing provider
+    # asked again on every company is the retry storm the interval exists to prevent,
+    # and standing acquisition down while enrichment keeps calling would leave the
+    # loudest caller ungoverned.
+    #
+    # This RESERVES the attempt; it does not record success. Recording SERVING here
+    # would mean zero HTTP requests could clear a refusal.
+    if apollo_budget.continuous_mode():
+        attempt = apollo_availability.may_attempt()
+        if not attempt["allowed"]:
+            raise ApolloCreditsExhaustedError(
+                "Apollo refused a chargeable call at "
+                f"{attempt.get('refusing_since')} and the retry interval has not "
+                f"elapsed; the next attempt is due after "
+                f"{attempt.get('next_attempt_after')}. Nothing was requested."
+            )
     if not apollo_budget.enabled():
         return
     try:
@@ -697,6 +722,7 @@ def match_person(person: Dict[str, Any]) -> PersonMatch:
             params=params,
             before_attempt=lambda: _charge_recovery_budget("person_match"),
         )
+        _record_provider_served()
         data = safe_json(response)
         debug_dump(
             "apollo_people_match",
