@@ -368,7 +368,9 @@ class RealEnrichmentStage:
     here weakens a gate.
     """
 
-    def __init__(self, *, target_final_pass: Optional[int] = None, workdir: Optional[str] = None):
+    def __init__(self, *, target_final_pass: Optional[int] = None, workdir: Optional[str] = None,
+                 paid_evidence_dir: Optional[str] = None):
+        self.paid_evidence_dir = paid_evidence_dir
         self.target_final_pass = target_final_pass
         self.workdir = Path(workdir or tempfile.mkdtemp())
         self._run_budgets_initialized = False
@@ -430,7 +432,8 @@ class RealEnrichmentStage:
                 qual_path, target_final_pass_leads=self.target_final_pass,
                 exclude_company_keys=exclude_company_keys,
                 exclude_company_function_keys=exclude_company_function_keys,
-                reset_run_budgets=not self._run_budgets_initialized)
+                reset_run_budgets=not self._run_budgets_initialized,
+                paid_evidence_dir=self.paid_evidence_dir)
             self._run_budgets_initialized = True
 
         leads = self._load_leads(step3.output_path)
@@ -567,6 +570,17 @@ class RealEnrichmentStage:
         )
 
     def _to_report(self, qual, step3, lead_rows) -> EnrichmentReport:
+        precontact_rejected = set()
+        nonpass_path = getattr(qual, "nonpass_path", None)
+        if nonpass_path:
+            from retrieval_measurement.accounting import posting_identity
+            nonpass = json.loads(Path(nonpass_path).read_text(encoding="utf-8"))
+            for row in nonpass.get("jobs") or []:
+                if (row.get("_job_gate_state") == "REJECT"
+                        or row.get("_role_gate_state") == "REJECT"):
+                    strength, key = posting_identity(row)
+                    if key and strength != "none":
+                        precontact_rejected.add(key)
         # Authoritative per-state counts from Step3Result (the census must match).
         authoritative = {
             Disposition.FINAL_PASS: int(step3.final_pass_leads),
@@ -646,6 +660,7 @@ class RealEnrichmentStage:
             funnel["contact_discovery_entered"] = int(entered)
         return EnrichmentReport(
             leads=leads,
+            precontact_rejected_posting_ids=sorted(precontact_rejected),
             stages=[stage],
             loss_census={
                 "hiring_manager_not_found": int(step3.hiring_manager_not_found),

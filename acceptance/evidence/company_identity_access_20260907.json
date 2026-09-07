@@ -1,0 +1,461 @@
+{
+  "checked_at": "2026-09-07",
+  "base_commit": "ecfff2053babe074e0787336192590f885d93c53",
+  "file_read_thread": "2d58af51-a5fe-4e61-9691-08f0558e8105",
+  "reads": [
+    {
+      "tool": "readContainerFileTool",
+      "args": {
+        "length": 100000,
+        "offset": 0,
+        "path": "/app/data/state/orchestrator_v2/maintenance_backups/20260907T003521Z/per_lead/20260906T202534Z-0395cf0a/enrichment/enrichment/jobs_enriched_2026-09-06.json",
+        "serviceId": "3a41d0d7-cd66-4f53-baa6-886266ddbbed"
+      },
+      "isError": false,
+      "size": 1869595,
+      "content_length": 100000
+    },
+    {
+      "tool": "readContainerFileTool",
+      "args": {
+        "length": 100000,
+        "offset": 100000,
+        "path": "/app/data/state/orchestrator_v2/maintenance_backups/20260907T003521Z/per_lead/20260906T202534Z-0395cf0a/enrichment/enrichment/jobs_enriched_2026-09-06.json",
+        "serviceId": "3a41d0d7-cd66-4f53-baa6-886266ddbbed"
+      },
+      "isError": false,
+      "size": 1869595,
+      "content_length": 100000
+    },
+    {
+      "tool": "readContainerFileTool",
+      "args": {
+        "length": 100000,
+        "offset": 200000,
+        "path": "/app/data/state/orchestrator_v2/maintenance_backups/20260907T003521Z/per_lead/20260906T202534Z-0395cf0a/enrichment/enrichment/jobs_enriched_2026-09-06.json",
+        "serviceId": "3a41d0d7-cd66-4f53-baa6-886266ddbbed"
+      },
+      "isError": false,
+      "size": 1869595,
+      "content_length": 100000
+    },
+    {
+      "tool": "readContainerFileTool",
+      "args": {
+        "length": 100000,
+        "offset": 300000,
+        "path": "/app/data/state/orchestrator_v2/maintenance_backups/20260907T003521Z/per_lead/20260906T202534Z-0395cf0a/enrichment/enrichment/jobs_enriched_2026-09-06.json",
+        "serviceId": "3a41d0d7-cd66-4f53-baa6-886266ddbbed"
+      },
+      "isError": false,
+      "size": 1869595,
+      "content_length": 100000
+    },
+    {
+      "tool": "readContainerFileTool",
+      "args": {
+        "length": 100000,
+        "offset": 400000,
+        "path": "/app/data/state/orchestrator_v2/maintenance_backups/20260907T003521Z/per_lead/20260906T202534Z-0395cf0a/enrichment/enrichment/jobs_enriched_2026-09-06.json",
+        "serviceId": "3a41d0d7-cd66-4f53-baa6-886266ddbbed"
+      },
+      "isError": false,
+      "size": 1869595,
+      "content_length": 100000
+    },
+    {
+      "tool": "readContainerFileTool",
+      "args": {
+        "length": 100000,
+        "offset": 500000,
+        "path": "/app/data/state/orchestrator_v2/maintenance_backups/20260907T003521Z/per_lead/20260906T202534Z-0395cf0a/enrichment/enrichment/jobs_enriched_2026-09-06.json",
+        "serviceId": "3a41d0d7-cd66-4f53-baa6-886266ddbbed"
+      },
+      "isError": false,
+      "size": 1869595,
+      "content_length": 100000
+    },
+    {
+      "tool": "readContainerFileTool",
+      "args": {
+        "length": 100000,
+        "offset": 600000,
+        "path": "/app/data/state/orchestrator_v2/maintenance_backups/20260907T003521Z/per_lead/20260906T202534Z-0395cf0a/enrichment/enrichment/jobs_enriched_2026-09-06.json",
+        "serviceId": "3a41d0d7-cd66-4f53-baa6-886266ddbbed"
+      },
+      "isError": false,
+      "size": 1869595,
+      "content_length": 100000
+    },
+    {
+      "tool": "readContainerFileTool",
+      "args": {
+        "length": 100000,
+        "offset": 700000,
+        "path": "/app/data/state/orchestrator_v2/maintenance_backups/20260907T003521Z/per_lead/20260906T202534Z-0395cf0a/enrichment/enrichment/jobs_enriched_2026-09-06.json",
+        "serviceId": "3a41d0d7-cd66-4f53-baa6-886266ddbbed"
+      },
+      "isError": false,
+      "size": 1869595,
+      "content_length": 100000
+    },
+    {
+      "tool": "readContainerFileTool",
+      "args": {
+        "length": 100000,
+        "offset": 800000,
+        "path": "/app/data/state/orchestrator_v2/maintenance_backups/20260907T003521Z/per_lead/20260906T202534Z-0395cf0a/enrichment/enrichment/jobs_enriched_2026-09-06.json",
+        "serviceId": "3a41d0d7-cd66-4f53-baa6-886266ddbbed"
+      },
+      "isError": false,
+      "size": 1869595,
+      "content_length": 100000
+    },
+    {
+      "tool": "readContainerFileTool",
+      "args": {
+        "length": 100000,
+        "offset": 900000,
+        "path": "/app/data/state/orchestrator_v2/maintenance_backups/20260907T003521Z/per_lead/20260906T202534Z-0395cf0a/enrichment/enrichment/jobs_enriched_2026-09-06.json",
+        "serviceId": "3a41d0d7-cd66-4f53-baa6-886266ddbbed"
+      },
+      "isError": false,
+      "size": 1869595,
+      "content_length": 100000
+    },
+    {
+      "tool": "readContainerFileTool",
+      "args": {
+        "length": 100000,
+        "offset": 1000000,
+        "path": "/app/data/state/orchestrator_v2/maintenance_backups/20260907T003521Z/per_lead/20260906T202534Z-0395cf0a/enrichment/enrichment/jobs_enriched_2026-09-06.json",
+        "serviceId": "3a41d0d7-cd66-4f53-baa6-886266ddbbed"
+      },
+      "isError": false,
+      "size": 1869595,
+      "content_length": 100000
+    },
+    {
+      "tool": "readContainerFileTool",
+      "args": {
+        "length": 100000,
+        "offset": 1100000,
+        "path": "/app/data/state/orchestrator_v2/maintenance_backups/20260907T003521Z/per_lead/20260906T202534Z-0395cf0a/enrichment/enrichment/jobs_enriched_2026-09-06.json",
+        "serviceId": "3a41d0d7-cd66-4f53-baa6-886266ddbbed"
+      },
+      "isError": false,
+      "size": 1869595,
+      "content_length": 100000
+    },
+    {
+      "tool": "readContainerFileTool",
+      "args": {
+        "length": 100000,
+        "offset": 1200000,
+        "path": "/app/data/state/orchestrator_v2/maintenance_backups/20260907T003521Z/per_lead/20260906T202534Z-0395cf0a/enrichment/enrichment/jobs_enriched_2026-09-06.json",
+        "serviceId": "3a41d0d7-cd66-4f53-baa6-886266ddbbed"
+      },
+      "isError": false,
+      "size": 1869595,
+      "content_length": 100000
+    },
+    {
+      "tool": "readContainerFileTool",
+      "args": {
+        "length": 100000,
+        "offset": 1300000,
+        "path": "/app/data/state/orchestrator_v2/maintenance_backups/20260907T003521Z/per_lead/20260906T202534Z-0395cf0a/enrichment/enrichment/jobs_enriched_2026-09-06.json",
+        "serviceId": "3a41d0d7-cd66-4f53-baa6-886266ddbbed"
+      },
+      "isError": false,
+      "size": 1869595,
+      "content_length": 100000
+    },
+    {
+      "tool": "readContainerFileTool",
+      "args": {
+        "length": 100000,
+        "offset": 1400000,
+        "path": "/app/data/state/orchestrator_v2/maintenance_backups/20260907T003521Z/per_lead/20260906T202534Z-0395cf0a/enrichment/enrichment/jobs_enriched_2026-09-06.json",
+        "serviceId": "3a41d0d7-cd66-4f53-baa6-886266ddbbed"
+      },
+      "isError": false,
+      "size": 1869595,
+      "content_length": 100000
+    },
+    {
+      "tool": "readContainerFileTool",
+      "args": {
+        "length": 100000,
+        "offset": 1500000,
+        "path": "/app/data/state/orchestrator_v2/maintenance_backups/20260907T003521Z/per_lead/20260906T202534Z-0395cf0a/enrichment/enrichment/jobs_enriched_2026-09-06.json",
+        "serviceId": "3a41d0d7-cd66-4f53-baa6-886266ddbbed"
+      },
+      "isError": false,
+      "size": 1869595,
+      "content_length": 100000
+    },
+    {
+      "tool": "readContainerFileTool",
+      "args": {
+        "length": 100000,
+        "offset": 1600000,
+        "path": "/app/data/state/orchestrator_v2/maintenance_backups/20260907T003521Z/per_lead/20260906T202534Z-0395cf0a/enrichment/enrichment/jobs_enriched_2026-09-06.json",
+        "serviceId": "3a41d0d7-cd66-4f53-baa6-886266ddbbed"
+      },
+      "isError": false,
+      "size": 1869595,
+      "content_length": 100000
+    },
+    {
+      "tool": "readContainerFileTool",
+      "args": {
+        "length": 100000,
+        "offset": 1700000,
+        "path": "/app/data/state/orchestrator_v2/maintenance_backups/20260907T003521Z/per_lead/20260906T202534Z-0395cf0a/enrichment/enrichment/jobs_enriched_2026-09-06.json",
+        "serviceId": "3a41d0d7-cd66-4f53-baa6-886266ddbbed"
+      },
+      "isError": false,
+      "size": 1869595,
+      "content_length": 100000
+    },
+    {
+      "tool": "readContainerFileTool",
+      "args": {
+        "length": 100000,
+        "offset": 1800000,
+        "path": "/app/data/state/orchestrator_v2/maintenance_backups/20260907T003521Z/per_lead/20260906T202534Z-0395cf0a/enrichment/enrichment/jobs_enriched_2026-09-06.json",
+        "serviceId": "3a41d0d7-cd66-4f53-baa6-886266ddbbed"
+      },
+      "isError": false,
+      "size": 1869595,
+      "content_length": 69595
+    }
+  ],
+  "original_source_sha256": "a3469ca6b1cc6509d4b7bffb59179cae25ffec4330e5a11e53326a1e73e2aa28",
+  "source_bytes": 1869595,
+  "maintenance_evidence": [
+    {
+      "deployment": "7ed3bf76-d40a-44dc-848a-1b45ba616294",
+      "message": "      \"unavailable\": []",
+      "severity": "info",
+      "timestamp": "2026-09-07T01:37:38.797115051Z"
+    },
+    {
+      "deployment": "7ed3bf76-d40a-44dc-848a-1b45ba616294",
+      "message": "        \"icp_reason_families\": \"unavailable\",",
+      "severity": "info",
+      "timestamp": "2026-09-07T01:37:39.036170079Z"
+    },
+    {
+      "deployment": "7ed3bf76-d40a-44dc-848a-1b45ba616294",
+      "message": "ACCEPTED               : True",
+      "severity": "info",
+      "timestamp": "2026-09-07T01:38:03.281893905Z"
+    },
+    {
+      "deployment": "7ed3bf76-d40a-44dc-848a-1b45ba616294",
+      "message": "Period: Sep 04, 2026 00:00 PDT - Sep 06, 2026 18:37 PDT (2.8 days)",
+      "severity": "info",
+      "timestamp": "2026-09-07T01:38:03.281907855Z"
+    },
+    {
+      "deployment": "7ed3bf76-d40a-44dc-848a-1b45ba616294",
+      "message": "Jobs: 6,431 captured / reviewed not measured for the full period",
+      "severity": "info",
+      "timestamp": "2026-09-07T01:38:03.282873137Z"
+    },
+    {
+      "deployment": "7ed3bf76-d40a-44dc-848a-1b45ba616294",
+      "message": "Contacts found: 1,050",
+      "severity": "info",
+      "timestamp": "2026-09-07T01:38:03.282882767Z"
+    },
+    {
+      "deployment": "7ed3bf76-d40a-44dc-848a-1b45ba616294",
+      "message": "sent to Instantly: 769",
+      "severity": "info",
+      "timestamp": "2026-09-07T01:38:03.282886357Z"
+    },
+    {
+      "deployment": "7ed3bf76-d40a-44dc-848a-1b45ba616294",
+      "message": "all_reconcile: True",
+      "severity": "info",
+      "timestamp": "2026-09-07T01:38:03.282944667Z"
+    },
+    {
+      "deployment": "7ed3bf76-d40a-44dc-848a-1b45ba616294",
+      "message": "MAINTENANCE COMPLETE rc=0",
+      "severity": "info",
+      "timestamp": "2026-09-07T01:38:03.285196130Z"
+    },
+    {
+      "deployment": "7ed3bf76-d40a-44dc-848a-1b45ba616294",
+      "message": "weekly report not due today: waiting for friday; it is Monday (2026-09-07 01:38) in UTC; nothing written",
+      "severity": "info",
+      "timestamp": "2026-09-07T01:38:03.575239995Z"
+    },
+    {
+      "deployment": "0d36f95d-9d68-406a-abfa-d9bb297be155",
+      "message": "MAINTENANCE_ONLY: delegating to run_maintenance; no run directory, lane runner, engine or delivery manager is created.",
+      "severity": "info",
+      "timestamp": "2026-09-07T01:44:36.888475008Z"
+    },
+    {
+      "deployment": "0d36f95d-9d68-406a-abfa-d9bb297be155",
+      "message": "  \"identities_distinct\": 226,",
+      "severity": "info",
+      "timestamp": "2026-09-07T01:44:36.932907875Z"
+    },
+    {
+      "deployment": "0d36f95d-9d68-406a-abfa-d9bb297be155",
+      "message": "  \"unavailable\": [],",
+      "severity": "info",
+      "timestamp": "2026-09-07T01:44:36.932912385Z"
+    },
+    {
+      "deployment": "0d36f95d-9d68-406a-abfa-d9bb297be155",
+      "message": "  \"net_new_jobs_captured\": 226,",
+      "severity": "info",
+      "timestamp": "2026-09-07T01:44:36.932917344Z"
+    },
+    {
+      "deployment": "0d36f95d-9d68-406a-abfa-d9bb297be155",
+      "message": "  \"recovery_agrees\": true,",
+      "severity": "info",
+      "timestamp": "2026-09-07T01:44:36.932919934Z"
+    },
+    {
+      "deployment": "0d36f95d-9d68-406a-abfa-d9bb297be155",
+      "message": "  \"opportunities_retained\": 226,",
+      "severity": "info",
+      "timestamp": "2026-09-07T01:44:36.932921114Z"
+    },
+    {
+      "deployment": "0d36f95d-9d68-406a-abfa-d9bb297be155",
+      "message": "    \"pending_postings\": 5595,",
+      "severity": "info",
+      "timestamp": "2026-09-07T01:44:37.626584040Z"
+    },
+    {
+      "deployment": "0d36f95d-9d68-406a-abfa-d9bb297be155",
+      "message": "    \"pending_runs\": 3,",
+      "severity": "info",
+      "timestamp": "2026-09-07T01:44:37.626587790Z"
+    },
+    {
+      "deployment": "0d36f95d-9d68-406a-abfa-d9bb297be155",
+      "message": "    \"pending_postings\": 5595,",
+      "severity": "info",
+      "timestamp": "2026-09-07T01:44:37.627631053Z"
+    },
+    {
+      "deployment": "0d36f95d-9d68-406a-abfa-d9bb297be155",
+      "message": "    \"pending_runs\": 3,",
+      "severity": "info",
+      "timestamp": "2026-09-07T01:44:37.627634683Z"
+    },
+    {
+      "deployment": "0d36f95d-9d68-406a-abfa-d9bb297be155",
+      "message": "      \"unavailable\": \"\"",
+      "severity": "info",
+      "timestamp": "2026-09-07T01:45:48.745937758Z"
+    },
+    {
+      "deployment": "0d36f95d-9d68-406a-abfa-d9bb297be155",
+      "message": "      \"unavailable\": []",
+      "severity": "info",
+      "timestamp": "2026-09-07T01:45:48.773376438Z"
+    },
+    {
+      "deployment": "0d36f95d-9d68-406a-abfa-d9bb297be155",
+      "message": "        \"icp_reason_families\": \"unavailable\",",
+      "severity": "info",
+      "timestamp": "2026-09-07T01:45:48.887370808Z"
+    },
+    {
+      "deployment": "0d36f95d-9d68-406a-abfa-d9bb297be155",
+      "message": "ACCEPTED               : True",
+      "severity": "info",
+      "timestamp": "2026-09-07T01:46:13.916650841Z"
+    },
+    {
+      "deployment": "0d36f95d-9d68-406a-abfa-d9bb297be155",
+      "message": "Period: Sep 04, 2026 00:00 PDT - Sep 06, 2026 18:46 PDT (2.8 days)",
+      "severity": "info",
+      "timestamp": "2026-09-07T01:46:13.916668921Z"
+    },
+    {
+      "deployment": "0d36f95d-9d68-406a-abfa-d9bb297be155",
+      "message": "Jobs: 6,431 captured / reviewed not measured for the full period",
+      "severity": "info",
+      "timestamp": "2026-09-07T01:46:13.919100954Z"
+    },
+    {
+      "deployment": "0d36f95d-9d68-406a-abfa-d9bb297be155",
+      "message": "Contacts found: 1,050",
+      "severity": "info",
+      "timestamp": "2026-09-07T01:46:13.919109164Z"
+    },
+    {
+      "deployment": "0d36f95d-9d68-406a-abfa-d9bb297be155",
+      "message": "sent to Instantly: 769",
+      "severity": "info",
+      "timestamp": "2026-09-07T01:46:13.919113304Z"
+    },
+    {
+      "deployment": "0d36f95d-9d68-406a-abfa-d9bb297be155",
+      "message": "all_reconcile: True",
+      "severity": "info",
+      "timestamp": "2026-09-07T01:46:13.919175983Z"
+    },
+    {
+      "deployment": "0d36f95d-9d68-406a-abfa-d9bb297be155",
+      "message": "MAINTENANCE COMPLETE rc=0",
+      "severity": "info",
+      "timestamp": "2026-09-07T01:46:13.927130285Z"
+    },
+    {
+      "deployment": "0d36f95d-9d68-406a-abfa-d9bb297be155",
+      "message": "weekly report not due today: waiting for friday; it is Monday (2026-09-07 01:46) in UTC; nothing written",
+      "severity": "info",
+      "timestamp": "2026-09-07T01:46:14.209610538Z"
+    }
+  ],
+  "final_deployment": {
+    "deployments": [
+      {
+        "createdAt": "2026-09-07T01:46:33.827Z",
+        "environmentId": "bae427bd-64a6-4f4e-8f56-fbd406985434",
+        "id": "adc36f86-0212-4ea6-aaa1-4bb0b0ec69be",
+        "meta": {
+          "branch": "main",
+          "commitHash": "ecfff2053babe074e0787336192590f885d93c53",
+          "commitMessage": "Merge pull request #110 from TGTChq/fix/recovery-approved-throughput\n\ndocs: the withheld contacts answered, and the release published",
+          "reason": "redeploy"
+        },
+        "serviceId": "3a41d0d7-cd66-4f53-baa6-886266ddbbed",
+        "snapshotId": "910b21cc-428a-4db5-9bda-2a1a3d6afe8b",
+        "status": "SUCCESS",
+        "updatedAt": "2026-09-07T01:46:47.132Z",
+        "url": null
+      }
+    ]
+  },
+  "final_config": {
+    "deploy": {
+      "cronSchedule": "0 3 * * *",
+      "ipv6EgressEnabled": false,
+      "multiRegionConfig": {
+        "sfo": {
+          "numReplicas": 1
+        }
+      },
+      "restartPolicyType": "NEVER",
+      "runtime": "V2",
+      "startCommand": "sh -c 'python -u run_orchestrator.py --mode live_acquisition_and_enrichment --lanes fantastic --target 300 --airtable-write --global-budget 1500 --artifact-root /app/data/state/orchestrator_v2; rc=$?; python -u run_weekly_report.py --artifact-root /app/data/state/orchestrator_v2 --if-due friday --once-per-window --anchored --require-completed-run --instantly --slack --max-seconds 480 || true; exit $rc'",
+      "useLegacyStacker": false
+    }
+  },
+  "github_publication": "create_tree: API403 Resource not accessible by integration; no remote patch published"
+}

@@ -9,7 +9,9 @@ import os
 import re
 import time
 from collections import defaultdict
-from dataclasses import dataclass, field
+from contextlib import contextmanager
+from contextvars import ContextVar
+from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -57,6 +59,51 @@ from role_mapping import (
 from review_policy import is_airtable_reviewable
 
 logger = logging.getLogger(__name__)
+_ACTIVE_COMPANY_CUSTODY = ContextVar("hiring_manager_company_custody", default=None)
+
+
+class EnrichmentCustodyError(RuntimeError):
+    """Paid evidence could not be saved; continuing would risk repurchasing it."""
+
+
+def _custodied_result(kind, key, result_type, acquire=None):
+    custody = _ACTIVE_COMPANY_CUSTODY.get()
+    identity = hashlib.sha256(json.dumps(key, sort_keys=True, default=str).encode()).hexdigest()
+    durable = custody.paid_replies if custody is not None else None
+    try:
+        if durable is not None:
+            ttl = (config.APOLLO_CACHE_ORG_TTL_DAYS if kind == "org"
+                   else config.APOLLO_CACHE_PERSON_MATCH_TTL_DAYS)
+            saved = durable.get(kind, identity, ttl,
+                                max(1, config.REROUTE_TEMPORARY_TTL_HOURS) / 24)
+        else:
+            saved = (custody.data.get("providers", {}).get(kind, {}).get(identity)
+                     if custody is not None else None)
+        if saved is not None:
+            return result_type(**saved)
+    except (OSError, ValueError, TypeError) as exc:
+        raise EnrichmentCustodyError("Paid reply custody is unreadable; preserve evidence") from exc
+    if acquire is None:
+        return None
+    result = acquire()
+    if custody is not None:
+        try:
+            if durable is not None:
+                durable.put(kind, identity, asdict(result))
+            else:
+                custody.data.setdefault("providers", {}).setdefault(kind, {})[identity] = asdict(result)
+                custody.save()
+        except (OSError, TypeError, ValueError) as exc:
+            raise EnrichmentCustodyError("Paid reply could not be saved; stopping") from exc
+    return result
+
+
+def _checkpoint_reusable(leads):
+    # A returned function is not necessarily finished. Budget refusals, missing
+    # contacts and company-review holds must be re-evaluated on resume; only their
+    # paid provider evidence is reusable. Terminal business decisions remain final.
+    return all(str(row.get("_final_state") or "") in {"FINAL_PASS", "REJECT"}
+               for row in leads)
 
 
 @dataclass
@@ -270,11 +317,17 @@ def rank_candidates(people: List[Dict], target_titles: List[str]) -> List[Dict]:
             str(person.get("id") or person.get("person_id") or ""),
         ),
     )
-    return [
-        person
-        for person in ranked
-        if _title_priority(person.get("title") or "", target_titles)[1] > 0
-    ]
+    unique, seen = [], set()
+    for person in ranked:
+        if _title_priority(person.get("title") or "", target_titles)[1] <= 0:
+            continue
+        identity = _candidate_identity_key(person)
+        if identity and identity in seen:
+            continue
+        if identity:
+            seen.add(identity)
+        unique.append(person)
+    return unique
 
 
 def pick_best_candidate(people: List[Dict], target_titles: List[str]) -> Optional[Dict]:
@@ -309,9 +362,8 @@ def _recover_org_via_domain_corroboration(org, input_domain, company_name, prima
         stats["hm_domain_recovery_rejected"] += 1
         stats[f"hm_domain_recovery_reject__{decision.reason}"] += 1
         return org, decision
-    recovered = apollo.enrich_organization(
-        domain=decision.recovered_domain, name=company_name,
-        website=f"https://{decision.recovered_domain}")
+    recovered = _cached_enrich_organization(
+        decision.recovered_domain, company_name, f"https://{decision.recovered_domain}")
     if not recovered.found:
         stats["hm_domain_recovery_reenrich_untrusted"] += 1
         return org, decision
@@ -707,8 +759,11 @@ def _process_company_legacy(company_jobs: List[Dict]) -> Tuple[List[Dict], Dict]
             # bounds the RUN. A bucket recovered by the org-id fallback found zero
             # people before that fallback existed, so its paid matches are additional
             # spend and draw on a separate, default-zero budget.
-            _from_fallback = any(bool(j.get("_apollo_org_id_recovered")) for j in bucket_jobs)
-            person = _cached_verified_person(candidate, search_domain)
+            _from_fallback = False  # legacy path performs a primary-domain search
+            person = _custodied_result("match", [_candidate_identity_key(candidate), search_domain],
+                                       apollo.PersonMatch)
+            if person is None:
+                person = _cached_verified_person(candidate, search_domain)
             if person is None and not _paid_match_allowed(_from_fallback):
                 # DEFERRED, not discarded. The bucket is left unprocessed and counted
                 # so a later run with budget can pick it up; marking it processed
@@ -720,7 +775,8 @@ def _process_company_legacy(company_jobs: List[Dict]) -> Tuple[List[Dict], Dict]
             if person is None:
                 stats["person_match_attempts"] += 1
                 _record_paid_match(_from_fallback)
-                person = apollo.match_person(candidate)
+                person = _custodied_result("match", [_candidate_identity_key(candidate), search_domain],
+                    apollo.PersonMatch, lambda: apollo.match_person(candidate))
                 _remember_verified_person(candidate, search_domain, person)
                 time.sleep(config.APOLLO_RATE_LIMIT_DELAY)
             else:
@@ -1046,7 +1102,24 @@ def _titles_fingerprint(titles) -> str:
     return hashlib.sha256("|".join(sorted(str(t).lower() for t in (titles or []))).encode("utf-8")).hexdigest()[:12]
 
 
+def _people_search_cache_key(domain, bucket, titles, org) -> str:
+    """A negative proves absence only for the selectors actually available then."""
+    if not domain:
+        return ""
+    org_id = ""
+    if (config.APOLLO_ORG_ID_ZERO_PEOPLE_FALLBACK_ENABLED
+            and getattr(org, "found", False) and _org_is_trusted_for_domain(org, domain)):
+        org_id = str(getattr(org, "organization_id", "") or "")
+    return (f"{domain}|{bucket}|{_titles_fingerprint(titles)}"
+            f"|org:{org_id}|pages:{config.APOLLO_PEOPLE_SEARCH_MAX_PAGES}")
+
+
 def _cached_enrich_organization(input_domain: str, company_name: str, website: str):
+    return _custodied_result("org", [input_domain, company_name, website], apollo.OrgEnrichment,
+        lambda: _cached_enrich_organization_impl(input_domain, company_name, website))
+
+
+def _cached_enrich_organization_impl(input_domain: str, company_name: str, website: str):
     """Org enrichment with a POSITIVE-ONLY cross-run cache (Gate C): a miss always
     re-enriches (so org.raw exists for domain-corroboration recovery); only a
     trusted ``found`` org that passed Apollo's domain-consistency guard is cached.
@@ -1215,7 +1288,21 @@ def _process_company_strict(company_jobs: List[Dict]) -> Tuple[List[Dict], Dict]
     company_had_title_match = False
     company_had_untried_candidate = False
     company_had_person_match_attempt = False
+    custody = _ACTIVE_COMPANY_CUSTODY.get()
     for bucket, bucket_jobs in jobs_by_bucket.items():
+        bucket_stats_before = dict(stats)
+        saved = custody.data.get("buckets", {}).get(bucket) if custody is not None else None
+        if saved and _checkpoint_reusable([saved["lead"]]):
+            leads.append(saved["lead"])
+            for key, value in saved.get("stats", {}).items():
+                stats[key] += value
+            diag = saved["lead"].get("_row2_diagnostic") or {}
+            company_had_people_search_call |= bool(diag.get("people_search_call"))
+            company_had_person_returned |= bool(diag.get("people_returned"))
+            company_had_title_match |= bool(diag.get("title_matched_candidates"))
+            company_had_untried_candidate |= bool(diag.get("untried_candidates"))
+            company_had_person_match_attempt |= bool(diag.get("person_match_attempts"))
+            continue
         primary = _primary_job(bucket_jobs)
         job_decision = _strict_gate_from_job(primary, "_job_gate_decision", "job")
         role_decision = _strict_gate_from_job(primary, "_role_gate_decision", "role")
@@ -1281,6 +1368,8 @@ def _process_company_strict(company_jobs: List[Dict]) -> Tuple[List[Dict], Dict]
             stats[f"final_{str(final.get('_final_state')).lower()}"] += 1
             if not search_domain:
                 stats[f"domain_unresolved__{domain_res.unresolved_reason or 'unknown'}"] += 1
+            if custody is not None:
+                custody.record_bucket(bucket, final, stats, bucket_stats_before)
             continue
 
         target_titles = get_target_titles_for_jobs(bucket_jobs, org.employee_count)
@@ -1304,7 +1393,7 @@ def _process_company_strict(company_jobs: List[Dict]) -> Tuple[List[Dict], Dict]
         # The strict path is the one production takes; the legacy path carries the
         # same increment so the counter never depends on which body ran.
         stats["contact_discovery_entered"] += 1
-        company_had_people_search_call = True
+        bucket_search_called = False
         apollo_error = False
         # NEGATIVE people-search cache, VARIANT-SCOPED (Gate C): keyed by domain +
         # bucket + the exact title-set fingerprint, so the broadened second pass (a
@@ -1312,14 +1401,21 @@ def _process_company_strict(company_jobs: List[Dict]) -> Tuple[List[Dict], Dict]
         # Only a confirmed empty result is cached (never an error). Free search is
         # skipped on a hit; the zero-people outcome is replayed.
         _cache = _apollo_cache()
-        _neg_key = f"{safe_search_domain}|{bucket}|{_titles_fingerprint(target_titles)}" if safe_search_domain else ""
+        _org_id_recovered = False
+        search_complete = True
+        _neg_key = _people_search_cache_key(safe_search_domain, bucket, target_titles, org)
         if _cache.enabled and _neg_key and _cache.get("zero_title", _neg_key) is not None:
             people = []
             stats["people_search_negative_cache_hit"] += 1
         else:
             stats["row2_people_search_calls_total"] += 1
+            bucket_search_called = company_had_people_search_call = True
             try:
                 people = apollo.search_people_at_company(search_domain, target_titles)
+                search_complete = getattr(people, "complete", True)
+                if not search_complete:
+                    stats["people_search_incomplete"] += 1
+                    apollo_error = not bool(people)
             except apollo.GLOBAL_FATAL_ERRORS:
                 # A whole-account Apollo outage must propagate to open the run-level
                 # circuit, not be masked as an empty-people result for this one bucket.
@@ -1349,10 +1445,15 @@ def _process_company_strict(company_jobs: List[Dict]) -> Tuple[List[Dict], Dict]
                 try:
                     recovered = apollo.search_people_by_org_id(
                         org.organization_id, target_titles, expected_domain=search_domain)
+                    search_complete = getattr(recovered, "complete", True)
+                    if not search_complete:
+                        stats["people_search_incomplete"] += 1
+                        apollo_error = not bool(recovered)
                 except apollo.GLOBAL_FATAL_ERRORS:
                     raise
                 except Exception as exc:  # noqa: BLE001 - never worsens the miss
                     recovered = []
+                    apollo_error = True  # incomplete search is not a cacheable absence
                     logger.warning("Apollo org-id fallback failed for %s|%s: %s",
                                    search_domain, bucket, exc)
                 time.sleep(config.APOLLO_RATE_LIMIT_DELAY)
@@ -1360,9 +1461,10 @@ def _process_company_strict(company_jobs: List[Dict]) -> Tuple[List[Dict], Dict]
                     stats["apollo_people_org_id_people_found"] += 1
                     stats["apollo_people_org_id_people_total"] += len(recovered)
                     people = recovered
+                    _org_id_recovered = True
                     for _j in bucket_jobs:
                         _j["_apollo_org_id_recovered"] = True
-            if _cache.enabled and _neg_key and not apollo_error:
+            if _cache.enabled and _neg_key and not apollo_error and search_complete:
                 try:
                     if people:
                         _cache.put("people_pos", _neg_key, {"count": len(people)})
@@ -1398,6 +1500,8 @@ def _process_company_strict(company_jobs: List[Dict]) -> Tuple[List[Dict], Dict]
                 if broadened and broadened != target_titles:
                     stats["hm_second_pass_attempts"] += 1
                     try:
+                        bucket_search_called = company_had_people_search_call = True
+                        stats["row2_people_search_calls_total"] += 1
                         people2 = apollo.search_people_at_company(search_domain, broadened)
                     except apollo.GLOBAL_FATAL_ERRORS:
                         raise
@@ -1410,6 +1514,7 @@ def _process_company_strict(company_jobs: List[Dict]) -> Tuple[List[Dict], Dict]
                             stats["hm_second_pass_recovered"] += 1
                             target_titles = broadened
                             people = people2
+                            _org_id_recovered = False
                             title_ranked_candidates = t2
             stats["row2_title_matched_candidates_total"] += len(title_ranked_candidates)
             if title_ranked_candidates:
@@ -1481,22 +1586,30 @@ def _process_company_strict(company_jobs: List[Dict]) -> Tuple[List[Dict], Dict]
             _rank2 = _index2 + 1
             _more2 = _index2 + 1 < len(_considered2)
             candidate_id = _candidate_identity_key(candidate)
-            if candidate_id:
-                attempted_ids.append(candidate_id)
-            _from_fallback2 = any(bool(j.get("_apollo_org_id_recovered")) for j in bucket_jobs)
-            person = _cached_verified_person(candidate, search_domain)
+            _from_fallback2 = _org_id_recovered
+            person = _custodied_result("match", [_candidate_identity_key(candidate), search_domain], apollo.PersonMatch)
+            if person is None:
+                person = _cached_verified_person(candidate, search_domain)
             if person is None and not _paid_match_allowed(_from_fallback2):
                 _PAID_MATCH_BUDGET["deferred_buckets"] += 1
                 stats["paid_match_budget_deferred"] += 1
+                zero_attempt_reason = "paid_match_budget_deferred"
                 break
+            # A budget refusal is not an attempt and must never poison the next
+            # run's reroute history. Cached candidates still receive current gates.
+            if candidate_id:
+                attempted_ids.append(candidate_id)
             try:
                 if person is None:
                     stats["person_match_attempts"] += 1
                     _record_paid_match(_from_fallback2)
-                    person = apollo.match_person(candidate)
+                    person = _custodied_result("match", [_candidate_identity_key(candidate), search_domain], apollo.PersonMatch,
+                                              lambda: apollo.match_person(candidate))
                     _remember_verified_person(candidate, search_domain, person)
                 else:
                     stats["person_match_cache_hits"] += 1
+            except EnrichmentCustodyError:
+                raise
             except apollo.GLOBAL_FATAL_ERRORS:
                 # A whole-account Apollo outage must propagate to open the
                 # run-level circuit, not be masked as a per-candidate match error.
@@ -1719,9 +1832,7 @@ def _process_company_strict(company_jobs: List[Dict]) -> Tuple[List[Dict], Dict]
             if attempted_ids:
                 # Each candidate's own contact/email failure reason drives its
                 # own TTL (ROOT_CAUSE_TABLE_STRUCTURAL.md row 8 / TECHNICAL_DESIGN.md
-                # D9) -- a candidate never reached (e.g. loop broke early) or
-                # whose specific reason wasn't captured falls back to the
-                # bucket's overall final reason, matching the prior behavior.
+                # D9). Only candidates actually evaluated reach this list.
                 fallback_reason = str(final.get("_final_primary_reason") or "")
                 reroute_registry.record_many(
                     account_bucket_key,
@@ -1736,7 +1847,8 @@ def _process_company_strict(company_jobs: List[Dict]) -> Tuple[List[Dict], Dict]
             "company_key": company_key_for_job(first),
             "domain": search_domain,
             "bucket": bucket,
-            "people_search_call": True,
+            "people_search_call": bucket_search_called,
+            "people_search_complete": search_complete,
             "apollo_search_error": apollo_error,
             "people_returned": None if apollo_error else len(people),
             "title_matched_candidates": None if apollo_error else len(title_ranked_candidates),
@@ -1747,6 +1859,8 @@ def _process_company_strict(company_jobs: List[Dict]) -> Tuple[List[Dict], Dict]
         leads.append(final)
         stats[f"bucket_{bucket}_{final.get('_step3_status')}"] += 1
         stats[f"final_{str(final.get('_final_state')).lower()}"] += 1
+        if custody is not None:
+            custody.record_bucket(bucket, final, stats, bucket_stats_before)
 
     if company_had_people_search_call:
         stats["row2_companies_with_people_search_call"] += 1
@@ -1882,6 +1996,7 @@ class _EnrichmentProgress:
     def __init__(self, path: Path) -> None:
         self.path = path
         self.companies: Dict[str, Dict] = {}
+        self.paid_replies = None
 
     @classmethod
     def load(cls, directory: str) -> "_EnrichmentProgress":
@@ -1911,13 +2026,16 @@ class _EnrichmentProgress:
             return None
         leads = entry.get("leads")
         stats = entry.get("stats")
-        if isinstance(leads, list) and isinstance(stats, dict):
+        if isinstance(leads, list) and isinstance(stats, dict) and _checkpoint_reusable(leads):
             return leads, stats
         return None
 
     def record(self, company_key: str, workload_key: str, leads: List[Dict], stats: Dict) -> None:
         entry = self.companies.setdefault(company_key, {})
         entry.setdefault("workloads", {})[workload_key] = {"leads": leads, "stats": dict(stats)}
+        self.save()
+
+    def save(self) -> None:
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             tmp = self.path.with_suffix(self.path.suffix + ".tmp")
@@ -1930,7 +2048,38 @@ class _EnrichmentProgress:
         except (OSError, TypeError, ValueError) as exc:
             # Do not process another company after paid evidence failed to persist.
             # Leave the previous checkpoint and any staged file for recovery.
-            raise RuntimeError(f"Enrichment custody write failed at {self.path}; stopping") from exc
+            raise EnrichmentCustodyError(f"Enrichment custody write failed at {self.path}; stopping") from exc
+
+    @contextmanager
+    def company_custody(self, company_key: str, workload_key: str):
+        entry = self.companies.setdefault(company_key, {})
+        data = entry.setdefault("partial_workloads", {}).setdefault(workload_key, {})
+        custody = _CompanyCustody(data, self.save, self.paid_replies)
+        token = _ACTIVE_COMPANY_CUSTODY.set(custody)
+        try:
+            yield custody
+        finally:
+            _ACTIVE_COMPANY_CUSTODY.reset(token)
+
+
+class _CompanyCustody:
+    """Exact-workload paid replies and completed functions, including partial companies."""
+
+    def __init__(self, data, save, paid_replies=None):
+        self.data, self.save = data, save
+        self.paid_replies = paid_replies
+
+    def record_bucket(self, bucket, lead, stats, before):
+        self.data.setdefault("buckets", {})[bucket] = {
+            "lead": dict(lead),
+            "stats": {key: value - before.get(key, 0) for key, value in stats.items()
+                      if value != before.get(key, 0)}}
+        self.data["stats_at_last_completed_bucket"] = dict(stats)
+        self.save()
+
+    def partial_outcomes(self):
+        return ([entry["lead"] for entry in self.data.get("buckets", {}).values()],
+                dict(self.data.get("stats_at_last_completed_bucket") or {}))
 
 
 def _enrichment_workload_key(jobs: List[Dict]) -> str:
@@ -2012,6 +2161,7 @@ def run_hiring_manager_identification(
     exclude_company_function_keys: Optional[set[str]] = None,
     output_suffix: Optional[str] = None,
     reset_run_budgets: bool = True,
+    paid_evidence_dir: Optional[str] = None,
 ) -> Step3Result:
     """Enrich prequalified accounts under the applicable daily target.
 
@@ -2147,6 +2297,9 @@ def run_hiring_manager_identification(
     # a whole-account failure (credit/auth/rate-limit) trips it, after which no
     # further Apollo calls are made and completed work is preserved.
     progress = _EnrichmentProgress.load(config.STEP3_OUTPUT_DIR)
+    if paid_evidence_dir is not None:
+        from orchestrator.paid_reply_custody import PaidReplyCustody
+        progress.paid_replies = PaidReplyCustody(paid_evidence_dir)
 
     # Optional soft wall-clock budget (0 = unlimited). A fail-safe for large daily
     # runs: on expiry the loop stops taking NEW companies while every enriched
@@ -2182,7 +2335,10 @@ def run_hiring_manager_identification(
         else:
             logger.info("[%d/%d] Enriching %s", index, total_candidate_companies, company_key)
             try:
-                leads, stats = process_company(company_jobs)
+                with progress.company_custody(company_key, workload_key) as custody:
+                    leads, stats = process_company(company_jobs)
+            except EnrichmentCustodyError:
+                raise
             except apollo.GLOBAL_FATAL_ERRORS as exc:
                 # Apollo is unusable for the WHOLE run. Open the circuit, preserve
                 # every company already completed, and stop cleanly with a
@@ -2198,6 +2354,17 @@ def run_hiring_manager_identification(
                 total_stats["apollo_circuit_open"] = 1
                 total_stats[f"apollo_circuit_reason__{circuit_reason}"] = 1
                 stop_reason = "apollo_circuit_open"
+                partial_leads, partial_stats = custody.partial_outcomes()
+                if partial_leads:
+                    all_leads.extend(partial_leads)
+                    for key, value in partial_stats.items():
+                        total_stats[key] += value
+                    total_stats["partial_company_completed_functions"] += len(partial_leads)
+                    # Do not checkpoint the WHOLE company as complete or mark its
+                    # untouched jobs processed. Only these outcomes exist.
+                    done_buckets = set(custody.data.get("buckets") or {})
+                    processed_jobs.extend(job for job in company_jobs
+                                          if get_bucket_name_for_job(job) in done_buckets)
                 break
             except Exception as exc:  # noqa: BLE001 - one company never aborts the run
                 # Record-level failure for THIS company only: mark UNVERIFIED and
@@ -2208,9 +2375,14 @@ def run_hiring_manager_identification(
                     company_key, exc,
                 )
                 total_stats["apollo_company_record_failures"] += 1
-                leads, stats = _degraded_company_leads(
-                    company_jobs, reason="apollo_record_error"
-                )
+                partial_leads, partial_stats = custody.partial_outcomes()
+                done_buckets = set(custody.data.get("buckets") or {})
+                unfinished = [job for job in company_jobs
+                              if get_bucket_name_for_job(job) not in done_buckets]
+                leads, stats = _degraded_company_leads(unfinished, reason="apollo_record_error")
+                leads = partial_leads + leads
+                for key, value in partial_stats.items():
+                    stats[key] = stats.get(key, 0) + value
             else:
                 progress.record(company_key, workload_key, leads, stats)
         companies_considered += 1

@@ -13,15 +13,45 @@
       "evidence": {
         "source": "reviewed_fantastic_audit_2026-08-17",
         "organization": "SOCRadar",
-        "org_linkedin_name": "SOCRadar® Extended Threat Intelligence",
+        "org_linkedin_name": "SOCRadar\u00ae Extended Threat Intelligence",
         "org_linkedin_slug": "socradar",
         "domain": "socradar.io"
+      },
+      "resolver_version": "company-display/1",
+      "manual_override": true
+    },
+    "linkedin:resourcemanagementconceptsinc": {
+      "display_name": "Resource Management Concepts",
+      "confidence": "high",
+      "identity_safe": true,
+      "identity_keys": [
+        "linkedin:resourcemanagementconceptsinc",
+        "domain:rmcweb.com"
+      ],
+      "evidence": {
+        "source": "reviewed_original_calibration_and_first_party_identity_2026-09-07",
+        "organization": "Resource Management Concepts, Inc.",
+        "org_linkedin_slug": "resource-management-concepts-inc-",
+        "domain": "rmcweb.com",
+        "reviewed_at": "2026-09-07",
+        "sources": [
+          {
+            "url": "https://rmcweb.com/",
+            "supports": "The company identifies itself as Resource Management Concepts (RMC) on this domain."
+          },
+          {
+            "url": "https://www.linkedin.com/company/resource-management-concepts-inc-/",
+            "supports": "The exact LinkedIn company page names Resource Management Concepts, Inc. and links to rmcweb.com."
+          }
+        ],
+        "scope": "Display identity for this exact reviewed LinkedIn and domain pair only; no ICP, contact, email, freshness or approval override."
       },
       "resolver_version": "company-display/1",
       "manual_override": true
     }
   },
   "aliases": {
-    "domain:socradar.io": "linkedin:socradar"
+    "domain:socradar.io": "linkedin:socradar",
+    "domain:rmcweb.com": "linkedin:resourcemanagementconceptsinc"
   }
 }

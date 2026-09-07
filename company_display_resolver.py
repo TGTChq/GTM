@@ -369,10 +369,13 @@ def resolve_company_display(
     if cached and cached.get("display_name"):
         manual = bool(cached.get("manual_override"))
         cached_keys = set(cached.get("identity_keys") or [])
-        identity_safe = bool(cached.get("identity_safe", True)) and not (
-            identity_keys and cached_keys and not (set(identity_keys) & cached_keys)
+        # A matching slug alone must not carry an approval onto a different
+        # domain (or vice versa). Manual review is also scoped to the identities
+        # actually reviewed. New anchors require a fresh resolver decision.
+        identity_safe = bool(cached.get("identity_safe", False)) and bool(identity_keys) and (
+            set(identity_keys) <= cached_keys
         )
-        if manual or identity_safe:
+        if identity_safe and (manual or cached.get("confidence") in {"high", "medium"}):
             confidence = "high" if manual else str(cached.get("confidence") or "medium")
             return CompanyDisplayResult(
                 normalize_display_text(cached["display_name"]), confidence, False,

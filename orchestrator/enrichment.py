@@ -83,6 +83,10 @@ class EnrichmentReport:
     #: still delivered and the remaining companies stay resumable.
     stop_reason: str = ""
     enrichment_incomplete: bool = False
+    # Posting decisions made before contact discovery are not lead outcomes.
+    # Keep explicit rejects separately so they can leave custody without inflating
+    # the hiring-manager lead census or suppressing unresolved/reviewable jobs.
+    precontact_rejected_posting_ids: List[str] = field(default_factory=list)
 
     def dispositions(self) -> List[Disposition]:
         return [lead.disposition for lead in self.leads]
@@ -99,7 +103,7 @@ class EnrichmentReport:
         not completion when Airtable failed, withheld the row, or was disabled.
         Without that argument this remains the enrichment-only disposition census.
         """
-        out: set = set()
+        out: set = set(self.precontact_rejected_posting_ids)
         delivered = None if delivered_lead_keys is None else set(delivered_lead_keys)
         for lead in self.leads:
             if lead.disposition not in TERMINAL_DISPOSITIONS:
@@ -124,6 +128,7 @@ class EnrichmentReport:
             "sample": [l.to_dict() for l in self.leads[:10]],
             "stop_reason": self.stop_reason,
             "enrichment_incomplete": self.enrichment_incomplete,
+            "precontact_rejected_posting_ids": list(self.precontact_rejected_posting_ids),
         }
 
 

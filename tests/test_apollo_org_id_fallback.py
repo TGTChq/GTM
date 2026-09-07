@@ -56,10 +56,11 @@ class OrgIdSearchTests(unittest.TestCase):
         self.assertEqual(apollo_client.search_people_by_org_id("", ["X"]), [])
         self.assertEqual(apollo_client.search_people_by_org_id("org_1", []), [])
 
-    def test_transport_failure_returns_empty_never_raises(self):
+    def test_transport_failure_remains_an_error_for_the_callers_negative_cache(self):
         def boom(*a, **k): raise RuntimeError("network")
         with mock.patch.object(apollo_client, "request_with_retry", boom):
-            self.assertEqual(apollo_client.search_people_by_org_id("org_1", ["X"]), [])
+            with self.assertRaises(RuntimeError):
+                apollo_client.search_people_by_org_id("org_1", ["X"])
 
 
 class TrustGuardTests(unittest.TestCase):
@@ -131,12 +132,11 @@ class NoDuplicatePaidEnrichmentTests(unittest.TestCase):
         self.assertIs(people, recovered)
 
     def test_search_endpoint_is_zero_credit_not_an_enrichment_call(self):
-        src = open("apollo_client.py", encoding="utf-8").read()
-        start = src.index("def search_people_by_org_id")
-        body = src[start:start + 3200]
-        self.assertIn("mixed_people/api_search", body)          # search endpoint
-        for paid in ("people/match", "organizations/enrich", "bulk_people", "reveal_personal_emails"):
-            self.assertNotIn(paid, body)                        # never an enrichment/reveal
+        with mock.patch.object(apollo_client, "request_with_retry") as transport, mock.patch.object(
+                apollo_client, "safe_json", return_value={"people": []}):
+            apollo_client.search_people_by_org_id("org-acme", ["Controller"])
+        transport.assert_called_once()
+        self.assertTrue(transport.call_args.args[1].endswith("/mixed_people/api_search"))
 
 
 class MetricsTests(unittest.TestCase):

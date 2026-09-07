@@ -1,0 +1,326 @@
+{
+  "base_commit": "ecfff2053babe074e0787336192590f885d93c53",
+  "resolver_blob_on_both_branches": "48b86b382688cdce06ab5ddf14d8bfc691c6a249",
+  "branch_comparison": {
+    "ahead_by": 1,
+    "base": "main",
+    "base_commit": {
+      "html_url": "https://github.com/TGTChq/GTM/commit/ecfff2053babe074e0787336192590f885d93c53",
+      "sha": "ecfff2053babe074e0787336192590f885d93c53",
+      "url": "https://api.github.com/repos/TGTChq/GTM/commits/ecfff2053babe074e0787336192590f885d93c53"
+    },
+    "behind_by": 177,
+    "files": [
+      {
+        "additions": 3,
+        "changes": 3,
+        "deletions": 0,
+        "filename": ".gitignore",
+        "previous_filename": null,
+        "status": "modified"
+      },
+      {
+        "additions": 77,
+        "changes": 77,
+        "deletions": 0,
+        "filename": "COMPANY_ANCHOR_CONFLICT_MIGRATION.md",
+        "previous_filename": null,
+        "status": "added"
+      },
+      {
+        "additions": 71,
+        "changes": 72,
+        "deletions": 1,
+        "filename": "company_display_resolver.py",
+        "previous_filename": null,
+        "status": "modified"
+      },
+      {
+        "additions": 231,
+        "changes": 231,
+        "deletions": 0,
+        "filename": "tests/test_company_anchor_conflict.py",
+        "previous_filename": null,
+        "status": "added"
+      }
+    ],
+    "head": "fix/company-anchor-conflict",
+    "merge_base_commit": {
+      "html_url": "https://github.com/TGTChq/GTM/commit/a098ec48a2949d982de05ad9f54fc68d6faa698a",
+      "sha": "a098ec48a2949d982de05ad9f54fc68d6faa698a",
+      "url": "https://api.github.com/repos/TGTChq/GTM/commits/a098ec48a2949d982de05ad9f54fc68d6faa698a"
+    },
+    "repository_full_name": "TGTChq/GTM",
+    "status": "diverged",
+    "too_large": null,
+    "total_commits": 1
+  },
+  "railway": {
+    "environment": {
+      "id": "bae427bd-64a6-4f4e-8f56-fbd406985434",
+      "name": "production",
+      "unmergedChangesCount": null
+    },
+    "project": {
+      "id": "898f2e3a-1c1e-4b00-b9a6-686cf0432282",
+      "name": "tgtc-daily-pipeline",
+      "workspaceName": "My Projects"
+    },
+    "services": [
+      {
+        "cronSchedule": "0 3 * * *",
+        "id": "3a41d0d7-cd66-4f53-baa6-886266ddbbed",
+        "latestDeployment": {
+          "createdAt": "2026-09-07T00:48:50.070Z",
+          "id": "fb32d4a5-7812-4c51-b608-7dfe560ff3fb",
+          "status": "SUCCESS",
+          "url": null
+        },
+        "name": "GTM",
+        "numReplicas": 1
+      },
+      {
+        "cronSchedule": "0 0 * * *",
+        "id": "d6b2e1c1-c931-4803-8555-91a8216124bc",
+        "latestDeployment": {
+          "createdAt": "2026-09-07T00:48:29.404Z",
+          "id": "90bef032-4113-46b4-b56c-6d795a0a6191",
+          "status": "SUCCESS",
+          "url": null
+        },
+        "name": "GTM Approved Sync",
+        "numReplicas": 1
+      }
+    ]
+  },
+  "maintenance_request": {
+    "deploymentId": "ab8305cd-bd79-4b7f-a990-eed604ccd57c",
+    "startDate": "2026-09-07T00:30:00Z",
+    "endDate": "2026-09-07T00:48:00Z",
+    "limit": 500
+  },
+  "returned_entries": 501,
+  "complete_log_claimed": false,
+  "selected_original_entries": [
+    {
+      "attributes": [
+        {
+          "key": "level",
+          "value": "\"info\""
+        }
+      ],
+      "message": "          \"reason\": \"outbound_company_held_for_review\",",
+      "severity": "info",
+      "timestamp": "2026-09-07T00:35:22.334718087Z"
+    },
+    {
+      "attributes": [
+        {
+          "key": "level",
+          "value": "\"info\""
+        }
+      ],
+      "message": "          \"email_validation\": \"PASS\",",
+      "severity": "info",
+      "timestamp": "2026-09-07T00:35:22.334727927Z"
+    },
+    {
+      "attributes": [
+        {
+          "key": "level",
+          "value": "\"info\""
+        }
+      ],
+      "message": "          \"contact_alignment\": \"PASS\",",
+      "severity": "info",
+      "timestamp": "2026-09-07T00:35:22.334732247Z"
+    },
+    {
+      "attributes": [
+        {
+          "key": "level",
+          "value": "\"info\""
+        }
+      ],
+      "message": "          \"validation_version\": \"tgtc-ready-v1.4.7-role-display-2\",",
+      "severity": "info",
+      "timestamp": "2026-09-07T00:35:22.334741767Z"
+    },
+    {
+      "attributes": [
+        {
+          "key": "level",
+          "value": "\"info\""
+        }
+      ],
+      "message": "          \"has_fingerprint\": true",
+      "severity": "info",
+      "timestamp": "2026-09-07T00:35:22.334746447Z"
+    },
+    {
+      "attributes": [
+        {
+          "key": "level",
+          "value": "\"info\""
+        }
+      ],
+      "message": "          \"reason\": \"outbound_company_held_for_review\",",
+      "severity": "info",
+      "timestamp": "2026-09-07T00:35:22.334761647Z"
+    },
+    {
+      "attributes": [
+        {
+          "key": "level",
+          "value": "\"info\""
+        }
+      ],
+      "message": "      \"examined\": 26,",
+      "severity": "info",
+      "timestamp": "2026-09-07T00:35:22.334901657Z"
+    },
+    {
+      "attributes": [
+        {
+          "key": "level",
+          "value": "\"info\""
+        }
+      ],
+      "message": "      \"send_safe\": 0,",
+      "severity": "info",
+      "timestamp": "2026-09-07T00:35:22.334906927Z"
+    },
+    {
+      "attributes": [
+        {
+          "key": "level",
+          "value": "\"info\""
+        }
+      ],
+      "message": "      \"withheld\": 26,",
+      "severity": "info",
+      "timestamp": "2026-09-07T00:35:22.334911526Z"
+    },
+    {
+      "attributes": [
+        {
+          "key": "level",
+          "value": "\"info\""
+        }
+      ],
+      "message": "        \"missing_email\": 24,",
+      "severity": "info",
+      "timestamp": "2026-09-07T00:35:22.334921316Z"
+    },
+    {
+      "attributes": [
+        {
+          "key": "level",
+          "value": "\"info\""
+        }
+      ],
+      "message": "        \"outbound_company_held_for_review\": 2",
+      "severity": "info",
+      "timestamp": "2026-09-07T00:35:22.334926946Z"
+    },
+    {
+      "attributes": [
+        {
+          "key": "level",
+          "value": "\"info\""
+        }
+      ],
+      "message": "      \"verified_withheld\": [",
+      "severity": "info",
+      "timestamp": "2026-09-07T00:35:22.334936976Z"
+    },
+    {
+      "attributes": [
+        {
+          "key": "level",
+          "value": "\"info\""
+        }
+      ],
+      "message": "          \"email_validation\": \"PASS\",",
+      "severity": "info",
+      "timestamp": "2026-09-07T00:35:22.336400596Z"
+    },
+    {
+      "attributes": [
+        {
+          "key": "level",
+          "value": "\"info\""
+        }
+      ],
+      "message": "          \"contact_alignment\": \"PASS\",",
+      "severity": "info",
+      "timestamp": "2026-09-07T00:35:22.336427676Z"
+    },
+    {
+      "attributes": [
+        {
+          "key": "level",
+          "value": "\"info\""
+        }
+      ],
+      "message": "          \"validation_version\": \"tgtc-ready-v1.4.7-role-display-2\",",
+      "severity": "info",
+      "timestamp": "2026-09-07T00:35:22.336449646Z"
+    },
+    {
+      "attributes": [
+        {
+          "key": "level",
+          "value": "\"info\""
+        }
+      ],
+      "message": "          \"has_fingerprint\": true",
+      "severity": "info",
+      "timestamp": "2026-09-07T00:35:22.336458866Z"
+    },
+    {
+      "attributes": [
+        {
+          "key": "level",
+          "value": "\"info\""
+        }
+      ],
+      "message": "        \"send_safe_withheld\": 2",
+      "severity": "info",
+      "timestamp": "2026-09-07T00:35:42.437863466Z"
+    },
+    {
+      "attributes": [
+        {
+          "key": "level",
+          "value": "\"info\""
+        }
+      ],
+      "message": "        \"send_safe_withheld\": 2",
+      "severity": "info",
+      "timestamp": "2026-09-07T00:35:42.438911509Z"
+    },
+    {
+      "attributes": [
+        {
+          "key": "level",
+          "value": "\"info\""
+        }
+      ],
+      "message": "ACCEPTED               : True",
+      "severity": "info",
+      "timestamp": "2026-09-07T00:35:46.875195202Z"
+    },
+    {
+      "attributes": [
+        {
+          "key": "level",
+          "value": "\"info\""
+        }
+      ],
+      "message": "MAINTENANCE COMPLETE rc=0",
+      "severity": "info",
+      "timestamp": "2026-09-07T00:35:46.880758106Z"
+    }
+  ]
+}
