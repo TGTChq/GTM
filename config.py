@@ -2576,3 +2576,20 @@ STEP2_KEPT_FILE = os.getenv(
     "STEP2_KEPT_FILE",
     str(Path(FILTERED_OUTPUT_DIR) / f"jobs_filtered_{datetime.now():%Y-%m-%d}.json"),
 )
+
+# CONTINUOUS APOLLO OPERATION. With this on, paid acquisition is gated on whether the
+# provider is currently serving chargeable calls rather than on a manually issued
+# grant, so recovery after a top-up needs no human step: the run's own first call is
+# the check, a credit refusal is returned before any work and therefore costs
+# nothing, and the refusal is recorded so the next scheduled run retries on an
+# interval instead of inside a loop. The durable ledger still records every call.
+# Default OFF -- enabling the standing authorization is a deliberate act.
+APOLLO_CONTINUOUS_MODE = _env_bool("APOLLO_CONTINUOUS_MODE", False)
+# How long to leave a refusing provider alone before a run may attempt again. The
+# refusal is free, so this is a courtesy and a guard against a fast-cycling caller,
+# never a spend control.
+APOLLO_AVAILABILITY_RETRY_HOURS = float(
+    os.getenv("APOLLO_AVAILABILITY_RETRY_HOURS", "6") or 6)
+APOLLO_AVAILABILITY_STATE_PATH = os.getenv(
+    "APOLLO_AVAILABILITY_STATE_PATH",
+    str(Path(STATE_DIR) / "apollo_availability.json"))

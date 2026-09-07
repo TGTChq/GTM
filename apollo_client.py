@@ -129,6 +129,18 @@ def _raise_credit_error(
                  if k in context]
         if pairs:
             facts = " Apollo reports " + ", ".join(f"{k}={v}" for k, v in pairs) + "."
+    # DURABLE RECORD OF THE REFUSAL. The refusal itself is free -- Apollo answers
+    # before doing any work -- so the run's own call already IS the availability
+    # check. What has to survive the process is WHEN it last refused, so the next
+    # scheduled run retries on an interval instead of every code path that wants a
+    # contact trying again inside the same run.
+    try:
+        from orchestrator import apollo_availability
+
+        apollo_availability.record_refusal(
+            str(getattr(classification, "error_code", "") or ""))
+    except Exception:  # noqa: BLE001 - bookkeeping must never mask the provider error
+        pass
     raise ApolloCreditsExhaustedError(
         "Apollo refused credit-consuming calls: its response reports the team's "
         f"credits are used up (HTTP {getattr(classification, 'status', None)})."
@@ -285,8 +297,15 @@ def _charge_recovery_budget(kind: str) -> None:
     between the two, and an unrecorded paid call is the one error a ceiling cannot
     make.
     """
-    from orchestrator import apollo_budget
+    from orchestrator import apollo_availability, apollo_budget
 
+    # A charge about to be issued means the previous one was not refused. Recording
+    # it here rather than on each response keeps the write off the hot path: the
+    # function is idempotent once the state is already SERVING.
+    try:
+        apollo_availability.record_served()
+    except Exception:  # noqa: BLE001 - bookkeeping never blocks a call
+        pass
     if not apollo_budget.enabled():
         return
     try:
