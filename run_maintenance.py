@@ -640,6 +640,86 @@ def _stream_field_counts(path: Path, fields, chunk: int = 4 << 20) -> dict:
     return {f: dict(c.most_common(20)) for f, c in found.items() if c}
 
 
+def send_safe_forensics(root: Path, run_ids, *, limit: int = 200) -> dict:
+    """WHY a lead was withheld as not send-safe, per lead, from its own stored facts.
+
+    The 2026-09-06 calibration produced two verified contacts and created zero rows:
+    both were `send_safe_withheld`, and delivery recorded only the aggregate, so the
+    reason was never written down. Increasing a budget cannot explain a withholding,
+    and neither can a count.
+
+    `send_safe_facts` is deterministic, offline and fail-closed: it returns the FIRST
+    failing fact. Rebuilding each retained lead's Airtable fields with the production
+    `_job_to_fields` and re-running the gate reproduces exactly the decision delivery
+    made, with the reason it never emitted.
+
+    Reads only. No provider is contacted, nothing is written to Airtable, and no
+    field is repaired -- a rebuilt row is used to ASK the gate, never to change it.
+    """
+    from airtable_client import _job_to_fields, send_safe_facts
+
+    out = {"unit_note": "per-lead send-safe gate reasons, recomputed offline",
+           "runs": []}
+    for run_id in run_ids:
+        enr = root / "run_artifacts" / run_id / "enrichment"
+        row: Dict[str, Any] = {"run_id": run_id, "examined": 0, "send_safe": 0,
+                               "withheld": 0, "reasons": {}, "verified_withheld": [],
+                               "unavailable": []}
+        if not enr.is_dir():
+            row["unavailable"].append("no enrichment directory")
+            out["runs"].append(row)
+            continue
+        reasons: Dict[str, int] = {}
+        # `rglob` ALREADY matches the top level, so unioning it with `glob` visits
+        # every top-level file twice -- the same double-count that reported 2,068
+        # statuses for 1,034 leads. Deduplicated by resolved path.
+        for path in sorted({q.resolve() for q in enr.rglob("jobs_enriched*.json")}):
+            data = _read_json(path)
+            jobs = data.get("jobs") if isinstance(data, dict) else data
+            if not isinstance(jobs, list):
+                continue
+            for job in jobs:
+                if not isinstance(job, dict):
+                    continue
+                if row["examined"] >= limit:
+                    break
+                try:
+                    fields = _job_to_fields(job)
+                    ok, reason = send_safe_facts(fields)
+                except Exception as exc:  # noqa: BLE001 - one bad row never stops it
+                    reason, ok = f"recompute_error:{type(exc).__name__}", False
+                    fields = {}
+                row["examined"] += 1
+                if ok:
+                    row["send_safe"] += 1
+                    continue
+                row["withheld"] += 1
+                reasons[reason] = reasons.get(reason, 0) + 1
+                # The specific population the calibration left unexplained: a
+                # contact Apollo DID verify that was still withheld.
+                if str(fields.get("Apollo Email Status") or "").strip().lower() == "verified":
+                    if len(row["verified_withheld"]) < 25:
+                        row["verified_withheld"].append({
+                            "reason": reason,
+                            "final_decision": fields.get("Final Decision"),
+                            "email_validation": fields.get("Email Validation"),
+                            "contact_alignment": fields.get("Contact Alignment"),
+                            "outbound_hold": bool(fields.get("Outbound Hold")),
+                            "validation_version": fields.get("Validation Version"),
+                            "has_fingerprint": bool(
+                                str(fields.get("Validation Fingerprint") or "").strip()),
+                        })
+            if row["examined"] >= limit:
+                break
+        row["reasons"] = dict(sorted(reasons.items(), key=lambda kv: (-kv[1], kv[0])))
+        if not row["examined"]:
+            row["unavailable"].append(
+                "no jobs_enriched* rows -- the per-lead facts are not retained for "
+                "this run, so its withholding cannot be explained from evidence")
+        out["runs"].append(row)
+    return out
+
+
 def outcome_forensics(root: Path, run_ids) -> dict:
     """Decompose the hiring-manager outcomes from whatever the run actually wrote.
 
@@ -1265,6 +1345,9 @@ def main(argv=None) -> int:
 
         _say("4c0c. EXECUTION RECONCILE (stage-entry evidence, not a payload recount)")
         print(json.dumps(execution_reconcile(root, ids), indent=2, default=str))
+
+        _say("4c0e. SEND-SAFE FORENSICS (why a lead was withheld, per lead, offline)")
+        print(json.dumps(send_safe_forensics(root, ids), indent=2, default=str))
 
         _say("4c0d. OUTCOME FORENSICS (decompose only what the artifacts support)")
         print(json.dumps(outcome_forensics(root, ids), indent=2, default=str))
