@@ -403,11 +403,16 @@ def test_the_identity_key_stays_function_aware():
 
 
 def test_a_second_batch_for_the_same_organization_is_suppressed_by_identity(tmp_path):
-    """Two BATCHES, one organization, different domains -- the duplicate is caught.
+    """Two BATCHES, one organization -- and NOTHING links them but the identity key.
 
-    Batch one writes the row; batch two arrives with the organization's other
-    domain. Under the old key set nothing matched and a second active row was
-    created for one company x function.
+    Batch one writes the row. Batch two is the same LinkedIn organization posting
+    under a different domain AND a different published label, which is what a
+    regional entity or a domain moved mid-rebrand looks like. The domain differs and
+    the name differs, so the old key set matched on neither and created a second
+    active row for one company x function.
+
+    The differing name is the whole point of the fixture: with a shared label the
+    old `name:` key would have caught it anyway and this would prove nothing.
     """
     display = _resolve(tmp_path, name="Kai", slug="kaisecurity", domain="kai.security")
     first = _job_for(display, email="a@kai.security", domain="kai.security")
@@ -418,6 +423,11 @@ def test_a_second_batch_for_the_same_organization_is_suppressed_by_identity(tmp_
         "Website": "https://kai.security", "Role Bucket": "gtm_revenue",
         "Outbound Company Identity": display.identity_key, "Status": "Pending"}}}
     second = _job_for(display, email="b@kai-eu.example", domain="kai-eu.example")
+    second["employer_name"] = second["canonical_company_name"] = "Kai Security Europe"
+    # Neither legacy key can bridge these two rows.
+    assert not (_company_identity_keys_from_fields(existing[first["lead_key"]]["fields"])
+                - {display.identity_key}) & {"domain:kai-eu.example",
+                                             "name:kai security europe"}
     result = _push([second], existing)
     assert result["created"] == 0
     assert second["lead_key"] in result["suppressed_company_lead_keys"]
@@ -467,3 +477,59 @@ def test_an_unclassified_source_is_never_assumed_free():
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
+
+
+# ---------------------------------------------------------------------------
+# 8. What the conflict resolution will and will not accept
+# ---------------------------------------------------------------------------
+
+def test_two_anchors_derived_from_two_DIFFERENT_names_do_not_resolve(tmp_path):
+    """One name must source both identifiers, not one each.
+
+    Each identifier being derivable from SOME published name is not evidence that
+    they name one organization -- that is precisely the shape of a posting whose
+    employer and whose domain owner are different companies. Only a single name
+    that both are built from settles it.
+    """
+    result = _resolve(tmp_path, name="Northwind Logistics Group",
+                      other_name="Southgate Freight Systems",
+                      slug="southgatesystems", domain="northwindgroup.com")
+    assert result.hold is True
+    assert result.evidence["conflict_resolution"]["resolved"] is False
+
+
+def test_one_name_sourcing_both_identifiers_resolves_at_medium(tmp_path):
+    result = _resolve(tmp_path, name="Northwind Logistics Group",
+                      slug="northwindlogisticsgroup", domain="northwindgroup.com")
+    assert result.hold is False
+    assert result.confidence == "medium", "a resolved conflict is never promoted to high"
+    resolution = result.evidence["conflict_resolution"]
+    assert resolution["basis"] == "both_identifiers_derived_from_one_published_name"
+    assert resolution["derivations"]["domain"]["rule"] == "token_subsequence"
+
+
+def test_the_organizations_own_profile_can_attest_the_correspondence(tmp_path):
+    """LinkedIn stating this slug's website IS this domain settles the disagreement.
+
+    Not us inferring it from spelling -- the organization's own page asserting it.
+    Anything less (a different declared website, or none) leaves the row held.
+    """
+    attested = resolve_company_display(
+        organization="Globex Industries", org_linkedin_slug="acmeholdings",
+        employer_domain="globexindustries.com",
+        org_linkedin_website="https://globexindustries.com",
+        cache=CompanyDisplayCache(tmp_path / "a.json",
+                                  overrides_path=_empty_overrides(tmp_path)),
+        persist=False)
+    assert attested.hold is False
+    assert attested.evidence["conflict_resolution"]["basis"] == (
+        "linkedin_organization_profile_website")
+
+    elsewhere = resolve_company_display(
+        organization="Globex Industries", org_linkedin_slug="acmeholdings",
+        employer_domain="globexindustries.com",
+        org_linkedin_website="https://somewhere-else.example",
+        cache=CompanyDisplayCache(tmp_path / "b.json",
+                                  overrides_path=_empty_overrides(tmp_path)),
+        persist=False)
+    assert elsewhere.hold is True
