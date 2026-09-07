@@ -1,5 +1,44 @@
 # TGTC completion — progress record
 
+## Prepared for permanent operation — 2026-09-07, base `81d0dc3`
+
+Operating procedure: [OPERATING_MODEL.md](OPERATING_MODEL.md).
+
+**Correction accepted from review.** The loss-evidence claims below were over-stated
+and are withdrawn: `unverified` ⊃ `no_contact` was never established (different
+stages, no linked identities), so "only 11 email failures" is withdrawn; `hm_searches`
+is stamped BEFORE the client call inside the try, so it counts attempts ENTERED, not
+completed searches, and "all 203 were genuinely searched" is withdrawn; and
+`airtable_candidates` are delivery rows, so using them as opportunities-with-outcome
+mixed the very units the module exists to keep apart — the "4 interrupted
+opportunities" figure is withdrawn. Counters now stay unknown rather than becoming
+measured zeros, aliases count once, and totals require evidence of one population
+rather than a shared unit.
+
+**Effective configuration is now directly verifiable.** `railway api` returns variable
+VALUES, not only names, so state no longer depends on a dated container printout. GTM
+reads `MAINTENANCE_ONLY=1`, `FANTASTIC_JOBS_ENABLED=0`, `APOLLO_RECOVERY_BUDGET_ENABLED=true`,
+`CALLS=0` under the SPENT id, and `ACQUISITION_EXTRA_LANES=ats` — the 145 free direct
+boards, enabled here, costing no provider credits.
+
+**One reproduced defect closed:** `acceptance/apollo_readiness.py` issued its probe
+with a raw client, OUTSIDE the durable ceiling. The one call made precisely when
+nobody knows what the account will do was the one call the ceiling could not see. It
+now reserves first and exits 3 when the internal grant refuses, stating that Apollo
+credit will not renew it.
+
+**No-credit behaviour, now under test:** exhaustion is globally fatal by design so the
+rest of the cohort is not relabelled UNVERIFIED; there is no in-run retry against a
+refusing provider and the daily cron is the controlled retry; the ledger survives a
+deploy; a spent authorization id RESUMES rather than renews; only a new id resets; and
+reservations count request attempts, never provider credits.
+
+**BLOCKED, and not declared resolved:** the Apollo lead-credit balance cannot be read
+from here at zero cost, so `APOLLO_RECOVERY_BUDGET_CALLS` is not sized here. Paid
+acquisition and maintenance were deliberately NOT flipped: with the grant at zero a run
+would buy postings it cannot enrich and produce zero Approved. The exact remaining
+commands and the missing datum are in the operating procedure.
+
 ## Whole-path review — 2026-09-07, base `3a759d1`
 
 Full record: [SYSTEM_CLOSEOUT_2026-09-07.md](SYSTEM_CLOSEOUT_2026-09-07.md).
@@ -19,19 +58,20 @@ identical and both held; `vanity_get_attested` clears. `sibling_companies` passe
 every shape test a rebrand passes and is held, which is what separates it from
 `endeavor_attested`.
 
-**Losses now carry their units** (`orchestrator/loss_units.py`, reproduced on the
-real 2026-09-07 record). The flat reason map spans four non-addable units, repeats
-two populations under different names, and contains one inside another: `unverified`
-includes `no_contact`, so **only 11 opportunities had an email that failed to verify,
-not 155** -- the other 144 never had a contact. Delivery reconciles exactly
-(199 = 28 + 171, remainder 0), all 203 eligible buckets were genuinely searched, and
-the `hiring_manager_not_found` 169 against `hm_not_found` 147 disagreement is
-reported rather than resolved by preferring one.
+**Loss-counter interpretation corrected after review of `81d0dc3`.** The earlier
+claim of 11 email-verification failures was an unsupported subtraction of 155
+dispositions and 144 writer skips. Neither their containment nor the remaining
+records' email outcomes was established. Missing counters now remain unknown;
+agreeing aliases count once; units and potentially overlapping reasons are not added.
+The 203 search flags are observations on lead rows, possibly replayed from checkpoints,
+not physical-request receipts. The 169/147 difference stays unresolved. Delivery
+arithmetic still closes (199 = 28 + 171); this proves neither approval status nor
+the correctness of a skip.
 
-**The 172 duplicates close as an identity** -- 500 billed = 328 kept + 172 -- with no
-residue that could be a double purchase or a dropped first sighting. How they split
-between window-reuse seeding and within-run repeats stays OPEN: production retains no
-response-level ids.
+**The duplicate arithmetic closes** -- 500 billed = 328 kept + 172. A balanced
+partition does NOT exclude repeated purchases or incorrectly discarded first sightings.
+The stage counters locate the recorded loss at the adapter; its response-level
+attribution remains open because the historical response IDs were not retained.
 
 **Capacity, offline, through the real orchestrator:** 1,500 distinct new Approved in
 one run; 3,524 owed against a 2,000-row batch all drained in one run, so the batch is

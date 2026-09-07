@@ -90,21 +90,21 @@ function opportunities (`hiring_manager_not_found`), delivery rows (`no_contact`
 **Two labels are one population:** `unverified` and `email_unverified` are the same
 155; `not_icp` and `rejected` the same 19. Summing double-counts 174.
 
-**And one contains another.** `unverified` ⊃ `no_contact`, because an opportunity
-with no contact has no verified email either:
+**Containment is not established.** The previous claim of 11 email-verification
+failures subtracted 144 delivery rows from 155 dispositions without linked identities
+or email outcomes. It is withdrawn. Even establishing containment would not establish
+the remaining records' reason for being unverified.
 
-> Read flat, `email_unverified: 155` says email verification is the largest single
-> loss and points at the provider. **Only 11 opportunities actually had an email that
-> failed to verify.** The other 144 never had a contact to verify at all.
+**Delivery arithmetic closes:** 199 submitted = 28 created + 171 skips, remainder
+**0**. This does not establish approval status or the correctness of any skip.
 
-**The delivery unit is fully explained:** 199 submitted = 28 created + 171 skips,
-remainder **0**. Nothing there needs attributing to anyone.
-
-**Searched, never searched, interrupted.** All 203 eligible buckets were genuinely
-searched (`hm_searches` is stamped per issued call, not inferred by subtraction), so
-`never_searched` is 0 for this run; 147 searched and found nobody; 56 found; 27 found
-then withheld; 4 opportunities formed but never given an outcome, attributed to the
-interruption rather than to coverage.
+**Search observations retain their limits.** The summary counts 203 eligible lead
+rows with a search diagnostic flag, 147 without a manager name and 56 with one.
+The flag is set before a client call and may be replayed from a bucket checkpoint.
+It does not prove physical requests or completed searches during this run. The
+27 withheld writer rows belong to a separate delivery population. Nor do 199 writer
+candidates establish 199 distinct opportunities with outcomes: the prior claim of
+four interrupted opportunities from 203 minus 199 is withdrawn.
 
 **A counter disagreement, surfaced not resolved.** `loss_reasons.hiring_manager_not_found`
 says 169; the observability layer's `hm_not_found` says 147. They are computed from
@@ -120,10 +120,10 @@ rather than a call.
 ## 4. Duplicates: the identity closes, the attribution stays open
 
 For run `20260907T062915Z-f79f4de1`: `returned_billed 500 = unique_kept 328 +
-duplicates 172`, exactly. There is **no residue** that could be a double purchase, a
-dropped first sighting or a miscount. Both pipeline-side dedupe counters are zero, so
-none of the 172 reached the pipeline — they were suppressed at the adapter, which is
-why they cost credits and produced no posting.
+duplicates 172`, exactly. This balances the counters but does not exclude repeated
+purchases, discarded first sightings or duplicate accounting. Both pipeline-side
+dedupe counters are zero, which locates the recorded loss at the adapter; the
+underlying decisions require response-level evidence that was not retained.
 
 `cross_source_duplicates: 0` means *not cross-source*; it does not mean *not
 duplicated*. That counter fires only when `_first_seen` names a different source, and
