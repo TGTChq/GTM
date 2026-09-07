@@ -821,6 +821,96 @@ an import guard test independently forbids the writer and every request path.
 including all three 2026-09-06 recovery/calibration attempts. Backfill wrote nothing;
 the durable record already answered.
 
+### Full-flow release v2 published and deployed (2026-09-07T03:55Z)
+
+    PR #111    fix(full-flow): shared ATS hosts merged distinct employers, +21 findings
+    origin/main            aeaea5b
+    GTM                    SUCCESS  aeaea5b   cron 0 3 * * *
+    GTM Approved Sync      SUCCESS  aeaea5b   cron 0 0 * * *
+
+`origin/main` was the stated base `ecfff20` exactly; the applied tree reproduced the
+manifest hash `ddf9a7906eba70e23d617b35f7edd9b10fcd7984` byte for byte. Patch SHA256
+verified before applying. Published through ordinary authenticated `git`/`gh` -- the
+403 blocks the connected app integration, not this access.
+
+Gates, empty environment, `ci_no_network` blocking sockets AND DNS:
+**3,436 passed / 1 skipped / 1,001 subtests** (= the recorded 3,437), integrity
+**28/0/0**, undefined names 0, `git diff --check` clean.
+
+### THE finding: a shared ATS host was serving as employer identity
+
+Replayed the ORIGINAL calibration artifact against its recorded hash
+(`a3469ca6...73e2aa28`, 1,869,595 bytes -- recovered from the per-lead backup this
+session created). Nineteen unrelated employers -- Dayton T. Brown, OzarksGo, MartinFed,
+Buechel Stone, Globe Machine Manufacturing and more -- were all retained under ONE
+company, "Cutrale Citrus Juices USA, Inc." at `applicantpro.com`.
+
+`applicantpro.com` is a shared ATS host, not an employer domain, so every tenant
+posting through it collapsed into whichever employer was seen first:
+**13 distinct employer group keys where the retained data held 2 domains.**
+
+That is a throughput defect, not a cosmetic one. Company x function suppression then
+treats independent employers as one company and withholds the rest, and the outbound
+company display cannot resolve -- which is exactly the
+`outbound_company_held_for_review` that withheld BOTH of the calibration's verified
+contacts. `source_domains.py` now holds one registry used for both job-URL recognition
+and employer-identity rejection.
+
+Replay is honest about its own limits: `production_writes: 0`, `network_requests: 0`,
+`historical_signature_verified: false`, `live_approval_proven: false`. The personal
+data stays out of the repository; the committed evidence files carry no addresses or
+person fields (checked).
+
+### Bounded maintenance on the deployed release
+
+    MAINTENANCE_ONLY: delegating to run_maintenance; no run directory, lane runner,
+    engine or delivery manager is created.
+    exists=True  FANTASTIC_JOBS_ENABLED=False
+    package_integrity    checked=28 mismatch=0 absent=0 (OK)
+
+* **Sep 6 recovery against actual artifacts:** 226 / 226 / 226, and the NEW cohort
+  separation works -- `new_capture_agrees: true`, `recovery_agrees: true`,
+  `agrees: true` reconcile independently rather than as one mixed cohort.
+* **Distinct pending inventory:** 5,595 physical rows offered across THREE custody
+  files -> **3,595 distinct postings -> 2,998 company x function opportunities**,
+  `unidentifiable_employer: 0`, `resumable: true`. Physical rows are not leads and the
+  cross-run duplicate is counted once.
+* **Paid-reply custody** is under `provider_cache/paid_replies` -- a registered store,
+  sibling of `run_artifacts`, so prune cannot reach it; identities are validated
+  64-hex so the path cannot escape the root.
+* **Brett artifact-vs-ledger acceptance:** `ACCEPTED: True`. Census reconciles on
+  every metric: jobs_captured 6431, jobs_reviewed 2226, qualified_opportunities 26,
+  contacts_found 1050, sent_to_airtable 781 -- all `agrees=True`. Missing metrics
+  remain missing.
+
+### Published report corrected
+
+The shared artifact had been republished carrying figures this work retracted -- 18.8%
+observed against 51% needed, decomposed into 25.3% opportunity->contact and 74.5%
+contact->approved. All are withdrawn: they divide across populations that are not
+subsets of one another, and the opportunity->contact half treated a resolvable domain
+as proof a search had run. Replaced with the identity finding and an explicit
+"conversion is unknown". The business-day inventory correction (2,362-2,897 postings)
+stands; what it converts at does not.
+
+### Capability vs measured output
+
+Implemented and gated offline: batch continuation, checkpoint identity, custody before
+continuation, per-run approved target, paid-reply durability, employer-identity
+separation. **Measured production output remains 0 approved leads.** No run has
+produced 1,000 -- or any -- new Approved rows. Neither the suite nor this patch proves
+1,000 live approvals, and not every remaining limitation belongs to Apollo: the
+identity defect above was ours.
+
+### Exact remaining blockers
+
+1. A fresh explicit durable Apollo grant (new `APOLLO_RECOVERY_BUDGET_ID` + count).
+   The 50-reservation grant is spent; `APOLLO_RECOVERY_BUDGET_CALLS=0`. The reported
+   ~2,000 remaining credits are UNVERIFIED -- no paid probe was made.
+2. Production resumption authorization -- publishing this correction does not grant it.
+3. Whether the identity fix actually raises distinct-employer yield is **unmeasured**
+   in production; it is demonstrated only on the retained artifact.
+
 ### Final state — 2026-09-06T15:30Z
 
     origin/main   afd92db, deployed to both services (SUCCESS)
