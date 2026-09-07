@@ -12,7 +12,7 @@ from typing import Dict, Iterable, List, Optional, Set
 from urllib.parse import quote
 
 import config
-from company_identity import normalize_company_name
+from company_identity import normalize_company_name, is_intermediary_domain
 from domain_utils import normalize_company_domain
 from job_filter import normalize_text
 from job_signal import annotate_job
@@ -463,6 +463,20 @@ def _get_existing_leads() -> Dict[str, Dict]:
 def _company_identity_keys_from_fields(fields: Dict) -> Set[str]:
     keys: Set[str] = set()
     domain = normalize_company_domain(fields.get("Website"))
+    # A SHARED SOURCE PLATFORM IS NOT A COMPANY IDENTITY.
+    #
+    # The enrichment side stopped deriving employer identity from a recognized ATS
+    # host, but this keyer -- the one Airtable suppression actually decides on --
+    # still accepted it. Two unrelated employers both posting through ApplicantPro
+    # therefore shared `domain:applicantpro.com`, matched, and each suppressed the
+    # other. The 2026-09-06 calibration corpus shows the shape at scale: nineteen
+    # employers retained under one company at exactly that host.
+    #
+    # Dropping it does NOT weaken suppression, it sharpens it: `name:` still carries
+    # the identity, a genuinely repeated employer still matches on its name, and what
+    # stops matching is two DIFFERENT companies that happened to share a vendor.
+    if domain and is_intermediary_domain(domain, config.INTERMEDIARY_JOB_DOMAINS):
+        domain = ""
     if domain:
         keys.add(f"domain:{domain}")
     company = normalize_company_name(fields.get("Company"))
