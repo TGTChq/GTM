@@ -495,7 +495,16 @@ def _company_identity_keys_from_fields(fields: Dict) -> Set[str]:
     # LinkedIn organization -- two different companies never share a slug. A held
     # row carries no identity key and so is unaffected. The same shared-platform
     # rule applies: a `domain:` identity on an ATS host is still not an identity.
+    #
+    # AND ONLY WHEN THE RESOLUTION WAS STRONG ENOUGH TO ACT ON. Suppression is
+    # permanent in effect: a key that matches stops a row being written, and nobody
+    # revisits it. So a held row, or one resolved at low confidence, must not lend
+    # its identity to that decision -- a weakly inferred identity would otherwise
+    # merge two companies for good. Those rows keep exactly the keys they had.
     identity = str(fields.get("Outbound Company Identity") or "").strip().lower()
+    confidence = str(fields.get("Outbound Company Confidence") or "").strip().lower()
+    if bool(fields.get("Outbound Hold")) or confidence not in {"high", "medium"}:
+        identity = ""
     if identity.startswith("domain:"):
         host = normalize_company_domain(identity.split(":", 1)[1])
         if host and not is_intermediary_domain(host, config.INTERMEDIARY_JOB_DOMAINS):
@@ -505,8 +514,15 @@ def _company_identity_keys_from_fields(fields: Dict) -> Set[str]:
     return keys
 
 
-def _company_identity_keys_from_job(job: Dict) -> Set[str]:
-    fields = {
+def _identity_fields_from_job(job: Dict) -> Dict:
+    """The identity-bearing fields of a job, named as the record names them.
+
+    The guard on `Outbound Company Identity` reads a confidence and a hold flag, so
+    a caller that supplies the identity WITHOUT them gets the identity discarded --
+    silently, and only for incoming jobs, which is the shape of a suppression bug
+    nobody would see. One helper keeps the two sides from drifting again.
+    """
+    return {
         "Website": (
             f"https://{job.get('company_domain')}"
             if job.get("company_domain")
@@ -514,8 +530,14 @@ def _company_identity_keys_from_job(job: Dict) -> Set[str]:
         ),
         "Company": job.get("employer_name"),
         "Outbound Company Identity": job.get("outbound_company_identity_key"),
+        "Outbound Company Confidence": job.get("outbound_company_confidence"),
+        "Outbound Hold": bool(job.get("_outbound_company_hold")
+                              or job.get("_outbound_role_hold")),
     }
-    return _company_identity_keys_from_fields(fields)
+
+
+def _company_identity_keys_from_job(job: Dict) -> Set[str]:
+    return _company_identity_keys_from_fields(_identity_fields_from_job(job))
 
 
 def _company_function_keys_from_fields(fields: Dict) -> Set[str]:
@@ -531,16 +553,8 @@ def _company_function_keys_from_fields(fields: Dict) -> Set[str]:
 
 
 def _company_function_keys_from_job(job: Dict) -> Set[str]:
-    fields = {
-        "Outbound Company Identity": job.get("outbound_company_identity_key"),
-        "Website": (
-            f"https://{job.get('company_domain')}"
-            if job.get("company_domain")
-            else job.get("employer_website")
-        ),
-        "Company": job.get("employer_name"),
-        "Role Bucket": job.get("_role_bucket"),
-    }
+    fields = _identity_fields_from_job(job)
+    fields["Role Bucket"] = job.get("_role_bucket")
     return _company_function_keys_from_fields(fields)
 
 

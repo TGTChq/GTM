@@ -60,10 +60,11 @@ def _empty_overrides(tmp_path) -> Path:
     return path
 
 
-def _resolve(tmp_path, *, name, slug="", domain="", other_name="", tag="c"):
+def _resolve(tmp_path, *, name, slug="", domain="", other_name="", website="",
+             tag="c"):
     return resolve_company_display(
         organization=name, org_linkedin_name=other_name, org_linkedin_slug=slug,
-        employer_domain=domain,
+        employer_domain=domain, org_linkedin_website=website,
         cache=CompanyDisplayCache(tmp_path / f"{tag}.json",
                                   overrides_path=_empty_overrides(tmp_path)),
         persist=False)
@@ -90,10 +91,28 @@ def test_corpus_row_meets_its_expectation(row):
 
 def test_the_corpus_actually_contains_unseen_companies():
     """Guards the guard: a corpus of only the five fixed cases proves nothing."""
-    reviewed = {"endeavor", "bsb", "kai", "nash", "zwicker"}
+    reviewed = {"endeavor_attested", "endeavor_bare", "bsb", "kai", "nash", "zwicker"}
     unseen_resolves = [r["id"] for r in resolve_corpus()
                        if not r["hold"] and r["id"] not in reviewed]
     assert len(unseen_resolves) >= 4, unseen_resolves
+
+
+def test_string_identical_pairs_are_separated_only_by_corroboration():
+    """The homonym fix, stated as the property that makes it general.
+
+    ``Apple``/``applebank``/``apple.com`` and ``Clark``/``clarkaudit``/
+    ``getclark.com`` stand in the SAME string relation. No rule reading only those
+    strings can clear one and hold the other, so any rule that tried was wrong about
+    one of them. What separates them here is the organization's own declared
+    website, and nothing else -- which is why it works on companies never seen.
+    """
+    rows = {r["id"]: r for r in resolve_corpus()}
+    assert rows["homonym_prefix"]["relation"] == rows["vanity_get_bare"]["relation"]
+    assert rows["homonym_prefix"]["hold"] is True
+    assert rows["vanity_get_bare"]["hold"] is True          # same shape, same outcome
+    assert rows["vanity_get_attested"]["hold"] is False     # corroborated, so it clears
+    # And an attestation pointing somewhere else corroborates nothing.
+    assert rows["homonym_counter_attested"]["hold"] is True
 
 
 # ---------------------------------------------------------------------------
@@ -367,10 +386,12 @@ def test_one_organization_under_two_domains_is_one_company_for_suppression():
     """Two domains, one LinkedIn organization -- previously two rows for one company."""
     left = _company_identity_keys_from_fields({
         "Website": "https://acme.com", "Company": "Acme",
-        "Outbound Company Identity": "linkedin:acmeco"})
+        "Outbound Company Identity": "linkedin:acmeco",
+        "Outbound Company Confidence": "high"})
     right = _company_identity_keys_from_fields({
         "Website": "https://acme-careers.example", "Company": "Acme Global",
-        "Outbound Company Identity": "linkedin:acmeco"})
+        "Outbound Company Identity": "linkedin:acmeco",
+        "Outbound Company Confidence": "medium"})
     assert left & right == {"linkedin:acmeco"}
 
 
@@ -395,7 +416,8 @@ def test_a_held_row_carries_no_identity_and_suppresses_nothing_extra():
 def test_the_identity_key_stays_function_aware():
     """Acme+Marketing and Acme+Sales remain distinct opportunities."""
     fields = {"Website": "https://acme.com", "Company": "Acme", "Role Bucket": "marketing",
-              "Outbound Company Identity": "linkedin:acmeco"}
+              "Outbound Company Identity": "linkedin:acmeco",
+              "Outbound Company Confidence": "high"}
     marketing = _company_function_keys_from_fields(fields)
     sales = _company_function_keys_from_fields({**fields, "Role Bucket": "gtm_revenue"})
     assert "linkedin:acmeco|bucket:marketing" in marketing
@@ -421,7 +443,8 @@ def test_a_second_batch_for_the_same_organization_is_suppressed_by_identity(tmp_
     existing = {first["lead_key"]: {"id": "rec1", "fields": {
         "Lead Key": first["lead_key"], "Company": "Kai",
         "Website": "https://kai.security", "Role Bucket": "gtm_revenue",
-        "Outbound Company Identity": display.identity_key, "Status": "Pending"}}}
+        "Outbound Company Identity": display.identity_key,
+        "Outbound Company Confidence": display.confidence, "Status": "Pending"}}}
     second = _job_for(display, email="b@kai-eu.example", domain="kai-eu.example")
     second["employer_name"] = second["canonical_company_name"] = "Kai Security Europe"
     # Neither legacy key can bridge these two rows.
@@ -504,7 +527,7 @@ def test_one_name_sourcing_both_identifiers_resolves_at_medium(tmp_path):
     assert result.hold is False
     assert result.confidence == "medium", "a resolved conflict is never promoted to high"
     resolution = result.evidence["conflict_resolution"]
-    assert resolution["basis"] == "both_identifiers_derived_from_one_published_name"
+    assert resolution["basis"] == "both_identifiers_accounted_for_by_one_published_name"
     assert resolution["derivations"]["domain"]["rule"] == "token_subsequence"
 
 
@@ -533,3 +556,94 @@ def test_the_organizations_own_profile_can_attest_the_correspondence(tmp_path):
                                   overrides_path=_empty_overrides(tmp_path)),
         persist=False)
     assert elsewhere.hold is True
+
+
+# ---------------------------------------------------------------------------
+# 9. A company hold is retryable, and a rule change reaches it
+# ---------------------------------------------------------------------------
+
+def test_a_company_hold_is_not_a_terminal_state(tmp_path):
+    """The property that makes correcting the rules worth anything.
+
+    A held row is withheld at delivery, not rejected. If that made its posting
+    terminal it would enter cross-run suppression and no later run -- however much
+    better its rules -- would ever look at it again, so every identity correction
+    would apply only to inventory bought afterwards.
+
+    ``terminal_posting_ids`` admits FINAL_PASS only when delivery evidenced the key,
+    and REJECT. A withheld FINAL_PASS and a NEEDS_CHECK are both excluded, so the
+    posting stays in custody for a later run.
+    """
+    from orchestrator.enrichment import Disposition, EnrichmentReport, Lead
+    from orchestrator.reasons import ReasonCode
+
+    withheld = Lead(posting_id="p-withheld", company={"name": "Held Co"},
+                    contact={"email": "hm@held.example"}, contact_key="k-withheld",
+                    disposition=Disposition.FINAL_PASS, primary_reason=ReasonCode.OK)
+    needs_check = Lead(posting_id="p-needs", company={"name": "Held Co"},
+                       contact={"email": "hm2@held.example"}, contact_key="k-needs",
+                       disposition=Disposition.NEEDS_CHECK,
+                       primary_reason=ReasonCode.OK)
+    delivered = Lead(posting_id="p-ok", company={"name": "Fine Co"},
+                     contact={"email": "hm@fine.example"}, contact_key="k-ok",
+                     disposition=Disposition.FINAL_PASS, primary_reason=ReasonCode.OK)
+    report = EnrichmentReport(stages=[], leads=[withheld, needs_check, delivered],
+                              funnel={})
+    terminal = report.terminal_posting_ids(delivered_lead_keys=["k-ok"])
+    assert "p-ok" in terminal
+    assert "p-withheld" not in terminal, "a withheld row must stay retryable"
+    assert "p-needs" not in terminal
+
+
+def test_new_evidence_clears_a_row_that_was_held_under_the_old_record(tmp_path):
+    """Same company, same anchors; the record gains its declared website.
+
+    This is what a retry buys. The first pass has nothing to corroborate a prefix
+    relation and holds. The second has the organization's own website and clears --
+    without any entry naming the company, and without the cache pinning the first
+    answer.
+    """
+    cache = CompanyDisplayCache(tmp_path / "shared.json",
+                               overrides_path=_empty_overrides(tmp_path))
+    first = resolve_company_display(
+        organization="Clark", org_linkedin_slug="clarkaudit",
+        employer_domain="getclark.com", cache=cache)
+    assert first.hold is True
+
+    second = resolve_company_display(
+        organization="Clark", org_linkedin_slug="clarkaudit",
+        employer_domain="getclark.com", org_linkedin_website="https://getclark.com",
+        cache=cache)
+    assert second.hold is False
+    assert second.evidence["cache_hit"] is False, "the hold must not have been cached"
+    assert second.evidence["conflict_resolution"]["basis"] == (
+        "linkedin_organization_profile_website")
+
+
+def test_an_updated_rule_reaches_a_company_the_old_rule_already_answered(tmp_path):
+    """A resolver upgrade must not stop at companies nobody has seen yet.
+
+    An entry written by an earlier resolver is retired on version alone, so the row
+    is decided again under the current rules instead of inheriting the old verdict.
+    """
+    from company_display_resolver import RESOLVER_VERSION
+
+    path = tmp_path / "cache.json"
+    path.write_text(json.dumps({
+        "schema": "company-display-cache/1",
+        "entries": {"linkedin:clarkaudit": {
+            "display_name": "Stale Answer", "confidence": "high",
+            "identity_safe": True,
+            "identity_keys": ["linkedin:clarkaudit", "domain:getclark.com"],
+            "evidence": {}, "resolver_version": "company-display/1",
+            "resolved_at": "2026-09-07T00:00:00Z", "manual_override": False}},
+        "aliases": {},
+    }), encoding="utf-8")
+    result = resolve_company_display(
+        organization="Clark", org_linkedin_slug="clarkaudit",
+        employer_domain="getclark.com",
+        cache=CompanyDisplayCache(path, overrides_path=_empty_overrides(tmp_path)),
+        persist=False)
+    assert result.name != "Stale Answer"
+    assert result.evidence["resolver_version"] == RESOLVER_VERSION
+    assert result.hold is True, "re-decided under the current rules, not inherited"

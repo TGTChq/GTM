@@ -68,42 +68,55 @@ def test_anchors_conflict_is_unchanged(slug, domain, conflicts):
 @pytest.mark.parametrize(
     "name,slug,domain,brand,route",
     [
-        # ``get``/``my`` are registrar vanity prefixes, so these two AGREE once the
-        # prefix is read off -- there was never a disagreement to bridge.
-        ("Clark", "clarkaudit", "getclark.com", "clark", "vanity_agreement"),
-        ("Carpe", "carpe1", "mycarpe.com", "carpe", "vanity_agreement"),
+        # ``get``/``my`` are registrar vanity prefixes, so the domain reads as the
+        # brand -- but the SLUG still extends it (``clarkaudit``), which is the same
+        # relation as ``apple`` inside ``applebank``. Corroboration decides.
+        ("Clark", "clarkaudit", "getclark.com", "clark", "prefix"),
+        ("Carpe", "carpe1", "mycarpe.com", "carpe", "prefix"),
         # ``the`` is NOT a vanity prefix here: stripping it would read
-        # ``theresa.com`` as the company "Resa". So this stays a real conflict and
-        # is bridged the original way, by the name sitting inside both anchors.
-        ("Blueground", "bluegroundco", "theblueground.com", "blueground", "bridged"),
+        # ``theresa.com`` as the company "Resa". So this stays a real conflict, and
+        # the name sitting inside both anchors is a candidate signal, not evidence.
+        ("Blueground", "bluegroundco", "theblueground.com", "blueground", "conflict"),
     ],
 )
 def test_real_branded_domain_pairs_clear_at_medium(tmp_path, name, slug, domain, brand, route):
-    """The OUTCOME these pairs must have. How it is reached changed; what is
-    guaranteed did not: they clear, they are identity-safe, and they clear at
-    medium -- never high.
+    """These pairs clear at medium -- WHEN the organization corroborates them.
 
-    They used to reach that outcome as a BRIDGED CONFLICT: the anchors were read as
-    disagreeing and the published name, being literally inside both, bridged them.
-    Reading the vanity prefix off the domain shows there was no disagreement to
-    bridge (``getclark`` IS ``clark``), so `identity_conflict` is now False for
-    them. The cap survives the change, because the agreement rests on a registrar
-    convention rather than on the domain's own letters.
+    They used to clear on shape alone: the published name sat inside both anchors,
+    or opened the longer one, and that was taken as proof of one organization. It is
+    not. ``Apple`` opens ``applebank`` exactly the way ``Clark`` opens
+    ``clarkaudit``, so any rule that clears one clears the other.
+
+    What separates them is the organization's own declared website. With it these
+    clear, at medium and never high, because the agreement still rests on a naming
+    convention. Without it they hold -- asserted in the companion test below.
     """
-    result = _resolve(tmp_path, name, slug, domain)
-    assert result.hold is False
-    assert result.identity_safe is True
-    assert result.confidence == "medium"
-    agreement = result.evidence["identifier_agreement"]
-    if route == "vanity_agreement":
-        assert agreement["conflict"] is False
-        assert agreement["convention_only"] is True
-        assert agreement["agreed_on"]["domain_form"] == "vanity_prefix_stripped"
-        assert agreement["agreed_on"]["domain_key"] == brand
-    else:
-        assert agreement["conflict"] is True
-        assert result.evidence["bridging_brand"] == brand
-        assert "identity_conflict_bridged_by_shared_brand" in result.evidence["reasons"]
+    attested = _resolve(tmp_path, name, slug, domain,
+                        org_linkedin_website=f"https://{domain}")
+    assert attested.hold is False
+    assert attested.identity_safe is True
+    assert attested.confidence == "medium"
+    assert attested.evidence["identifier_agreement"]["kind"] == route
+    assert attested.evidence["conflict_resolution"]["basis"] == (
+        "linkedin_organization_profile_website")
+    if route == "conflict":
+        # The shared brand is still recorded -- as a candidate signal that settled
+        # nothing, so a reader can see what was considered and rejected.
+        assert attested.evidence["bridging_brand"] == brand
+
+
+@pytest.mark.parametrize("name,slug,domain,brand,route", [
+    ("Clark", "clarkaudit", "getclark.com", "clark", "prefix"),
+    ("Carpe", "carpe1", "mycarpe.com", "carpe", "prefix"),
+    ("Blueground", "bluegroundco", "theblueground.com", "blueground", "conflict"),
+])
+def test_the_same_pairs_hold_when_nothing_corroborates_them(tmp_path, name, slug,
+                                                            domain, brand, route):
+    """The other half of the contract, and the reason the homonym is now caught."""
+    bare = _resolve(tmp_path, name, slug, domain)
+    assert bare.hold is True
+    assert bare.evidence["conflict_resolution"]["resolved"] is False
+    assert bare.evidence["missing_evidence"]["need"]
 
 
 def test_a_convention_only_agreement_is_never_promoted_to_high(tmp_path):
@@ -112,9 +125,11 @@ def test_a_convention_only_agreement_is_never_promoted_to_high(tmp_path):
     ``clark`` and ``getclark.com`` line up only because we strip a prefix a
     registrar era made conventional. That is very probably right and it is not a
     fact the domain states, so it must not buy the confidence reserved for an
-    identifier that spells the name outright.
+    identifier that spells the name outright. Here the slug is exactly ``clark``, so
+    the identifiers AGREE and nothing needs corroborating -- only the cap is at issue.
     """
     exact = _resolve(tmp_path, "Clark", "clark", "getclark.com")
+    assert exact.hold is False
     assert exact.confidence == "medium"
     assert "identifiers_agree_only_after_vanity_prefix" in exact.evidence["reasons"]
     assert exact.evidence["identifier_agreement"]["convention_only"] is True
@@ -174,17 +189,23 @@ def test_bridging_brand_has_a_minimum_length():
 
 def test_real_multi_entity_name_with_a_conflict_stays_held(tmp_path):
     """AGS is a real backlog row. The brand ("ags") is below the minimum bridging
-    length and the full name is in neither anchor, so the conflict still holds it."""
+    length and the full name is in neither anchor, so it is still held.
+
+    The REASON reported changed and the outcome did not. Name-quality checks now run
+    before the identity relation, because "this label names several entities" is a
+    more specific and more actionable diagnosis than "the identifiers disagree", and
+    this row is both. Either way the row is held and nothing is sent.
+    """
     result = _resolve(tmp_path, "AGS - American Gaming Systems",
                       "americangamingsystems", "playags.com")
     assert result.hold is True
     assert result.evidence["bridging_brand"] == ""
-    assert "linkedin_slug_domain_disagreement" in result.evidence["reasons"]
+    assert result.evidence["identifier_agreement"]["contradictory"] is True
+    assert "unresolved_multi_entity_or_franchise_name" in result.evidence["reasons"]
 
 
-def test_multi_entity_name_still_holds_once_a_conflict_is_bridged(tmp_path):
-    """The ambiguity gate sits AFTER the conflict gate, so a bridged conflict must
-    not let a franchise/multi-entity name through."""
+def test_multi_entity_name_still_holds_even_when_the_identifiers_are_bridged(tmp_path):
+    """A franchise/multi-entity label must never pass, whatever the identifiers do."""
     result = _resolve(tmp_path, "Blue / Ground", "bluegroundco", "theblueground.com")
     assert result.evidence["bridging_brand"] == "blueground"  # the bridge does apply
     assert result.hold is True                                # and the row is still held

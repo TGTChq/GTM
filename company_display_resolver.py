@@ -115,38 +115,53 @@ _CONVENTION_FORMS = frozenset({"vanity_prefix_stripped"})
 
 
 def _forms_agreement(slug_forms, domain_forms) -> Dict[str, Any]:
-    """Do the two identifiers agree under ANY readable spelling of each?
+    """How the two identifiers relate, under every readable spelling of each.
 
-    A domain has more than one honest reading -- the second-level label, the whole
-    domain including a brand TLD, the label without a registrar vanity prefix. The
-    old test compared one spelling of each and called a mismatch a conflict, which
-    is how ``kai.security`` came to "disagree" with the slug ``kaisecurity``: the
-    two are the same string once the TLD is not discarded.
+    Four outcomes, and the distinction between the first two is what separates a
+    decorated brand from a homonym:
 
-    Agreement under any pairing settles the disagreement, because every form names
-    the same registered domain -- but HOW it was reached is kept, because a vanity
-    prefix is a convention we applied, not something the domain states. Reading
-    ``getclark.com`` as "clark" is very probably right and is not a fact, so a row
-    that agrees only that way is treated exactly like a bridged conflict: sendable,
-    never high.
+    * ``single_identifier`` -- only one is present, so there is nothing to agree or
+      disagree with.
+    * ``identical`` -- some spelling of each is the SAME STRING. Nothing is left
+      over on either side; there is no contradiction to resolve.
+    * ``prefix`` -- one identifier CONTAINS the other and then continues. ``clark``
+      inside ``clarkaudit`` and ``apple`` inside ``applebank`` are the same relation,
+      and the trailing word is the whole question: "Clark Audit" is Clark decorated,
+      "Apple Bank" is a different company. The relation alone cannot tell them apart,
+      so it is treated as contradictory and needs corroboration.
+    * ``conflict`` -- neither contains the other.
+
+    ``convention_only`` marks agreement reached only by reading a registrar vanity
+    prefix off the domain, which is a convention rather than something the domain
+    states, and is capped below high confidence wherever it appears.
     """
     if not slug_forms or not domain_forms:
-        return {"conflict": False, "agreed_on": None, "convention_only": False}
-    strong = None
-    weak = None
+        return {"kind": "single_identifier", "conflict": False, "agreed_on": None,
+                "convention_only": False, "contradictory": False}
+    identical: Optional[Dict[str, Any]] = None
+    prefixed: Optional[Dict[str, Any]] = None
+
+    def _pair(s, d, relation):
+        return {"linkedin_form": s.form, "domain_form": d.form,
+                "linkedin_key": s.key, "domain_key": d.key, "relation": relation,
+                "convention": bool(s.form in _CONVENTION_FORMS
+                                   or d.form in _CONVENTION_FORMS)}
+
     for s in slug_forms:
         for d in domain_forms:
-            if _anchors_conflict(s.key, d.key):
-                continue
-            pair = {"linkedin_form": s.form, "domain_form": d.form,
-                    "linkedin_key": s.key, "domain_key": d.key}
-            if s.form in _CONVENTION_FORMS or d.form in _CONVENTION_FORMS:
-                weak = weak or pair
-            else:
-                strong = strong or pair
-    agreed = strong or weak
-    return {"conflict": agreed is None, "agreed_on": agreed,
-            "convention_only": bool(agreed is not None and strong is None)}
+            if s.key and s.key == d.key:
+                if identical is None or (identical["convention"] and not
+                                         _pair(s, d, "identical")["convention"]):
+                    identical = _pair(s, d, "identical")
+            elif not _anchors_conflict(s.key, d.key):
+                if prefixed is None or (prefixed["convention"] and not
+                                        _pair(s, d, "prefix")["convention"]):
+                    prefixed = _pair(s, d, "prefix")
+    agreed = identical or prefixed
+    kind = "identical" if identical else ("prefix" if prefixed else "conflict")
+    return {"kind": kind, "conflict": kind == "conflict", "agreed_on": agreed,
+            "convention_only": bool(agreed is not None and agreed["convention"]),
+            "contradictory": kind in {"prefix", "conflict"}}
 
 
 def _anchors_conflict(slug_anchor: str, domain_anchor: str) -> bool:
@@ -219,88 +234,145 @@ def _bridging_brand(chosen: Optional[Dict[str, Any]],
 
 
 def _identity_match(cleaned: str, raw: str, forms, primary: str,
-                    legal_cleanup: bool) -> tuple[str, Optional[Dict[str, Any]]]:
+                    legal_cleanup: bool) -> tuple[str, Optional[Dict[str, Any]], bool]:
     """How strongly one published name is corroborated by one stable identifier.
 
-    Returns ``("exact"|"derived"|"prefix"|"extension"|"legal"|"", derivation)``.
+    Returns ``(strength, derivation, accounts_for_all_of_it)``.
 
-    The existing string tiers are evaluated first and unchanged, so nothing that
-    resolved before resolves differently. What is new is the fallback: when no
-    spelling of the identifier matches the name as a string, ask whether the
-    identifier can be CONSTRUCTED from the name's own words. That is what lets
-    ``bsbsystems.com`` corroborate "BS&B Safety Systems" without any entry naming
-    either of them -- and what still refuses ``minthgroup.com`` for "Minth North
-    America", because a parent's domain is not built from the subsidiary's words.
+    The third value is the one that matters when the identifiers disagree. It says
+    whether the name explains the identifier COMPLETELY, or only opens it and leaves
+    a residue:
+
+    * ``clark`` against ``clarkaudit`` -- match, residue ``audit``.
+    * ``apple`` against ``applebank`` -- match, residue ``bank``.
+    * ``BS&B Safety Systems`` against ``bsbsystems`` -- match by an ordered subset of
+      its own words, residue NONE. Every letter of the identifier came from the name.
+
+    The first two are the same relation and the residue is the entire question, so a
+    residue-bearing match may propose a candidate but may not settle a disagreement
+    on its own. A derivation, by construction, never leaves a residue.
     """
     key = _name_key(cleaned, drop_legal=True)
     raw_key = _name_key(raw)
     match = _anchor_match(key, primary)
     if match:
-        return match, None
+        return match, None, match == "exact"
     if legal_cleanup and _anchor_match(raw_key, primary) == "exact":
-        return "legal", None
+        return "legal", None, True
     derivation = best_derivation(cleaned, forms) or best_derivation(raw, forms)
     if derivation:
-        return ("exact" if derivation.exact else "derived"), derivation.to_dict()
-    return "", None
+        return ("exact" if derivation.exact else "derived"), derivation.to_dict(), True
+    return "", None, False
 
 
-def _derives_both(candidate: Optional[Dict[str, Any]]) -> bool:
-    """Is this one published name the source of BOTH stable identifiers?
+def _accounts_for_both(candidate: Optional[Dict[str, Any]]) -> bool:
+    """Is ONE published name the complete source of BOTH identifiers?
 
-    The general form of the old bridging-brand test. That test asked whether the
-    name was literally *contained* in both anchor strings, which only ever held for
-    decorations around an unchanged brand. This asks whether both anchors can be
-    CONSTRUCTED from the name -- so a domain that drops an interior word
-    (``bsbsystems`` from "BS&B Safety Systems") counts, while a parent's domain
-    (``minthgroup`` for "Minth North America") still does not, because no ordered
-    subset of those words spells it.
+    Complete is the operative word. The old test asked only whether each identifier
+    matched somehow, which let a prefix match -- the ``Apple``/``applebank`` relation
+    -- stand as proof that two disagreeing identifiers named one organization. This
+    asks whether anything in either identifier is left unexplained by the name.
+
+    ``BS&B Safety Systems`` explains ``bsbsafetysystems`` and ``bsbsystems`` entirely;
+    ``Apple`` leaves ``bank`` unexplained; ``Minth North America`` explains nothing of
+    ``minthgroup`` beyond its opening.
     """
     if not candidate:
         return False
     matches = candidate.get("identity_matches") or {}
-    return bool(matches.get("linkedin")) and bool(matches.get("domain"))
+    complete = candidate.get("identity_complete") or {}
+    return all(bool(matches.get(label)) and bool(complete.get(label))
+               for label in ("linkedin", "domain"))
+
+
+def _corroborated_rename(evaluated, slug_forms, domain_forms,
+                         attestation: Dict[str, Any]) -> Dict[str, Any]:
+    """Two published names for one organization -- only with corroboration.
+
+    Two names inside one record do NOT prove a rebrand. A record can carry an
+    incorrect association: a staffing listing naming its client, a parent named
+    beside a subsidiary, or two sibling companies under one group. "Northwind
+    Logistics" and "Northwind Capital" satisfy every shape test a rebrand does.
+
+    So the shape is necessary and not sufficient. Required together:
+
+    1. each name is EXACTLY corroborated by a different identifier, with no residue;
+    2. one name's leading token (>= _MIN_RENAME_TOKEN) opens the other's key;
+    3. both IDENTIFIERS also open with that same token -- the two anchors corroborate
+       each other, not merely the two names;
+    4. the organization's own LinkedIn profile attests the correspondence.
+
+    Point 4 is what makes it evidence rather than an inference, and it is why this
+    branch cannot be reached by a coincidence of naming.
+    """
+    exact_slug = [c for c in evaluated
+                  if c["identity_matches"].get("linkedin") == "exact"
+                  and (c.get("identity_complete") or {}).get("linkedin")]
+    exact_domain = [c for c in evaluated
+                    if c["identity_matches"].get("domain") == "exact"
+                    and (c.get("identity_complete") or {}).get("domain")]
+    if not exact_slug or not exact_domain:
+        return {"resolved": False}
+    related = rename_correspondence([exact_slug[0]["cleaned"], exact_domain[0]["cleaned"]])
+    if not related.get("related"):
+        return {"resolved": False, "shape": "names_unrelated"}
+    token = related["shared_leading_token"]
+    anchors = [f.key for f in slug_forms] + [f.key for f in domain_forms]
+    if not (any(k.startswith(token) for k in (f.key for f in slug_forms))
+            and any(k.startswith(token) for k in (f.key for f in domain_forms))):
+        return {"resolved": False, "shape": "identifiers_do_not_share_the_token"}
+    if not attestation.get("attested"):
+        # The shape is there and nothing corroborates it. A sibling company under a
+        # group brand produces exactly this, so the row stays held.
+        return {"resolved": False, "shape": "rename_shape_without_corroboration",
+                "shared_leading_token": token,
+                "candidate_current_name": exact_slug[0]["cleaned"],
+                "candidate_former_name": exact_domain[0]["cleaned"]}
+    return {"resolved": True,
+            "reason": "identity_conflict_resolved_by_attested_rename",
+            "basis": "two_anchor_names_corroborated_by_organization_profile",
+            "shared_leading_token": token, "anchors_considered": anchors,
+            # The LinkedIn page is the organization's current self-description and
+            # the slug survives a rebrand, so it names the company today.
+            "display_name": exact_slug[0]["cleaned"],
+            "superseded_name": exact_domain[0]["cleaned"]}
 
 
 def _resolve_conflict(chosen, evaluated, slug_forms, domain_forms,
-                      attestation: Dict[str, Any],
-                      bridging_brand: str) -> Dict[str, Any]:
+                      attestation: Dict[str, Any], bridging_brand: str,
+                      kind: str) -> Dict[str, Any]:
     """Evidence, if any, that two disagreeing identifiers name one organization.
 
     Tried strongest-first, and every branch returns WHAT it relied on. Nothing here
-    compares one company to another: each test is about a single provider record,
-    which is why homonyms cannot be merged by any of them -- two companies never
-    appear in one record's organization fields.
+    compares one company to another: each test is about a single provider record.
+
+    Ordered so that the only branch reachable WITHOUT corroboration is the one where
+    a single published name accounts for both identifiers completely -- there, the
+    identifiers are two spellings of one name rather than a claim about two things.
     """
-    if _derives_both(chosen):
+    if _accounts_for_both(chosen):
         return {"resolved": True, "reason": "identity_conflict_resolved_by_shared_derivation",
-                "basis": "both_identifiers_derived_from_one_published_name",
+                "basis": "both_identifiers_accounted_for_by_one_published_name",
                 "derivations": chosen.get("identity_derivations") or {}}
     if attestation.get("attested"):
         return {"resolved": True, "reason": "identity_conflict_resolved_by_organization_profile",
                 "basis": attestation["basis"],
                 "linkedin_declared_website": attestation["linkedin_declared_website"]}
-    # A rebrand: the provider returned two names for one record, each exactly
-    # corroborated by a DIFFERENT identifier. Unrelated pairings cannot produce that
-    # shape, and the leading-token bar keeps a coincidental prefix from bridging.
-    by_slug = [c for c in evaluated if (c["identity_matches"].get("linkedin") == "exact")]
-    by_domain = [c for c in evaluated if (c["identity_matches"].get("domain") == "exact")]
-    if by_slug and by_domain:
-        related = rename_correspondence([by_slug[0]["cleaned"], by_domain[0]["cleaned"]])
-        if related.get("related"):
-            return {"resolved": True,
-                    "reason": "identity_conflict_resolved_by_attested_rename",
-                    "basis": related["basis"],
-                    "shared_leading_token": related["shared_leading_token"],
-                    # The LinkedIn page is the organization's current self-description
-                    # and the slug survives a rebrand, so it names the company today.
-                    "display_name": by_slug[0]["cleaned"],
-                    "superseded_name": by_domain[0]["cleaned"]}
+    rename = _corroborated_rename(evaluated, slug_forms, domain_forms, attestation)
+    if rename.get("resolved"):
+        return rename
+    unresolved: Dict[str, Any] = {"resolved": False, "relation": kind}
     if bridging_brand:
-        return {"resolved": True, "reason": "identity_conflict_bridged_by_shared_brand",
-                "basis": "published_name_contained_in_both_anchors",
-                "bridging_brand": bridging_brand}
-    return {"resolved": False}
+        # The published name sits inside BOTH identifiers. That used to resolve the
+        # disagreement on its own, and it is the same class of inference as a prefix
+        # match: shared letters, not shared evidence. Two organizations can both
+        # contain a brand word, so it is recorded as a CANDIDATE signal and settles
+        # nothing. Corroboration -- the organization profile above -- decides.
+        unresolved["candidate_signal"] = {"bridging_brand": bridging_brand,
+                                          "why_not_sufficient": "shared_letters_not_evidence"}
+    if rename.get("shape"):
+        unresolved["rename_shape"] = rename
+    return unresolved
 
 
 def _missing_evidence(reasons, slug_forms, domain_forms,
@@ -616,6 +688,10 @@ def resolve_company_display(
 
     agreement = _forms_agreement(slug_forms, domain_forms)
     conflict = bool(agreement["conflict"])
+    # A PREFIX relation between the identifiers is contradictory too, not benign.
+    # ``apple`` inside ``applebank`` and ``clark`` inside ``clarkaudit`` are one
+    # relation, so both take the corroboration path rather than only the second.
+    contradictory = bool(agreement["contradictory"])
     canonical_raw_key = _name_key(canonical_company_name)
     evaluated: list[Dict[str, Any]] = []
     for source, raw in _candidate_sources(organization, org_linkedin_name, canonical_company_name):
@@ -623,9 +699,10 @@ def resolve_company_display(
         legal_cleanup = "corroborated_trailing_legal_suffix_removed" in transformations
         matches: Dict[str, str] = {}
         derivations: Dict[str, Any] = {}
+        complete: Dict[str, bool] = {}
         for label, forms, primary in (("linkedin", slug_forms, slug_anchor),
                                       ("domain", domain_forms, domain_anchor)):
-            matches[label], derivation = _identity_match(
+            matches[label], derivation, complete[label] = _identity_match(
                 cleaned, raw, forms, primary, legal_cleanup)
             if derivation:
                 derivations[label] = derivation
@@ -650,6 +727,7 @@ def resolve_company_display(
             "transformations": transformations,
             "identity_matches": matches,
             "identity_derivations": derivations,
+            "identity_complete": dict(complete),
             "ambiguous_separator": ambiguous,
             "malformed_name": malformed,
             "verified_canonical_pair": verified_canonical_pair,
@@ -663,7 +741,8 @@ def resolve_company_display(
     # chosen, because it is a fact about that candidate.
     bridging_brand = _bridging_brand(chosen, slug_anchor, domain_anchor) if conflict else ""
     bridge = _resolve_conflict(chosen, evaluated, slug_forms, domain_forms,
-                               attestation, bridging_brand) if conflict else {}
+                               attestation, bridging_brand,
+                               agreement["kind"]) if contradictory else {}
     name = str(bridge.get("display_name") or (chosen or {}).get("cleaned") or "")
     if bridge.get("display_name") and bridge["display_name"] != (chosen or {}).get("cleaned"):
         # A rename picks the name the LinkedIn slug corroborates, so the candidate
@@ -677,12 +756,16 @@ def resolve_company_display(
         reasons.append("no_company_name_candidate")
     elif not identity_keys:
         reasons.append("no_stable_linkedin_or_domain_identity")
-    elif conflict and not bridge.get("resolved"):
-        reasons.append("linkedin_slug_domain_disagreement")
     elif chosen["ambiguous_separator"]:
+        # Name-quality first: these say the NAME is unusable, which is a more
+        # specific and more actionable diagnosis than the identity relation. Both
+        # hold either way, so this only changes which reason is reported.
         reasons.append("unresolved_multi_entity_or_franchise_name")
     elif chosen["malformed_name"]:
         reasons.append("malformed_or_coded_company_name")
+    elif contradictory and not bridge.get("resolved"):
+        reasons.append("linkedin_slug_domain_disagreement" if conflict
+                       else "one_identifier_extends_the_other_without_corroboration")
     else:
         matches = chosen["identity_matches"]
         exact_count = sum(v == "exact" for v in matches.values())
@@ -721,7 +804,7 @@ def resolve_company_display(
         # for identifiers that spell the name outright.
         confidence = "medium"
         reasons.append("identifiers_agree_only_after_vanity_prefix")
-    if conflict and bridge.get("resolved") and identity_safe:
+    if contradictory and bridge.get("resolved") and identity_safe:
         # The anchors still differ as strings. The evidence proved they name one
         # organization, not that they are the same legal entity, so such a row is
         # never promoted to high confidence -- it stays sendable at medium.

@@ -1,5 +1,53 @@
 # TGTC completion — progress record
 
+## Whole-path review — 2026-09-07, base `3a759d1`
+
+Full record: [SYSTEM_CLOSEOUT_2026-09-07.md](SYSTEM_CLOSEOUT_2026-09-07.md).
+
+**Correction to the section below.** It presented the general identity mechanism as
+if it settled the identity work. It did not: it left `Apple`/`applebank`/`apple.com`
+resolving, and cleared `Clark`/`clarkaudit`/`getclark.com` by the SAME rule, so it
+was wrong about one of them. A prefix relation between the two identifiers is now
+treated as contradictory rather than benign, and the only thing that still resolves a
+contradiction without corroboration is a published name that accounts for BOTH
+identifiers entirely. Prefix relations, two-names-in-one-record and a shared brand
+inside both identifiers each now need the organization's own declared website.
+
+The corpus carries that attestation as a column and runs each ambiguous pair twice:
+30/30, 12 resolve, 18 held. `homonym_prefix` and `vanity_get_bare` are string
+identical and both held; `vanity_get_attested` clears. `sibling_companies` passes
+every shape test a rebrand passes and is held, which is what separates it from
+`endeavor_attested`.
+
+**Losses now carry their units** (`orchestrator/loss_units.py`, reproduced on the
+real 2026-09-07 record). The flat reason map spans four non-addable units, repeats
+two populations under different names, and contains one inside another: `unverified`
+includes `no_contact`, so **only 11 opportunities had an email that failed to verify,
+not 155** -- the other 144 never had a contact. Delivery reconciles exactly
+(199 = 28 + 171, remainder 0), all 203 eligible buckets were genuinely searched, and
+the `hiring_manager_not_found` 169 against `hm_not_found` 147 disagreement is
+reported rather than resolved by preferring one.
+
+**The 172 duplicates close as an identity** -- 500 billed = 328 kept + 172 -- with no
+residue that could be a double purchase or a dropped first sighting. How they split
+between window-reuse seeding and within-run repeats stays OPEN: production retains no
+response-level ids.
+
+**Capacity, offline, through the real orchestrator:** 1,500 distinct new Approved in
+one run; 3,524 owed against a 2,000-row batch all drained in one run, so the batch is
+not a daily ceiling; and controls at zero when quality fails or every write fails.
+That is capacity of the code under simulated inputs -- **not 1,000 Approved per day
+demonstrated**, and not commercial performance.
+
+**A company hold is retryable**, which is what makes any of this worth doing: a
+withheld FINAL_PASS and a NEEDS_CHECK are both excluded from `terminal_posting_ids`,
+so the posting stays in custody and a later run re-decides it under the corrected
+rules with the cache retired by version.
+
+**Still open:** the 27 withheld contacts individually (blocked on a maintenance pass
+whose cron change is refused here), the 169/147 disagreement, the duplicate
+attribution, and any live measurement at all.
+
 ## Company identity resolved generally — 2026-09-07, base `e97fc3c`
 
 Full record: [COMPANY_IDENTITY_GENERAL_2026-09-07.md](COMPANY_IDENTITY_GENERAL_2026-09-07.md).

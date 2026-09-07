@@ -14,6 +14,9 @@ from tests.test_fantastic_send_safe_auto_approval import _fantastic_job
 #: posting where it returned one -- Endeavor's rebrand is only legible because the
 #: record names the company twice, once per anchor, so dropping it would test a
 #: record production never saw.
+#: ``website`` is the organization's own declared website, present on the record.
+#: Endeavor's rebrand needs it: two names inside one record are a SHAPE, and a
+#: record can carry an incorrect association, so the shape alone no longer clears.
 REVIEWED = [
     ("EndeavorB2B", "endeavorb2b", "endeavorbusinessmedia.com", "Endeavor Business Media"),
     ("BS&B Safety Systems", "bsbsafetysystems", "bsbsystems.com", "BS&B SAFETY SYSTEMS, LLC.."),
@@ -45,15 +48,26 @@ def test_reviewed_identity_resolves_with_no_manual_entry_at_all(tmp_path, name, 
     inputs = (dict(organization=other_name, org_linkedin_name=name) if other_name
               else dict(organization=name))
     inputs.update(org_linkedin_slug=slug, employer_domain=domain)
+    if other_name:
+        inputs["org_linkedin_website"] = f"https://{domain}"
     result = resolve_company_display(**inputs, cache=cache, persist=False)
     assert result.hold is False
     assert result.name == name
     assert result.evidence["manual_override"] is False
     # Changing either identifier is a DIFFERENT organization and must stay held: the
-    # evidence is about this name and these anchors, never about the name alone.
-    for other in ({"employer_domain": "unrelated.example"}, {"org_linkedin_slug": "unrelated"}):
-        moved = resolve_company_display(**{**inputs, **other}, cache=cache, persist=False)
+    # evidence is about this name and these anchors, never about the name alone --
+    # and the cached approval must not travel with the name either.
+    #
+    # The attestation is dropped alongside the move, deliberately. A record that
+    # still declares the ORIGINAL website for a moved anchor is a record asserting
+    # that pair, and honouring it is correct; what must never happen is the name or
+    # the cache carrying an approval to anchors nothing has vouched for.
+    bare = {k: v for k, v in inputs.items() if k != "org_linkedin_website"}
+    for other in ({"employer_domain": "unrelated.example"},
+                  {"org_linkedin_slug": "unrelated"}):
+        moved = resolve_company_display(**{**bare, **other}, cache=cache, persist=False)
         assert moved.hold, f"{other} must not inherit the resolved identity"
+        assert moved.evidence["cache_hit"] is False
 
 
 def test_no_manual_override_survives_that_the_general_path_already_reaches(tmp_path):
@@ -216,7 +230,9 @@ def test_resolved_company_does_not_promote_unverified_email_or_unsafe_contact(tm
         Path(__file__).resolve().parents[1] / "company_display_overrides.json")
     display = resolve_company_display(organization=other_name or name,
         org_linkedin_name=name if other_name else "", org_linkedin_slug=slug,
-        employer_domain=domain, cache=cache, persist=False)
+        employer_domain=domain,
+        org_linkedin_website=(f"https://{domain}" if other_name else ""),
+        cache=cache, persist=False)
     job = _fantastic_job(canonical_company_name=name, company_domain=domain,
         hiring_manager_email=f"fixture@{domain}", outbound_company_name=display.name,
         outbound_company_confidence=display.confidence,
