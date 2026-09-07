@@ -111,11 +111,16 @@ def record_refusal(error_code: str = "", *, path: str = "",
 
 
 def record_served(*, path: str = "", now: Optional[datetime] = None) -> Dict[str, Any]:
-    """A chargeable call went through. Recovery is automatic from exactly here.
+    """A chargeable call RETURNED SUCCESSFULLY. Recovery is automatic from here.
 
-    Idempotent and cheap: already-serving runs rewrite the same two timestamps, so
-    this can sit on the success path of every chargeable call without becoming a
-    write per request that matters.
+    CALL THIS ONLY FROM A RESPONSE. Not when reserving budget, not in a finally, not
+    on an exception path, and never because a timer expired. It was briefly called at
+    reservation time, which meant zero HTTP requests could turn REFUSING into SERVING
+    and clear the retry block -- the record then described an intention rather than
+    anything the provider had done.
+
+    Idempotent and cheap: an already-serving state returns without writing, so this
+    can sit on the success path of every chargeable call.
     """
     state = load(path)
     moment = _iso(now)
@@ -158,6 +163,30 @@ def may_attempt(*, path: str = "", now: Optional[datetime] = None) -> Dict[str, 
     return {"allowed": False, "reason": "provider_refusing_within_retry_interval",
             "retry_interval_hours": hours, "next_attempt_after": _iso(resume_at),
             **state}
+
+
+def acquisition_allowed(*, path: str = "") -> Dict[str, Any]:
+    """May PAID INVENTORY be bought? A different question from "may we check".
+
+    The interval elapsing permits one controlled attempt at Apollo. It does not
+    permit buying postings, because nothing new has been learned yet -- the clock is
+    not a response. Only a satisfactory response, recorded from the response itself,
+    lifts a refusal for acquisition.
+
+    Getting this wrong is how a refusing provider silently re-enabled purchases: the
+    run stood down at hour 1, the same run stood down at hour 5, and at hour 7 it
+    bought a window of postings it still could not enrich.
+    """
+    state = load(path)
+    if state["state"] == REFUSING:
+        return {"allowed": False,
+                "reason": "provider_refusing_until_a_served_response",
+                "detail": ("Apollo refused a chargeable call at "
+                           f"{state.get('refusing_since')}. A retry may be attempted "
+                           "once the interval elapses, but inventory is not bought "
+                           "until a call actually succeeds."),
+                **state}
+    return {"allowed": True, "reason": f"provider_state_{state['state']}", **state}
 
 
 def summary(path: str = "") -> Dict[str, Any]:
