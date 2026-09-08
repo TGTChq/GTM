@@ -104,10 +104,24 @@ either. The actual post-patch Approved gain remains unmeasured.
 The same 29 new regression cases on a separate pristine `c30178d` worktree give
 **17 failures and 12 passing controls**. This avoids reverting uncommitted work
 and proves that the new assertions do not merely pass on both implementations.
-Full-suite and integrity results are recorded in the pull request after the
-final gate completes.
+The final full suite reports **3,741 passed and 1,001 subtests passed** on Python
+3.12.13 / pytest 9.1.1. Integrity: **35 checked, zero mismatch, zero absent**.
+Tracked-file pyflakes reports no undefined names; existing unused-import warnings
+are unchanged. `git diff --check` is clean.
 
 Local execution additionally denies IPv4/IPv6 sockets at the kernel boundary,
 clears the environment and uses a fresh HOME, disables dotenv loading, and runs
 the repository's `ci_no_network` plugin. This applies to subprocesses too.
 No production access or paid request is needed to reproduce these regressions.
+
+## Publication status
+
+Branch: `fix/approved-volume-recovery-20260908`. The initial push was denied by
+the permission layer because external publication required explicit user
+approval. No alternate publication path was attempted. The user subsequently
+authorized publishing this branch to `TGTChq/GTM` and opening a PR on September 8.
+The authorized Git push failed for missing HTTPS credentials; the connected
+GitHub integration then rejected tree creation with HTTP 403, "Resource not
+accessible by integration." Publication therefore remains blocked on write
+access, not user authorization. No PR, merge, deployment, or post-patch live
+uplift exists. Pending Railway configuration changes were not applied.
