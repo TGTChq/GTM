@@ -2,8 +2,7 @@
 
 The pipeline receives domains from several noisy sources: employer websites,
 career pages, investor-relations pages, ATS redirects, and Apollo.  This module
-reduces safe company subdomains to a registrable-looking root domain without
-adding a new runtime dependency.
+reduces safe company subdomains to a registrable root using a bundled suffix list.
 """
 
 from __future__ import annotations
@@ -12,22 +11,15 @@ import ipaddress
 import re
 from urllib.parse import urlparse
 
+import tldextract
+
 _LABEL_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$", re.I)
 
-# Common public suffixes where the registrable domain needs three labels.
-# This is intentionally conservative; it covers the markets most likely in the
-# current US-targeted pipeline while avoiding a heavy public-suffix dependency.
-_MULTI_LABEL_PUBLIC_SUFFIXES = {
-    "co.uk", "org.uk", "me.uk", "ac.uk", "gov.uk",
-    "com.au", "net.au", "org.au", "edu.au", "gov.au",
-    "co.nz", "net.nz", "org.nz", "govt.nz",
-    "co.za", "org.za", "net.za",
-    "com.br", "com.mx", "com.ar", "com.co", "com.pe", "com.cl",
-    "com.sg", "com.hk", "com.tw", "com.my", "com.ph",
-    "co.jp", "co.kr", "co.in", "firm.in", "net.in", "org.in",
-    "com.cn", "com.tr", "com.sa", "com.eg", "com.ng",
-    "com.de", "com.fr", "com.es", "com.it", "com.nl",
-}
+# No HTTP or writable cache is needed, including on a fresh container. Private
+# hosting suffixes stay at the platform root for the existing intermediary gate.
+DOMAIN_NORMALIZATION_VERSION = "public-suffix/1"
+_PUBLIC_SUFFIX = tldextract.TLDExtract(
+    suffix_list_urls=(), cache_dir=None, include_psl_private_domains=False)
 
 # Subdomains that commonly appear in company-owned career, recruiting, or
 # investor URLs.  The final root-domain reduction handles any additional nested
@@ -85,7 +77,9 @@ def normalize_company_domain(value: str | None) -> str:
 
     host = ".".join(labels)
     labels = host.split(".")
-    suffix2 = ".".join(labels[-2:])
-    if suffix2 in _MULTI_LABEL_PUBLIC_SUFFIXES and len(labels) >= 3:
-        return ".".join(labels[-3:])
+    extracted = _PUBLIC_SUFFIX(host)
+    if extracted.suffix:
+        # A public suffix alone is not an employer, e.g. gov.in or edu.ph.
+        return extracted.top_domain_under_public_suffix
+    # Preserve the established behavior for internal/unlisted test namespaces.
     return ".".join(labels[-2:])

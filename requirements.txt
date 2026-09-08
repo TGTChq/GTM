@@ -1,2 +1,4 @@
 requests>=2.32,<3
 python-dotenv>=1.0,<2
+# Bundled Public Suffix List; normalization never fetches data at runtime.
+tldextract==5.3.0
