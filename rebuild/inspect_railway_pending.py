@@ -152,15 +152,25 @@ def summarize(response):
         interpretation = "entries_only_in_masked_view"
     else:
         interpretation = "decrypted_patch_has_entries"
-    patch_id = str(staged.get("id", ""))
-    if patch_id and not re.fullmatch(r"[0-9a-fA-F-]{36}", patch_id):
-        raise ValueError("unexpected_patch_id")
+    # GraphQL IDs are opaque. A non-UUID marker must not prevent inspecting the
+    # patch, or be interpreted as proof that no changes exist. Keep unfamiliar
+    # identifiers out of the report; they are never used in a mutation here.
+    raw_id = staged.get("id")
+    if isinstance(raw_id, str) and re.fullmatch(
+            r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}", raw_id):
+        patch_id, id_format = raw_id.lower(), "uuid"
+    else:
+        patch_id = None
+        id_format = ("absent_or_null" if raw_id is None else
+                     "empty_string" if raw_id == "" else
+                     "opaque_string_redacted" if isinstance(raw_id, str) else
+                     "unexpected_type_redacted")
     status = staged.get("status")
     if status not in ("STAGED", "APPLYING", "APPLIED", "FAILED", "DISCARDED"):
         status = "OTHER"
     return {
         "read_only": True, "project_id": PROJECT, "environment_id": ENVIRONMENT,
-        "patch_id": patch_id, "patch_status": status,
+        "patch_id": patch_id, "patch_id_format": id_format, "patch_status": status,
         "matches_connector_patch_id": patch_id == OBSERVED_PATCH,
         "inspected_entry_count": decrypted["inspected_entry_count"],
         "count_definition": "one entry per variable, one per other supplied scalar/list/null field; not Railway's undocumented changeCount",
@@ -232,7 +242,7 @@ def main():
     except Exception as exc:
         known = {"railway_cli_not_found", "installed_cli_has_no_supported_api_command",
                  "cli_query_failed_check_login_and_project_access", "api_response_error",
-                 "unexpected_project_or_environment", "unsupported_config_shape", "unsupported_masked_patch_shape", "unexpected_patch_id"}
+                 "unexpected_project_or_environment", "unsupported_config_shape", "unsupported_masked_patch_shape"}
         code = str(exc) if type(exc) in (RuntimeError, ValueError) and str(exc) in known else type(exc).__name__
         print("No se pudo completar la lectura: " + code, file=sys.stderr)
         print("No se aplicaron cambios. No compartas tokens ni salidas crudas de variables.", file=sys.stderr)

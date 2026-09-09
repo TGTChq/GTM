@@ -142,11 +142,13 @@ def test_failed_cli_does_not_echo_raw_response_or_save_it(monkeypatch, tmp_path,
     assert list(tmp_path.iterdir()) == []
 
 
-def test_protected_cwd_saves_under_user_home_without_repeating_api(monkeypatch, tmp_path, capsys):
-    protected = tmp_path / "System32"
-    protected.mkdir()
-    user_home = tmp_path / "user"
-    user_home.mkdir()
+@pytest.mark.parametrize("folder_name", ["System32", r"Windows\System32"])
+def test_protected_cwd_saves_under_user_home_without_repeating_api(monkeypatch, tmp_path, capsys, folder_name):
+    # The literal backslash also reproduces repr-escaping on a POSIX runner.
+    protected = tmp_path / folder_name
+    protected.mkdir(parents=True)
+    user_home = tmp_path / ("user-" + folder_name)
+    user_home.mkdir(parents=True)
     monkeypatch.chdir(protected)
     monkeypatch.setattr(probe.Path, "home", classmethod(lambda cls: user_home))
     real_open = probe.Path.open
@@ -169,6 +171,30 @@ def test_protected_cwd_saves_under_user_home_without_repeating_api(monkeypatch, 
     files = list((user_home / "TGTC-diagnostics").glob("*.json"))
     assert len(files) == 1
     assert json.loads(files[0].read_text())["read_only"] is True
-    printed = str(capsys.readouterr())
+    captured = capsys.readouterr()
+    printed = captured.out + captured.err
     assert str(files[0]) in printed
     assert "private-" not in printed
+
+
+@pytest.mark.parametrize("identifier,format_name", [
+    (None, "absent_or_null"), ("", "empty_string"),
+    ("private-opaque-identifier", "opaque_string_redacted"),
+    ({"private-key": "private-value"}, "unexpected_type_redacted"),
+    (12345, "unexpected_type_redacted"),
+])
+@pytest.mark.parametrize("empty", [False, True])
+def test_non_uuid_id_preserves_patch_evidence_without_printing_identifier(identifier, format_name, empty):
+    raw = response()
+    staged = raw["data"]["environmentStagedChanges"]
+    staged["id"] = identifier
+    if empty:
+        staged["patch"] = {}
+    result = probe.summarize(raw)
+    assert result["patch_id"] is None
+    assert result["patch_id_format"] == format_name
+    assert result["inspected_entry_count"] == (0 if empty else 4)
+    assert result["patch_status"] == "STAGED"
+    assert result["matches_connector_patch_id"] is False
+    assert result["safe_to_apply"] is False
+    assert "private-" not in json.dumps(result)
