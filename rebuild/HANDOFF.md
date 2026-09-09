@@ -61,7 +61,17 @@ enrichments (Fantastic supplied the facts). `evidence_class: SIMULATED_PROVIDERS
 ```bash
 python -m tgtc_core.testing.load --events 50000 --burst 10000 --workers 4
 ```
-Result: `__LOAD__`. Zero provider latency, so this is a software envelope only.
+Result (2026-09-08, embedded PostgreSQL, 4 worker threads, zero provider latency):
+
+| Phase | Numbers |
+|---|---|
+| Ingestion | 60,000 rows (50,000 events + 10,000 burst) in 122 pages, 66.1 s, 908 rows/s; 15,840 new postings, 12,016 modifications recorded as `posting_versions`; both partitions `complete` |
+| Identity + classification | 15,840 + 15,840 items in 143.8 s, 220 items/s, **0 errors** (the first run had 3 employer-creation races; fixed with a savepoint, covered by `test_identity_race.py`) |
+| Result | 15,840 postings, 15,840 opportunities, 31,680 work items `done`, 15,840 `qualify_opportunity` items `ready` (the next stage's queue; Apollo is not simulated by the script), no item lost, running or in retry |
+| Memory | 86.1 MB peak (tracemalloc), 213 s total |
+
+This is a software envelope: it says nothing about inventory, buyer coverage,
+conversion, credits or provider latency, and the fake serves pages instantly.
 
 ```bash
 python -m pyflakes tgtc_core tests_core   # undefined names: none (unused imports only)

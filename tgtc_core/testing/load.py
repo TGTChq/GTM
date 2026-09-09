@@ -136,13 +136,17 @@ def run(*, events: int, burst: int, workers: int, database_url_override: str = "
             postings = cur.fetchone()["count"]
             cur.execute("SELECT count(*) FROM opportunities")
             opps = cur.fetchone()["count"]
-            cur.execute("SELECT state, count(*) AS n FROM work_items GROUP BY state")
-            wi = {r["state"]: int(r["n"]) for r in cur.fetchall()}
+            cur.execute("SELECT kind, state, count(*) AS n FROM work_items GROUP BY kind, state")
+            wi = {f"{r['kind']}:{r['state']}": int(r["n"]) for r in cur.fetchall()}
             cur.execute("SELECT count(*) FROM posting_versions WHERE version > 1")
             versions = cur.fetchone()["count"]
         conn.commit()
         report["result"] = {"postings": postings, "opportunities": opps, "work_items": wi, "modified_versions": versions,
-                            "queue_lost_or_duplicated": wi.get("running", 0) + wi.get("ready", 0) + wi.get("retry", 0)}
+                            # only the two stages this script runs; qualify_opportunity items are the NEXT
+                            # stage's queue (Apollo is not simulated here), not lost work
+                            "queue_lost_or_duplicated": sum(v for k, v in wi.items()
+                                                            if k.split(":")[0] in ("resolve_identity", "classify")
+                                                            and k.split(":")[1] in ("running", "ready", "retry"))}
         current, peak = tracemalloc.get_traced_memory()
         report["memory_mb"] = {"current": round(current / 1e6, 1), "peak": round(peak / 1e6, 1)}
         report["total_seconds"] = round(time.perf_counter() - t0, 2)
