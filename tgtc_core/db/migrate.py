@@ -9,6 +9,7 @@ highest version applied.
 from __future__ import annotations
 
 import re
+from ipaddress import ip_address
 from pathlib import Path
 from typing import List, Tuple
 
@@ -50,10 +51,21 @@ def applied_versions(conn: psycopg.Connection) -> List[int]:
 
 
 def reset_schema(conn: psycopg.Connection) -> None:
-    """TEST ONLY: drop and recreate the public schema. Refuses non-local hosts."""
+    """TEST ONLY: reset a disposable local database, over TCP or a Unix socket."""
     info = conn.info
     host = str(getattr(info, "host", "") or "")
-    if host not in ("", "localhost", "127.0.0.1", "::1"):
+    hostaddr = str(getattr(info, "hostaddr", "") or "")
+    # pgserver uses an absolute Unix socket directory on Linux/macOS, with no
+    # hostaddr. Windows uses loopback TCP. Check the actual address as well:
+    # libpq allows hostaddr to override a seemingly local host name.
+    socket_local = host.startswith("/") and not hostaddr
+    tcp_local = host in ("", "localhost", "127.0.0.1", "::1")
+    if hostaddr:
+        try:
+            tcp_local = tcp_local and ip_address(hostaddr).is_loopback
+        except ValueError:
+            tcp_local = False
+    if not (socket_local or tcp_local):
         raise RuntimeError(f"refusing to reset a schema on non-local host {host!r}")
     with conn.cursor() as cur:
         cur.execute("DROP SCHEMA public CASCADE; CREATE SCHEMA public;")
