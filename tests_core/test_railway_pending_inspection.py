@@ -140,3 +140,35 @@ def test_failed_cli_does_not_echo_raw_response_or_save_it(monkeypatch, tmp_path,
     assert probe.main() == 1
     assert "private-" not in str(capsys.readouterr())
     assert list(tmp_path.iterdir()) == []
+
+
+def test_protected_cwd_saves_under_user_home_without_repeating_api(monkeypatch, tmp_path, capsys):
+    protected = tmp_path / "System32"
+    protected.mkdir()
+    user_home = tmp_path / "user"
+    user_home.mkdir()
+    monkeypatch.chdir(protected)
+    monkeypatch.setattr(probe.Path, "home", classmethod(lambda cls: user_home))
+    real_open = probe.Path.open
+
+    def protected_open(path, *args, **kwargs):
+        if path.parent == protected:
+            raise PermissionError("private-filesystem-message")
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(probe.Path, "open", protected_open)
+    reads = []
+
+    def read_once():
+        reads.append(True)
+        return probe.summarize(response())
+
+    monkeypatch.setattr(probe, "run_query", read_once)
+    assert probe.main() == 0
+    assert reads == [True]
+    files = list((user_home / "TGTC-diagnostics").glob("*.json"))
+    assert len(files) == 1
+    assert json.loads(files[0].read_text())["read_only"] is True
+    printed = str(capsys.readouterr())
+    assert str(files[0]) in printed
+    assert "private-" not in printed

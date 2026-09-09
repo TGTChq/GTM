@@ -206,9 +206,18 @@ def main():
         report["observed_at_utc"] = datetime.now(timezone.utc).isoformat()
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
         destination = Path.cwd() / f"railway-pending-inspection-{stamp}.json"
-        with destination.open("x", encoding="utf-8") as handle:
-            json.dump(report, handle, ensure_ascii=False, indent=2)
-        print(f"Diagnostico de solo lectura guardado: {destination.name}")
+        try:
+            with destination.open("x", encoding="utf-8") as handle:
+                json.dump(report, handle, ensure_ascii=False, indent=2)
+        except PermissionError:
+            # PowerShell can start in System32. A read that succeeded should not
+            # be reported as an API failure just because the CWD is protected.
+            folder = Path.home() / "TGTC-diagnostics"
+            folder.mkdir(parents=True, exist_ok=True)
+            destination = folder / destination.name
+            with destination.open("x", encoding="utf-8") as handle:
+                json.dump(report, handle, ensure_ascii=False, indent=2)
+        print(f"Diagnostico de solo lectura guardado: {destination}")
         print(f"Parche: {report['patch_id']} ({report['patch_status']})")
         print("Entradas por servicio: " + json.dumps(report["by_scope"], ensure_ascii=False))
         print("Comparacion: " + json.dumps(report["by_comparison"], ensure_ascii=False))
