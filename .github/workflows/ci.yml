@@ -20,7 +20,7 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, feat/rebuild-core]
   pull_request:
     branches: [main]
   workflow_dispatch:
@@ -131,7 +131,13 @@ jobs:
       - name: Core integrated suite (embedded PostgreSQL, simulated providers)
         env:
           PYTHONHASHSEED: "0"
-        run: python -m pytest tests_core -q
+        run: python -m pytest tests_core -q -p ci_no_network --junitxml=core-results.xml
+      - name: Preserve core test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: core-test-results
+          path: core-results.xml
       - name: Confirm no credential reached the job
         run: |
           for name in RAPIDAPI_KEY APOLLO_API_KEY HUNTER_API_KEY AIRTABLE_TOKEN \
