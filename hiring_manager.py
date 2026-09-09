@@ -102,8 +102,9 @@ def _checkpoint_reusable(leads):
     # A returned function is not necessarily finished. Budget refusals, missing
     # contacts and company-review holds must be re-evaluated on resume; only their
     # paid provider evidence is reusable. Terminal business decisions remain final.
-    return all(str(row.get("_final_state") or "") in {"FINAL_PASS", "REJECT"}
-               for row in leads)
+    return all(str(row.get("_final_state") or "") == "REJECT"
+               or (str(row.get("_final_state") or "") == "FINAL_PASS"
+                   and not row.get("_outbound_company_hold")) for row in leads)
 
 
 @dataclass
@@ -487,18 +488,21 @@ def _paid_match_allowed(from_org_id_fallback: bool) -> bool:
     every path and is off by default -- it limits work that was already authorized,
     so it is switched on deliberately rather than imposed here.
 
-    The fallback one bounds only the paid enrichment of buckets the org-id recovery
-    found, and defaults to ZERO. Those buckets had no people before the fallback
-    existed, so every paid call they make is spend that no prior authorization
-    covered. The recovery still runs and still finds the people; enriching them waits
-    for a budget.
+    The fallback ceiling defaults to zero in bounded recovery. In continuous mode
+    an ABSENT fallback ceiling inherits normal production authorization; otherwise
+    recovered candidates remain blocked forever despite a replenished account.
+    An explicit ceiling (including zero) still applies. The Apollo client retains
+    the shared authorization, availability circuit, and durable call accounting.
     """
     overall = int(getattr(config, "APOLLO_MAX_PERSON_MATCH_CALLS_PER_RUN", 0) or 0)
     if overall > 0 and _PAID_MATCH_BUDGET["used"] >= overall:
         return False
     if from_org_id_fallback:
         cap = int(getattr(config, "APOLLO_ORG_ID_FALLBACK_MAX_PAID_MATCHES_PER_RUN", 0) or 0)
-        if _PAID_MATCH_BUDGET["fallback_used"] >= cap:
+        inherits_continuous = (
+            bool(getattr(config, "APOLLO_CONTINUOUS_MODE", False)) and cap == 0
+            and not bool(getattr(config, "APOLLO_ORG_ID_FALLBACK_BUDGET_CONFIGURED", True)))
+        if not inherits_continuous and _PAID_MATCH_BUDGET["fallback_used"] >= cap:
             return False
     return True
 
@@ -1710,12 +1714,12 @@ def _process_company_strict(company_jobs: List[Dict]) -> Tuple[List[Dict], Dict]
                     attempted_id_reasons[candidate_id] = str(email_decision.primary_reason or "")
                 continue
 
-            # NEEDS_CHECK means Apollo did not verify this person's e-mail, so the
-            # row could never pass send_safe_facts. Accepting it here is exactly how
-            # an undeliverable backlog accumulated. Hold it as a fail-open fallback
-            # and try the next ranked candidate first.
-            if (email_decision.state_value == GateState.NEEDS_CHECK.value
-                    and _person_level_unverified(person)
+            # A verified email does not resolve a person-level contact review.
+            # Preserve that candidate as fallback while trying a fully valid one
+            # within the existing cascade and paid-attempt budgets.
+            if ((contact_decision.state_value == GateState.NEEDS_CHECK.value
+                 or (email_decision.state_value == GateState.NEEDS_CHECK.value
+                     and _person_level_unverified(person)))
                     and _alternate_budget_available()
                     and _more2):
                 if fallback_bundle is None:
@@ -2090,9 +2094,17 @@ def _enrichment_workload_key(jobs: List[Dict]) -> str:
     interrupted caller resuming an earlier batch.
     """
     rows = sorted(json.dumps(job, sort_keys=True, default=str) for job in jobs)
+    from company_display_resolver import RESOLVER_VERSION
+    from domain_utils import DOMAIN_NORMALIZATION_VERSION
+
     rules = {key: getattr(config, key, None) for key in (
         "VALIDATION_VERSION", "MIN_EMPLOYEES", "MAX_EMPLOYEES",
-        "APOLLO_EXCLUDED_INDUSTRY_KEYWORDS", "FINAL_PASS_PIPELINE_ENABLED")}
+        "APOLLO_EXCLUDED_INDUSTRY_KEYWORDS", "FINAL_PASS_PIPELINE_ENABLED",
+        "HM_DOMAIN_CORROBORATION_RECOVERY", "HM_SECOND_PASS_TITLE_BROADENING",
+        "APOLLO_ORG_ID_ZERO_PEOPLE_FALLBACK_ENABLED", "APOLLO_PEOPLE_SEARCH_MAX_PAGES",
+        "ALTERNATE_CONTACT_CASCADE_ENABLED", "CONTACT_MAX_REROUTE_ATTEMPTS_PER_BUCKET")}
+    rules.update(company_resolver_version=RESOLVER_VERSION,
+                 domain_normalization_version=DOMAIN_NORMALIZATION_VERSION)
     return hashlib.sha256(json.dumps([rows, rules], sort_keys=True, default=str).encode()).hexdigest()
 
 

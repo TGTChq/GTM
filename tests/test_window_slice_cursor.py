@@ -273,6 +273,7 @@ class AnOffsetEraDrainedFlagIsNotSliceEvidence(unittest.TestCase):
 
         eng = fja.DateCreatedWatermarkEngine.__new__(fja.DateCreatedWatermarkEngine)
         eng.state = {"window_drained_sources": drained, "window_slices": slices}
+        eng.lower, eng.upper = "2026-09-01T00:00:00Z", "2026-09-01T06:00:00Z"
         eng.path = _os.path.join(_tempfile.mkdtemp(), "wm.json")
         return eng, _mock.patch.object(_config, "FANTASTIC_WINDOW_SLICING_ENABLED", sliced)
 

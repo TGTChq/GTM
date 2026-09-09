@@ -2113,6 +2113,15 @@ class DateCreatedWatermarkEngine:
         if in_flight and start_ok:
             self.lower, self.upper = str(self.state.get("window_start")), str(in_flight)
             reused = True
+            if not self.state.get("window_slice_origin"):
+                # Recover the old grid from its recorded ranges before clamping.
+                # Otherwise seconds of cron jitter move EVERY slice boundary.
+                starts = [self.lower]
+                for ranges in self.window_slices_done().values():
+                    starts.extend(key.split("|", 1)[0] for key in ranges if "|" in key)
+                for offsets in self.window_slice_offsets().values():
+                    starts.extend(key.split("|", 1)[0] for key in offsets if "|" in key)
+                self.state["window_slice_origin"] = min(starts)
             if self.lower < horizon:
                 # Part of the window is still reachable, part is not. Raise the lower
                 # bound to what the feed will actually serve, so the window states its
@@ -2152,6 +2161,9 @@ class DateCreatedWatermarkEngine:
             if lower_dt >= upper_dt:
                 lower_dt = upper_dt  # run started inside the lag buffer: empty interval
             self.lower, self.upper = self._iso(lower_dt), self._iso(upper_dt)
+            self.state["window_slice_origin"] = self.lower
+            self.state["window_slices"] = {}
+            self.state["window_slice_offsets"] = {}
             self.state["window_acquired_ids"] = []
             # A NEW window starts with every source un-drained. Never carried over:
             # a source must earn "drained" for the window it actually paged.
@@ -2670,13 +2682,38 @@ class DateCreatedWatermarkEngine:
             hi = datetime.fromisoformat(self.upper.replace("Z", "+00:00"))
         except (TypeError, ValueError):
             return []
+        try:
+            origin = datetime.fromisoformat(str(
+                self.state.get("window_slice_origin") or self.lower).replace("Z", "+00:00"))
+            if origin.tzinfo is None:
+                origin = origin.replace(tzinfo=timezone.utc)
+        except (TypeError, ValueError):
+            origin = lo
+        step = timedelta(hours=hours)
         out: List[Tuple[str, str]] = []
         cur = lo
         while cur < hi and len(out) < 400:
-            nxt = min(cur + timedelta(hours=hours), hi)
+            nxt = min(origin + ((cur - origin) // step + 1) * step, hi)
             out.append((self._iso(cur), self._iso(nxt)))
             cur = nxt
         return out
+
+    @staticmethod
+    def _slice_covered(lo: str, hi: str, done) -> bool:
+        """Completed ranges also cover a first slice clipped by the feed's floor."""
+        intervals = []
+        for key in done:
+            start, separator, end = str(key).partition("|")
+            if separator and start < end:
+                intervals.append((start, end))
+        cursor = lo
+        for start, end in sorted(intervals):
+            if start > cursor:
+                break
+            cursor = max(cursor, end)
+            if cursor >= hi:
+                return True
+        return False
 
     def coverage_rewinds(self) -> Dict[str, int]:
         """How many times each source was sent back to the head of THIS window."""
@@ -2741,7 +2778,9 @@ class DateCreatedWatermarkEngine:
             return False
         if not bool(getattr(config, "FANTASTIC_WINDOW_SLICING_ENABLED", False)):
             return True
-        return bool(self.window_slices_done().get(str(label)))
+        done = self.window_slices_done().get(str(label), [])
+        bounds = self.window_slice_bounds()
+        return bool(bounds) and all(self._slice_covered(lo, hi, done) for lo, hi in bounds)
 
     def mark_source_drained(self, label: str) -> None:
         """Record whether a source exhausted the window, from ITS OWN segment stats.
@@ -2785,13 +2824,12 @@ class DateCreatedWatermarkEngine:
                     cap_limit: int, accept: Optional[Tuple[str, ...]]) -> None:
         """Drain the window one `date_created` slice at a time, oldest first.
 
-        Each slice is paged from offset 0 WITHIN THIS RUN, which is exactly the
-        documented usage. Nothing about a slice's position is carried between runs;
-        what persists is the fact that the slice is finished, and that fact stays
-        true however the feed reorders itself.
+        Completed date ranges and unfinished offsets persist. The grid is anchored
+        for the lifetime of a window, including when the feed clips its first slice.
         """
         done = set(self.window_slices_done().get(str(label), []))
         slices = self.window_slice_bounds()
+        consumed_at_entry = self.quota.jobs_consumed
         # NOT `setdefault(label, {})`: `_fetch_segment` initialises the segment with
         # its full counter shape only when the key is absent, so pre-creating an
         # empty dict here left it without `attempted` and the first call raised.
@@ -2799,28 +2837,26 @@ class DateCreatedWatermarkEngine:
             "total": len(slices), "already_done": 0, "drained_now": 0,
             "attempted": 0, "billed": 0, "kept": 0, "budget_exhausted": False})
         stats["total"] = len(slices)
-        stats["already_done"] = sum(1 for lo, hi in slices if f"{lo}|{hi}" in done)
+        stats["already_done"] = sum(1 for lo, hi in slices if self._slice_covered(lo, hi, done))
 
         for lo, hi in slices:
             key = f"{lo}|{hi}"
-            if key in done:
+            if self._slice_covered(lo, hi, done):
                 continue
-            room = min(cap_limit, self.run_cap - self.quota.jobs_consumed)
+            room = min(cap_limit - (self.quota.jobs_consumed - consumed_at_entry),
+                       self.run_cap - self.quota.jobs_consumed)
             if room <= 0:
                 stats["budget_exhausted"] = True
                 seg = self.metrics["segments"].get(label)
                 if seg is not None:
-                    seg["stop_reason"] = seg.get("stop_reason") or "cap_reached"
+                    seg["stop_reason"] = "cap_reached"
                 break
             params = dict(base_params)
             params["date_created_gte"] = lo
             params["date_created_lt"] = hi
             resume = int(self.window_slice_offsets().get(str(label), {}).get(key, 0) or 0)
-            # Read this slice's OWN stop reason: `_fetch_segment` only ever sets the
-            # segment's reason if it is empty, so an earlier slice's reason would
-            # otherwise mask every later one.
+            # An earlier short page must not mask this slice's budget/error stop.
             seg_key = self.metrics["segments"].get(label)
-            carried = (seg_key.get("stop_reason") or "") if seg_key else ""
             if seg_key is not None:
                 seg_key["stop_reason"] = ""
             before = self.quota.jobs_consumed
@@ -2833,8 +2869,6 @@ class DateCreatedWatermarkEngine:
                                      rows, offset, lambda value: self.record_slice_offset(label, key, value)))
             seg_key = self.metrics["segments"].get(label) or {}
             slice_stop = str(seg_key.get("stop_reason") or "")
-            if seg_key:
-                seg_key["stop_reason"] = carried or slice_stop
             billed = self.quota.jobs_consumed - before
             progress = int(seg_key.get("continuation_rows", 0)) - progress_before
             stats["attempted"] += 1
@@ -2855,9 +2889,13 @@ class DateCreatedWatermarkEngine:
                 # Unfinished: remember how far into THIS slice we got, so the next
                 # run continues rather than re-buying the prefix.
                 self.record_slice_offset(label, key, resume + progress)
+            if slice_stop == "cap_reached":
+                stats["budget_exhausted"] = True
 
-        if len(done) >= len(slices) and slices:
+        if slices and all(self._slice_covered(lo, hi, done) for lo, hi in slices):
             self.mark_source_drained_from_slices(label)
+        elif slices:
+            self.state.setdefault("window_drained_sources", {})[str(label)] = False
         # DELIBERATELY NOT `self._save()`. Slice progress is continuation state, and
         # continuation must not become durable before the rows it advances past are
         # in custody. `checkpoint()` runs the custody hook and only then saves, so

@@ -1572,6 +1572,10 @@ FANTASTIC_HISTORICAL_RECOVERY_STATE_PATH = os.getenv(
 
 APOLLO_ORG_ID_FALLBACK_MAX_PAID_MATCHES_PER_RUN = _env_int(
     "APOLLO_ORG_ID_FALLBACK_MAX_PAID_MATCHES_PER_RUN", 0)
+# Internal presence bit, not another operator switch. Continuous production uses
+# its normal authorization when this legacy recovery-only ceiling was never set.
+APOLLO_ORG_ID_FALLBACK_BUDGET_CONFIGURED = os.getenv(
+    "APOLLO_ORG_ID_FALLBACK_MAX_PAID_MATCHES_PER_RUN") not in (None, "")
 
 # Overall ceiling on paid `people/match` calls per run, across every path (primary,
 # alternate cascade, org-id fallback). 0 = no ceiling, which is the behaviour that
