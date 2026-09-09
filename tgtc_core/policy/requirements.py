@@ -48,8 +48,12 @@ RULES: Tuple[Rule, ...] = (
          "Unknown headcount does not reject by itself (REJECT_UNKNOWN_FIRMOGRAPHICS is an env value, not a code truth)."),
     Rule("founder_fallback_max_employees", 99, LEGACY,
          "Founders/CEO are searched as buyers only at employers with <= 99 employees."),
-    Rule("max_match_attempts_per_opportunity", 3, LEGACY,
-         "Paid person enrichments attempted per opportunity before it closes as no_verified_buyer (APOLLO_MAX_PERSON_MATCH_ATTEMPTS_PER_BUCKET)."),
+    Rule("max_match_attempts_per_evidence_epoch", 3, LEGACY,
+         "Paid person enrichments attempted per opportunity AND evidence epoch before it closes as no_verified_buyer "
+         "(APOLLO_MAX_PERSON_MATCH_ATTEMPTS_PER_BUCKET). A reopen on new evidence starts the next epoch; history is kept."),
+    Rule("max_evidence_epochs", 5, BLUEPRINT,
+         "Upper bound on reopen epochs per opportunity so reconsideration on new evidence never becomes unlimited retries. "
+         "Value proposed by the rebuild, pending confirmation."),
     Rule("email_verification_authority", ("apollo",), BLUEPRINT,
          "Only Apollo email_status == 'verified' proves an email. Hunter never promotes. unknown/accept_all/extrapolated never pass."),
     Rule("email_domain_rule", "employer_domain_or_corroborated_alternate", BLUEPRINT,

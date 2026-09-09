@@ -184,3 +184,31 @@ def evaluate_email(
         # Apollo is the single authority; nothing promotes unverified/extrapolated/unknown.
         return GateResult(False, f"email:not_verified:{status or 'missing'}", {"alignment": alignment})
     return GateResult(True, "email:pass", {"alignment": alignment, "authority": "apollo"})
+
+
+def pre_enrichment_check(*, person: Dict[str, Any], employer_name: str, employer_domains: Set[str],
+                         buyer_titles: Sequence[str], founder_allowed: bool) -> GateResult:
+    """What can be decided from a SEARCH result, which Apollo documents as limited data
+    (no email, no LinkedIn; organization details may be partial).
+
+    Decides only on evidence the search carries: a title outside the buyer hierarchy,
+    a founder-tier title at an employer too large for founders, or an organization that
+    is provably a different company. Everything that arrives only with enrichment
+    (LinkedIn, employment history, email) is checked AFTER enrichment by
+    ``evaluate_contact`` / ``evaluate_email``. A negative here is cheap and re-evaluable;
+    it never blacklists the candidate.
+    """
+    if not (person.get("id") or person.get("person_id")):
+        return GateResult(False, "contact:no_person_identity")
+    title = str(person.get("title") or "").strip()
+    if not title_matches(title, buyer_titles):
+        return GateResult(False, "contact:function_or_authority_mismatch", {"title": title})
+    if is_founder_tier(title) and not founder_allowed:
+        return GateResult(False, "contact:founder_tier_not_allowed_for_size", {"title": title})
+    org = person_organization(person)
+    org_name = str(org.get("name") or person.get("organization_name") or "")
+    org_domain = _org_domain(org) or safe_employer_domain(person.get("organization_domain"))
+    if org_domain or org_name:
+        if not organization_matches(name=org_name, domain=org_domain, employer_name=employer_name, employer_domains=employer_domains):
+            return GateResult(False, "contact:wrong_organization", {"org": org_name or org_domain})
+    return GateResult(True, "contact:eligible_for_enrichment", {"title": title})

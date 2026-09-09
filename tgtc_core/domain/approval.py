@@ -118,6 +118,9 @@ def build_approved_lead(
         return ApprovalRefusal("posting_identity_missing")
     if str(posting.get("state") or "") in {"closed", "expired"}:
         return ApprovalRefusal("posting_not_active", {"state": posting.get("state")})
+    valid_through = posting.get("date_valid_through")
+    if isinstance(valid_through, datetime) and valid_through < moment:
+        return ApprovalRefusal("posting_expired", {"date_valid_through": _iso(valid_through)})
     if classification.get("excluded"):
         return ApprovalRefusal("posting_excluded", {"reason": classification.get("exclusion_reason")})
     if function_key not in (classification.get("compatible_functions") or []):
@@ -181,6 +184,8 @@ def build_approved_lead(
         "posting_date_posted": _iso(posting.get("date_posted")),
         "posting_first_seen_at": _iso(posting.get("first_seen_at")),
         "posting_age_days": age_days,
+        "posting_valid_through": _iso(valid_through) if isinstance(valid_through, datetime) else "",
+        "posting_content_hash": posting.get("content_hash") or "",
         "employer_id": employer.get("id"),
         "employer_name": employer_name,
         "employer_domain": employer_domain,

@@ -29,8 +29,20 @@ def test_registry_matches_legacy_wave1_campaigns():
 
 
 def test_env_map_matches_legacy_config_map():
-    legacy_config = importlib.import_module("config")
-    assert dict(legacy_config.CAMPAIGN_ENV_BY_BUCKET) == new.CAMPAIGN_ENV_BY_FUNCTION
+    """Read the legacy dict literal from config.py's SOURCE with ``ast`` -- importing the
+    legacy config pulls python-dotenv and the whole legacy tree, which the core's own
+    dependency set does not (and must not) include (review R12)."""
+    import ast
+    from pathlib import Path
+
+    source = (Path(__file__).resolve().parents[1] / "config.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    literal = None
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign) and any(isinstance(t, ast.Name) and t.id == "CAMPAIGN_ENV_BY_BUCKET" for t in node.targets):
+            literal = ast.literal_eval(node.value)
+    assert literal is not None, "CAMPAIGN_ENV_BY_BUCKET not found in legacy config.py"
+    assert dict(literal) == new.CAMPAIGN_ENV_BY_FUNCTION
 
 
 @pytest.mark.parametrize("function_key", new.FUNCTION_KEYS)

@@ -140,7 +140,7 @@ def test_crash_between_call_and_commit_loses_nothing_and_re_requests_the_page(co
 def test_source_failure_is_local(conn, clock):
     """Auth refusal on one source stalls THAT partition, keeps its rows, and the other source proceeds."""
     bad = FakeFantastic(rows=rows_in_window(clock, 6, prefix="a", domain_prefix="a"), fail_offsets={3: 401})
-    good = FakeFantastic(rows=rows_in_window(clock, 4, prefix="b", domain_prefix="b"))
+    good = FakeFantastic(ats_rows=rows_in_window(clock, 4, prefix="b", domain_prefix="b"))   # the ATS feed is its own endpoint (R02)
     svc_bad = acquisition(conn, bad, clock, page_limit=3)
     svc_good = acquisition(conn, good, clock, page_limit=3)
     p_bad = make_fresh_partition(conn, clock, source="fantastic:active-jb")
@@ -154,6 +154,7 @@ def test_source_failure_is_local(conn, clock):
     assert r_good.stop_reason == "complete" and r_good.new_postings == 4
     # a served response flips the provider back and stalled partitions can be reopened at their own cursor
     assert sql1(conn, "SELECT state FROM provider_state WHERE provider = 'fantastic'") == "serving"
+    assert good.requests[0]["path"] == "/v1/active-ats" and bad.requests[0]["path"] == "/v1/active-jb"
     assert svc_bad.reopen_stalled("fantastic:active-jb") == 1
     assert sql1(conn, "SELECT next_offset FROM source_partitions WHERE id = %s", (p_bad,)) == 3
 

@@ -1,8 +1,27 @@
 """Qualify one opportunity: employer facts, candidate discovery, selective paid
 enrichment, real gates, deterministic approval + outbox in one transaction.
 
-PRODUCT_CONTRACT §7-§8. The provider is called OUTSIDE any transaction; intent is
-committed before every potentially chargeable request and the outcome after.
+PRODUCT_CONTRACT §7-§8, tightened after review a090a2b:
+
+* R01 -- a SEARCH result carries limited data (Apollo documents no email, no LinkedIn).
+  Before enrichment only search-visible evidence is judged (title/authority, founder
+  tier, a provably different organization). LinkedIn, current employment, territory
+  and the verified employer email are checked AFTER enrichment, on the enriched record.
+  A pre-enrichment skip is cheap and re-evaluable; it never blacklists a candidate.
+* R04 -- a stored person is reused ONLY after passing the same current-employment,
+  authority, territory and email checks as a fresh enrichment, from the evidence stored
+  with them. ``people.employer_id`` is set only when the contact gate proved the
+  employment; a contradicted employer is never attributed.
+* Recovery (a) -- selectors fall back to ``organization_ids[]`` when the domain search
+  leaves no USABLE candidate after exclusions, not merely when it returns nobody.
+* Recovery (b) -- paid attempts are budgeted per evidence epoch. A reopen on new
+  evidence (a new or modified posting) starts the next epoch: the history stays,
+  candidates already judged on evidence stay excluded, and the number of epochs is
+  itself bounded (``max_evidence_epochs``).
+* R08 -- the controlled probe after a refusal is reserved atomically across workers.
+
+The provider is called OUTSIDE any transaction; intent is committed before every
+potentially chargeable request and the outcome after.
 """
 
 from __future__ import annotations
@@ -15,13 +34,29 @@ import psycopg
 
 from ..db.connection import jsonb, transaction
 from ..domain.approval import ApprovalRefusal, ApprovedLead, airtable_fields, build_approved_lead, instantly_payload
-from ..domain.gates import corroborated_alternate_domains, evaluate_contact, evaluate_email, person_organization, title_matches
+from ..domain.gates import (
+    corroborated_alternate_domains, evaluate_contact, evaluate_email, person_organization, pre_enrichment_check,
+    title_matches,
+)
 from ..domain.identity import company_names_compatible, domain_name_consistent, person_ref, safe_employer_domain
 from ..policy.campaigns import buyer_titles, is_founder_tier, resolve_campaign_id
 from ..policy.requirements import excluded_industry, rule
 from ..providers.apollo import ApolloClient, ApolloResult, Outcome, person_org_domain
 from . import provider_state
 from .suppression import account_keys, check as suppression_check, company_function_keys
+
+#: Approval refusals that describe the OPPORTUNITY (not the candidate): no other
+#: candidate can change them, so the opportunity closes with the reason.
+OPPORTUNITY_LEVEL_REFUSALS = frozenset({
+    "suppressed", "posting_too_old", "posting_expired", "posting_not_active", "posting_excluded",
+    "employer_identity_incomplete", "employer_too_small", "employer_too_large", "employer_excluded_industry",
+    "employer_is_agency", "no_campaign_configured", "campaign_id_not_allowed", "signing_key_missing",
+    "no_responsibility_evidence", "copy_fields_incomplete", "function_not_compatible",
+})
+
+#: Stored per person so reuse can run the SAME gates later without a new paid call.
+EVIDENCE_KEYS = ("title", "headline", "linkedin_url", "organization", "employment_history", "city", "state", "country",
+                 "seniority", "organization_name", "organization_domain")
 
 
 @dataclass
@@ -63,6 +98,7 @@ class OpportunityService:
 
     # --- helpers ------------------------------------------------------------
     def _load(self, opportunity_id: int) -> Tuple[Dict[str, Any], Dict[str, Any], Dict[str, Any], Dict[str, Any]]:
+        moment = self.now()
         with self.conn.cursor() as cur:
             cur.execute("SELECT * FROM opportunities WHERE id = %s", (opportunity_id,))
             opp = cur.fetchone()
@@ -75,11 +111,12 @@ class OpportunityService:
                 SELECT p.*, c.result_json AS classification_json, c.compatible_functions, c.excluded, c.method
                 FROM opportunity_postings op JOIN postings p ON p.id = op.posting_id
                 JOIN classifications c ON c.id = op.classification_id
-                WHERE op.opportunity_id = %s AND p.state <> 'closed' AND p.state <> 'expired'
+                WHERE op.opportunity_id = %s AND p.state IN ('identity_resolved', 'classified')
+                  AND (p.date_valid_through IS NULL OR p.date_valid_through >= %s)
                   AND NOT c.excluded AND %s = ANY (c.compatible_functions)
                 ORDER BY p.commercial_age_anchor DESC LIMIT 1
                 """,
-                (opportunity_id, opp["function_key"]),
+                (opportunity_id, moment, opp["function_key"]),
             )
             posting = cur.fetchone()
         self.conn.commit()
@@ -119,27 +156,19 @@ class OpportunityService:
                     )
 
     def _guard_provider(self) -> None:
-        """One controlled attempt per qualification pass against a refusing provider.
-
-        The first guard in a pass decides; later guards in the SAME pass reuse that
-        decision, so marking the attempt does not re-block the pass that was permitted.
-        A pass that is permitted may make its search and one paid call; it never loops.
-        """
+        """One controlled attempt per qualification pass against a refusing provider,
+        reserved ATOMICALLY across workers (R08). The first guard in a pass decides;
+        later guards in the same pass reuse that decision."""
         if self._pass_permitted:
             return
-        state = provider_state.may_attempt(self.conn, "apollo", retry_hours=self.retry_hours, now=self.now())
-        if not state["allowed"]:
-            raise ProviderWait(f"apollo_{state['state']}_until_{state['next_attempt_after'].isoformat()}", state["next_attempt_after"])
-        if state["state"] in (provider_state.REFUSING, provider_state.UNAUTHORIZED):
-            provider_state.mark_attempt(self.conn, "apollo", now=self.now())
+        gate = provider_state.reserve_probe(self.conn, "apollo", retry_hours=self.retry_hours, now=self.now())
+        if not gate["allowed"]:
+            raise ProviderWait(f"apollo_{gate['state']}_until_{gate['next_attempt_after'].isoformat()}", gate["next_attempt_after"])
         self._pass_permitted = True
 
     def _handle_global(self, result: ApolloResult, *, chargeable: bool = True) -> None:
         """Refusals/throttles/timeouts raise; a served CHARGEABLE call records recovery.
-
-        A served 0-credit search proves reachability, not credits, so it never flips a
-        refusing provider back to serving.
-        """
+        A served 0-credit search proves reachability, not credits."""
         moment = self.now()
         if result.outcome is Outcome.CREDIT_EXHAUSTED:
             provider_state.record_refusal(self.conn, "apollo", result.error_code or "credit_exhausted", now=moment,
@@ -172,7 +201,6 @@ class OpportunityService:
         self._finish(attempt_id, result, operation="organization_enrich", estimated=1)
         self._handle_global(result)
         org = (result.data or {}).get("organization") or {}
-        facts: Dict[str, Any] = {"apollo_found": bool(org)}
         with transaction(self.conn):
             with self.conn.cursor() as cur:
                 if org:
@@ -181,7 +209,6 @@ class OpportunityService:
                     domain_ok = bool(emp.get("domain") and apollo_domain and apollo_domain == emp["domain"])
                     trusted = domain_ok or (name_ok and (not emp.get("domain") or not apollo_domain))
                     if emp.get("domain") and apollo_domain and apollo_domain != emp["domain"]:
-                        # Different domain for the same name: record, never overwrite the observed identity.
                         cur.execute(
                             "INSERT INTO evidence (subject_kind, subject_id, fact, value, status, source, excerpt) VALUES ('employer', %s, 'apollo_domain_disagreement', %s, 'recorded', 'apollo', %s)",
                             (emp["id"], jsonb({"employer_domain": emp["domain"], "apollo_domain": apollo_domain}), str(org.get("name") or "")),
@@ -209,7 +236,6 @@ class OpportunityService:
                             cur.execute("INSERT INTO employer_aliases (employer_id, alias_kind, alias_value, evidence) VALUES (%s, 'apollo_org_id', %s, %s) ON CONFLICT DO NOTHING",
                                         (emp["id"], str(org.get("id")), jsonb({"source": "apollo"})))
                     else:
-                        facts["apollo_untrusted"] = True
                         cur.execute("UPDATE employers SET facts_json = facts_json || %s, enriched_at = %s, updated_at = now() WHERE id = %s",
                                     (jsonb({"apollo_untrusted_match": str(org.get("name") or "")}), self.now(), emp["id"]))
                 else:
@@ -219,19 +245,27 @@ class OpportunityService:
                 return dict(cur.fetchone())
 
     # --- candidates -------------------------------------------------------------
-    def _search_candidates(self, opp: Dict[str, Any], emp: Dict[str, Any], titles: Sequence[str]) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
-        """Returns (candidates, dropped). ``dropped`` are search results whose organization is
-        provably a different company; they are recorded, never silently discarded."""
-        people: List[Dict[str, Any]] = []
+    def _search_candidates(self, opp: Dict[str, Any], emp: Dict[str, Any], titles: Sequence[str],
+                           excluded: Set[str]) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], Dict[str, int]]:
+        """Returns (usable candidates, dropped-as-other-company, stats).
+
+        The organization-id selector is tried when the domain selector leaves no USABLE
+        candidate after exclusions (already judged, already approved), not merely when
+        it returns nobody (recovery finding a).
+        """
+        usable: List[Dict[str, Any]] = []
         dropped: List[Dict[str, Any]] = []
+        stats = {"returned": 0, "excluded_already_judged": 0, "dropped_other_company": 0, "selectors_tried": 0}
+        seen: Set[str] = set()
         for selector in (("domain", emp["domain"]), ("organization_id", emp.get("apollo_org_id") or "")):
             if not selector[1]:
                 continue
+            stats["selectors_tried"] += 1
             for page in range(1, self.search_pages + 1):
                 self._guard_provider()
                 params = {selector[0]: selector[1], "titles": list(titles), "page": page}
                 attempt_id = self._intent("people_search", opportunity_id=opp["id"], params=params, estimated_credits=0)
-                kwargs = {"titles": list(titles), "page": page}
+                kwargs: Dict[str, Any] = {"titles": list(titles), "page": page}
                 kwargs[selector[0]] = selector[1]
                 result = self.apollo.search_people(**kwargs)
                 self._finish(attempt_id, result, operation="people_search", estimated=0)
@@ -239,39 +273,35 @@ class OpportunityService:
                 if not result.served:
                     break
                 page_people = [p for p in (result.data.get("people") or []) if isinstance(p, dict)]
+                stats["returned"] += len(page_people)
                 for p in page_people:
+                    ref = person_ref(apollo_person_id=str(p.get("id") or p.get("person_id") or ""),
+                                     name=f"{p.get('first_name', '')} {p.get('last_name', '')}", employer_key=f"domain:{emp['domain']}")
+                    if not ref or ref in seen:
+                        continue
+                    seen.add(ref)
+                    p["_ref"] = ref
                     pd = person_org_domain(p)
                     if pd and pd != emp["domain"] and not pd.endswith("." + emp["domain"]):
-                        # Wrong-company guard (legacy-proven), refined: a different org DOMAIN is
-                        # tolerated only when the organization is corroborated as this employer
-                        # (compatible name or the same Apollo organization id). The email gate then
-                        # decides alignment. Anything else is a different company: dropped, recorded.
                         org = person_organization(p)
                         corroborated = company_names_compatible(emp["canonical_name"], str(org.get("name") or "")) or (
                             emp.get("apollo_org_id") and str(org.get("id") or "") == str(emp.get("apollo_org_id")))
                         if not corroborated:
                             p["_drop_reason"] = f"contact:wrong_organization_search_guard:{pd}"
                             dropped.append(p)
+                            stats["dropped_other_company"] += 1
                             continue
-                    people.append(p)
+                    if ref in excluded:
+                        stats["excluded_already_judged"] += 1
+                        continue
+                    usable.append(p)
                 pagination = result.data.get("pagination") if isinstance(result.data.get("pagination"), dict) else {}
                 total_pages = pagination.get("total_pages")
                 if len(page_people) < 25 or (isinstance(total_pages, int) and page >= total_pages):
                     break
-            if people:
+            if usable:
                 break
-        # dedupe by id, keep first
-        seen: Set[str] = set()
-        out: List[Dict[str, Any]] = []
-        for p in people + dropped:
-            ref = person_ref(apollo_person_id=str(p.get("id") or p.get("person_id") or ""), linkedin_url=p.get("linkedin_url"),
-                             name=f"{p.get('first_name','')} {p.get('last_name','')}", employer_key=f"domain:{emp['domain']}")
-            if ref and ref not in seen:
-                seen.add(ref)
-                p["_ref"] = ref
-                if "_drop_reason" not in p:
-                    out.append(p)
-        return out, [p for p in dropped if "_ref" in p]
+        return usable, dropped, stats
 
     def _rank(self, candidates: List[Dict[str, Any]], titles: Sequence[str]) -> List[Dict[str, Any]]:
         def rank(p: Dict[str, Any]) -> int:
@@ -283,15 +313,18 @@ class OpportunityService:
         return sorted(candidates, key=rank)
 
     def _excluded_refs(self, opportunity_id: int) -> Tuple[Set[str], Set[str], Set[str]]:
-        """(attempted for this opportunity, active approvals by apollo id, suppressed emails)"""
+        """(judged for this opportunity, active approvals, suppressed emails).
+
+        Judged = a served/not-found paid match or a post-enrichment gate FAIL. A provider
+        refusal, a lost response, or a pre-enrichment skip (search-only evidence) is not
+        a judgement and never excludes the candidate (R01).
+        """
         with self.conn.cursor() as cur:
-            # A provider refusal or a lost response is not an attempt AGAINST the candidate:
-            # the same person is retried once the provider serves again.
             cur.execute(
                 "SELECT candidate_ref FROM candidate_attempts WHERE opportunity_id = %s AND ("
-                "(attempt_kind = 'match' AND outcome NOT IN ('refused', 'uncertain')) OR attempt_kind = 'gate')",
+                "(attempt_kind = 'match' AND outcome NOT IN ('refused', 'uncertain')) OR (attempt_kind = 'gate' AND outcome = 'fail'))",
                 (opportunity_id,))
-            attempted = {r["candidate_ref"] for r in cur.fetchall()}
+            judged = {r["candidate_ref"] for r in cur.fetchall()}
             cur.execute("SELECT p.apollo_person_id, p.linkedin_url FROM approvals a JOIN people p ON p.id = a.person_id WHERE a.state <> 'revoked'")
             approved = set()
             for r in cur.fetchall():
@@ -302,23 +335,29 @@ class OpportunityService:
             cur.execute("SELECT key FROM suppressions WHERE kind = 'person_email'")
             suppressed = {r["key"] for r in cur.fetchall()}
         self.conn.commit()
-        return attempted, approved, suppressed
+        return judged, approved, suppressed
 
-    def _record_attempt(self, opportunity_id: int, ref: str, kind: str, outcome: str, reason: str,
+    def _record_attempt(self, opportunity_id: int, ref: str, kind: str, outcome: str, reason: str, *, epoch: int,
                         person_id: Optional[int] = None, attempt_id: Optional[int] = None, details: Optional[Dict[str, Any]] = None) -> None:
         with transaction(self.conn):
             with self.conn.cursor() as cur:
                 cur.execute(
-                    "INSERT INTO candidate_attempts (opportunity_id, person_id, candidate_ref, attempt_kind, outcome, reason, attempt_id, details) "
-                    "VALUES (%s, %s, %s, %s, %s, %s, %s, %s) ON CONFLICT (opportunity_id, candidate_ref, attempt_kind) DO UPDATE SET "
-                    "outcome = EXCLUDED.outcome, reason = EXCLUDED.reason, person_id = COALESCE(EXCLUDED.person_id, candidate_attempts.person_id), details = EXCLUDED.details, created_at = now()",
-                    (opportunity_id, person_id, ref, kind, outcome, reason[:200], attempt_id, jsonb(details or {})),
+                    "INSERT INTO candidate_attempts (opportunity_id, person_id, candidate_ref, attempt_kind, outcome, reason, attempt_id, details, epoch) "
+                    "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) ON CONFLICT (opportunity_id, candidate_ref, attempt_kind) DO UPDATE SET "
+                    "outcome = EXCLUDED.outcome, reason = EXCLUDED.reason, person_id = COALESCE(EXCLUDED.person_id, candidate_attempts.person_id), "
+                    "details = EXCLUDED.details, epoch = EXCLUDED.epoch, attempt_id = COALESCE(EXCLUDED.attempt_id, candidate_attempts.attempt_id), created_at = now()",
+                    (opportunity_id, person_id, ref, kind, outcome, reason[:200], attempt_id, jsonb(details or {}), epoch),
                 )
 
-    def _upsert_person(self, enriched: Dict[str, Any], emp: Dict[str, Any], *, email_alignment: str) -> int:
+    def _upsert_person(self, enriched: Dict[str, Any], emp: Dict[str, Any], *, email_alignment: str,
+                       employment_verified: bool) -> int:
+        """Persist the enriched record with the evidence the gates need later (R04).
+        ``employer_id`` is attributed only when the contact gate proved current
+        employment at this employer."""
         org = person_organization(enriched)
         email = str(enriched.get("email") or "").strip().lower() or None
         status = str(enriched.get("email_status") or enriched.get("contact_email_status") or "").lower() or None
+        evidence = {k: enriched.get(k) for k in EVIDENCE_KEYS if enriched.get(k) not in (None, "", [])}
         with transaction(self.conn):
             with self.conn.cursor() as cur:
                 cur.execute(
@@ -336,9 +375,11 @@ class OpportunityService:
                     RETURNING id
                     """,
                     (str(enriched.get("id") or ""), enriched.get("linkedin_url"), enriched.get("first_name"), enriched.get("last_name"),
-                     enriched.get("title"), emp["id"], org.get("name") or enriched.get("organization_name"),
+                     enriched.get("title"), emp["id"] if employment_verified else None, org.get("name") or enriched.get("organization_name"),
                      person_org_domain(enriched) or None, email, status, "apollo" if email else None,
-                     self.now() if status == "verified" else None, jsonb({"email_alignment": email_alignment, "headline": enriched.get("headline")})),
+                     self.now() if status == "verified" else None,
+                     jsonb({"email_alignment": email_alignment, "headline": enriched.get("headline"), "enriched": evidence,
+                            "enriched_at": self.now().isoformat(), "employment_verified": employment_verified})),
                 )
                 return int(cur.fetchone()["id"])
 
@@ -391,6 +432,23 @@ class OpportunityService:
                 )
         return approval_id
 
+    def _gate_enriched(self, enriched: Dict[str, Any], emp: Dict[str, Any], titles: Sequence[str], founder_allowed: bool,
+                       employer_domains: Set[str]):
+        """The complete final checks on an enriched (or stored) record: identity, current
+        employer, authority, territory, LinkedIn, verified employer email."""
+        contact = evaluate_contact(person=enriched, employer_name=emp["canonical_name"], employer_domains=employer_domains,
+                                   buyer_titles=titles, founder_allowed=founder_allowed,
+                                   require_linkedin=bool(rule("require_contact_linkedin")),
+                                   require_current_employment=bool(rule("require_current_employment_evidence")))
+        apollo_org = (emp.get("facts_json") or {}).get("apollo") if isinstance(emp.get("facts_json"), dict) else None
+        alt = corroborated_alternate_domains(
+            employer_name=emp["canonical_name"], employer_domains=employer_domains, person=enriched,
+            apollo_org={"name": (apollo_org or {}).get("name"), "primary_domain": (apollo_org or {}).get("primary_domain"),
+                        "id": emp.get("apollo_org_id")} if isinstance(apollo_org, dict) else None)
+        email = evaluate_email(email=enriched.get("email"), email_status=enriched.get("email_status") or enriched.get("contact_email_status"),
+                               employer_domains=employer_domains, corroborated_domains=alt)
+        return contact, email
+
     # --- main -------------------------------------------------------------------
     def process(self, opportunity_id: int) -> QualifyOutcome:
         self._pass_permitted = False
@@ -399,7 +457,9 @@ class OpportunityService:
             return QualifyOutcome(opportunity_id, "closed", f"already_{opp['state']}")
         if not posting:
             return self._close(opportunity_id, "no_active_compatible_posting")
-        # company × function suppression (imported history) closes before any spend
+        epoch = int(opp.get("evidence_epoch") or 1)
+        if epoch > int(rule("max_evidence_epochs")):
+            return self._close(opportunity_id, "evidence_epochs_exhausted")
         hits = suppression_check(
             self.conn,
             company_function=company_function_keys(domain=emp.get("domain") or "", name=emp["canonical_name"],
@@ -431,56 +491,52 @@ class OpportunityService:
         founder_allowed = count is not None and count <= int(rule("founder_fallback_max_employees"))
         titles = buyer_titles(opp["function_key"], founder_allowed=founder_allowed)
         employer_domains = {emp["domain"]} | self._alias_domains(emp["id"])
-        max_attempts = int(rule("max_match_attempts_per_opportunity"))
-        attempted, approved_refs, suppressed_emails = self._excluded_refs(opportunity_id)
+        max_attempts = int(rule("max_match_attempts_per_evidence_epoch"))
+        judged, approved_refs, suppressed_emails = self._excluded_refs(opportunity_id)
         with self.conn.cursor() as cur:
             cur.execute("SELECT count(*) AS n FROM candidate_attempts WHERE opportunity_id = %s AND attempt_kind = 'match' "
-                        "AND outcome NOT IN ('refused', 'uncertain')", (opportunity_id,))
+                        "AND outcome NOT IN ('refused', 'uncertain') AND epoch = %s", (opportunity_id, epoch))
             matches_done = int(cur.fetchone()["n"])
         self.conn.commit()
 
-        # 1) reuse a person already verified at this employer within TTL
-        reuse = self._reusable_person(emp, titles, approved_refs, suppressed_emails, employer_domains)
+        # 1) reuse a person already verified at this employer within TTL -- through the SAME gates (R04)
+        reuse = self._reusable_person(emp, titles, founder_allowed, approved_refs, suppressed_emails, employer_domains, opportunity_id, epoch)
         if reuse is not None:
             decision = self._approve(opp, emp, posting, classification, reuse)
             if isinstance(decision, ApprovedLead):
                 approval_id = self._commit_approval(opp, int(reuse["id"]), decision)
-                self._record_attempt(opportunity_id, reuse["_ref"], "gate", "pass", "reused_verified_person", person_id=int(reuse["id"]))
+                self._record_attempt(opportunity_id, reuse["_ref"], "gate", "pass", "reused_verified_person", epoch=epoch, person_id=int(reuse["id"]))
                 return QualifyOutcome(opportunity_id, "approved", "reused_verified_person", approval_id, int(reuse["id"]))
-            if decision.reason in {"suppressed", "posting_too_old", "posting_excluded", "employer_identity_incomplete",
-                                   "employer_too_small", "employer_too_large", "employer_excluded_industry", "no_campaign_configured",
-                                   "campaign_id_not_allowed", "signing_key_missing", "no_responsibility_evidence", "copy_fields_incomplete"}:
+            if decision.reason in OPPORTUNITY_LEVEL_REFUSALS:
                 return self._close(opportunity_id, f"approval_refused:{decision.reason}")
 
-        # 2) candidate discovery (0-credit search)
+        # 2) candidate discovery (0-credit search), with the org-id fallback on no USABLE candidate
         try:
-            found, dropped = self._search_candidates(opp, emp, titles)
-            candidates = self._rank(found, titles)
+            usable, dropped, stats = self._search_candidates(opp, emp, titles, judged | approved_refs)
+            candidates = self._rank(usable, titles)
         except ProviderWait as w:
             return QualifyOutcome(opportunity_id, "wait", w.reason, details={"until": w.until.isoformat()})
         except ProviderRetry as r:
             return QualifyOutcome(opportunity_id, "retry", f"apollo_{r}")
         for p in dropped:
-            if p["_ref"] not in attempted:
-                self._record_attempt(opportunity_id, p["_ref"], "gate", "skipped_pre_enrichment", p["_drop_reason"],
+            if p["_ref"] not in judged:
+                self._record_attempt(opportunity_id, p["_ref"], "gate", "skipped_pre_enrichment", p["_drop_reason"], epoch=epoch,
                                      details={"title": p.get("title"), "org": person_organization(p).get("name")})
         if not candidates:
-            return self._close(opportunity_id, "no_candidates_found")
+            reason = "no_candidates_found" if stats["returned"] == 0 else "no_unjudged_candidates_remaining"
+            return self._close(opportunity_id, reason)
 
         made = 0
         for cand in candidates:
             if matches_done + made >= max_attempts:
                 break
             ref = cand["_ref"]
-            if ref in attempted or ref in approved_refs:
-                continue
-            pre = evaluate_contact(person=cand, employer_name=emp["canonical_name"], employer_domains=employer_domains,
-                                   buyer_titles=titles, founder_allowed=founder_allowed,
-                                   require_linkedin=bool(rule("require_contact_linkedin")), require_current_employment=False)
+            # R01: judge only what the search carries; LinkedIn/employment/email come with enrichment.
+            pre = pre_enrichment_check(person=cand, employer_name=emp["canonical_name"], employer_domains=employer_domains,
+                                       buyer_titles=titles, founder_allowed=founder_allowed)
             if not pre.passed:
-                self._record_attempt(opportunity_id, ref, "gate", "skipped_pre_enrichment", pre.reason, details=pre.evidence)
+                self._record_attempt(opportunity_id, ref, "gate", "skipped_pre_enrichment", pre.reason, epoch=epoch, details=pre.evidence)
                 continue
-            # paid match
             try:
                 self._guard_provider()
             except ProviderWait as w:
@@ -492,63 +548,52 @@ class OpportunityService:
             try:
                 self._handle_global(result)
             except ProviderWait as w:
-                self._record_attempt(opportunity_id, ref, "match", "refused", w.reason, attempt_id=attempt_id)
+                self._record_attempt(opportunity_id, ref, "match", "refused", w.reason, epoch=epoch, attempt_id=attempt_id)
                 return QualifyOutcome(opportunity_id, "wait", w.reason, attempts_made=made, details={"until": w.until.isoformat()})
             except ProviderRetry as r:
-                self._record_attempt(opportunity_id, ref, "match", "uncertain", str(r), attempt_id=attempt_id)
+                self._record_attempt(opportunity_id, ref, "match", "uncertain", str(r), epoch=epoch, attempt_id=attempt_id)
                 return QualifyOutcome(opportunity_id, "retry", f"apollo_{r}", attempts_made=made)
             made += 1
             if not result.served or not (result.data.get("person") or {}):
                 outcome = "not_found" if (result.served or result.status == 404) else result.outcome.value
-                self._record_attempt(opportunity_id, ref, "match", outcome, result.message or "no_person_in_response", attempt_id=attempt_id)
+                self._record_attempt(opportunity_id, ref, "match", outcome, result.message or "no_person_in_response", epoch=epoch, attempt_id=attempt_id)
                 continue
             enriched = dict(result.data["person"])
             enriched.setdefault("id", pid)
-            # full gates on enriched evidence
-            contact = evaluate_contact(person=enriched, employer_name=emp["canonical_name"], employer_domains=employer_domains,
-                                       buyer_titles=titles, founder_allowed=founder_allowed,
-                                       require_linkedin=bool(rule("require_contact_linkedin")),
-                                       require_current_employment=bool(rule("require_current_employment_evidence")))
-            apollo_org = (emp.get("facts_json") or {}).get("apollo") if isinstance(emp.get("facts_json"), dict) else None
-            alt = corroborated_alternate_domains(employer_name=emp["canonical_name"], employer_domains=employer_domains,
-                                                 person=enriched, apollo_org={"name": (apollo_org or {}).get("name"),
-                                                                             "primary_domain": (apollo_org or {}).get("primary_domain"),
-                                                                             "id": emp.get("apollo_org_id")} if apollo_org else None)
-            email = evaluate_email(email=enriched.get("email"), email_status=enriched.get("email_status") or enriched.get("contact_email_status"),
-                                   employer_domains=employer_domains, corroborated_domains=alt)
-            person_id = self._upsert_person(enriched, emp, email_alignment=str(email.evidence.get("alignment") or ""))
-            self._record_attempt(opportunity_id, ref, "match", "served", "enriched", person_id=person_id, attempt_id=attempt_id)
+            contact, email = self._gate_enriched(enriched, emp, titles, founder_allowed, employer_domains)
+            person_id = self._upsert_person(enriched, emp, email_alignment=str(email.evidence.get("alignment") or ""),
+                                            employment_verified=contact.passed)
+            self._record_attempt(opportunity_id, ref, "match", "served", "enriched", epoch=epoch, person_id=person_id, attempt_id=attempt_id)
             if not contact.passed:
-                self._record_attempt(opportunity_id, ref, "gate", "fail", contact.reason, person_id=person_id, details=contact.evidence)
+                self._record_attempt(opportunity_id, ref, "gate", "fail", contact.reason, epoch=epoch, person_id=person_id, details=contact.evidence)
                 continue
             if not email.passed:
-                self._record_attempt(opportunity_id, ref, "gate", "fail", email.reason, person_id=person_id, details=email.evidence)
+                self._record_attempt(opportunity_id, ref, "gate", "fail", email.reason, epoch=epoch, person_id=person_id, details=email.evidence)
                 continue
             if str(enriched.get("email") or "").strip().lower() in suppressed_emails:
-                self._record_attempt(opportunity_id, ref, "gate", "fail", "suppressed:person_email", person_id=person_id)
+                self._record_attempt(opportunity_id, ref, "gate", "fail", "suppressed:person_email", epoch=epoch, person_id=person_id)
                 continue
             person_row = self._person_row(person_id)
             person_row.update({"contact_gate_passed": True, "contact_gate_reason": contact.reason, "email_gate_passed": True,
                                "email_alignment": email.evidence.get("alignment", "")})
             decision = self._approve(opp, emp, posting, classification, person_row)
             if isinstance(decision, ApprovalRefusal):
-                self._record_attempt(opportunity_id, ref, "gate", "fail", f"approval_refused:{decision.reason}", person_id=person_id, details=decision.details)
-                if decision.reason in {"suppressed", "posting_too_old", "posting_excluded", "employer_identity_incomplete",
-                                       "employer_too_small", "employer_too_large", "employer_excluded_industry", "no_campaign_configured",
-                                       "campaign_id_not_allowed", "signing_key_missing", "no_responsibility_evidence", "copy_fields_incomplete"}:
+                self._record_attempt(opportunity_id, ref, "gate", "fail", f"approval_refused:{decision.reason}", epoch=epoch,
+                                     person_id=person_id, details=decision.details)
+                if decision.reason in OPPORTUNITY_LEVEL_REFUSALS:
                     return self._close(opportunity_id, f"approval_refused:{decision.reason}")
                 continue
             try:
                 approval_id = self._commit_approval(opp, person_id, decision)
             except psycopg.errors.UniqueViolation:
                 self.conn.rollback()
-                self._record_attempt(opportunity_id, ref, "gate", "fail", "person_already_approved_elsewhere", person_id=person_id)
+                self._record_attempt(opportunity_id, ref, "gate", "fail", "person_already_approved_elsewhere", epoch=epoch, person_id=person_id)
                 continue
-            self._record_attempt(opportunity_id, ref, "gate", "pass", "approved", person_id=person_id)
+            self._record_attempt(opportunity_id, ref, "gate", "pass", "approved", epoch=epoch, person_id=person_id)
             return QualifyOutcome(opportunity_id, "approved", "approved", approval_id, person_id, attempts_made=made)
 
         if matches_done + made >= max_attempts:
-            return self._close(opportunity_id, "no_verified_buyer_after_max_attempts")
+            return self._close(opportunity_id, f"no_verified_buyer_after_max_attempts:epoch_{epoch}")
         return self._close(opportunity_id, "no_verified_buyer_in_candidates")
 
     def _alias_domains(self, employer_id: int) -> Set[str]:
@@ -565,8 +610,11 @@ class OpportunityService:
         self.conn.commit()
         return row
 
-    def _reusable_person(self, emp: Dict[str, Any], titles: Sequence[str], approved_refs: Set[str], suppressed: Set[str],
-                         employer_domains: Set[str]) -> Optional[Dict[str, Any]]:
+    def _reusable_person(self, emp: Dict[str, Any], titles: Sequence[str], founder_allowed: bool, approved_refs: Set[str],
+                         suppressed: Set[str], employer_domains: Set[str], opportunity_id: int, epoch: int) -> Optional[Dict[str, Any]]:
+        """A stored, employment-verified person with a verified email inside the TTL is a
+        candidate for reuse -- and is judged by the SAME gates as a fresh enrichment,
+        from the evidence stored with them (R04). A rejection is recorded like any other."""
         ttl = timedelta(days=int(rule("person_evidence_ttl_days")))
         with self.conn.cursor() as cur:
             cur.execute("SELECT * FROM people WHERE employer_id = %s AND email_status = 'verified' AND email_verified_at >= %s ORDER BY email_verified_at DESC",
@@ -577,10 +625,16 @@ class OpportunityService:
             ref = person_ref(apollo_person_id=row.get("apollo_person_id"), linkedin_url=row.get("linkedin_url"))
             if ref in approved_refs or str(row.get("email") or "").lower() in suppressed:
                 continue
-            if not title_matches(str(row.get("title") or ""), titles):
-                continue
-            email = evaluate_email(email=row.get("email"), email_status=row.get("email_status"), employer_domains=employer_domains)
-            if not email.passed:
+            facts = row.get("facts_json") if isinstance(row.get("facts_json"), dict) else {}
+            evidence = dict(facts.get("enriched") or {})
+            record = {**evidence, "id": row.get("apollo_person_id"), "first_name": row.get("first_name"), "last_name": row.get("last_name"),
+                      "title": row.get("title") or evidence.get("title"), "linkedin_url": row.get("linkedin_url"),
+                      "email": row.get("email"), "email_status": row.get("email_status")}
+            contact, email = self._gate_enriched(record, emp, titles, founder_allowed, employer_domains)
+            if not contact.passed or not email.passed:
+                reason = contact.reason if not contact.passed else email.reason
+                self._record_attempt(opportunity_id, ref, "gate", "fail", f"reuse_rejected:{reason}", epoch=epoch, person_id=int(row["id"]),
+                                     details={"source": "stored_evidence"})
                 continue
             row.update({"_ref": ref, "contact_gate_passed": True, "contact_gate_reason": "reused_verified_person",
                         "email_gate_passed": True, "email_alignment": email.evidence.get("alignment", "")})

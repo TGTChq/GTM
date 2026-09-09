@@ -92,10 +92,13 @@ class InstantlyClient:
         except TransportTimeout:
             return InstantlyResult(False, None, message="timeout", uncertain=method != "GET")
         except TransportError as exc:
-            return InstantlyResult(False, None, message=str(exc)[:200])
+            # A lost connection on a create may have reached the server: uncertain (R05).
+            return InstantlyResult(False, None, message=str(exc)[:200], uncertain=method != "GET")
         body = resp.json()
         if 200 <= resp.status < 300:
             return InstantlyResult(True, resp.status, data=body if isinstance(body, dict) else {"items": body})
+        if method != "GET" and resp.status in (408, 500, 502, 503, 504):
+            return InstantlyResult(False, resp.status, data=body if isinstance(body, dict) else {}, message=(resp.text or "")[:300], uncertain=True)
         return InstantlyResult(False, resp.status, data=body if isinstance(body, dict) else {}, message=(resp.text or "")[:300])
 
     def create_lead(self, payload: Dict[str, Any]) -> InstantlyResult:

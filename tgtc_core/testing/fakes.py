@@ -5,7 +5,12 @@ each provider's responses so the REAL client code (``tgtc_core.providers.*``) ru
 unchanged, but nothing here is evidence about the live services. Each fake is
 stateful and scriptable: pages can overlap, repeat or fail; Apollo can exhaust
 credits, rate-limit, time out or refuse auth; Airtable/Instantly can accept and then
-lose the response.
+lose the response, reset the connection or answer 5xx after creating.
+
+Apollo People Search is served in its DOCUMENTED limited shape (review finding R01):
+no email, no LinkedIn URL, no employment history -- those arrive only from
+``people/match``. The search carries id, names, title, headline and a basic
+organization block.
 """
 
 from __future__ import annotations
@@ -16,17 +21,17 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Dict, List, Optional, Tuple
-from urllib.parse import parse_qsl, urlsplit
+from urllib.parse import urlsplit
 
-from ..providers.http import Response, TransportTimeout
+from ..providers.http import Response, TransportError, TransportTimeout
+
+#: Fields Apollo's People Search returns (limited data); everything else needs enrichment.
+SEARCH_FIELDS = ("id", "first_name", "last_name", "name", "title", "headline", "organization", "seniority")
 
 
 def _params_dict(params: Any) -> Dict[str, List[str]]:
     out: Dict[str, List[str]] = {}
-    if isinstance(params, dict):
-        items = list(params.items())
-    else:
-        items = list(params or [])
+    items = list(params.items()) if isinstance(params, dict) else list(params or [])
     for k, v in items:
         out.setdefault(str(k), []).append(str(v))
     return out
@@ -44,7 +49,8 @@ def make_posting_row(*, id: str, title: str, organization: str, domain: str, des
                      date_created: datetime, source: str = "linkedin", employment_type: str = "FULL_TIME",
                      countries: Tuple[str, ...] = ("US",), slug: str = "", headcount: Optional[int] = 120,
                      industry: str = "Software Development", agency: bool = False, location_type: str = "remote",
-                     url: str = "", ats_duplicate: bool = False, **extra: Any) -> Dict[str, Any]:
+                     url: str = "", ats_duplicate: bool = False, source_type: str = "jobboard",
+                     date_valid_through: Optional[datetime] = None, **extra: Any) -> Dict[str, Any]:
     row = {
         "id": id, "title": title, "organization": organization,
         "organization_url": f"https://{domain}" if domain else "", "domain_derived": domain,
@@ -56,35 +62,51 @@ def make_posting_row(*, id: str, title: str, organization: str, domain: str, des
         "date_created": date_created.strftime("%Y-%m-%dT%H:%M:%SZ"),
         "date_posted": (date_created - timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "description_text": description, "url": url or f"https://jobs.example/{id}",
-        "source": source, "source_type": "jobboard", "employment_type": employment_type,
+        "source": source, "source_type": source_type, "employment_type": employment_type,
         "ai_employment_type": employment_type, "ats_duplicate": ats_duplicate,
         # PII the client must strip
         "recruiter_name": "Recruiter Person", "ai_hiring_manager_email_address": "hm@" + (domain or "example.com"),
     }
+    if date_valid_through is not None:
+        row["date_valid_through"] = date_valid_through.strftime("%Y-%m-%dT%H:%M:%SZ")
     row.update(extra)
     return row
 
 
 @dataclass
 class FakeFantastic:
-    """Serves a window's rows ordered by date_posted DESC and paginates by offset."""
+    """Serves a window's rows ordered by date_posted DESC and paginates by offset.
+
+    ``rows`` feeds ``/v1/active-jb``; ``ats_rows`` feeds ``/v1/active-ats``. When the
+    job-board request carries ``exclude_ats_duplicate=true`` rows flagged
+    ``ats_duplicate`` are dropped from the job-board feed (documented behaviour).
+    """
 
     rows: List[Dict[str, Any]] = field(default_factory=list)
+    ats_rows: List[Dict[str, Any]] = field(default_factory=list)
     jobs_remaining: int = 20000
     requests_remaining: int = 10000
+    next_billing_date: str = "2026-09-17"
     fail_offsets: Dict[int, Any] = field(default_factory=dict)  # offset -> status | 'timeout'
     repeat_page_at_offset: Optional[int] = None                 # serve the previous page again once
     requests: List[Dict[str, Any]] = field(default_factory=list)
     auth_ok: bool = True
+    quota_exhausted: bool = False
+    on_request: Optional[Callable[[Dict[str, Any]], None]] = None   # hook (used by concurrency tests)
     _repeated: bool = field(default=False, repr=False)
 
     def request(self, method: str, url: str, *, headers=None, params=None, json_body=None, timeout=30.0) -> Response:
         p = _params_dict(params)
         path = urlsplit(url).path
-        self.requests.append({"path": path, "params": {k: v[0] if len(v) == 1 else v for k, v in p.items()},
-                              "auth_header_present": bool((headers or {}).get("Authorization"))})
+        record = {"path": path, "params": {k: v[0] if len(v) == 1 else v for k, v in p.items()},
+                  "auth_header_present": bool((headers or {}).get("Authorization"))}
+        self.requests.append(record)
+        if self.on_request is not None:
+            self.on_request(record)
         if not self.auth_ok:
             return _json(401, {"error": "unauthorized"})
+        if self.quota_exhausted:
+            return _json(429, {"error": "quota exhausted"})
         limit = int(p.get("limit", ["100"])[0])
         offset = int(p.get("offset", ["0"])[0])
         fail = self.fail_offsets.pop(offset, None)
@@ -94,7 +116,10 @@ class FakeFantastic:
             return _json(fail, {"error": f"simulated_{fail}"})
         lower = datetime.fromisoformat(p["date_created_gte"][0].replace("Z", "+00:00"))
         upper = datetime.fromisoformat(p["date_created_lt"][0].replace("Z", "+00:00"))
-        window = [r for r in self.rows if lower <= datetime.fromisoformat(r["date_created"].replace("Z", "+00:00")) < upper]
+        source_rows = self.ats_rows if path.endswith("/active-ats") else self.rows
+        window = [r for r in source_rows if lower <= datetime.fromisoformat(r["date_created"].replace("Z", "+00:00")) < upper]
+        if path.endswith("/active-jb") and p.get("exclude_ats_duplicate", ["false"])[0] == "true":
+            window = [r for r in window if not r.get("ats_duplicate")]
         window.sort(key=lambda r: r["date_posted"], reverse=True)
         if self.repeat_page_at_offset is not None and offset == self.repeat_page_at_offset and not self._repeated:
             self._repeated = True
@@ -108,7 +133,7 @@ class FakeFantastic:
         self.requests_remaining -= 1
         headers = {"x-api-jobs-limit": "20000", "x-api-jobs-remaining": str(self.jobs_remaining),
                    "x-api-requests-limit": "10000", "x-api-requests-remaining": str(self.requests_remaining),
-                   "x-api-next-billing-date": "2026-09-17"}
+                   "x-api-next-billing-date": self.next_billing_date}
         return _json(200, page, headers)
 
 
@@ -128,14 +153,24 @@ CREDIT_BODY = {
 def make_person(*, id: str, first: str, last: str, title: str, org_name: str, org_domain: str,
                 email: Optional[str], email_status: Optional[str], linkedin: Optional[str] = None,
                 org_id: str = "", headline: str = "", current: bool = True) -> Dict[str, Any]:
-    person = {
-        "id": id, "first_name": first, "last_name": last, "title": title, "headline": headline,
+    """A FULL person record as ``people/match`` returns it. The search fake projects it
+    to the documented limited shape."""
+    return {
+        "id": id, "first_name": first, "last_name": last, "name": f"{first} {last}", "title": title, "headline": headline,
         "linkedin_url": linkedin if linkedin is not None else f"https://www.linkedin.com/in/{first.lower()}-{last.lower()}-{id}",
         "organization": {"id": org_id or f"org-{org_domain}", "name": org_name, "primary_domain": org_domain},
         "employment_history": [{"organization_name": org_name, "current": current, "end_date": None if current else "2024-01-01"}],
         "_email": email, "_email_status": email_status,
     }
-    return person
+
+
+def search_projection(person: Dict[str, Any]) -> Dict[str, Any]:
+    """Apollo People Search: limited data (no email, no LinkedIn, no history)."""
+    out = {k: v for k, v in person.items() if k in SEARCH_FIELDS}
+    org = out.get("organization")
+    if isinstance(org, dict):
+        out["organization"] = {k: org[k] for k in ("id", "name", "primary_domain") if k in org}
+    return out
 
 
 @dataclass
@@ -147,12 +182,20 @@ class FakeApollo:
     fail_next: List[Any] = field(default_factory=list)  # 'timeout' | 429 | 401 | 500 (consumed in order for paid calls)
     requests: List[Dict[str, Any]] = field(default_factory=list)
     served_paid: int = 0
+    #: Legacy-style rich search output. Off by default: the documented shape is sparse.
+    rich_search: bool = False
 
     def _people(self, p: Dict[str, List[str]]) -> List[Dict[str, Any]]:
         if "organization_ids[]" in p:
             return list(self.people_by_org_id.get(p["organization_ids[]"][0], []))
         domain = p.get("q_organization_domains_list[]", [""])[0]
         return list(self.people_by_domain.get(domain, []))
+
+    def _all_people(self) -> List[Dict[str, Any]]:
+        out: List[Dict[str, Any]] = []
+        for people in list(self.people_by_domain.values()) + list(self.people_by_org_id.values()):
+            out.extend(people)
+        return out
 
     def request(self, method: str, url: str, *, headers=None, params=None, json_body=None, timeout=30.0) -> Response:
         p = _params_dict(params)
@@ -186,13 +229,15 @@ class FakeApollo:
             page = int(p.get("page", ["1"])[0])
             per_page = int(p.get("per_page", ["25"])[0])
             chunk = people[(page - 1) * per_page: page * per_page]
-            public = [{k: v for k, v in x.items() if not k.startswith("_")} for x in chunk]
+            if self.rich_search:
+                public = [{k: v for k, v in x.items() if not k.startswith("_")} for x in chunk]
+            else:
+                public = [search_projection(x) for x in chunk]
             return _json(200, {"people": public, "pagination": {"page": page, "per_page": per_page,
                                                                   "total_pages": max(1, (len(people) + per_page - 1) // per_page)}})
         if path.endswith("/people/match"):
             pid = p.get("id", [""])[0]
-            person = next((x for people in list(self.people_by_domain.values()) + list(self.people_by_org_id.values())
-                           for x in people if x["id"] == pid), None)
+            person = next((x for x in self._all_people() if x["id"] == pid), None)
             self._charge()
             if not person:
                 return _json(404, {"error": "not found"})
@@ -216,6 +261,8 @@ class FakeApollo:
 class FakeAirtable:
     records: Dict[str, Dict[str, Any]] = field(default_factory=dict)  # record id -> record
     lose_response_once: bool = False
+    #: Accept the create, store the row, then fail the response: 'reset' | 500 | 502 | 503
+    fail_after_create_once: Optional[Any] = None
     fail_next_status: Optional[int] = None
     requests: List[Dict[str, Any]] = field(default_factory=list)
     _counter: int = 0
@@ -245,6 +292,11 @@ class FakeAirtable:
             if self.lose_response_once:
                 self.lose_response_once = False
                 raise TransportTimeout("simulated lost response after create")
+            if self.fail_after_create_once is not None:
+                mode, self.fail_after_create_once = self.fail_after_create_once, None
+                if mode == "reset":
+                    raise TransportError("ConnectionResetError")
+                return _json(int(mode), {"error": {"type": "SERVER_ERROR", "message": f"simulated {mode} after create"}})
             return _json(200, {"records": created})
         if method == "PATCH":
             updated = []
@@ -266,6 +318,7 @@ class FakeInstantly:
     leads: Dict[str, Dict[str, Any]] = field(default_factory=dict)   # email -> lead
     campaign_status: Dict[str, int] = field(default_factory=dict)    # campaign id -> status (1 active)
     lose_response_once: bool = False
+    fail_after_create_once: Optional[Any] = None                     # 'reset' | 500
     requests: List[Dict[str, Any]] = field(default_factory=list)
     clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc)
 
@@ -284,6 +337,11 @@ class FakeInstantly:
                 if self.lose_response_once:
                     self.lose_response_once = False
                     raise TransportTimeout("simulated lost response after create")
+                if self.fail_after_create_once is not None:
+                    mode, self.fail_after_create_once = self.fail_after_create_once, None
+                    if mode == "reset":
+                        raise TransportError("ConnectionResetError")
+                    return _json(int(mode), {"error": f"simulated {mode} after create"})
                 return _json(200, lead)
             # 200 for an existing email, with the ORIGINAL timestamp (integration truth)
             return _json(200, existing)

@@ -57,23 +57,31 @@ def test_generic_mailbox_and_wrong_domain_are_rejected_and_the_next_candidate_wi
 
 
 def test_max_attempts_closes_with_reason_and_a_new_candidate_reopens_later(conn, clock):
+    """Review (recovery b): the per-epoch cap closes the opportunity; NEW evidence reopens it
+    into the next epoch with a fresh budget, the earlier history is kept, and candidates
+    already judged on evidence are not retried."""
     domain, org = "acme.com", "Acme"
     people = [good_buyer(domain, org, id=f"p-{i}", email=f"p{i}@{domain}", status="extrapolated") for i in range(5)]
     pid, eid, oid = seed_opportunity(conn, clock)
     fake = apollo_for(domain, org, people=people)
     out = opportunity_service(conn, fake, clock).process(oid)
-    assert out.outcome == "closed" and out.reason == "no_verified_buyer_after_max_attempts"
+    assert out.outcome == "closed" and out.reason == "no_verified_buyer_after_max_attempts:epoch_1"
     assert sql1(conn, "SELECT count(*) FROM request_attempts WHERE operation = 'person_match'") == 3   # the legacy cap, explicit
     assert sql1(conn, "SELECT count(*) FROM approvals") == 0
-    # closed is reopenable: a new posting for the same employer x function reopens it and the
-    # previously attempted candidates are NOT retried
+    # new evidence: a new posting for the same employer x function reopens it into epoch 2
     from tests_core.seed import seed_opportunity as seed2
     fake.people_by_domain[domain].append(good_buyer(domain, org, id="p-new", email=f"new@{domain}"))
     pid2, _, oid2 = seed2(conn, clock, domain=domain, org_name=org, job_id="job-2")
-    assert oid2 == oid and sql1(conn, "SELECT state FROM opportunities WHERE id = %s", (oid,)) == "open"
+    assert oid2 == oid and sql1(conn, "SELECT state || ':' || evidence_epoch FROM opportunities WHERE id = %s", (oid,)) == "open:2"
     out2 = opportunity_service(conn, fake, clock).process(oid)
-    # attempts already made count against the cap -> closes again without paying for p-new
-    assert out2.outcome == "closed" and sql1(conn, "SELECT count(*) FROM request_attempts WHERE operation = 'person_match'") == 3
+    assert out2.outcome == "approved", out2
+    assert sql1(conn, "SELECT lead_json->>'email' FROM approvals") == f"new@{domain}"
+    # epoch 1's three judged candidates were not retried; epoch 2 spent exactly one match
+    assert sql1(conn, "SELECT count(*) FROM request_attempts WHERE operation = 'person_match'") == 4
+    assert sql1(conn, "SELECT count(*) FROM candidate_attempts WHERE epoch = 1 AND attempt_kind = 'match'") == 3
+    assert sql1(conn, "SELECT count(*) FROM candidate_attempts WHERE epoch = 2 AND attempt_kind = 'match'") == 1
+    # history is kept: every epoch-1 attempt row is still there
+    assert sql1(conn, "SELECT count(*) FROM candidate_attempts WHERE opportunity_id = %s", (oid,)) >= 8
 
 
 def test_corroborated_alternate_domain_email_passes_but_unrelated_domain_does_not(conn, clock):

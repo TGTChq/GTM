@@ -50,23 +50,40 @@ class AirtableClient:
         return {"Authorization": f"Bearer {self._token}", "Content-Type": "application/json"}
 
     def _request(self, method: str, *, params: Any = None, json_body: Any = None) -> AirtableResult:
+        """GET is retried. A create/update (POST/PATCH) is NOT retried inside the client on
+        any failure that could have reached the server -- connection reset, timeout,
+        408 or 5xx -- because Airtable has no idempotency key: a blind second POST after
+        an accepted first one duplicates the row (review finding R05). Those outcomes
+        come back ``uncertain`` so the outbox reconciles by Lead Key first. A 429 is
+        rejected before processing and is retried after the documented wait."""
+        mutating = method.upper() in ("POST", "PATCH", "DELETE")
         for attempt in range(self._retries + 1):
             try:
                 resp = self._t.request(method, self._url, headers=self._headers(), params=params,
                                        json_body=json_body, timeout=self._timeout)
             except TransportTimeout:
-                return AirtableResult(False, None, error_type="timeout", message="timeout", uncertain=method != "GET")
+                return AirtableResult(False, None, error_type="timeout", message="timeout", uncertain=mutating)
             except TransportError as exc:
+                if mutating:
+                    return AirtableResult(False, None, error_type="connection_lost", message=str(exc)[:200], uncertain=True)
                 if attempt < self._retries:
                     self._sleep(1.0 * (attempt + 1))
                     continue
                 return AirtableResult(False, None, error_type="network", message=str(exc)[:200])
-            if resp.status in RETRYABLE and attempt < self._retries:
-                wait = 30.0 if resp.status == 429 else min(8.0, 2.0 ** attempt)
-                self._sleep(wait)
+            if resp.status == 429 and attempt < self._retries:
+                self._sleep(30.0)
                 continue
+            if resp.status in RETRYABLE and resp.status != 429:
+                if mutating:
+                    parsed = self._parse(resp)
+                    parsed.uncertain = True
+                    parsed.error_type = parsed.error_type or f"ambiguous_{resp.status}"
+                    return parsed
+                if attempt < self._retries:
+                    self._sleep(min(8.0, 2.0 ** attempt))
+                    continue
             return self._parse(resp)
-        return AirtableResult(False, None, error_type="exhausted", message="retries exhausted")
+        return AirtableResult(False, 429, error_type="rate_limited", message="retries exhausted on 429")
 
     @staticmethod
     def _parse(resp: Response) -> AirtableResult:

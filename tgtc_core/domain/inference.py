@@ -95,6 +95,16 @@ class ResponsibilityItem:
     excerpt: str
 
 
+#: Why an answer is unavailable (review finding R03). The caller treats them differently:
+#: ``transient`` -> the work waits and resumes by itself; ``config`` -> no inference is
+#: configured or authorized (closed, reopened when configuration appears); ``answer`` ->
+#: the model declined or produced nothing usable for this content (closed as insufficient
+#: evidence, reopened by a new policy/model version).
+UNAVAILABLE_TRANSIENT = "transient"
+UNAVAILABLE_CONFIG = "config"
+UNAVAILABLE_ANSWER = "answer"
+
+
 @dataclass
 class InferenceResponse:
     available: bool
@@ -106,6 +116,7 @@ class InferenceResponse:
     confidence: float = 0.0
     model_version: str = ""
     unavailable_reason: str = ""
+    unavailable_kind: str = ""
     usage: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -115,7 +126,8 @@ class InferenceResponse:
             "responsibilities": [{"phrase": r.phrase, "excerpt": r.excerpt} for r in self.responsibilities],
             "seniority": self.seniority, "people_management": self.people_management,
             "incompatible_reasons": list(self.incompatible_reasons), "confidence": self.confidence,
-            "model_version": self.model_version, "unavailable_reason": self.unavailable_reason, "usage": self.usage,
+            "model_version": self.model_version, "unavailable_reason": self.unavailable_reason,
+            "unavailable_kind": self.unavailable_kind, "usage": self.usage,
         }
 
     @classmethod
@@ -131,6 +143,7 @@ class InferenceResponse:
             confidence=float(data.get("confidence") or 0.0),
             model_version=str(data.get("model_version") or model_version),
             unavailable_reason=str(data.get("unavailable_reason") or ""),
+            unavailable_kind=str(data.get("unavailable_kind") or ""),
             usage=dict(data.get("usage") or {}),
         )
 
@@ -151,11 +164,22 @@ def grounded(excerpt: str, description: str) -> bool:
     return bool(e) and len(e) >= 12 and e in _ws(description)
 
 
+def classify_exception(exc: BaseException) -> str:
+    """Map an SDK/transport failure to an unavailability kind without importing the SDK
+    at module level. Authorization/permission/bad-request problems are configuration;
+    timeouts, connection errors, rate limits and 5xx are transient."""
+    name = type(exc).__name__
+    status = getattr(exc, "status_code", None)
+    if name in ("AuthenticationError", "PermissionDeniedError", "BadRequestError", "NotFoundError") or status in (400, 401, 403, 404):
+        return UNAVAILABLE_CONFIG
+    return UNAVAILABLE_TRANSIENT
+
+
 class NullAdapter:
     model_version = ""
 
     def classify(self, request: InferenceRequest) -> InferenceResponse:
-        return InferenceResponse(available=False, unavailable_reason="no_inference_configured")
+        return InferenceResponse(available=False, unavailable_reason="no_inference_configured", unavailable_kind=UNAVAILABLE_CONFIG)
 
 
 class ReplayAdapter:
@@ -174,7 +198,8 @@ class ReplayAdapter:
         if data is None and self._fallback is not None:
             data = self._fallback(request)
         if data is None:
-            return InferenceResponse(available=False, unavailable_reason="no_recorded_answer", model_version=self.model_version)
+            return InferenceResponse(available=False, unavailable_reason="no_recorded_answer", unavailable_kind=UNAVAILABLE_ANSWER,
+                                     model_version=self.model_version)
         return InferenceResponse.from_dict(data, model_version=self.model_version)
 
 
@@ -226,7 +251,7 @@ class AnthropicAdapter:
             message = self._send(params)
         except Exception as exc:  # noqa: BLE001 - any transport/API failure is "unavailable", never a guess
             return InferenceResponse(available=False, unavailable_reason=f"inference_error:{type(exc).__name__}",
-                                     model_version=self.model_version)
+                                     unavailable_kind=classify_exception(exc), model_version=self.model_version)
         return self.parse_message(message)
 
     def parse_message(self, message: Any) -> InferenceResponse:
@@ -236,9 +261,11 @@ class AnthropicAdapter:
                  "output_tokens": getattr(usage_obj, "output_tokens", None),
                  "cache_read_input_tokens": getattr(usage_obj, "cache_read_input_tokens", None)}
         if stop == "refusal":
-            return InferenceResponse(available=False, unavailable_reason="model_refusal", model_version=self.model_version, usage=usage)
+            return InferenceResponse(available=False, unavailable_reason="model_refusal", unavailable_kind=UNAVAILABLE_ANSWER,
+                                     model_version=self.model_version, usage=usage)
         if stop == "max_tokens":
-            return InferenceResponse(available=False, unavailable_reason="max_tokens", model_version=self.model_version, usage=usage)
+            return InferenceResponse(available=False, unavailable_reason="max_tokens", unavailable_kind=UNAVAILABLE_TRANSIENT,
+                                     model_version=self.model_version, usage=usage)
         text = ""
         for block in getattr(message, "content", []) or []:
             if getattr(block, "type", "") == "text":
@@ -247,9 +274,11 @@ class AnthropicAdapter:
         try:
             data = json.loads(text)
         except ValueError:
-            return InferenceResponse(available=False, unavailable_reason="invalid_json", model_version=self.model_version, usage=usage)
+            return InferenceResponse(available=False, unavailable_reason="invalid_json", unavailable_kind=UNAVAILABLE_TRANSIENT,
+                                     model_version=self.model_version, usage=usage)
         if not isinstance(data, dict):
-            return InferenceResponse(available=False, unavailable_reason="invalid_shape", model_version=self.model_version, usage=usage)
+            return InferenceResponse(available=False, unavailable_reason="invalid_shape", unavailable_kind=UNAVAILABLE_TRANSIENT,
+                                     model_version=self.model_version, usage=usage)
         resp = InferenceResponse.from_dict(data, model_version=self.model_version)
         resp.usage = usage
         return resp

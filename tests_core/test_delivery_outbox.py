@@ -117,12 +117,15 @@ def test_airtable_422_is_blocked_with_the_field_error_not_retried_forever(conn, 
     assert len([r for r in at.requests if r["method"] == "POST"]) == 1
 
 
-def test_transient_airtable_failure_retries_with_backoff(conn, clock):
+def test_ambiguous_5xx_on_create_is_uncertain_and_reconciled_without_a_second_row(conn, clock):
+    """R05: a 503 after the request was sent may have created the row. The client must not
+    retry blindly; the outbox reconciles by Lead Key and sends nothing a second time."""
     _approve(conn, clock)
-    at = FakeAirtable(fail_next_status=503)
+    at = FakeAirtable(fail_next_status=503)          # rejected BEFORE creating anything
     svc = delivery_service(conn, at, None, clock)
-    svc.airtable._retries = 0
-    assert [x.outcome for x in svc.drain("airtable")] == ["failed"]
-    assert svc.drain("airtable") == []                        # backoff honoured
-    clock.advance(seconds=121)
+    assert [x.outcome for x in svc.drain("airtable")] == ["uncertain"]
+    assert len(at.records) == 0 and len([r for r in at.requests if r["method"] == "POST"]) == 1
+    clock.advance(seconds=301)
+    # reconciliation finds nothing -> ONE more create, which succeeds
     assert [x.outcome for x in svc.drain("airtable")] == ["delivered"]
+    assert len(at.records) == 1 and len([r for r in at.requests if r["method"] == "POST"]) == 2

@@ -29,10 +29,6 @@ CREATE TABLE IF NOT EXISTS source_partitions (
     rows_new          integer NOT NULL DEFAULT 0,
     duplicate_pages   integer NOT NULL DEFAULT 0,
     last_error        text,
-    stall_reason      text,
-    -- R07: one acquirer at a time; every cursor commit is fenced by this token.
-    lease_token       uuid,
-    lease_expires_at  timestamptz,
     created_at        timestamptz NOT NULL DEFAULT now(),
     updated_at        timestamptz NOT NULL DEFAULT now(),
     UNIQUE (source, lane, window_start, window_end)
@@ -79,9 +75,6 @@ CREATE TABLE IF NOT EXISTS page_receipts (
     quota_requests_remaining integer,
     quota_next_billing_date text,
     rows_compressed         bytea,
-    -- A page received by an acquirer that had lost the partition lease: billed and
-    -- kept for audit, but it never moved the cursor.
-    fenced                  boolean NOT NULL DEFAULT false,
     received_at             timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS page_receipts_partition_idx ON page_receipts (partition_id, page_offset);
@@ -153,7 +146,6 @@ CREATE TABLE IF NOT EXISTS postings (
     state                     text NOT NULL DEFAULT 'new'
                               CHECK (state IN ('new', 'identity_resolved', 'classified', 'closed', 'expired')),
     close_reason              text,
-    expired_at                timestamptz,
     created_at                timestamptz NOT NULL DEFAULT now(),
     updated_at                timestamptz NOT NULL DEFAULT now(),
     UNIQUE (source, provider_job_id)
@@ -182,10 +174,6 @@ CREATE TABLE IF NOT EXISTS opportunities (
                         CHECK (state IN ('open', 'approved', 'closed')),
     close_reason        text,
     approved_person_id  bigint,
-    -- Attempts are budgeted per evidence epoch; a reopen on NEW evidence starts the
-    -- next epoch without erasing the attempt history of earlier ones.
-    evidence_epoch      integer NOT NULL DEFAULT 1,
-    reopened_at         timestamptz,
     first_posting_at    timestamptz,
     last_posting_at     timestamptz,
     created_at          timestamptz NOT NULL DEFAULT now(),
@@ -264,7 +252,6 @@ CREATE TABLE IF NOT EXISTS candidate_attempts (
     reason            text,
     attempt_id        bigint REFERENCES request_attempts(id),
     details           jsonb NOT NULL DEFAULT '{}'::jsonb,
-    epoch             integer NOT NULL DEFAULT 1,
     created_at        timestamptz NOT NULL DEFAULT now(),
     UNIQUE (opportunity_id, candidate_ref, attempt_kind)
 );
@@ -322,8 +309,6 @@ CREATE TABLE IF NOT EXISTS provider_state (
     last_served_at        timestamptz,
     last_error_code       text,
     consecutive_refusals  integer NOT NULL DEFAULT 0,
-    -- R08: the controlled probe after a refusal is reserved atomically by ONE worker.
-    probe_reserved_at     timestamptz,
     details               jsonb NOT NULL DEFAULT '{}'::jsonb,
     updated_at            timestamptz NOT NULL DEFAULT now()
 );
@@ -374,10 +359,8 @@ CREATE TABLE IF NOT EXISTS delivery_outbox (
     channel           text NOT NULL CHECK (channel IN ('airtable', 'instantly')),
     idempotency_key   text NOT NULL,
     payload_json      jsonb NOT NULL,
-    -- R06: claiming is a state transition (pending/failed -> claimed) under a lease;
-    -- in_flight means the provider request was sent.
     state             text NOT NULL DEFAULT 'pending'
-                      CHECK (state IN ('pending', 'claimed', 'in_flight', 'delivered', 'failed', 'blocked')),
+                      CHECK (state IN ('pending', 'in_flight', 'delivered', 'failed', 'blocked')),
     attempts          integer NOT NULL DEFAULT 0,
     lease_token       uuid,
     lease_expires_at  timestamptz,

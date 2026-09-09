@@ -9,9 +9,11 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field, fields
-from typing import Any, Dict, Mapping, Optional
+from typing import Any, Dict, List, Mapping, Optional
 
 from .policy.campaigns import CAMPAIGN_ENV_BY_FUNCTION, POLICY_VERSION
+
+DEFAULT_FANTASTIC_SOURCES = ("fantastic:active-jb", "fantastic:active-ats")
 
 SECRET_NAMES = (
     "TGTC_DATABASE_URL", "FANTASTIC_JOBS_API_KEY", "APOLLO_API_KEY", "AIRTABLE_TOKEN",
@@ -64,6 +66,13 @@ class Settings:
     fantastic_max_pages_per_partition: int = 50
     fantastic_min_jobs_quota_remaining: int = 90
     fantastic_min_requests_quota_remaining: int = 20
+    #: Both contracted Fantastic feeds by default (review R02). ATS here is Fantastic's
+    #: ATS feed, not the 145 direct boards of the old system.
+    fantastic_sources: List[str] = field(default_factory=lambda: list(DEFAULT_FANTASTIC_SOURCES))
+    fantastic_quota_max_age_hours: float = 24.0
+    fantastic_availability_retry_hours: float = 6.0
+    partition_lease_seconds: int = 900
+    inference_retry_minutes: int = 15
     apollo_people_search_max_pages: int = 2
     apollo_availability_retry_hours: float = 6.0
     lease_seconds: int = 300
@@ -107,6 +116,11 @@ class Settings:
             fantastic_max_pages_per_partition=_int(env, "TGTC_FANTASTIC_MAX_PAGES_PER_PARTITION", 50),
             fantastic_min_jobs_quota_remaining=_int(env, "TGTC_FANTASTIC_MIN_JOBS_QUOTA_REMAINING", 90),
             fantastic_min_requests_quota_remaining=_int(env, "TGTC_FANTASTIC_MIN_REQUESTS_QUOTA_REMAINING", 20),
+            fantastic_sources=[x.strip() for x in str(env.get("TGTC_FANTASTIC_SOURCES", "") or ",".join(DEFAULT_FANTASTIC_SOURCES)).split(",") if x.strip()],
+            fantastic_quota_max_age_hours=float(_int(env, "TGTC_FANTASTIC_QUOTA_MAX_AGE_HOURS", 24)),
+            fantastic_availability_retry_hours=float(_int(env, "TGTC_FANTASTIC_AVAILABILITY_RETRY_HOURS", 6)),
+            partition_lease_seconds=_int(env, "TGTC_PARTITION_LEASE_SECONDS", 900),
+            inference_retry_minutes=_int(env, "TGTC_INFERENCE_RETRY_MINUTES", 15),
             apollo_people_search_max_pages=_int(env, "TGTC_APOLLO_PEOPLE_SEARCH_MAX_PAGES", 2),
             apollo_availability_retry_hours=float(_int(env, "TGTC_APOLLO_AVAILABILITY_RETRY_HOURS", 6)),
             lease_seconds=_int(env, "TGTC_LEASE_SECONDS", 300),
@@ -133,6 +147,7 @@ class Settings:
             if f.type in ("int", "float", "bool") or isinstance(getattr(self, f.name), (int, float, bool)):
                 if f.name not in {"campaign_env"}:
                     out["limits"][f.name] = getattr(self, f.name)
+        out["limits"]["fantastic_sources"] = list(self.fantastic_sources)
         out["limits"]["airtable_base_id_present"] = bool(self.airtable_base_id)
         out["limits"]["airtable_table_name"] = self.airtable_table_name
         out["limits"]["inference_model"] = self.inference_model
