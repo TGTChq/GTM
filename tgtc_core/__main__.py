@@ -64,12 +64,12 @@ def cmd_check_db(args) -> int:
 
 
 def _runner(conn, s: Settings, *, allow_spend: bool):
+    _require_spend_acknowledgement(allow_spend)
+
     from .domain.inference import AnthropicAdapter, NullAdapter
     from .providers.http import RequestsTransport
     from .runner import Runner
 
-    if not allow_spend:
-        raise SystemExit("refusing to run against real providers without --i-understand-spend")
     t = RequestsTransport()
     inference = AnthropicAdapter(api_key=s.anthropic_api_key, model=s.inference_model, base_url=s.anthropic_base_url) if s.anthropic_api_key else NullAdapter()
     return Runner(conn, s, fantastic_transport=t if s.fantastic_api_key else None, apollo_transport=t if s.apollo_api_key else None,
@@ -77,7 +77,15 @@ def _runner(conn, s: Settings, *, allow_spend: bool):
                   inference=inference)
 
 
+def _require_spend_acknowledgement(allow_spend: bool) -> None:
+    # Refuse before opening storage or applying a schema. This acknowledgement is
+    # not a credit budget and does not make a live acceptance cycle bounded.
+    if not allow_spend:
+        raise SystemExit("refusing to run against real providers without --i-understand-spend")
+
+
 def cmd_cycle(args) -> int:
+    _require_spend_acknowledgement(args.i_understand_spend)
     s = _settings()
     conn = connect(args.database_url or s.database_url)
     apply_schema(conn)
@@ -87,6 +95,7 @@ def cmd_cycle(args) -> int:
 
 
 def cmd_work(args) -> int:
+    _require_spend_acknowledgement(args.i_understand_spend)
     s = _settings()
     conn = connect(args.database_url or s.database_url)
     r = _runner(conn, s, allow_spend=args.i_understand_spend)
@@ -95,6 +104,7 @@ def cmd_work(args) -> int:
 
 
 def cmd_deliver(args) -> int:
+    _require_spend_acknowledgement(args.i_understand_spend)
     s = _settings()
     conn = connect(args.database_url or s.database_url)
     r = _runner(conn, s, allow_spend=args.i_understand_spend)

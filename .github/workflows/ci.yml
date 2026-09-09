@@ -138,12 +138,20 @@ jobs:
           docker run --rm --network none tgtc-core:ci
           docker run --rm --network none --entrypoint python tgtc-core:ci -c \
             "from tgtc_core.db.migrate import SCHEMA_PATH, migrations; assert SCHEMA_PATH.is_file(); assert migrations()"
+      - name: Legacy consumer compatibility (required)
+        env:
+          TGTC_REQUIRE_LEGACY_CONSUMER_TEST: "1"
+        run: |
+          python -m pip install -r requirements.txt
+          python -m pytest tests_core/test_legacy_consumer_exclusion.py -q -p ci_no_network --junitxml=legacy-core-results.xml
       - name: Preserve core test results
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: core-test-results
-          path: core-results.xml
+          path: |
+            core-results.xml
+            legacy-core-results.xml
       - name: Confirm no credential reached the job
         run: |
           for name in RAPIDAPI_KEY APOLLO_API_KEY HUNTER_API_KEY AIRTABLE_TOKEN \

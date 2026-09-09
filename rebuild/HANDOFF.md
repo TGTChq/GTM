@@ -128,12 +128,18 @@ difference from `PRODUCT_CONTRACT.md`.
 2. **Import history with provenance**: `python -m tgtc_core import-airtable` (reads the
    production table once; writes only `suppressions`), plus an Instantly workspace email
    import. Re-running is a no-op (`test_migration_replay.py`).
-3. **Acceptance in isolation**: point `AIRTABLE_TABLE_NAME` at a new acceptance table in
-   the same base and run `python -m tgtc_core cycle --i-understand-spend` with a bounded
-   Fantastic window and a bounded Apollo grant. Read `ledger`. This is the first live
-   evidence; nothing before it is.
-4. **Mutual exclusion at cutover**: pause the legacy GTM cron (`MAINTENANCE_ONLY=1` already
-   holds it) and the legacy Approved Sync cron. Structurally, core rows carry
+3. **Acceptance in isolation (still blocked)**: first implement and test a persistent
+   budget reserving every physical provider attempt, including inference SDK retries
+   and uncertain outcomes. `--max-items` and `--i-understand-spend` do not enforce that
+   budget. Prepare explicit UTC acquisition windows and an isolated Airtable table;
+   keep Instantly disconnected until a separately approved no-send destination exists.
+   Do not use the unrestricted `cycle` command as the acceptance executor. Live
+   acceptance also requires confirmed account availability and authorized consumption.
+4. **Mutual exclusion at cutover**: establish and verify the pause of the legacy GTM
+   and Approved Sync services before enabling the core. The September 9 GTM logs show
+   acquisition and an Apollo refusal; a current pause is **not demonstrated** by the
+   visible configuration. Do not assume `MAINTENANCE_ONLY` controls the active command.
+   Structurally, core rows carry
    `Validation Version = tgtc-core/1`, so a still-running Approved Sync skips them without
    a write; the core's importer treats legacy rows as history. Both directions are guarded.
 5. **Schedule**: run `cycle` hourly (blueprint §5 proposal) or as three stage workers

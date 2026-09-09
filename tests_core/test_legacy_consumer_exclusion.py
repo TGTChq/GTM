@@ -14,10 +14,11 @@ from tgtc_core.domain import approval as ap
 
 def test_legacy_approved_row_eligibility_skips_core_rows():
     os.environ.setdefault("PYTEST_CURRENT_TEST", "1")
-    try:
-        legacy = importlib.import_module("airtable_client")
-    except Exception as exc:  # noqa: BLE001 - environment-dependent legacy import
-        pytest.skip(f"legacy airtable_client not importable here: {exc}")
+    if os.environ.get("TGTC_REQUIRE_LEGACY_CONSUMER_TEST") != "1":
+        pytest.importorskip("dotenv", reason="legacy dependency absent in core-only environment")
+    # The required CI gate installs legacy dependencies. Import defects there,
+    # and unexpected runtime defects anywhere, must fail instead of being skipped.
+    legacy = importlib.import_module("airtable_client")
     out = ap.build_approved_lead(**_inputs())
     fields = ap.airtable_fields(out.lead, out.fingerprint)
     category, reason = legacy.approved_row_eligibility(fields)

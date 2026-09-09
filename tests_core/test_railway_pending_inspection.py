@@ -1,0 +1,101 @@
+"""Synthetic Railway responses only; no Railway session or network is used."""
+
+import json
+from types import SimpleNamespace
+
+import pytest
+
+from rebuild import inspect_railway_pending as probe
+
+
+def response():
+    sid = next(iter(probe.SERVICES))
+    current = {"services": {sid: {"variables": {
+        "APOLLO_API_KEY": {"value": "private-current-value", "description": "unchanged metadata"},
+        "SEALED": {"value": "********", "isSealed": True},
+    }, "deploy": {"cronSchedule": "0 3 * * *"}}}}
+    patch = {"services": {sid: {"variables": {
+        "APOLLO_API_KEY": {"value": "private-proposed-value"},
+        "SEALED": {"value": "********", "isSealed": True},
+    }, "deploy": {"cronSchedule": "0 3 * * *"}}},
+        "sharedVariables": {"EXTRA": {"value": "private-shared-value"}}}
+    return {"data": {
+        "environment": {"id": probe.ENVIRONMENT, "projectId": probe.PROJECT, "config": current},
+        "environmentStagedChanges": {"id": probe.OBSERVED_PATCH, "environmentId": probe.ENVIRONMENT,
+                                     "status": "STAGED", "patch": patch},
+    }}
+
+
+def test_comparison_reports_names_without_secret_values():
+    result = probe.summarize(response())
+    assert result["inspected_entry_count"] == 4
+    assert result["by_scope"] == {"GTM": 3, "environment": 1}
+    assert result["by_comparison"] == {
+        "different_from_current": 1, "same_as_current": 1,
+        "value_not_comparable": 1, "absent_in_current": 1,
+    }
+    encoded = json.dumps(result)
+    assert "APOLLO_API_KEY" in encoded
+    assert "private-" not in encoded and "********" not in encoded
+
+
+def test_partial_variable_patch_does_not_turn_omitted_metadata_into_change():
+    raw = response()
+    sid = next(iter(probe.SERVICES))
+    raw["data"]["environmentStagedChanges"]["patch"]["services"][sid]["variables"]["APOLLO_API_KEY"]["value"] = "private-current-value"
+    result = probe.summarize(raw)
+    assert result["by_comparison"]["same_as_current"] == 2
+
+
+@pytest.mark.parametrize("value", [None, "********", "[REDACTED]"])
+def test_hidden_values_are_never_reported_as_equal(value):
+    assert probe._variable_comparison({"value": value}, {"value": value}) == "value_not_comparable"
+
+
+def test_wrong_environment_is_rejected():
+    raw = response()
+    raw["data"]["environment"]["id"] = "some-other-environment"
+    with pytest.raises(ValueError, match="unexpected_project_or_environment"):
+        probe.summarize(raw)
+
+
+def test_empty_patch_and_replaced_patch_are_reported_without_inventing_changes():
+    raw = response()
+    staged = raw["data"]["environmentStagedChanges"]
+    staged["patch"] = {}
+    staged["id"] = "00000000-0000-4000-8000-000000000000"
+    result = probe.summarize(raw)
+    assert result["inspected_entry_count"] == 0
+    assert result["matches_connector_patch_id"] is False
+
+
+def test_cli_uses_only_fixed_read_query_and_persists_only_redacted_result(monkeypatch, tmp_path, capsys):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(probe.shutil, "which", lambda name: "railway.exe")
+
+    def fake_run(command, **kwargs):
+        assert command == ["railway.exe", "api", "--file", "-", "--compact"]
+        assert kwargs["input"] == probe.QUERY
+        assert probe.QUERY.strip().startswith("query ")
+        assert "mutation" not in probe.QUERY.lower()
+        assert kwargs["capture_output"] is True
+        assert kwargs["env"]["RAILWAY_NO_AUTO_UPDATE"] == "1"
+        assert kwargs["timeout"] == 45
+        return SimpleNamespace(returncode=0, stdout=json.dumps(response()), stderr="")
+
+    monkeypatch.setattr(probe.subprocess, "run", fake_run)
+    assert probe.main() == 0
+    files = list(tmp_path.glob("*.json"))
+    assert len(files) == 1
+    assert "private-" not in files[0].read_text()
+    assert "private-" not in str(capsys.readouterr())
+
+
+def test_failed_cli_does_not_echo_raw_response_or_save_it(monkeypatch, tmp_path, capsys):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(probe.shutil, "which", lambda name: "railway.exe")
+    monkeypatch.setattr(probe.subprocess, "run", lambda *a, **k: SimpleNamespace(
+        returncode=1, stdout=json.dumps(response()), stderr="private-error-secret"))
+    assert probe.main() == 1
+    assert "private-" not in str(capsys.readouterr())
+    assert list(tmp_path.iterdir()) == []
