@@ -1,0 +1,6 @@
+# Test dependencies for tests_core/: a real PostgreSQL (embedded) is required.
+-r requirements-core.txt
+pytest>=8.0,<10
+pyflakes>=3.2,<4
+# Embedded PostgreSQL 16 for local/CI tests when TGTC_TEST_DATABASE_URL is not set.
+pgserver>=0.1.4,<0.2

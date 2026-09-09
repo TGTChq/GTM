@@ -1,0 +1,7 @@
+# Runtime dependencies of the rebuilt core (tgtc_core/). Separate from the legacy
+# requirements.txt so the legacy image is unchanged until the cutover decision.
+requests>=2.32,<3
+tldextract==5.3.0
+psycopg[binary]>=3.2,<4
+# Semantic inference adapter (official SDK). Only imported when ANTHROPIC_API_KEY is set.
+anthropic>=1,<2

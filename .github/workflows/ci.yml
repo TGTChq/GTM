@@ -98,3 +98,48 @@ jobs:
             fi
           done
           echo "no provider credential is present"
+
+  core:
+    # The rebuilt core (tgtc_core/) runs against a REAL PostgreSQL. `pgserver` embeds
+    # PostgreSQL 16 so the job needs no service container and no credential; the
+    # legacy `test` job above is untouched.
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            requirements-core.txt
+            requirements-core-dev.txt
+      - name: Install core dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-core-dev.txt
+      - name: Undefined names in the core
+        run: |
+          set -o pipefail
+          python -m pyflakes tgtc_core tests_core | tee pyflakes-core.txt || true
+          if grep -q "undefined name" pyflakes-core.txt; then
+            echo "::error::pyflakes found an undefined name in tgtc_core"
+            grep "undefined name" pyflakes-core.txt
+            exit 1
+          fi
+      - name: Core integrated suite (embedded PostgreSQL, simulated providers)
+        env:
+          PYTHONHASHSEED: "0"
+        run: python -m pytest tests_core -q
+      - name: Confirm no credential reached the job
+        run: |
+          for name in RAPIDAPI_KEY APOLLO_API_KEY HUNTER_API_KEY AIRTABLE_TOKEN \
+                      INSTANTLY_API_KEY FANTASTIC_JOBS_API_KEY VALIDATION_SIGNING_KEY \
+                      ANTHROPIC_API_KEY TGTC_CORE_SIGNING_KEY TGTC_DATABASE_URL; do
+            if [ -n "${!name:-}" ]; then
+              echo "::error::$name is set in CI; this gate must stay credential-free"
+              exit 1
+            fi
+          done
+          echo "no provider credential is present"
