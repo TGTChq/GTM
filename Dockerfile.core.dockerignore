@@ -1,0 +1,13 @@
+# The acceptance build must not even receive legacy state or credentials.
+*
+!Dockerfile.core
+!requirements-core.txt
+!domain_utils.py
+!source_domains.py
+!tgtc_core/
+!tgtc_core/**
+tgtc_core/testing/
+**/__pycache__/
+**/*.py[cod]
+**/.env
+**/.env.*

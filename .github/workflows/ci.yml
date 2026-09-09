@@ -132,6 +132,12 @@ jobs:
         env:
           PYTHONHASHSEED: "0"
         run: python -m pytest tests_core -q -p ci_no_network --junitxml=core-results.xml
+      - name: Build isolated core image and check zero-network startup
+        run: |
+          docker build -f Dockerfile.core -t tgtc-core:ci .
+          docker run --rm --network none tgtc-core:ci describe
+          docker run --rm --network none --entrypoint python tgtc-core:ci -c \
+            "from tgtc_core.db.migrate import SCHEMA_PATH, migrations; assert SCHEMA_PATH.is_file(); assert migrations()"
       - name: Preserve core test results
         if: always()
         uses: actions/upload-artifact@v4

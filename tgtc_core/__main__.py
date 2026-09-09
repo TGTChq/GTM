@@ -3,6 +3,7 @@
 Subcommands:
   migrate            apply the schema to TGTC_DATABASE_URL (idempotent)
   describe           print settings presence/limits and the policy manifest (no secrets)
+  check-db           authenticated PostgreSQL SELECTs only; does not install the schema
   cycle              acquisition + stages + delivery against the REAL providers configured
   work --kind K      drain one stage
   deliver            drain the outbox
@@ -49,6 +50,17 @@ def cmd_describe(args) -> int:
     s = _settings()
     print(json.dumps({"settings": s.describe(), "policy": describe_policy().__dict__}, indent=2, default=str))
     return 0
+
+
+def cmd_check_db(args) -> int:
+    from .db.check import check_database
+
+    # No provider settings or runner are needed for an infrastructure check.
+    result = check_database(args.database_url or os.environ.get("TGTC_DATABASE_URL", ""))
+    print(json.dumps(result, sort_keys=True))
+    if result["status"] == "missing_database_url":
+        return 2
+    return 0 if result["status"] == "database_reachable" else 1
 
 
 def _runner(conn, s: Settings, *, allow_spend: bool):
@@ -156,7 +168,7 @@ def main(argv=None) -> int:
     sub = parser.add_subparsers(dest="cmd", required=True)
     for name, fn in (("migrate", cmd_migrate), ("describe", cmd_describe), ("cycle", cmd_cycle), ("work", cmd_work),
                      ("deliver", cmd_deliver), ("ledger", cmd_ledger), ("import-airtable", cmd_import_airtable),
-                     ("prune", cmd_prune), ("demo", cmd_demo)):
+                     ("prune", cmd_prune), ("demo", cmd_demo), ("check-db", cmd_check_db)):
         p = sub.add_parser(name)
         p.add_argument("--database-url", default="")
         p.add_argument("--max-items", type=int, default=1000)

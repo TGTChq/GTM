@@ -1,0 +1,16 @@
+FROM python:3.12-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1
+
+WORKDIR /app
+COPY requirements-core.txt ./
+RUN pip install --no-cache-dir -r requirements-core.txt
+
+# Explicit runtime files: no .env, historical data, tests, or legacy runner.
+COPY tgtc_core/ ./tgtc_core/
+COPY domain_utils.py source_domains.py ./
+
+# Starting an image must not acquire, enrich, migrate, or deliver implicitly.
+CMD ["python", "-m", "tgtc_core", "describe"]
