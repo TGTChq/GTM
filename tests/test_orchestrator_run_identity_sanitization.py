@@ -187,12 +187,12 @@ class ZeroNetworkTests(unittest.TestCase):
 class PreservedBehaviorTests(unittest.TestCase):
     # (7) Railway Start Command is service-managed, NOT config-as-code.
     def test_railway_json_does_not_define_start_command(self):
-        # railway.json must NOT pin the GTM Start Command: it is managed at the
+        # The preserved railway.legacy.json must NOT pin the GTM Start Command: it is managed at the
         # Railway service level so it can be edited/restored from the UI (including a
         # temporary maintenance 'sleep infinity') with no Git change. If no Start
         # Command is set, the image falls back to the SAFE zero-network preflight,
         # never acquisition.
-        rc = json.loads(Path("railway.json").read_text(encoding="utf-8"))
+        rc = json.loads(Path("railway.legacy.json").read_text(encoding="utf-8"))
         self.assertNotIn("startCommand", rc.get("deploy", {}))
         # Acquisition flags must not leak into config-as-code anywhere in the file.
         blob = json.dumps(rc)

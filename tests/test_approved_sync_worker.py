@@ -419,10 +419,10 @@ class WorkerIsolationTests(_Base):
 
     def test_railway_json_does_not_control_start_command(self):
         # The GTM Start Command is deliberately service-managed (editable from the
-        # Railway UI), NOT config-as-code: railway.json must not define it, so an
+        # Railway UI), NOT config-as-code: railway.legacy.json must not define it, so an
         # operator can set/restore it (or a maintenance 'sleep infinity') without a
         # Git change. The image CMD is the safe fallback if no Start Command is set.
-        rc = json.loads(Path("railway.json").read_text(encoding="utf-8"))
+        rc = json.loads(Path("railway.legacy.json").read_text(encoding="utf-8"))
         self.assertNotIn("startCommand", rc.get("deploy", {}))
         dockerfile = Path("Dockerfile").read_text(encoding="utf-8")
         self.assertIn("--preflight-only", dockerfile)  # safe, zero-network fallback
