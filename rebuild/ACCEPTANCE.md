@@ -69,7 +69,7 @@ pass` is computed by `tgtc_core/services/metrics.py` from linked cohorts only.
 
 | Check | Result |
 |---|---|
-| `python -m pytest tests_core -q` | 195 passed (embedded PostgreSQL 16.2) |
+| `python -m pytest tests_core -q` | 196 passed (embedded PostgreSQL 16.2) |
 | `python -m tgtc_core demo` | 10 Approved across the nine campaigns; 10 Airtable rows, 10 Instantly leads; 30 simulated paid matches; 0 organization enrichments |
 | `python -m tgtc_core.testing.load --events 50000 --burst 10000 --workers 4` | see `HANDOFF.md §3` (software envelope only) |
 | Legacy `python ci_check_integrity.py` | `checked=35 mismatch=0 absent=0` |

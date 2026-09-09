@@ -15,7 +15,7 @@ providers it says so.
 | Repository | `TGTChq/GTM` |
 | Base | `main = 5d87851` (the blueprint's inspected commit) |
 | Branch / worktree | `feat/rebuild-core` at `C:/TGTC/tgtc_rebuild` |
-| Commit | `__COMMIT__` |
+| Commit | `65ab398` (implementation) + the docs/retention commit on top; `git log --oneline 5d87851..feat/rebuild-core` |
 | Diff summary | `git diff --stat 5d87851..feat/rebuild-core` — new package `tgtc_core/`, new suite `tests_core/`, `rebuild/*.md`, `requirements-core*.txt`, one added CI job. **No legacy file was modified except `.github/workflows/ci.yml` (job appended).** |
 | Preserved | the session's original worktree (`feat/row2-diagnostic-instrumentation`), every other worktree's uncommitted changes, all legacy modules, the integrity manifest |
 
@@ -45,7 +45,7 @@ Run from `C:/TGTC/tgtc_rebuild` (Python 3.12; `pip install -r requirements-core-
 ```bash
 python -m pytest tests_core -q
 ```
-Result: `195 passed in 23.25s` (2026-09-08). Backed by an embedded PostgreSQL 16.2 (`pgserver`), simulated
+Result: `196 passed in 25.60s` (2026-09-08, after adding the retention test). Backed by an embedded PostgreSQL 16.2 (`pgserver`), simulated
 providers. What it proves: the storage contract, the gates, the failure/recovery
 scenarios in `ACCEPTANCE.md §1`, and that all nine campaign routes deliver. What it does
 not prove: provider behaviour, conversion, capacity.
@@ -132,9 +132,10 @@ difference from `PRODUCT_CONTRACT.md`.
    the core remain in Airtable/Instantly and in `delivery_receipts`; they are history the
    legacy suppression already recognises (same `Lead Key`, same company × function keys).
    Nothing in rollback deletes a delivered lead.
-7. **Backup**: PostgreSQL logical backup before each policy-version change; `payload
-   retention` prunes `page_receipts.rows_compressed` after `TGTC_PAYLOAD_RETENTION_DAYS`
-   (prune command to be added before production; receipts and ids are never pruned).
+7. **Backup and retention**: PostgreSQL logical backup before each policy-version change;
+   `python -m tgtc_core prune` nulls `page_receipts.rows_compressed` older than
+   `TGTC_PAYLOAD_RETENTION_DAYS` (default 30). Receipts, ids, fingerprints, quota headers
+   and posting text are never pruned (`tests_core/test_retention.py`).
 
 Infrastructure change and cost: one PostgreSQL instance and one Railway service. No new
 provider, no plan change, no copy change.

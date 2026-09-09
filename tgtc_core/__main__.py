@@ -8,6 +8,7 @@ Subcommands:
   deliver            drain the outbox
   ledger             print the reconciled ledger
   import-airtable    import existing Airtable rows as suppressions (reads only)
+  prune              null compressed page payloads older than TGTC_PAYLOAD_RETENTION_DAYS (receipts kept)
   demo               end-to-end run against SIMULATED providers on an embedded PostgreSQL
 
 Nothing here deploys, merges or changes live configuration. ``cycle``/``work``/
@@ -132,6 +133,15 @@ def _merge(a, b):
     return a
 
 
+def cmd_prune(args) -> int:
+    from .services.retention import prune_payloads
+
+    s = _settings()
+    conn = connect(args.database_url or s.database_url)
+    print(json.dumps(prune_payloads(conn, retention_days=s.payload_retention_days), indent=2, default=str))
+    return 0
+
+
 def cmd_demo(args) -> int:
     """SIMULATED providers, embedded PostgreSQL, nine routes. Not live evidence."""
     from .testing.demo import run_demo
@@ -145,7 +155,8 @@ def main(argv=None) -> int:
     parser = argparse.ArgumentParser(prog="tgtc_core", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="cmd", required=True)
     for name, fn in (("migrate", cmd_migrate), ("describe", cmd_describe), ("cycle", cmd_cycle), ("work", cmd_work),
-                     ("deliver", cmd_deliver), ("ledger", cmd_ledger), ("import-airtable", cmd_import_airtable), ("demo", cmd_demo)):
+                     ("deliver", cmd_deliver), ("ledger", cmd_ledger), ("import-airtable", cmd_import_airtable),
+                     ("prune", cmd_prune), ("demo", cmd_demo)):
         p = sub.add_parser(name)
         p.add_argument("--database-url", default="")
         p.add_argument("--max-items", type=int, default=1000)
