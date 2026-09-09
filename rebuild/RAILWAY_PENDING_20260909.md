@@ -1,5 +1,46 @@
 # Railway pending configuration and acceptance follow-up — 2026-09-09
 
+## Latest evidence (supersedes the earlier status below)
+
+The user supplied the complete redacted JSON from 07:28:51 UTC: same patch ID,
+STAGED, zero enumerated entries, empty scopes and comparisons. The original
+inspector did not record container shape or request the non-decrypted patch;
+the result cannot distinguish a literal `{}` from nested empty objects. The
+connector still returns 308. Do not count those as 308 proven modifications.
+
+The official CLI explicitly recognizes an empty placeholder returned by
+`environmentStagedChanges`. Its database module also documents that current
+configuration read without `decryptVariables: true` masks variable values as
+null. These are plausible explanations to test, **not a verified cause for this
+environment**. The revised inspector requests both patch views in one fixed
+query, reports their counts and structural shapes, and never grants apply
+permission from an empty result. Historical incident auditing remains open.
+
+- [Empty staged placeholders](https://github.com/railwayapp/cli/blob/4536fd53b0f77cd9693321fd992dd8b582bab55e/src/controllers/template_apply.rs)
+- [Non-decrypted configuration values](https://github.com/railwayapp/cli/blob/4536fd53b0f77cd9693321fd992dd8b582bab55e/src/commands/database/mod.rs)
+
+Remote `feat/rebuild-core` is `07c715bc61ff75c3e0228d34ecfe7b38490bdca3`.
+[CI 34324131422](https://github.com/TGTChq/GTM/actions/runs/34324131422) passed
+core, legacy, Docker and the mandatory legacy consumer check. Windows reported
+346 passed with zero skips. New changes in this follow-up still require their
+own published CI.
+
+For the **first infrastructure check only**, the CLI now implements
+`TGTC_ACCEPTANCE_MODE=read_only`: only `describe` and `check-db` can dispatch.
+Every other command is rejected before its handler, even with the spend flag.
+Unknown mode values fail closed without printing their contents. This enforces
+zero provider calls through that CLI mode; it does **not** solve the durable
+budget required for subsequent paid trials or control the running legacy
+services. Thirty-two focused offline regression checks passed locally.
+
+Railway's current documentation says new services cannot opt into the deprecated
+`railway.json`/`railway.toml` Config as Code mechanism. Therefore no new custom
+config file is proposed. Set build/start configuration on the acceptance service
+itself and verify the effective deployment metadata. Do not migrate or delete the
+legacy configuration as part of this step. [Current Railway documentation](https://docs.railway.com/config-as-code).
+
+The remainder records the preceding review. Read its temporal claims as history.
+
 ## Verified baseline
 
 Remote `feat/rebuild-core` is still

@@ -67,6 +67,47 @@ def test_empty_patch_and_replaced_patch_are_reported_without_inventing_changes()
     result = probe.summarize(raw)
     assert result["inspected_entry_count"] == 0
     assert result["matches_connector_patch_id"] is False
+    assert result["interpretation"] == "masked_view_not_requested"
+    assert result["safe_to_apply"] is False
+
+
+def test_empty_decrypted_patch_does_not_hide_masked_variable_entries():
+    raw = response()
+    staged = raw["data"]["environmentStagedChanges"]
+    staged["maskedPatch"] = staged["patch"]
+    staged["patch"] = {}
+    result = probe.summarize(raw)
+    assert result["inspected_entry_count"] == 0
+    assert result["masked_view"]["inspected_entry_count"] == 4
+    assert result["interpretation"] == "entries_only_in_masked_view"
+    assert "by_comparison" not in result["masked_view"]
+    assert "private-" not in json.dumps(result)
+    assert result["safe_to_apply"] is False
+
+
+def test_zero_entries_preserves_evidence_of_empty_nested_containers():
+    raw = response()
+    staged = raw["data"]["environmentStagedChanges"]
+    staged["patch"] = {"services": {next(iter(probe.SERVICES)): {"variables": {}}}}
+    staged["maskedPatch"] = {}
+    result = probe.summarize(raw)
+    assert result["interpretation"] == "no_entries_in_either_returned_view"
+    assert result["patch_shape"]["objects"] == 4
+    assert result["patch_shape"]["empty_objects"] == 1
+    assert result["masked_view"]["shape"]["objects"] == 1
+    assert result["safe_to_apply"] is False
+
+
+def test_null_patch_is_not_silently_treated_as_no_changes():
+    raw = response()
+    raw["data"]["environmentStagedChanges"]["maskedPatch"] = None
+    with pytest.raises(ValueError, match="unsupported_masked_patch_shape"):
+        probe.summarize(raw)
+
+
+def test_query_requests_both_representations_in_same_read():
+    assert "patch(decryptVariables: true)" in probe.QUERY
+    assert "maskedPatch: patch(decryptVariables: false)" in probe.QUERY
 
 
 def test_cli_uses_only_fixed_read_query_and_persists_only_redacted_result(monkeypatch, tmp_path, capsys):

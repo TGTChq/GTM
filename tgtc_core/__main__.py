@@ -15,6 +15,8 @@ Subcommands:
 Nothing here deploys, merges or changes live configuration. ``cycle``/``work``/
 ``deliver`` will spend provider credits when given real credentials -- they are the
 production path, and they refuse to run without an explicit ``--i-understand-spend``.
+With ``TGTC_ACCEPTANCE_MODE=read_only``, only ``describe`` and ``check-db`` are
+allowed; the spend acknowledgement does not override that restriction.
 """
 
 from __future__ import annotations
@@ -82,6 +84,19 @@ def _require_spend_acknowledgement(allow_spend: bool) -> None:
     # not a credit budget and does not make a live acceptance cycle bounded.
     if not allow_spend:
         raise SystemExit("refusing to run against real providers without --i-understand-spend")
+
+
+def _require_acceptance_command(command: str) -> None:
+    """The initial acceptance service may only inspect config or SELECT from DB.
+
+    The ordinary spend acknowledgement cannot override this deployment setting.
+    This is a zero-provider-spend CLI mode, not a budget for later paid trials.
+    """
+    mode = os.environ.get("TGTC_ACCEPTANCE_MODE", "").strip()
+    if mode and mode != "read_only":
+        raise SystemExit("invalid TGTC_ACCEPTANCE_MODE; expected read_only or unset")
+    if mode == "read_only" and command not in ("describe", "check-db"):
+        raise SystemExit("TGTC_ACCEPTANCE_MODE=read_only allows only describe and check-db")
 
 
 def cmd_cycle(args) -> int:
@@ -188,6 +203,7 @@ def main(argv=None) -> int:
             p.add_argument("--kind", required=True, choices=("resolve_identity", "classify", "qualify_opportunity"))
         p.set_defaults(fn=fn)
     args = parser.parse_args(argv)
+    _require_acceptance_command(args.cmd)
     return int(args.fn(args))
 
 

@@ -32,7 +32,9 @@ QUERY = '''query InspectTGTCStagedReadOnly {
     id projectId name config(decryptVariables: true)
   }
   environmentStagedChanges(environmentId: "%s") {
-    id environmentId status createdAt updatedAt patch(decryptVariables: true)
+    id environmentId status createdAt updatedAt
+    patch(decryptVariables: true)
+    maskedPatch: patch(decryptVariables: false)
   }
 }''' % (ENVIRONMENT, PROJECT, ENVIRONMENT)
 MISSING = object()
@@ -86,6 +88,38 @@ def _entries(current, patch, path=()):
                 yield child_path, _comparison(previous, proposed), "configuration_field"
 
 
+def _shape(value):
+    """Count containers as well as leaves; never serialize a config value."""
+    counts = Counter(objects=0, empty_objects=0, arrays=0, scalars=0, nulls=0)
+
+    def visit(node):
+        if isinstance(node, dict):
+            counts["objects"] += 1
+            counts["empty_objects"] += int(not node)
+            for child in node.values():
+                visit(child)
+        elif isinstance(node, list):
+            counts["arrays"] += 1
+            for child in node:
+                visit(child)
+        else:
+            counts["nulls" if node is None else "scalars"] += 1
+
+    visit(value)
+    return dict(counts)
+
+
+def _view(current, patch):
+    entries = []
+    for path, comparison, kind in _entries(current, patch):
+        scope = SERVICES.get(path[1], "unknown_service") if len(path) > 1 and path[0] == "services" else "environment"
+        entries.append({"scope": scope, "path": list(path), "kind": kind, "comparison": comparison})
+    return {"shape": _shape(patch), "inspected_entry_count": len(entries),
+            "by_scope": dict(Counter(x["scope"] for x in entries)),
+            "by_comparison": dict(Counter(x["comparison"] for x in entries)),
+            "entries": entries}
+
+
 def summarize(response):
     if not isinstance(response, dict) or response.get("errors"):
         raise ValueError("api_response_error")
@@ -98,10 +132,26 @@ def summarize(response):
     current, patch = env.get("config"), staged.get("patch")
     if not isinstance(current, dict) or not isinstance(patch, dict):
         raise ValueError("unsupported_config_shape")
-    entries = []
-    for path, comparison, kind in _entries(current, patch):
-        scope = SERVICES.get(path[1], path[1]) if len(path) > 1 and path[0] == "services" else "environment"
-        entries.append({"scope": scope, "path": list(path), "kind": kind, "comparison": comparison})
+    decrypted = _view(current, patch)
+    # The old report did not request this alias. Preserve its readable format,
+    # but label that missing evidence instead of treating it as an empty patch.
+    masked = staged.get("maskedPatch", MISSING)
+    if masked is not MISSING and not isinstance(masked, dict):
+        raise ValueError("unsupported_masked_patch_shape")
+    masked_view = None if masked is MISSING else _view(MISSING, masked)
+    # A masked value cannot establish equality or deletion semantics. Report
+    # structural counts only for this representation, never comparisons.
+    if masked_view is not None:
+        masked_view.pop("by_comparison")
+        masked_view.pop("entries")
+    if masked_view is None:
+        interpretation = "masked_view_not_requested"
+    elif not decrypted["inspected_entry_count"] and not masked_view["inspected_entry_count"]:
+        interpretation = "no_entries_in_either_returned_view"
+    elif not decrypted["inspected_entry_count"]:
+        interpretation = "entries_only_in_masked_view"
+    else:
+        interpretation = "decrypted_patch_has_entries"
     patch_id = str(staged.get("id", ""))
     if patch_id and not re.fullmatch(r"[0-9a-fA-F-]{36}", patch_id):
         raise ValueError("unexpected_patch_id")
@@ -112,16 +162,23 @@ def summarize(response):
         "read_only": True, "project_id": PROJECT, "environment_id": ENVIRONMENT,
         "patch_id": patch_id, "patch_status": status,
         "matches_connector_patch_id": patch_id == OBSERVED_PATCH,
-        "inspected_entry_count": len(entries),
+        "inspected_entry_count": decrypted["inspected_entry_count"],
         "count_definition": "one entry per variable, one per other supplied scalar/list/null field; not Railway's undocumented changeCount",
-        "by_scope": dict(Counter(x["scope"] for x in entries)),
-        "by_comparison": dict(Counter(x["comparison"] for x in entries)),
-        "entries": entries,
+        "by_scope": decrypted["by_scope"],
+        "by_comparison": decrypted["by_comparison"],
+        "entries": decrypted["entries"],
+        "patch_shape": decrypted["shape"],
+        "masked_view": masked_view,
+        "interpretation": interpretation,
+        "safe_to_apply": False,
+        "current_services_returned": sorted(SERVICES[sid] for sid in SERVICES
+                                            if sid in current.get("services", {})),
         "limits": [
             "No values, passwords, hashes or raw API errors included.",
             "Equality describes the current returned representation, not historical pre-incident values or resolved reference semantics.",
             "Sealed, masked and omitted values remain unknown; no deployment or acceptance is authorized by this result.",
             "Current config and patch reads are not a locked snapshot. Recheck before any separately authorized mutation.",
+            "STAGED alone can describe an empty placeholder. Zero enumerated entries do not authorize applying or discarding it.",
         ],
     }
 
@@ -155,12 +212,18 @@ def main():
         print(f"Parche: {report['patch_id']} ({report['patch_status']})")
         print("Entradas por servicio: " + json.dumps(report["by_scope"], ensure_ascii=False))
         print("Comparacion: " + json.dumps(report["by_comparison"], ensure_ascii=False))
+        print("Resultado de ambas lecturas: " + report["interpretation"])
+        masked = report["masked_view"]
+        print("Entradas descifradas / ocultas: " + str(report["inspected_entry_count"]) + " / "
+              + (str(masked["inspected_entry_count"]) if masked is not None else "no consultada"))
+        print("Servicios visibles en configuracion actual: " + ", ".join(report["current_services_returned"]))
+        print("Forma del parche descifrado: " + json.dumps(report["patch_shape"]))
         print("Comparte el archivo JSON generado. No contiene los valores de las variables.")
         return 0
     except Exception as exc:
         known = {"railway_cli_not_found", "installed_cli_has_no_supported_api_command",
                  "cli_query_failed_check_login_and_project_access", "api_response_error",
-                 "unexpected_project_or_environment", "unsupported_config_shape", "unexpected_patch_id"}
+                 "unexpected_project_or_environment", "unsupported_config_shape", "unsupported_masked_patch_shape", "unexpected_patch_id"}
         code = str(exc) if type(exc) in (RuntimeError, ValueError) and str(exc) in known else type(exc).__name__
         print("No se pudo completar la lectura: " + code, file=sys.stderr)
         print("No se aplicaron cambios. No compartas tokens ni salidas crudas de variables.", file=sys.stderr)
