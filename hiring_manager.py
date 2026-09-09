@@ -459,9 +459,35 @@ def alternate_contact_budget_used() -> int:
 
 
 def _alternate_budget_available() -> bool:
+    """May this bucket advance to its next ranked candidate?
+
+    The ceiling counts ADVANCES, not credits: a bucket that moves to rank 2 spends
+    one of these whether or not the move ends in a paid match. It exists so a
+    pathological batch cannot multiply work, and 100 was chosen when a run was a
+    few hundred companies.
+
+    In continuous mode that default became a recovery ceiling rather than a safety
+    one. The 2026-09-08 run considered 1,506 companies and found 536 contacts, so a
+    run-level allowance of 100 advances is spent long before the candidates are, and
+    every later bucket stops at its first candidate however much authorization
+    Apollo has. An ABSENT operator limit therefore inherits continuous
+    authorization, exactly as the org-id fallback ceiling already does.
+
+    WHAT DOES NOT CHANGE. An explicit limit still applies, including an explicit
+    zero, which still disables advancing. The cascade flag still gates everything.
+    Advances are still counted, so the run reports what it did. And advancing is
+    still bounded per bucket -- candidates are walked by index and never revisited,
+    and APOLLO_MAX_PERSON_MATCH_ATTEMPTS_PER_BUCKET caps the paid matches a bucket
+    can make -- so removing a run-level ceiling cannot produce a loop.
+    """
     if not bool(getattr(config, "ALTERNATE_CONTACT_CASCADE_ENABLED", False)):
         return False
     cap = int(getattr(config, "ALTERNATE_CONTACT_MAX_ENRICHMENTS_PER_RUN", 0) or 0)
+    inherits_continuous = (
+        bool(getattr(config, "APOLLO_CONTINUOUS_MODE", False))
+        and not bool(getattr(config, "ALTERNATE_CONTACT_BUDGET_CONFIGURED", True)))
+    if inherits_continuous:
+        return True
     return cap > 0 and _ALTERNATE_BUDGET["used"] < cap
 
 

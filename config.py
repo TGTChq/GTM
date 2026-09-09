@@ -1518,6 +1518,12 @@ ALTERNATE_CONTACT_CASCADE_ENABLED = _env_bool("ALTERNATE_CONTACT_CASCADE_ENABLED
 # explode Apollo usage. <= 0 disables advancing entirely.
 ALTERNATE_CONTACT_MAX_ENRICHMENTS_PER_RUN = _env_int(
     "ALTERNATE_CONTACT_MAX_ENRICHMENTS_PER_RUN", 100)
+# Internal presence bit, not another operator switch -- the same shape as
+# APOLLO_ORG_ID_FALLBACK_BUDGET_CONFIGURED. It distinguishes "the operator chose a
+# ceiling" from "nobody ever set one and a default applied", which is the only way
+# continuous mode can tell an explicit limit from an inherited default.
+ALTERNATE_CONTACT_BUDGET_CONFIGURED = os.getenv(
+    "ALTERNATE_CONTACT_MAX_ENRICHMENTS_PER_RUN") not in (None, "")
 
 APOLLO_MAX_PERSON_MATCH_ATTEMPTS_PER_BUCKET = _env_int(
     "APOLLO_MAX_PERSON_MATCH_ATTEMPTS_PER_BUCKET", 3
