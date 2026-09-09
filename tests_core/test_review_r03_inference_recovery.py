@@ -88,7 +88,7 @@ def test_runner_puts_transient_failures_in_waiting_and_resumes_them(conn, clock)
 def test_missing_configuration_closes_distinctly_and_reopens_when_configured(conn, clock):
     pid = _seed_vague(conn, clock)
     out = classify_one(conn, pid, inference=None, now=clock())
-    assert out.outcome == "closed" and out.reason.startswith("insufficient_evidence:semantic_port_unavailable")
+    assert out.outcome == "closed" and out.reason == "inference_unavailable:no_inference_configured"
     from tgtc_core.domain.inference import NullAdapter
     pid2 = _seed_vague(conn, clock, job_id="vague-2")
     out2 = classify_one(conn, pid2, inference=NullAdapter(), now=clock())

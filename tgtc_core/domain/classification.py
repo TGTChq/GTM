@@ -21,7 +21,10 @@ from typing import Dict, List, Optional, Sequence, Tuple
 
 from ..policy.campaigns import CAMPAIGN_BY_FUNCTION, FUNCTION_KEYS, POLICY_VERSION
 from .facts import JobFacts, extract_job_facts, sentences
-from .inference import InferencePort, InferenceRequest, InferenceResponse, grounded
+from .inference import (
+    UNAVAILABLE_ANSWER, UNAVAILABLE_CONFIG, UNAVAILABLE_TRANSIENT,
+    InferencePort, InferenceRequest, InferenceResponse, grounded,
+)
 
 METHOD_DETERMINISTIC = "deterministic"
 METHOD_SEMANTIC = "semantic"
@@ -182,6 +185,8 @@ class ClassificationResult:
     policy_version: str = POLICY_VERSION
     model_version: str = ""
     notes: List[str] = field(default_factory=list)
+    unavailable_kind: str = ""
+    unavailable_reason: str = ""
 
     @property
     def primary_function(self) -> str:
@@ -205,6 +210,8 @@ class ClassificationResult:
             "policy_version": self.policy_version,
             "model_version": self.model_version,
             "notes": list(self.notes),
+            "unavailable_kind": self.unavailable_kind,
+            "unavailable_reason": self.unavailable_reason,
         }
 
 
@@ -301,6 +308,8 @@ def classify_posting(
     # 3) semantic port
     if inference is None:
         result.method = METHOD_UNAVAILABLE
+        result.unavailable_kind = UNAVAILABLE_CONFIG
+        result.unavailable_reason = "no_inference_configured"
         result.notes.append("insufficient_evidence:semantic_port_unavailable")
         return result
     request = InferenceRequest(
@@ -314,6 +323,10 @@ def classify_posting(
     result.model_version = response.model_version
     if not response.available:
         result.method = METHOD_UNAVAILABLE
+        result.unavailable_kind = (response.unavailable_kind if response.unavailable_kind in
+                                   (UNAVAILABLE_CONFIG, UNAVAILABLE_TRANSIENT, UNAVAILABLE_ANSWER)
+                                   else UNAVAILABLE_TRANSIENT)
+        result.unavailable_reason = response.unavailable_reason or "inference_unavailable"
         result.notes.append(f"insufficient_evidence:{response.unavailable_reason or 'inference_unavailable'}")
         return result
     result.method = METHOD_SEMANTIC

@@ -16,7 +16,7 @@ Rules (PRODUCT_CONTRACT §5 'Employer identity'):
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, Optional, Tuple
 
 import psycopg
@@ -145,13 +145,16 @@ def _bool(value: Any) -> Optional[bool]:
     return str(value).strip().lower() in {"1", "true", "yes"}
 
 
-def resolve_posting_identity(conn: psycopg.Connection, posting_id: int, *, now: Optional[datetime] = None) -> IdentityOutcome:
+def resolve_posting_identity(conn: psycopg.Connection, posting_id: int, *, now: Optional[datetime] = None, work_item: Optional[work_queue.WorkItem] = None) -> IdentityOutcome:
     with transaction(conn):
+        work_queue.assert_owned(conn, work_item, now=now or datetime.now(timezone.utc))
         with conn.cursor() as cur:
             cur.execute("SELECT id, source, title, employer_name, description_text, org_json, lane, state FROM postings WHERE id = %s FOR UPDATE", (posting_id,))
             posting = cur.fetchone()
             if not posting:
                 raise LookupError(f"posting {posting_id} not found")
+            if posting["state"] == "expired":
+                return IdentityOutcome(posting_id, None, "closed", "posting_expired")
             org = dict(posting["org_json"] or {})
             eid, ekey, reason = resolve_employer(conn, org=org, employer_name_fallback=posting["employer_name"] or "",
                                                 source=posting["source"])

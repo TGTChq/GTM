@@ -101,9 +101,9 @@ class DeliveryService:
                            available_at = COALESCE(%s, available_at),
                            lease_token = CASE WHEN %s THEN lease_token ELSE NULL END,
                            lease_expires_at = CASE WHEN %s THEN lease_expires_at ELSE NULL END, updated_at = now()
-                    WHERE id = %s AND lease_token = %s RETURNING id
+                    WHERE id = %s AND lease_token = %s AND lease_expires_at > %s RETURNING id
                     """,
-                    (state, error[:500] or None, blocked_reason[:200] or None, available_at, keep_lease, keep_lease, item.id, item.lease_token),
+                    (state, error[:500] or None, blocked_reason[:200] or None, available_at, keep_lease, keep_lease, item.id, item.lease_token, self.now()),
                 )
                 return cur.fetchone() is not None
 
@@ -116,20 +116,38 @@ class DeliveryService:
                     """
                     INSERT INTO delivery_receipts (outbox_id, channel, receipt_kind, external_id, external_campaign, response_summary)
                     SELECT o.id, o.channel, %s, %s, %s, %s FROM delivery_outbox o
-                    WHERE o.id = %s AND o.lease_token = %s
+                    WHERE o.id = %s AND o.lease_token = %s AND o.lease_expires_at > %s
+                    FOR UPDATE OF o
                     RETURNING id
                     """,
-                    (kind, external_id or None, external_campaign or None, jsonb(summary or {}), item.id, item.lease_token),
+                    (kind, external_id or None, external_campaign or None, jsonb(summary or {}), item.id, item.lease_token, self.now()),
                 )
                 return cur.fetchone() is not None
 
     def _delivered(self, item: OutboxItem, kind: str, *, external_id: str = "", external_campaign: str = "",
                    summary: Optional[Dict[str, Any]] = None) -> bool:
-        if not self._receipt(item, kind, external_id=external_id, external_campaign=external_campaign, summary=summary):
-            return False
-        if not self._set(item, "delivered"):
-            return False
-        self._mark_approval_delivered_if_complete(item.approval_id)
+        # Receipt and terminal transition commit together. A lease loss cannot leave
+        # a terminal receipt attached to an item another worker still has to deliver.
+        with transaction(self.conn):
+            with self.conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE delivery_outbox SET state = 'delivered', lease_token = NULL, lease_expires_at = NULL, "
+                    "last_error = NULL, updated_at = now() WHERE id = %s AND lease_token = %s "
+                    "AND lease_expires_at > %s RETURNING id",
+                    (item.id, item.lease_token, self.now()),
+                )
+                if cur.fetchone() is None:
+                    return False
+                cur.execute(
+                    "INSERT INTO delivery_receipts (outbox_id, channel, receipt_kind, external_id, external_campaign, response_summary) "
+                    "VALUES (%s, %s, %s, %s, %s, %s)",
+                    (item.id, item.channel, kind, external_id or None, external_campaign or None, jsonb(summary or {})),
+                )
+                cur.execute(
+                    "UPDATE approvals SET state = 'delivered', updated_at = now() WHERE id = %s AND state = 'approved' "
+                    "AND NOT EXISTS (SELECT 1 FROM delivery_outbox WHERE approval_id = %s AND state <> 'delivered')",
+                    (item.approval_id, item.approval_id),
+                )
         return True
 
     def _mark_approval_delivered_if_complete(self, approval_id: int) -> None:
@@ -298,6 +316,14 @@ class DeliveryService:
         return DeliveryOutcome(item.id, "instantly", state, f"http_{result.status}")
 
     def process(self, item: OutboxItem) -> DeliveryOutcome:
+        with self.conn.cursor() as cur:
+            cur.execute("SELECT id FROM delivery_outbox WHERE id = %s AND lease_token = %s "
+                        "AND lease_expires_at > %s AND state IN ('claimed', 'in_flight')",
+                        (item.id, item.lease_token, self.now()))
+            owned = cur.fetchone() is not None
+        self.conn.commit()
+        if not owned:
+            return DeliveryOutcome(item.id, item.channel, "lease_lost", "lease_lost_before_processing")
         return self.process_airtable(item) if item.channel == "airtable" else self.process_instantly(item)
 
     def drain(self, channel: str, *, max_items: int = 100) -> List[DeliveryOutcome]:

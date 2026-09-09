@@ -41,7 +41,8 @@ class ClassifyOutcome:
 
 
 def classify_one(conn: psycopg.Connection, posting_id: int, *, inference: Optional[InferencePort],
-                 now: Optional[datetime] = None, transient_backoff_minutes: int = 15) -> ClassifyOutcome:
+                 now: Optional[datetime] = None, transient_backoff_minutes: int = 15,
+                 work_item: Optional[work_queue.WorkItem] = None) -> ClassifyOutcome:
     moment = now or datetime.now(timezone.utc)
     with conn.cursor() as cur:
         cur.execute("SELECT * FROM postings WHERE id = %s", (posting_id,))
@@ -74,13 +75,26 @@ def classify_one(conn: psycopg.Connection, posting_id: int, *, inference: Option
         reason = (f"inference_unavailable:{result.unavailable_reason or 'not_configured'}" if kind == UNAVAILABLE_CONFIG
                   else f"insufficient_evidence:{result.unavailable_reason or 'no_answer'}")
         with transaction(conn):
+            work_queue.assert_owned(conn, work_item, now=moment)
+            _assert_snapshot(conn, posting)
             with conn.cursor() as cur:
                 cur.execute("UPDATE postings SET state = 'closed', close_reason = %s, updated_at = now() WHERE id = %s",
                             (reason[:200], posting_id))
+                if kind == UNAVAILABLE_ANSWER:
+                    # A content-level refusal is a result for this model/policy. Without
+                    # this receipt lifecycle would reopen it on every cycle forever.
+                    cur.execute(
+                        "INSERT INTO classifications (posting_id, policy_version, model_version, method, compatible_functions, excluded, result_json) "
+                        "VALUES (%s, %s, %s, %s, %s, false, %s) "
+                        "ON CONFLICT (posting_id, policy_version, model_version) DO UPDATE SET result_json = EXCLUDED.result_json",
+                        (posting_id, POLICY_VERSION, model_version, result.method, [], jsonb({**result.to_dict(), "input_content_hash": posting["content_hash"]})),
+                    )
         return ClassifyOutcome(posting_id, "closed", reason, [], result.method)
 
     opportunity_ids: List[int] = []
     with transaction(conn):
+        work_queue.assert_owned(conn, work_item, now=moment)
+        _assert_snapshot(conn, posting)
         with conn.cursor() as cur:
             cur.execute(
                 """
@@ -93,7 +107,7 @@ def classify_one(conn: psycopg.Connection, posting_id: int, *, inference: Option
                 RETURNING id
                 """,
                 (posting_id, POLICY_VERSION, model_version or "", result.method, result.compatible_functions,
-                 result.excluded, result.exclusion_reason or None, jsonb(result.to_dict())),
+                 result.excluded, result.exclusion_reason or None, jsonb({**result.to_dict(), "input_content_hash": posting["content_hash"]})),
             )
             classification_id = int(cur.fetchone()["id"])
             if result.excluded:
@@ -126,14 +140,18 @@ def classify_one(conn: psycopg.Connection, posting_id: int, *, inference: Option
                 oid = int(row["id"])
                 opportunity_ids.append(oid)
                 cur.execute(
-                    "INSERT INTO opportunity_postings (opportunity_id, posting_id, classification_id) VALUES (%s, %s, %s) "
-                    "ON CONFLICT (opportunity_id, posting_id) DO UPDATE SET classification_id = EXCLUDED.classification_id, linked_at = now()",
-                    (oid, posting_id, classification_id),
+                    "INSERT INTO opportunity_postings (opportunity_id, posting_id, classification_id, evidence_hash) VALUES (%s, %s, %s, %s) "
+                    "ON CONFLICT (opportunity_id, posting_id) DO UPDATE SET classification_id = EXCLUDED.classification_id, "
+                    "evidence_hash = EXCLUDED.evidence_hash, linked_at = now() "
+                    "WHERE opportunity_postings.evidence_hash IS DISTINCT FROM EXCLUDED.evidence_hash "
+                    "OR opportunity_postings.classification_id IS DISTINCT FROM EXCLUDED.classification_id RETURNING posting_id",
+                    (oid, posting_id, classification_id, posting["content_hash"]),
                 )
+                new_evidence = cur.fetchone() is not None
                 if row["state"] == "open":
                     work_queue.enqueue(conn, kind="qualify_opportunity", subject_kind="opportunity", subject_id=oid,
                                        lane=posting["lane"], reopen=True, available_at=now)
-                elif row["state"] == "closed":
+                elif row["state"] == "closed" and new_evidence:
                     # New evidence reopens a closed opportunity and starts its next evidence
                     # epoch. The attempt history of earlier epochs is kept (recovery finding b).
                     cur.execute("UPDATE opportunities SET state = 'open', close_reason = NULL, evidence_epoch = evidence_epoch + 1, "
@@ -198,3 +216,13 @@ def _bool(value: Any) -> Optional[bool]:
     if value in (None, ""):
         return None
     return str(value).strip().lower() in {"1", "true", "yes"}
+
+
+def _assert_snapshot(conn, posting) -> None:
+    """Validate the model's input version under the posting row lock before writing."""
+    with conn.cursor() as cur:
+        cur.execute("SELECT content_hash, employer_id, state FROM postings WHERE id = %s FOR UPDATE", (posting["id"],))
+        current = cur.fetchone()
+        if (current is None or current["content_hash"] != posting["content_hash"]
+                or current["employer_id"] != posting["employer_id"] or current["state"] == "expired"):
+            raise work_queue.EvidenceChanged(f"posting {posting['id']} changed during classification")

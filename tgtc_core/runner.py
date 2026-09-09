@@ -170,11 +170,11 @@ class Runner:
                 break
             try:
                 if kind == "resolve_identity":
-                    out = resolve_posting_identity(self.conn, item.subject_id, now=self.now())
+                    out = resolve_posting_identity(self.conn, item.subject_id, now=self.now(), work_item=item)
                     result = out.outcome
                 elif kind == "classify":
                     out = classify_one(self.conn, item.subject_id, inference=self.inference, now=self.now(),
-                                       transient_backoff_minutes=self.s.inference_retry_minutes)
+                                       transient_backoff_minutes=self.s.inference_retry_minutes, work_item=item)
                     result = out.outcome
                     if result == "wait":
                         with transaction(self.conn):
@@ -187,7 +187,7 @@ class Runner:
                             work_queue.wait(self.conn, item, "apollo_not_configured", self.now() + timedelta(hours=1))
                         counts["wait"] = counts.get("wait", 0) + 1
                         continue
-                    out = opp_service.process(item.subject_id)
+                    out = opp_service.process(item.subject_id, work_item=item)
                     result = out.outcome
                     if result == "wait":
                         until = datetime.fromisoformat(out.details["until"]) if out.details.get("until") else self.now() + timedelta(hours=1)
@@ -208,6 +208,9 @@ class Runner:
                     else:
                         work_queue.complete(self.conn, item)
                 counts[result] = counts.get(result, 0) + 1
+            except work_queue.LeaseLost:
+                self.conn.rollback()
+                counts["lease_lost"] = counts.get("lease_lost", 0) + 1
             except Exception as exc:  # noqa: BLE001 - a technical failure retries; it never approves or rejects
                 self.conn.rollback()
                 log.exception("work item %s failed", item.id)

@@ -20,6 +20,14 @@ import psycopg
 CLAIMABLE_STATES = ("ready", "retry", "waiting")
 
 
+class LeaseLost(RuntimeError):
+    """A worker no longer owns the item whose business state it tried to write."""
+
+
+class EvidenceChanged(RuntimeError):
+    """An external response was computed from a superseded posting snapshot."""
+
+
 @dataclass(frozen=True)
 class WorkItem:
     id: int
@@ -39,6 +47,25 @@ class WorkItem:
 
 def _now(now: Optional[datetime]) -> datetime:
     return now or datetime.now(timezone.utc)
+
+
+def assert_owned(conn: psycopg.Connection, item: Optional[WorkItem], *, now: datetime) -> None:
+    """Call inside the SAME transaction as a stage's business writes.
+
+    Holding this row lock until commit makes ownership validation and the writes
+    indivisible with respect to another worker reclaiming the lease.
+    Direct single-worker service tests may omit the queue item.
+    """
+    if item is None:
+        return
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT id FROM work_items WHERE id = %s AND lease_token = %s AND version = %s "
+            "AND state = 'running' AND lease_expires_at > %s FOR UPDATE",
+            (item.id, item.lease_token, item.version, now),
+        )
+        if cur.fetchone() is None:
+            raise LeaseLost(f"work item {item.id} no longer owned")
 
 
 def enqueue(conn: psycopg.Connection, *, kind: str, subject_kind: str, subject_id: int,

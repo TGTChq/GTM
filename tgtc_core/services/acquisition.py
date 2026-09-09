@@ -384,7 +384,7 @@ class AcquisitionService:
         """Reopen stalled partitions when the provider is not on record as refusing, or
         the retry interval has elapsed (the next page request IS the controlled probe:
         a refusal stalls them again and records the refusal). Cursors are untouched."""
-        gate = provider_state.reserve_probe(self.conn, PROVIDER, retry_hours=self.provider_retry_hours, now=self.now())
+        gate = provider_state.may_attempt(self.conn, PROVIDER, retry_hours=self.provider_retry_hours, now=self.now())
         if not gate["allowed"]:
             return {"reopened": 0, "reason": f"provider_{gate['state']}", "next_attempt_after": gate.get("next_attempt_after")}
         with transaction(self.conn):
@@ -392,7 +392,7 @@ class AcquisitionService:
                 cur.execute("UPDATE source_partitions SET state = 'open', updated_at = now() WHERE source = %s AND state = 'stalled' RETURNING id",
                             (source,))
                 ids = [int(r["id"]) for r in cur.fetchall()]
-        return {"reopened": len(ids), "partition_ids": ids, "reason": "provider_probe" if gate.get("reserved") else "provider_available"}
+        return {"reopened": len(ids), "partition_ids": ids, "reason": "provider_probe_due" if gate["state"] in provider_state.BLOCKING_STATES else "provider_available"}
 
     def reopen_stalled(self, source: str = SOURCE_JOB_BOARDS) -> int:
         return int(self.recover_partitions(source).get("reopened", 0))
@@ -407,7 +407,7 @@ class AcquisitionService:
                 """
                 SELECT r.quota_jobs_remaining, r.quota_requests_remaining, r.quota_next_billing_date, r.received_at
                 FROM page_receipts r JOIN source_partitions p ON p.id = r.partition_id
-                WHERE p.source = %s AND r.quota_jobs_remaining IS NOT NULL ORDER BY r.id DESC LIMIT 1
+                WHERE p.source = %s AND (r.quota_jobs_remaining IS NOT NULL OR r.quota_requests_remaining IS NOT NULL) ORDER BY r.id DESC LIMIT 1
                 """,
                 (source,),
             )
@@ -415,7 +415,7 @@ class AcquisitionService:
         self.conn.commit()
         if not r:
             return {}
-        if r["received_at"] < moment - self.quota_max_age:
+        if r["received_at"] <= moment - self.quota_max_age:
             return {}
         nbd = _parse_dt(r["quota_next_billing_date"])
         if nbd is None and r["quota_next_billing_date"]:
@@ -472,7 +472,8 @@ class AcquisitionService:
             if part["state"] != "open":
                 run.stop_reason = f"partition_{part['state']}"
                 break
-            if str(part.get("lease_token") or "") != token:
+            if (str(part.get("lease_token") or "") != token
+                    or part["lease_expires_at"] <= self.now()):
                 run.stop_reason = "lease_lost"
                 break
             source = part["source"]
@@ -480,6 +481,12 @@ class AcquisitionService:
             breach = self._quota_breach(self._latest_quota(source))
             if breach:
                 run.stop_reason = breach
+                break
+            # Reserve immediately before the page call, including for newly planned
+            # partitions. Recovery planning must not consume or bypass this reservation.
+            gate = provider_state.reserve_probe(self.conn, PROVIDER, retry_hours=self.provider_retry_hours, now=self.now())
+            if not gate["allowed"]:
+                run.stop_reason = f"provider_{gate['state']}"
                 break
             offset = int(part["next_offset"])
             endpoint, params = self.request_params(source, lower=part["window_start"], upper=part["window_end"], offset=offset)
@@ -502,13 +509,13 @@ class AcquisitionService:
                 break
             except FantasticAuthError as exc:
                 self._finish_attempt(attempt_id, "refused", 401, "auth", str(exc))
-                self._stall(partition_id, f"auth:{exc}")
+                self._stall(partition_id, token, f"auth:{exc}")
                 provider_state.record_refusal(self.conn, PROVIDER, str(exc), state=provider_state.UNAUTHORIZED, now=self.now())
                 run.stop_reason = "auth_refused"
                 break
             except FantasticQuotaError as exc:
                 self._finish_attempt(attempt_id, "refused", 429, "quota", str(exc))
-                self._stall(partition_id, f"quota:{exc}")
+                self._stall(partition_id, token, f"quota:{exc}")
                 provider_state.record_refusal(self.conn, PROVIDER, str(exc), now=self.now())
                 run.stop_reason = "quota_refused"
                 break
@@ -516,8 +523,8 @@ class AcquisitionService:
                 self._finish_attempt(attempt_id, "failed", exc.status, exc.stage, exc.code)
                 with transaction(self.conn):
                     with self.conn.cursor() as cur:
-                        cur.execute("UPDATE source_partitions SET last_error = %s, updated_at = now() WHERE id = %s",
-                                    (f"{exc.stage}:{exc.code}", partition_id))
+                        cur.execute("UPDATE source_partitions SET last_error = %s, updated_at = now() WHERE id = %s AND lease_token = %s",
+                                    (f"{exc.stage}:{exc.code}", partition_id, token))
                 run.stop_reason = f"request_error:{exc.code}"
                 break
             # 3) rows + receipt + fenced cursor advance: one transaction
@@ -537,8 +544,16 @@ class AcquisitionService:
                         (page.status, jsonb({"rows": len(page.rows), "quota": page.quota.to_dict(),
                                              "pii_fields_dropped": page.pii_fields_dropped}), attempt_id),
                     )
+                    # Lock and validate BEFORE changing posting facts. A stale response
+                    # remains in the receipt; it cannot roll newer business data back.
+                    cur.execute(
+                        "SELECT id FROM source_partitions WHERE id = %s AND lease_token = %s "
+                        "AND next_offset = %s AND state = 'open' AND lease_expires_at > %s FOR UPDATE",
+                        (partition_id, token, offset, moment),
+                    )
+                    fenced = cur.fetchone() is None
                     new_here = modified_here = expired_here = 0
-                    if not duplicate_page:
+                    if not fenced:
                         for row in page.rows:
                             if not str(row.get("id") or "").strip():
                                 continue
@@ -565,24 +580,24 @@ class AcquisitionService:
                                complete_coverage = CASE WHEN %s THEN true ELSE complete_coverage END,
                                stall_reason = CASE WHEN %s THEN 'duplicate_page_loop' ELSE NULL END,
                                last_error = NULL, lease_expires_at = %s + make_interval(secs => %s), updated_at = now()
-                        WHERE id = %s AND lease_token = %s AND next_offset = %s AND state = 'open'
+                        WHERE id = %s AND lease_token = %s AND next_offset = %s AND state = 'open' AND lease_expires_at > %s
                         RETURNING id
                         """,
                         (advance, len(page.rows), new_here, 1 if duplicate_page else 0, complete, stall, complete, stall,
-                         moment, self.lease_seconds, partition_id, token, offset),
+                         moment, self.lease_seconds, partition_id, token, offset, moment),
                     )
                     fenced = cur.fetchone() is None
                     cur.execute(
                         """
                         INSERT INTO page_receipts (partition_id, attempt_id, page_offset, page_limit, row_ids, row_count,
                             fingerprint, duplicate_of_receipt_id, quota_jobs_remaining, quota_requests_remaining,
-                            quota_next_billing_date, rows_compressed, fenced)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                            quota_next_billing_date, rows_compressed, fenced, received_at)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                         """,
                         (partition_id, attempt_id, offset, self.page_limit, ids, len(ids), fp,
                          prev_receipt_id if duplicate_page else None, page.quota.jobs_remaining,
                          page.quota.requests_remaining, page.quota.next_billing_date,
-                         zlib.compress(json.dumps(page.rows, default=str).encode("utf-8")), fenced),
+                         zlib.compress(json.dumps(page.rows, default=str).encode("utf-8")), fenced, moment),
                     )
                     cur.execute(
                         "INSERT INTO credit_events (provider, operation, attempt_id, requests, estimated_credits, confirmed_credits, basis) "
@@ -628,8 +643,8 @@ class AcquisitionService:
                     (operation, attempt_id, requests, estimated, confirmed),
                 )
 
-    def _stall(self, partition_id: int, error: str) -> None:
+    def _stall(self, partition_id: int, token: str, error: str) -> None:
         with transaction(self.conn):
             with self.conn.cursor() as cur:
-                cur.execute("UPDATE source_partitions SET state = 'stalled', stall_reason = %s, last_error = %s, updated_at = now() WHERE id = %s",
-                            (error[:120], error[:300], partition_id))
+                cur.execute("UPDATE source_partitions SET state = 'stalled', stall_reason = %s, last_error = %s, updated_at = now() WHERE id = %s AND lease_token = %s",
+                            (error[:120], error[:300], partition_id, token))

@@ -91,7 +91,6 @@ def test_identity_change_re_resolves_the_employer(conn, clock):
     conn.commit()
     assert res2.state == "modified" and res2.identity_changed
     assert sql1(conn, "SELECT state FROM postings WHERE id = %s", (pid,)) == "new"
-    assert sql1(conn, "SELECT kind FROM work_items WHERE subject_id = %s AND state = 'ready' ORDER BY id DESC LIMIT 1", (pid,)) in ("resolve_identity", None) or True
     resolve_posting_identity(conn, pid, now=clock())
     second_employer = sql1(conn, "SELECT employer_id FROM postings WHERE id = %s", (pid,))
     assert second_employer != first_employer

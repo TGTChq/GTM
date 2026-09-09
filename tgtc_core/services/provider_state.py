@@ -126,7 +126,7 @@ def reserve_probe(conn: psycopg.Connection, provider: str, *, retry_hours: float
             "refusing_since": fresh.get("refusing_since")}
 
 
-# Backwards-compatible names used by earlier tests; both now route through reserve_probe.
+# Read-only scheduling check; actual chargeable calls must use reserve_probe.
 def may_attempt(conn: psycopg.Connection, provider: str, *, retry_hours: float,
                 now: Optional[datetime] = None) -> Dict[str, Any]:
     moment = now or datetime.now(timezone.utc)

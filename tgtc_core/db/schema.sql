@@ -211,6 +211,7 @@ CREATE TABLE IF NOT EXISTS opportunity_postings (
     opportunity_id     bigint NOT NULL REFERENCES opportunities(id),
     posting_id         bigint NOT NULL REFERENCES postings(id),
     classification_id  bigint REFERENCES classifications(id),
+    evidence_hash      text,
     linked_at          timestamptz NOT NULL DEFAULT now(),
     PRIMARY KEY (opportunity_id, posting_id)
 );

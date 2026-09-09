@@ -33,6 +33,7 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
 import psycopg
 
 from ..db.connection import jsonb, transaction
+from ..db import work_queue
 from ..domain.approval import ApprovalRefusal, ApprovedLead, airtable_fields, build_approved_lead, instantly_payload
 from ..domain.gates import (
     corroborated_alternate_domains, evaluate_contact, evaluate_email, person_organization, pre_enrichment_check,
@@ -94,7 +95,7 @@ class OpportunityService:
         self.person_uniqueness = person_uniqueness
         self.verify_on_import = verify_on_import
         self.now = now
-        self._pass_permitted = False
+        self._work_item = None
 
     # --- helpers ------------------------------------------------------------
     def _load(self, opportunity_id: int) -> Tuple[Dict[str, Any], Dict[str, Any], Dict[str, Any], Dict[str, Any]]:
@@ -111,12 +112,13 @@ class OpportunityService:
                 SELECT p.*, c.result_json AS classification_json, c.compatible_functions, c.excluded, c.method
                 FROM opportunity_postings op JOIN postings p ON p.id = op.posting_id
                 JOIN classifications c ON c.id = op.classification_id
-                WHERE op.opportunity_id = %s AND p.state IN ('identity_resolved', 'classified')
+                WHERE op.opportunity_id = %s AND p.state = 'classified'
+                  AND p.employer_id = %s AND c.result_json->>'input_content_hash' = p.content_hash
                   AND (p.date_valid_through IS NULL OR p.date_valid_through >= %s)
                   AND NOT c.excluded AND %s = ANY (c.compatible_functions)
                 ORDER BY p.commercial_age_anchor DESC LIMIT 1
                 """,
-                (opportunity_id, moment, opp["function_key"]),
+                (opportunity_id, opp["employer_id"], moment, opp["function_key"]),
             )
             posting = cur.fetchone()
         self.conn.commit()
@@ -124,6 +126,7 @@ class OpportunityService:
 
     def _close(self, opportunity_id: int, reason: str) -> QualifyOutcome:
         with transaction(self.conn):
+            work_queue.assert_owned(self.conn, self._work_item, now=self.now())
             with self.conn.cursor() as cur:
                 cur.execute("UPDATE opportunities SET state = 'closed', close_reason = %s, updated_at = now() WHERE id = %s",
                             (reason[:200], opportunity_id))
@@ -132,6 +135,7 @@ class OpportunityService:
     def _intent(self, operation: str, *, opportunity_id: int, person_ref_value: str = "", params: Dict[str, Any],
                 estimated_credits: Optional[float]) -> int:
         with transaction(self.conn):
+            work_queue.assert_owned(self.conn, self._work_item, now=self.now())
             with self.conn.cursor() as cur:
                 cur.execute(
                     "INSERT INTO request_attempts (provider, operation, opportunity_id, person_ref, params_json, estimated_credits) "
@@ -155,16 +159,13 @@ class OpportunityService:
                         (operation, attempt_id, estimated),
                     )
 
-    def _guard_provider(self) -> None:
-        """One controlled attempt per qualification pass against a refusing provider,
-        reserved ATOMICALLY across workers (R08). The first guard in a pass decides;
-        later guards in the same pass reuse that decision."""
-        if self._pass_permitted:
-            return
-        gate = provider_state.reserve_probe(self.conn, "apollo", retry_hours=self.retry_hours, now=self.now())
+    def _guard_provider(self, *, chargeable: bool = True) -> None:
+        """Reserve only at a chargeable call. A free search can find no usable
+        people; it must not consume the sole recovery probe for the next opportunity."""
+        check = provider_state.reserve_probe if chargeable else provider_state.may_attempt
+        gate = check(self.conn, "apollo", retry_hours=self.retry_hours, now=self.now())
         if not gate["allowed"]:
             raise ProviderWait(f"apollo_{gate['state']}_until_{gate['next_attempt_after'].isoformat()}", gate["next_attempt_after"])
-        self._pass_permitted = True
 
     def _handle_global(self, result: ApolloResult, *, chargeable: bool = True) -> None:
         """Refusals/throttles/timeouts raise; a served CHARGEABLE call records recovery.
@@ -202,6 +203,7 @@ class OpportunityService:
         self._handle_global(result)
         org = (result.data or {}).get("organization") or {}
         with transaction(self.conn):
+            work_queue.assert_owned(self.conn, self._work_item, now=self.now())
             with self.conn.cursor() as cur:
                 if org:
                     apollo_domain = safe_employer_domain(org.get("primary_domain") or org.get("domain") or org.get("website_url"))
@@ -262,7 +264,7 @@ class OpportunityService:
                 continue
             stats["selectors_tried"] += 1
             for page in range(1, self.search_pages + 1):
-                self._guard_provider()
+                self._guard_provider(chargeable=False)
                 params = {selector[0]: selector[1], "titles": list(titles), "page": page}
                 attempt_id = self._intent("people_search", opportunity_id=opp["id"], params=params, estimated_credits=0)
                 kwargs: Dict[str, Any] = {"titles": list(titles), "page": page}
@@ -293,6 +295,16 @@ class OpportunityService:
                             continue
                     if ref in excluded:
                         stats["excluded_already_judged"] += 1
+                        continue
+                    count = emp.get("employee_count")
+                    pre = pre_enrichment_check(
+                        person=p, employer_name=emp["canonical_name"],
+                        employer_domains={emp["domain"]}, buyer_titles=titles,
+                        founder_allowed=count is not None and count <= int(rule("founder_fallback_max_employees")),
+                    )
+                    if not pre.passed:
+                        p["_drop_reason"] = pre.reason
+                        dropped.append(p)
                         continue
                     usable.append(p)
                 pagination = result.data.get("pagination") if isinstance(result.data.get("pagination"), dict) else {}
@@ -359,6 +371,7 @@ class OpportunityService:
         status = str(enriched.get("email_status") or enriched.get("contact_email_status") or "").lower() or None
         evidence = {k: enriched.get(k) for k in EVIDENCE_KEYS if enriched.get(k) not in (None, "", [])}
         with transaction(self.conn):
+            work_queue.assert_owned(self.conn, self._work_item, now=self.now())
             with self.conn.cursor() as cur:
                 cur.execute(
                     """
@@ -407,7 +420,20 @@ class OpportunityService:
         """Approval + both outbox items in ONE transaction."""
         lead = approved.lead
         with transaction(self.conn):
+            work_queue.assert_owned(self.conn, self._work_item, now=self.now())
             with self.conn.cursor() as cur:
+                cur.execute("SELECT state, evidence_epoch FROM opportunities WHERE id = %s FOR UPDATE", (opp["id"],))
+                current_opp = cur.fetchone()
+                cur.execute("SELECT content_hash, employer_id, state, date_valid_through FROM postings WHERE id = %s FOR UPDATE",
+                            (lead["posting_id"],))
+                current_posting = cur.fetchone()
+                if (not current_opp or current_opp["state"] != "open"
+                        or int(current_opp["evidence_epoch"]) != int(opp.get("evidence_epoch") or 1)
+                        or not current_posting or current_posting["state"] != "classified"
+                        or current_posting["employer_id"] != opp["employer_id"]
+                        or current_posting["content_hash"] != lead["posting_content_hash"]
+                        or (current_posting["date_valid_through"] and current_posting["date_valid_through"] < self.now())):
+                    raise work_queue.EvidenceChanged("approval input changed during qualification")
                 cur.execute(
                     """
                     INSERT INTO approvals (opportunity_id, person_id, employer_id, campaign_key, function_key, campaign_id, policy_version,
@@ -450,8 +476,8 @@ class OpportunityService:
         return contact, email
 
     # --- main -------------------------------------------------------------------
-    def process(self, opportunity_id: int) -> QualifyOutcome:
-        self._pass_permitted = False
+    def process(self, opportunity_id: int, *, work_item: Optional[work_queue.WorkItem] = None) -> QualifyOutcome:
+        self._work_item = work_item
         opp, emp, posting, classification = self._load(opportunity_id)
         if opp["state"] != "open":
             return QualifyOutcome(opportunity_id, "closed", f"already_{opp['state']}")
