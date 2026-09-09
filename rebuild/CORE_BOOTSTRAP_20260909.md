@@ -68,3 +68,28 @@ no Docker daemon and cannot start embedded PostgreSQL with its root-only user
 mapping. The new image build and real-PostgreSQL tests are therefore CI gates, not
 claimed local successes. The previously green CI at `6202a63` does not verify this
 new code. Results for the new exact head must be read before deployment.
+
+## Follow-up verification
+
+The image declares a complete `CMD`, with no `ENTRYPOINT`. Passing `describe` as
+the Docker run command would replace that entire CMD and attempt to execute a
+nonexistent standalone executable. The CI smoke command now runs the image with
+no command override, exercising its actual default startup.
+
+The four portable `test_database_check.py` cases passed with `ci_no_network`;
+the two real-PostgreSQL cases and the Docker build remain pending on the new head.
+The remote feature branch was directly checked at `6202a63`.
+
+Railway's follow-up read reports a different staged patch,
+`2f6879e3-ccdb-40f1-87c8-719d79cd8dab`, containing 308 pending changes. Service
+reads associate 240 variable entries with GTM, 57 with Approved Sync, and 5 with
+Postgres Core; they do not explain all 308 entries or reveal their values. The
+acceptance service has no staged changes, source, variables or deployment.
+The old deployment IDs remain unchanged. No attribution of this new patch's
+author or actual value differences is possible from these responses. Do not
+commit, discard, or conflate it with the earlier confirmed patch.
+
+The acquisition pause is still not independently established: the old GTM cron
+and its acquisition start command remain configured, and OAuth withholds the
+control-variable values. This follow-up performs no Railway writes or provider
+requests. The original incident's variable-value comparison remains open.

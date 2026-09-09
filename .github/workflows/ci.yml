@@ -135,7 +135,7 @@ jobs:
       - name: Build isolated core image and check zero-network startup
         run: |
           docker build -f Dockerfile.core -t tgtc-core:ci .
-          docker run --rm --network none tgtc-core:ci describe
+          docker run --rm --network none tgtc-core:ci
           docker run --rm --network none --entrypoint python tgtc-core:ci -c \
             "from tgtc_core.db.migrate import SCHEMA_PATH, migrations; assert SCHEMA_PATH.is_file(); assert migrations()"
       - name: Preserve core test results
