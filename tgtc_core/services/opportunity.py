@@ -249,7 +249,7 @@ class OpportunityService:
     # --- candidates -------------------------------------------------------------
     def _search_candidates(self, opp: Dict[str, Any], emp: Dict[str, Any], titles: Sequence[str],
                            excluded: Set[str]) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], Dict[str, int]]:
-        """Returns (usable candidates, dropped-as-other-company, stats).
+        """Returns (usable candidates, pre-enrichment rejections, stats).
 
         The organization-id selector is tried when the domain selector leaves no USABLE
         candidate after exclusions (already judged, already approved), not merely when
@@ -549,7 +549,14 @@ class OpportunityService:
                 self._record_attempt(opportunity_id, p["_ref"], "gate", "skipped_pre_enrichment", p["_drop_reason"], epoch=epoch,
                                      details={"title": p.get("title"), "org": person_organization(p).get("name")})
         if not candidates:
-            reason = "no_candidates_found" if stats["returned"] == 0 else "no_unjudged_candidates_remaining"
+            if stats["returned"] == 0:
+                reason = "no_candidates_found"
+            elif any(p["_ref"] not in judged | approved_refs for p in dropped):
+                # Search-only rejection is not a paid judgement. Do not report
+                # exhausted candidate history when a new person failed this gate.
+                reason = "no_usable_candidates_in_search"
+            else:
+                reason = "no_unjudged_candidates_remaining"
             return self._close(opportunity_id, reason)
 
         made = 0

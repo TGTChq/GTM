@@ -68,7 +68,9 @@ def test_cross_source_repeat_keeps_the_first_occurrence_and_links_the_second(con
     """The same job seen on a job board and in the ATS feed: one opportunity, first posting
     kept as the original, the later one linked as its duplicate."""
     ex = example_for("finance")
-    created = clock() - timedelta(hours=4)
+    # Both observations belong inside the helper's [now-5h, now-4h) partition.
+    # now-4h is the EXCLUDED upper boundary, not an acquired row.
+    created = clock() - timedelta(hours=4, minutes=30)
     jb = make_posting_row(id="jb-9", title=ex.title, organization="Finance Co", domain="financeco.com", description=ex.description,
                           date_created=created, ats_duplicate=True)
     ats = make_posting_row(id="ats-9", title=ex.title, organization="Finance Co", domain="financeco.com", description=ex.description,

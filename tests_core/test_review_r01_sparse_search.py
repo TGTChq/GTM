@@ -61,7 +61,7 @@ def test_pre_enrichment_skip_is_not_a_permanent_blacklist(conn, clock):
     person["title"] = "Marketing Coordinator"
     fake = apollo_for("acme.com", "Acme", people=[person])
     out = opportunity_service(conn, fake, clock).process(oid)
-    assert out.outcome == "closed" and out.reason == "no_verified_buyer_in_candidates"
+    assert out.outcome == "closed" and out.reason == "no_usable_candidates_in_search"
     assert sql1(conn, "SELECT outcome FROM candidate_attempts WHERE candidate_ref = 'pid:p-x'") == "skipped_pre_enrichment"
     assert fake.served_paid == 0
     # new evidence reopens; the candidate now holds a buyer title

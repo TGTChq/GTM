@@ -9,7 +9,7 @@ import pytest
 
 from tgtc_core.providers.http import TransportTimeout
 from tgtc_core.services import acquisition as acq
-from tgtc_core.testing.fakes import FakeFantastic
+from tgtc_core.testing.fakes import FakeFantastic, make_posting_row
 from tests_core.helpers import acquisition, make_fresh_partition, rows_in_window, sql1, sqlall
 
 
@@ -79,6 +79,25 @@ def test_limit_pages_and_short_page_completes(conn, clock):
     assert fake.requests[0]["params"]["description_format"] == "text"
 
 
+def test_adjacent_partitions_include_lower_and_exclude_upper_boundary(conn, clock):
+    lower = clock() - timedelta(hours=5)
+    upper = clock() - timedelta(hours=4)
+    rows = [make_posting_row(id=identity, date_created=created, title="Boundary role",
+                            organization="Boundary Co", domain="boundary.example", description="Boundary fixture")
+            for identity, created in [("at-lower", lower), ("at-upper", upper)]]
+    fake = FakeFantastic(rows=rows)
+    svc = acquisition(conn, fake, clock)
+    p1 = make_fresh_partition(conn, clock)
+    first = svc.run_partition(p1)
+    assert first.new_postings == 1
+    assert sql1(conn, "SELECT provider_job_id FROM postings") == "at-lower"
+    p2 = make_fresh_partition(conn, clock, hours_ago_start=4)
+    second = svc.run_partition(p2)
+    assert second.new_postings == 1
+    assert {r["provider_job_id"] for r in sqlall(conn, "SELECT provider_job_id FROM postings")} == {"at-lower", "at-upper"}
+    assert all(r["complete_coverage"] for r in sqlall(conn, "SELECT complete_coverage FROM source_partitions"))
+
+
 def test_failed_later_page_keeps_earlier_pages_and_resumes_from_its_own_cursor(conn, clock):
     fake = FakeFantastic(rows=rows_in_window(clock, 7), fail_offsets={3: 404})
     svc = acquisition(conn, fake, clock, page_limit=3)
@@ -137,8 +156,9 @@ def test_crash_between_call_and_commit_loses_nothing_and_re_requests_the_page(co
     assert sql1(conn, "SELECT count(*) FROM postings p JOIN postings q ON q.provider_job_id = p.provider_job_id AND q.id <> p.id") == 0
 
 
-def test_source_failure_is_local(conn, clock):
-    """Auth refusal on one source stalls THAT partition, keeps its rows, and the other source proceeds."""
+def test_auth_refusal_waits_before_another_feed_can_probe_and_recover(conn, clock):
+    """The feeds share a credential. Preserve each cursor, but respect the recorded
+    provider refusal until a recovery probe is due; only a served page lifts it."""
     bad = FakeFantastic(rows=rows_in_window(clock, 6, prefix="a", domain_prefix="a"), fail_offsets={3: 401})
     good = FakeFantastic(ats_rows=rows_in_window(clock, 4, prefix="b", domain_prefix="b"))   # the ATS feed is its own endpoint (R02)
     svc_bad = acquisition(conn, bad, clock, page_limit=3)
@@ -151,12 +171,33 @@ def test_source_failure_is_local(conn, clock):
     assert sql1(conn, "SELECT count(*) FROM postings WHERE source = 'fantastic:active-jb'") == 3
     assert sql1(conn, "SELECT state FROM provider_state WHERE provider = 'fantastic'") == "unauthorized"
     r_good = svc_good.run_partition(p_good)
+    assert r_good.stop_reason == "provider_unauthorized"
+    assert good.requests == []
+    assert sql1(conn, "SELECT next_offset FROM source_partitions WHERE id = %s", (p_good,)) == 0
+    clock.advance(hours=6, seconds=1)
+    r_good = svc_good.run_partition(p_good)
     assert r_good.stop_reason == "complete" and r_good.new_postings == 4
     # a served response flips the provider back and stalled partitions can be reopened at their own cursor
     assert sql1(conn, "SELECT state FROM provider_state WHERE provider = 'fantastic'") == "serving"
     assert good.requests[0]["path"] == "/v1/active-ats" and bad.requests[0]["path"] == "/v1/active-jb"
     assert svc_bad.reopen_stalled("fantastic:active-jb") == 1
     assert sql1(conn, "SELECT next_offset FROM source_partitions WHERE id = %s", (p_bad,)) == 3
+
+
+def test_source_request_failure_does_not_block_the_other_feed(conn, clock):
+    """A source-specific request error does not invalidate the shared credential."""
+    bad = FakeFantastic(rows=rows_in_window(clock, 6, prefix="a"), fail_offsets={3: 404})
+    good = FakeFantastic(ats_rows=rows_in_window(clock, 4, prefix="b"))
+    svc_bad = acquisition(conn, bad, clock, page_limit=3)
+    p_bad = make_fresh_partition(conn, clock, source="fantastic:active-jb")
+    p_good = make_fresh_partition(conn, clock, source="fantastic:active-ats")
+    failed = svc_bad.run_partition(p_bad)
+    assert failed.stop_reason == "request_error:http_404" and failed.rows == 3
+    assert sql1(conn, "SELECT next_offset FROM source_partitions WHERE id = %s", (p_bad,)) == 3
+    good_run = acquisition(conn, good, clock, page_limit=3).run_partition(p_good)
+    assert good_run.stop_reason == "complete" and good_run.new_postings == 4
+    assert svc_bad.run_partition(p_bad).new_postings == 3
+    assert sql1(conn, "SELECT count(*) FROM postings") == 10
 
 
 def test_quota_reserve_stops_before_breaching(conn, clock):

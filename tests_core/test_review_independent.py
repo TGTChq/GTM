@@ -345,3 +345,40 @@ def test_unusable_domain_results_do_not_hide_a_valid_org_id_candidate():
     assert out.outcome == "approved", out
     assert any("organization_ids[]" in r["params"] for r in fake.requests)
     assert svc.person["apollo_person_id"] == "right-role"
+
+
+@pytest.mark.parametrize("scenario, reason", [
+    ("empty", "no_candidates_found"),
+    ("unusable", "no_usable_candidates_in_search"),
+    ("judged", "no_unjudged_candidates_remaining"),
+])
+def test_empty_search_outcome_distinguishes_precheck_rejection_from_paid_history(scenario, reason):
+    """Same production search/process code, explicit storage fixture. An unsuitable
+    search result is not proof that we already paid to evaluate that person."""
+    person = make_person(
+        id="search-person", first="Search", last="Person",
+        title="Software Engineer" if scenario == "unusable" else "VP Product",
+        org_name="Acme", org_domain="acme.com", email="search@acme.com", email_status="verified")
+
+    class BroadSearch(FakeApollo):
+        def request(self, method, url, **kwargs):
+            response = super().request(method, url, **kwargs)
+            if url.endswith("/mixed_people/api_search"):
+                from tgtc_core.testing.fakes import search_projection
+                people = [] if scenario == "empty" else [search_projection(person)]
+                return Response(200, text=json.dumps({"people": people}))
+            return response
+
+    fake = BroadSearch()
+    svc = OpportunityWithFixtureStorage(fake, "product")
+    if scenario == "judged":
+        svc._excluded_refs = lambda oid: ({"pid:search-person"}, set(), set())
+    out = svc.process(1)
+    assert (out.outcome, out.reason) == ("closed", reason)
+    assert fake.served_paid == 0 and svc.approvals == []
+    assert not any(r["path"].endswith("/people/match") for r in fake.requests)
+    if scenario == "unusable":
+        assert len(svc.attempts) == 1
+        assert svc.attempts[0][0][1:4] == ("pid:search-person", "gate", "skipped_pre_enrichment")
+    else:
+        assert svc.attempts == []

@@ -76,10 +76,16 @@ def test_max_attempts_closes_with_reason_and_a_new_candidate_reopens_later(conn,
     out2 = opportunity_service(conn, fake, clock).process(oid)
     assert out2.outcome == "approved", out2
     assert sql1(conn, "SELECT lead_json->>'email' FROM approvals") == f"new@{domain}"
-    # epoch 1's three judged candidates were not retried; epoch 2 spent exactly one match
-    assert sql1(conn, "SELECT count(*) FROM request_attempts WHERE operation = 'person_match'") == 4
-    assert sql1(conn, "SELECT count(*) FROM candidate_attempts WHERE epoch = 1 AND attempt_kind = 'match'") == 3
-    assert sql1(conn, "SELECT count(*) FROM candidate_attempts WHERE epoch = 2 AND attempt_kind = 'match'") == 1
+    # p-3 and p-4 were never enriched in epoch 1. Their email status is unknown to
+    # search, so epoch 2 must evaluate them before p-new; none of p-0..p-2 is retried.
+    assert sql1(conn, "SELECT count(*) FROM request_attempts WHERE operation = 'person_match'") == 6
+    matches = sqlall(conn, "SELECT epoch, candidate_ref FROM candidate_attempts "
+                    "WHERE opportunity_id = %s AND attempt_kind = 'match' ORDER BY id", (oid,))
+    assert [(m["epoch"], m["candidate_ref"]) for m in matches] == [
+        (1, "pid:p-0"), (1, "pid:p-1"), (1, "pid:p-2"),
+        (2, "pid:p-3"), (2, "pid:p-4"), (2, "pid:p-new"),
+    ]
+    assert fake.served_paid == 6
     # history is kept: every epoch-1 attempt row is still there
     assert sql1(conn, "SELECT count(*) FROM candidate_attempts WHERE opportunity_id = %s", (oid,)) >= 8
 

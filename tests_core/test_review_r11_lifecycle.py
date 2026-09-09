@@ -5,6 +5,8 @@ from __future__ import annotations
 
 from datetime import timedelta
 
+import pytest
+
 from tgtc_core.services.acquisition import upsert_posting
 from tgtc_core.services.classification_service import classify_one
 from tgtc_core.services.identity_service import resolve_posting_identity
@@ -46,7 +48,8 @@ def test_expiry_at_approval_time(conn, clock):
     assert sql1(conn, "SELECT count(*) FROM request_attempts WHERE operation = 'person_match'") == 0   # nothing bought for it
 
 
-def test_approval_awaiting_delivery_is_revoked_when_its_vacancy_expires(conn, clock):
+@pytest.mark.parametrize("first_channel", ["airtable", "instantly"])
+def test_approval_awaiting_delivery_is_revoked_when_its_vacancy_expires(conn, clock, first_channel):
     res = _seed(conn, clock, valid_through=clock() + timedelta(hours=2))
     resolve_posting_identity(conn, res.posting_id, now=clock())
     classify_one(conn, res.posting_id, inference=None, now=clock())
@@ -56,9 +59,17 @@ def test_approval_awaiting_delivery_is_revoked_when_its_vacancy_expires(conn, cl
     assert expire_postings(conn, now=clock())["postings_expired"] == 1
     at, ins = FakeAirtable(), FakeInstantly(campaign_status={CS: 1}, clock=clock)
     svc = delivery_service(conn, at, ins, clock)
-    a, i = svc.drain("airtable"), svc.drain("instantly")
-    assert [x.outcome for x in a] == ["blocked"] and a[0].reason.startswith("posting_no_longer_active")
-    assert [x.outcome for x in i] == ["blocked"]
+    first = svc.drain(first_channel)
+    second_channel = "instantly" if first_channel == "airtable" else "airtable"
+    second = svc.drain(second_channel)
+    assert [x.outcome for x in first] == ["blocked"] and first[0].reason.startswith("posting_no_longer_active")
+    # Revocation already blocked BOTH channels atomically. The second drain must
+    # claim nothing; an empty return is not evidence that delivery is still pending.
+    assert second == []
+    outbox = sqlall(conn, "SELECT channel, state, blocked_reason FROM delivery_outbox ORDER BY channel")
+    assert [(r["channel"], r["state"]) for r in outbox] == [("airtable", "blocked"), ("instantly", "blocked")]
+    assert all(r["blocked_reason"].startswith("posting_no_longer_active") for r in outbox)
+    assert at.requests == [] and ins.requests == []
     assert len(at.records) == 0 and len(ins.leads) == 0
     assert sql1(conn, "SELECT state || ':' || revoke_reason FROM approvals").startswith("revoked:posting_no_longer_active")
 
