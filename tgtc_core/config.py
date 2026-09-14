@@ -55,6 +55,9 @@ class Settings:
     anthropic_base_url: str = "https://api.anthropic.com"
     inference_model: str = "claude-opus-5"
     signing_key: str = ""
+    #: Immutable authorization key for the current provider-spend window.  The
+    #: identifier is not secret; its value is omitted from ``describe`` anyway.
+    spend_budget_id: str = ""
     # --- campaign ids: env NAME -> id, read at runtime ---------------------
     campaign_env: Dict[str, str] = field(default_factory=dict)
     # --- limits (meaning + provenance in describe()) ------------------------
@@ -107,6 +110,7 @@ class Settings:
             anthropic_base_url=str(env.get("TGTC_ANTHROPIC_BASE_URL", "") or "https://api.anthropic.com"),
             inference_model=str(env.get("TGTC_INFERENCE_MODEL", "") or "claude-opus-5"),
             signing_key=str(env.get("TGTC_CORE_SIGNING_KEY", "") or ""),
+            spend_budget_id=str(env.get("TGTC_SPEND_BUDGET_ID", "") or ""),
             campaign_env=campaign_env,
             fantastic_page_limit=_int(env, "TGTC_FANTASTIC_PAGE_LIMIT", 100),
             fantastic_fresh_window_minutes=_int(env, "TGTC_FRESH_WINDOW_MINUTES", 60),
@@ -143,6 +147,7 @@ class Settings:
         ):
             out["secrets_present"][name] = bool(getattr(self, attr))
         out["campaign_env_present"] = sorted(self.campaign_env.keys())
+        out["spend_budget_present"] = bool(self.spend_budget_id)
         for f in fields(self):
             if f.type in ("int", "float", "bool") or isinstance(getattr(self, f.name), (int, float, bool)):
                 if f.name not in {"campaign_env"}:

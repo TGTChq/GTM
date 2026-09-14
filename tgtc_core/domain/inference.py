@@ -29,6 +29,7 @@ import psycopg
 
 from ..db.connection import jsonb, transaction
 from ..policy.campaigns import FUNCTION_KEYS, POLICY_VERSION
+from ..services.spend_budget import BudgetExceeded, SpendBudget
 
 SCHEMA_VERSION = "posting-classification/1"
 
@@ -221,7 +222,10 @@ class AnthropicAdapter:
         if self._client is None:
             import anthropic  # official SDK; imported lazily so tests need no key
 
-            kwargs: Dict[str, Any] = {"api_key": self._api_key, "timeout": self._timeout, "max_retries": 2}
+            # Retries must be visible to the persistent spend ledger.  A single SDK
+            # call therefore means exactly one physical request; the work queue owns
+            # any later retry and must obtain a new reservation first.
+            kwargs: Dict[str, Any] = {"api_key": self._api_key, "timeout": self._timeout, "max_retries": 0}
             if self._base_url:
                 kwargs["base_url"] = self._base_url
             self._client = anthropic.Anthropic(**kwargs)
@@ -282,6 +286,86 @@ class AnthropicAdapter:
         resp = InferenceResponse.from_dict(data, model_version=self.model_version)
         resp.usage = usage
         return resp
+
+
+class BudgetedInference:
+    """Reserve one Anthropic request before dispatch and retain its outcome.
+
+    This wrapper belongs *inside* ``CachedInference``: a cache hit costs nothing and
+    never reserves capacity; every miss that crosses the network does.
+    """
+
+    def __init__(self, conn: psycopg.Connection, inner: InferencePort, budget: SpendBudget):
+        self.conn = conn
+        self.inner = inner
+        self.budget = budget
+        self.model_version = inner.model_version
+
+    def _input_reservation(self, request: InferenceRequest) -> int:
+        # One token cannot encode fewer than one payload byte, so the serialized
+        # UTF-8 request size is a conservative hard upper bound, independent of the
+        # language or tokenizer.  Use the adapter's exact outbound shape when it is
+        # available; the fallback also includes this module's prompt and schema.
+        build = getattr(self.inner, "build_params", None)
+        payload = build(request) if callable(build) else {
+            "system": SYSTEM_PROMPT, "schema": RESPONSE_SCHEMA,
+            "title": request.title, "description": request.description[:20000],
+            "structured": request.structured,
+        }
+        return len(json.dumps(payload, ensure_ascii=False, default=str).encode("utf-8"))
+
+    def classify(self, request: InferenceRequest) -> InferenceResponse:
+        input_reserved = self._input_reservation(request)
+        output_reserved = int(getattr(self.inner, "max_tokens", 1024) or 1024)
+        try:
+            with transaction(self.conn):
+                with self.conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        INSERT INTO request_attempts (provider, operation, params_json)
+                        VALUES ('anthropic', 'classify', %s) RETURNING id
+                        """,
+                        (jsonb({"content_hash": request.content_hash, "model_version": self.model_version}),),
+                    )
+                    attempt_id = int(cur.fetchone()["id"])
+                    self.budget.reserve_attempt(
+                        cur, attempt_id=attempt_id, provider="anthropic", operation="classify",
+                        input_tokens=input_reserved, output_tokens=output_reserved,
+                    )
+        except BudgetExceeded:
+            return InferenceResponse(
+                available=False, unavailable_reason="spend_budget_exhausted",
+                unavailable_kind=UNAVAILABLE_TRANSIENT, model_version=self.model_version,
+            )
+        response = self.inner.classify(request)
+        if response.available or response.unavailable_kind == UNAVAILABLE_ANSWER:
+            status = "served"
+        elif response.unavailable_kind == UNAVAILABLE_CONFIG:
+            status = "refused"
+        else:
+            status = "uncertain"
+        usage = response.usage or {}
+
+        def used(name: str) -> Optional[int]:
+            value = usage.get(name)
+            return int(value) if isinstance(value, (int, float)) and value >= 0 else None
+
+        with transaction(self.conn):
+            with self.conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE request_attempts SET status = %s, error_class = %s,
+                        error_code = %s, response_summary = %s, finished_at = now()
+                    WHERE id = %s
+                    """,
+                    (status, response.unavailable_kind or None, response.unavailable_reason[:200] or None,
+                     jsonb({"available": response.available, "usage": usage}), attempt_id),
+                )
+        self.budget.finish_attempt(
+            attempt_id, status, input_tokens_used=used("input_tokens"),
+            output_tokens_used=used("output_tokens"),
+        )
+        return response
 
 
 class CachedInference:

@@ -25,7 +25,7 @@ import argparse
 import json
 import os
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from .config import Settings
 from .db import apply_schema, connect
@@ -79,6 +79,16 @@ def _runner(conn, s: Settings, *, allow_spend: bool):
                   inference=inference)
 
 
+def _budget_id(args, settings: Settings) -> str:
+    return str(getattr(args, "budget_id", "") or settings.spend_budget_id or "").strip()
+
+
+def _require_persistent_budget(args, settings: Settings) -> None:
+    settings.spend_budget_id = _budget_id(args, settings)
+    if not settings.spend_budget_id:
+        raise SystemExit("refusing provider execution without TGTC_SPEND_BUDGET_ID or --budget-id")
+
+
 def _require_spend_acknowledgement(allow_spend: bool) -> None:
     # Refuse before opening storage or applying a schema. This acknowledgement is
     # not a credit budget and does not make a live acceptance cycle bounded.
@@ -86,32 +96,42 @@ def _require_spend_acknowledgement(allow_spend: bool) -> None:
         raise SystemExit("refusing to run against real providers without --i-understand-spend")
 
 
-def _require_acceptance_command(command: str) -> None:
+def _require_acceptance_command(args) -> None:
     """The initial acceptance service may only inspect config or SELECT from DB.
 
     The ordinary spend acknowledgement cannot override this deployment setting.
     This is a zero-provider-spend CLI mode, not a budget for later paid trials.
     """
     mode = os.environ.get("TGTC_ACCEPTANCE_MODE", "").strip()
-    if mode and mode != "read_only":
-        raise SystemExit("invalid TGTC_ACCEPTANCE_MODE; expected read_only or unset")
-    if mode == "read_only" and command not in ("describe", "check-db"):
+    if mode not in ("", "read_only", "bounded"):
+        raise SystemExit("invalid TGTC_ACCEPTANCE_MODE; expected read_only, bounded or unset")
+    if mode == "read_only" and args.cmd not in ("describe", "check-db"):
         raise SystemExit("TGTC_ACCEPTANCE_MODE=read_only allows only describe and check-db")
+    if mode == "bounded":
+        allowed = ("describe", "check-db", "migrate", "budget", "ledger", "cycle", "work")
+        if args.cmd not in allowed:
+            raise SystemExit("TGTC_ACCEPTANCE_MODE=bounded blocks delivery and unbounded maintenance commands")
+        if args.cmd == "cycle" and not args.no_deliver:
+            raise SystemExit("TGTC_ACCEPTANCE_MODE=bounded requires --no-deliver")
 
 
 def cmd_cycle(args) -> int:
     _require_spend_acknowledgement(args.i_understand_spend)
     s = _settings()
+    _require_persistent_budget(args, s)
     conn = connect(args.database_url or s.database_url)
     apply_schema(conn)
     r = _runner(conn, s, allow_spend=args.i_understand_spend)
-    print(json.dumps(r.cycle(acquire=not args.no_acquire, max_items=args.max_items).to_dict(), indent=2, default=str))
+    print(json.dumps(r.cycle(acquire=not args.no_acquire, deliver=not args.no_deliver,
+                             max_items=args.max_items).to_dict(), indent=2, default=str))
     return 0
 
 
 def cmd_work(args) -> int:
     _require_spend_acknowledgement(args.i_understand_spend)
     s = _settings()
+    if args.kind in ("classify", "qualify_opportunity"):
+        _require_persistent_budget(args, s)
     conn = connect(args.database_url or s.database_url)
     r = _runner(conn, s, allow_spend=args.i_understand_spend)
     print(json.dumps(r.work(args.kind, max_items=args.max_items), indent=2))
@@ -124,6 +144,35 @@ def cmd_deliver(args) -> int:
     conn = connect(args.database_url or s.database_url)
     r = _runner(conn, s, allow_spend=args.i_understand_spend)
     print(json.dumps(r.deliver(max_items=args.max_items), indent=2))
+    return 0
+
+
+def cmd_budget(args) -> int:
+    from .services.spend_budget import BudgetLimits, create_budget
+
+    s = _settings()
+    budget_id = _budget_id(args, s)
+    if not budget_id:
+        raise SystemExit("--budget-id is required")
+    if args.expires_hours <= 0:
+        raise SystemExit("--expires-hours must be positive")
+    expires_at = datetime.now(timezone.utc) + timedelta(hours=args.expires_hours)
+    conn = connect(args.database_url or s.database_url)
+    apply_schema(conn)
+    result = create_budget(
+        conn, budget_id,
+        BudgetLimits(
+            fantastic_requests=args.fantastic_requests,
+            fantastic_credits=args.fantastic_credits,
+            apollo_requests=args.apollo_requests,
+            apollo_credits=args.apollo_credits,
+            anthropic_requests=args.anthropic_requests,
+            anthropic_input_tokens=args.anthropic_input_tokens,
+            anthropic_output_tokens=args.anthropic_output_tokens,
+        ),
+        expires_at=expires_at,
+    )
+    print(json.dumps(result, indent=2, default=str))
     return 0
 
 
@@ -193,17 +242,28 @@ def main(argv=None) -> int:
     sub = parser.add_subparsers(dest="cmd", required=True)
     for name, fn in (("migrate", cmd_migrate), ("describe", cmd_describe), ("cycle", cmd_cycle), ("work", cmd_work),
                      ("deliver", cmd_deliver), ("ledger", cmd_ledger), ("import-airtable", cmd_import_airtable),
-                     ("prune", cmd_prune), ("demo", cmd_demo), ("check-db", cmd_check_db)):
+                     ("prune", cmd_prune), ("demo", cmd_demo), ("check-db", cmd_check_db), ("budget", cmd_budget)):
         p = sub.add_parser(name)
         p.add_argument("--database-url", default="")
         p.add_argument("--max-items", type=int, default=1000)
         p.add_argument("--no-acquire", action="store_true")
+        p.add_argument("--no-deliver", action="store_true")
+        p.add_argument("--budget-id", default="")
         p.add_argument("--i-understand-spend", action="store_true", help="required for cycle/work/deliver against real providers")
         if name == "work":
             p.add_argument("--kind", required=True, choices=("resolve_identity", "classify", "qualify_opportunity"))
+        if name == "budget":
+            p.add_argument("--expires-hours", type=int, default=24)
+            p.add_argument("--fantastic-requests", type=int, required=True)
+            p.add_argument("--fantastic-credits", type=int, required=True)
+            p.add_argument("--apollo-requests", type=int, required=True)
+            p.add_argument("--apollo-credits", type=int, required=True)
+            p.add_argument("--anthropic-requests", type=int, required=True)
+            p.add_argument("--anthropic-input-tokens", type=int, required=True)
+            p.add_argument("--anthropic-output-tokens", type=int, required=True)
         p.set_defaults(fn=fn)
     args = parser.parse_args(argv)
-    _require_acceptance_command(args.cmd)
+    _require_acceptance_command(args)
     return int(args.fn(args))
 
 

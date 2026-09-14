@@ -135,6 +135,21 @@ difference from `PRODUCT_CONTRACT.md`.
    keep Instantly disconnected until a separately approved no-send destination exists.
    Do not use the unrestricted `cycle` command as the acceptance executor. Live
    acceptance also requires confirmed account availability and authorized consumption.
+
+### 2026-09-14 acceptance-gate update
+
+The persistent provider budget and `bounded` acceptance mode are now implemented in
+migration 4 and `tgtc_core/services/spend_budget.py`.  Provider-internal retries are
+disabled under a budget, ambiguous outcomes remain counted, and `cycle --no-deliver`
+cannot write to Airtable or Instantly.  The exact one-page / ten-Apollo-credit /
+ten-inference-request trial is documented in `RAILWAY_CORE_RELEASE.md`.
+
+PostgreSQL, the isolated core service, Dockerfile selection, legacy-service pause and
+schema migrations 1–3 were subsequently verified in production. Apollo has now
+confirmed a 10,000-credit top-up. Remaining before the first live trial: publish and
+pass CI for migration 4, add `ANTHROPIC_API_KEY`, deploy the exact passing SHA, apply
+migration 4, then run the documented bounded no-delivery command. Historical
+suppression adoption and any external delivery remain later cutover gates.
 4. **Mutual exclusion at cutover**: establish and verify the pause of the legacy GTM
    and Approved Sync services before enabling the core. The September 9 GTM logs show
    acquisition and an Apollo refusal; a current pause is **not demonstrated** by the

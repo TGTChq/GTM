@@ -98,6 +98,10 @@ class FantasticClient:
         self._retries = max(0, max_retries)
         self._sleep = sleep
 
+    def require_single_physical_attempt(self) -> None:
+        """Disable client-internal retries when each dispatch needs a DB reservation."""
+        self._retries = 0
+
     def fetch_page(self, endpoint: str, params: Dict[str, Any]) -> Page:
         """One page. Retries 408/5xx and network errors a bounded number of times.
 

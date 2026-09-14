@@ -63,6 +63,43 @@ CREATE TABLE IF NOT EXISTS request_attempts (
 CREATE INDEX IF NOT EXISTS request_attempts_provider_idx
     ON request_attempts (provider, operation, started_at);
 
+-- A human acknowledgement is not a credit ceiling.  Each authorized run has an
+-- immutable, expiring budget; every physical request reserves capacity atomically
+-- before leaving the process.  Reservations are intentionally never refunded.
+CREATE TABLE IF NOT EXISTS spend_budgets (
+    budget_id                       text PRIMARY KEY,
+    state                           text NOT NULL DEFAULT 'active' CHECK (state IN ('active', 'closed')),
+    fantastic_requests_limit       integer NOT NULL CHECK (fantastic_requests_limit >= 0),
+    fantastic_credits_limit        integer NOT NULL CHECK (fantastic_credits_limit >= 0),
+    apollo_requests_limit           integer NOT NULL CHECK (apollo_requests_limit >= 0),
+    apollo_credits_limit            integer NOT NULL CHECK (apollo_credits_limit >= 0),
+    anthropic_requests_limit        integer NOT NULL CHECK (anthropic_requests_limit >= 0),
+    anthropic_input_tokens_limit    integer NOT NULL CHECK (anthropic_input_tokens_limit >= 0),
+    anthropic_output_tokens_limit   integer NOT NULL CHECK (anthropic_output_tokens_limit >= 0),
+    expires_at                      timestamptz NOT NULL,
+    created_at                      timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS spend_reservations (
+    id                       bigserial PRIMARY KEY,
+    budget_id                text NOT NULL REFERENCES spend_budgets(budget_id),
+    provider                 text NOT NULL CHECK (provider IN ('fantastic', 'apollo', 'anthropic')),
+    operation                text NOT NULL,
+    attempt_id               bigint NOT NULL REFERENCES request_attempts(id),
+    estimated_credits        numeric NOT NULL DEFAULT 0 CHECK (estimated_credits >= 0),
+    input_tokens_reserved    integer NOT NULL DEFAULT 0 CHECK (input_tokens_reserved >= 0),
+    output_tokens_reserved   integer NOT NULL DEFAULT 0 CHECK (output_tokens_reserved >= 0),
+    input_tokens_used        integer,
+    output_tokens_used       integer,
+    status                   text NOT NULL DEFAULT 'reserved'
+                             CHECK (status IN ('reserved', 'served', 'uncertain', 'refused', 'failed')),
+    created_at               timestamptz NOT NULL DEFAULT now(),
+    finished_at              timestamptz,
+    UNIQUE (attempt_id)
+);
+CREATE INDEX IF NOT EXISTS spend_reservations_budget_provider_idx
+    ON spend_reservations (budget_id, provider, created_at);
+
 -- What one page actually returned. Written in the same transaction as the postings
 -- it carried and before the partition cursor advances.
 CREATE TABLE IF NOT EXISTS page_receipts (

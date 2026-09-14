@@ -32,5 +32,37 @@ legacy service build settings; do not bind either archived JSON automatically.
 
 Configuration-file precedence and the deprecation policy are documented at
 [Railway Config as Code](https://docs.railway.com/config-as-code). Activation with real providers remains
-separate: missing inference credential, persistent spending bounds, isolated
-acceptance and historical suppression adoption are still outstanding.
+separate: the inference credential, bounded live trial and historical suppression
+adoption are still outstanding.
+
+## Bounded live acceptance added after the read-only release
+
+The core now requires `TGTC_SPEND_BUDGET_ID` for every provider-bearing `cycle` and
+for the paid `classify` / `qualify_opportunity` workers.  Migration 4 stores immutable,
+expiring limits and atomically reserves one unit before every physical Fantastic,
+Apollo or Anthropic request.  Reservations survive timeouts, crashes and restarts.
+Fantastic and Anthropic client-internal retries are disabled while budgeted, so a
+retry cannot bypass the ledger.
+
+The first live trial must remain isolated from Airtable and Instantly:
+
+```text
+TGTC_ACCEPTANCE_MODE=bounded
+TGTC_SPEND_BUDGET_ID=core-acceptance-20260914-a
+
+python -m tgtc_core migrate
+python -m tgtc_core budget --budget-id core-acceptance-20260914-a \
+  --expires-hours 24 \
+  --fantastic-requests 1 --fantastic-credits 100 \
+  --apollo-requests 30 --apollo-credits 10 \
+  --anthropic-requests 10 --anthropic-input-tokens 350000 \
+  --anthropic-output-tokens 10240
+python -m tgtc_core cycle --budget-id core-acceptance-20260914-a \
+  --max-items 10 --no-deliver --i-understand-spend
+```
+
+The budget id is immutable and re-running `budget` never resets its usage.  A changed
+limit needs a new id.  `bounded` rejects `deliver` and rejects a cycle without
+`--no-deliver`.  After inspecting the request ledger, reservations, classification
+evidence and outbox, restore `TGTC_ACCEPTANCE_MODE=read_only` until cutover is
+separately approved.  The trial remains blocked until `ANTHROPIC_API_KEY` is present.

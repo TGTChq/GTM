@@ -42,6 +42,7 @@ from ..providers.fantastic import (
 )
 from ..providers.http import TransportTimeout
 from . import provider_state
+from .spend_budget import BudgetExceeded, SpendBudget
 
 SOURCE_JOB_BOARDS = "fantastic:active-jb"
 SOURCE_ATS = "fantastic:active-ats"
@@ -269,9 +270,14 @@ class AcquisitionService:
                  max_pages_per_partition: int, min_jobs_quota_remaining: int, min_requests_quota_remaining: int,
                  location: Optional[str] = "United States", sources: Sequence[str] = DEFAULT_SOURCES,
                  lease_seconds: int = 900, quota_max_age_hours: float = 24.0, provider_retry_hours: float = 6.0,
+                 spend_budget: Optional[SpendBudget] = None,
                  now: Callable[[], datetime] = lambda: datetime.now(timezone.utc)):
         self.conn = conn
         self.client = client
+        if spend_budget:
+            # A reservation represents exactly one physical request.  Retries are
+            # scheduled outside the client and must reserve again after a restart.
+            self.client.require_single_physical_attempt()
         self.page_limit = page_limit
         self.time_frame = time_frame
         self.fresh_window = timedelta(minutes=fresh_window_minutes)
@@ -288,6 +294,7 @@ class AcquisitionService:
         self.lease_seconds = lease_seconds
         self.quota_max_age = timedelta(hours=quota_max_age_hours)
         self.provider_retry_hours = provider_retry_hours
+        self.spend_budget = spend_budget
         self.now = now
 
     # --- request shape per source (R02) -------------------------------------
@@ -491,36 +498,53 @@ class AcquisitionService:
             offset = int(part["next_offset"])
             endpoint, params = self.request_params(source, lower=part["window_start"], upper=part["window_end"], offset=offset)
             # 1) intent, committed before the call
-            with transaction(self.conn):
-                with self.conn.cursor() as cur:
-                    cur.execute(
-                        "INSERT INTO request_attempts (provider, operation, partition_id, params_json, estimated_credits) "
-                        "VALUES ('fantastic', 'page', %s, %s, %s) RETURNING id",
-                        (partition_id, jsonb({"endpoint": endpoint, **params}), self.page_limit),
-                    )
-                    attempt_id = int(cur.fetchone()["id"])
+            try:
+                with transaction(self.conn):
+                    with self.conn.cursor() as cur:
+                        cur.execute(
+                            "INSERT INTO request_attempts (provider, operation, partition_id, params_json, estimated_credits) "
+                            "VALUES ('fantastic', 'page', %s, %s, %s) RETURNING id",
+                            (partition_id, jsonb({"endpoint": endpoint, **params}), self.page_limit),
+                        )
+                        attempt_id = int(cur.fetchone()["id"])
+                        if self.spend_budget:
+                            self.spend_budget.reserve_attempt(
+                                cur, attempt_id=attempt_id, provider="fantastic", operation="page",
+                                estimated_credits=self.page_limit,
+                            )
+            except BudgetExceeded as exc:
+                run.stop_reason = str(exc)
+                break
             # 2) the call, outside any transaction
             try:
                 page: Page = self.client.fetch_page(endpoint, params)
             except TransportTimeout:
                 self._finish_attempt(attempt_id, "uncertain", None, "timeout", "TransportTimeout")
+                if self.spend_budget:
+                    self.spend_budget.finish_attempt(attempt_id, "uncertain")
                 self._credit_event(attempt_id, "page", requests=1, estimated=self.page_limit, confirmed=None)
                 run.stop_reason = "timeout_uncertain"
                 break
             except FantasticAuthError as exc:
                 self._finish_attempt(attempt_id, "refused", 401, "auth", str(exc))
+                if self.spend_budget:
+                    self.spend_budget.finish_attempt(attempt_id, "refused")
                 self._stall(partition_id, token, f"auth:{exc}")
                 provider_state.record_refusal(self.conn, PROVIDER, str(exc), state=provider_state.UNAUTHORIZED, now=self.now())
                 run.stop_reason = "auth_refused"
                 break
             except FantasticQuotaError as exc:
                 self._finish_attempt(attempt_id, "refused", 429, "quota", str(exc))
+                if self.spend_budget:
+                    self.spend_budget.finish_attempt(attempt_id, "refused")
                 self._stall(partition_id, token, f"quota:{exc}")
                 provider_state.record_refusal(self.conn, PROVIDER, str(exc), now=self.now())
                 run.stop_reason = "quota_refused"
                 break
             except FantasticRequestError as exc:
                 self._finish_attempt(attempt_id, "failed", exc.status, exc.stage, exc.code)
+                if self.spend_budget:
+                    self.spend_budget.finish_attempt(attempt_id, "failed")
                 with transaction(self.conn):
                     with self.conn.cursor() as cur:
                         cur.execute("UPDATE source_partitions SET last_error = %s, updated_at = now() WHERE id = %s AND lease_token = %s",
@@ -605,6 +629,8 @@ class AcquisitionService:
                         (attempt_id, len(page.rows), len(page.rows) if page.quota.jobs_remaining is not None else None,
                          "provider_header" if page.quota.jobs_remaining is not None else "estimate"),
                     )
+            if self.spend_budget:
+                self.spend_budget.finish_attempt(attempt_id, "served")
             provider_state.record_served(self.conn, PROVIDER, now=moment)
             run.pages += 1
             run.rows += len(page.rows)

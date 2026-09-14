@@ -54,6 +54,19 @@ def test_transport_failure_is_unavailable_never_a_guess():
     assert not out.available and out.unavailable_reason == "inference_error:ConnectionError"
 
 
+def test_sdk_internal_retries_are_disabled_so_each_physical_call_needs_a_reservation(monkeypatch):
+    captured = {}
+
+    class FakeAnthropic:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    import sys
+    monkeypatch.setitem(sys.modules, "anthropic", SimpleNamespace(Anthropic=FakeAnthropic))
+    AnthropicAdapter(api_key="k")._get_client()
+    assert captured["max_retries"] == 0
+
+
 def test_db_cache_avoids_a_second_call_for_the_same_content(conn):
     inner = ReplayAdapter({"abc": {"compatible_functions": ["finance"], "responsibilities": [
         {"phrase": "accounts payable", "excerpt": "Own accounts payable and receivable"}], "seniority": "ic",

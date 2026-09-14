@@ -20,7 +20,7 @@ import psycopg
 from .config import Settings
 from .db import work_queue
 from .db.connection import jsonb, transaction
-from .domain.inference import CachedInference, InferencePort, NullAdapter
+from .domain.inference import BudgetedInference, CachedInference, InferencePort, NullAdapter
 from .providers.airtable import AirtableClient
 from .providers.apollo import ApolloClient
 from .providers.fantastic import FantasticClient
@@ -35,6 +35,7 @@ from .services.lifecycle import expire_postings
 from .services.metrics import ledger
 from .services.opportunity import OpportunityService
 from .services.scheduler import FairShare
+from .services.spend_budget import BudgetExceeded, SpendBudget
 
 log = logging.getLogger("tgtc_core.runner")
 
@@ -67,14 +68,18 @@ class Runner:
         self.s = settings
         self.now = now
         self.run_id = run_id or self.now().strftime("%Y%m%dT%H%M%SZ")
+        self.spend_budget = SpendBudget(conn, settings.spend_budget_id, now=now) if settings.spend_budget_id else None
         self.fantastic = FantasticClient(fantastic_transport, base_url=settings.fantastic_base_url,
-                                         api_key=settings.fantastic_api_key) if fantastic_transport else None
+                                         api_key=settings.fantastic_api_key,
+                                         max_retries=0 if self.spend_budget else 2) if fantastic_transport else None
         self.apollo = ApolloClient(apollo_transport, base_url=settings.apollo_base_url, api_key=settings.apollo_api_key) if apollo_transport else None
         self.airtable = AirtableClient(airtable_transport, base_url=settings.airtable_base_url, token=settings.airtable_token,
                                        base_id=settings.airtable_base_id or "app_unset", table=settings.airtable_table_name) if airtable_transport else None
         self.instantly = InstantlyClient(instantly_transport, base_url=settings.instantly_base_url,
                                          api_key=settings.instantly_api_key) if instantly_transport else None
         base_port = inference or NullAdapter()
+        if self.spend_budget and getattr(base_port, "model_version", ""):
+            base_port = BudgetedInference(conn, base_port, self.spend_budget)
         self.inference: InferencePort = CachedInference(conn, base_port) if settings.inference_enabled else NullAdapter()
         self.inference_configured = bool(inference is not None and settings.inference_enabled and getattr(base_port, "model_version", ""))
         self.scheduler = FairShare(fresh_share_pct=settings.fresh_share_pct)
@@ -104,6 +109,7 @@ class Runner:
             min_requests_quota_remaining=self.s.fantastic_min_requests_quota_remaining, sources=self.s.fantastic_sources,
             lease_seconds=self.s.partition_lease_seconds, quota_max_age_hours=self.s.fantastic_quota_max_age_hours,
             provider_retry_hours=self.s.fantastic_availability_retry_hours, now=self.now,
+            spend_budget=self.spend_budget,
         )
 
     def acquisition_gate(self) -> Dict[str, Any]:
@@ -159,7 +165,8 @@ class Runner:
                                   retry_hours=self.s.apollo_availability_retry_hours,
                                   people_search_max_pages=self.s.apollo_people_search_max_pages,
                                   person_uniqueness=self.s.person_employer_uniqueness,
-                                  verify_on_import=self.s.instantly_verify_on_import, now=self.now)
+                                  verify_on_import=self.s.instantly_verify_on_import,
+                                  spend_budget=self.spend_budget, now=self.now)
 
     def work(self, kind: str, *, max_items: int = 1000) -> Dict[str, int]:
         counts: Dict[str, int] = {}
@@ -211,6 +218,11 @@ class Runner:
             except work_queue.LeaseLost:
                 self.conn.rollback()
                 counts["lease_lost"] = counts.get("lease_lost", 0) + 1
+            except BudgetExceeded as exc:
+                self.conn.rollback()
+                with transaction(self.conn):
+                    work_queue.wait(self.conn, item, str(exc), exc.retry_after)
+                counts["budget_exhausted"] = counts.get("budget_exhausted", 0) + 1
             except Exception as exc:  # noqa: BLE001 - a technical failure retries; it never approves or rejects
                 self.conn.rollback()
                 log.exception("work item %s failed", item.id)
@@ -232,7 +244,7 @@ class Runner:
         self._log("delivery", "drain", report)
         return report
 
-    def cycle(self, *, acquire: bool = True, max_items: int = 1000) -> CycleReport:
+    def cycle(self, *, acquire: bool = True, deliver: bool = True, max_items: int = 1000) -> CycleReport:
         report = CycleReport(run_id=self.run_id)
         self._log("cycle", "start", {"settings": self.s.describe()})
         report.lifecycle = self.lifecycle()
@@ -243,7 +255,10 @@ class Runner:
             report.acquisition = self.acquire()
         for stage in STAGES:
             report.stages[stage] = self.work(stage, max_items=max_items)
-        report.delivery = self.deliver(max_items=max_items)
+        if deliver:
+            report.delivery = self.deliver(max_items=max_items)
+        else:
+            report.delivery = {"airtable": {"withheld": 1}, "instantly": {"withheld": 1}}
         report.scheduler = self.scheduler.to_dict()
         report.ledger = ledger(self.conn)
         self.conn.commit()

@@ -33,6 +33,19 @@ def test_acknowledged_command_reaches_database_setup(command, monkeypatch):
     def stop_before_connection(*args, **kwargs):
         raise ReachedDatabase
 
+    monkeypatch.setenv("TGTC_SPEND_BUDGET_ID", "test-budget")
     monkeypatch.setattr(cli, "connect", stop_before_connection)
     with pytest.raises(ReachedDatabase):
+        cli.main(command + ["--i-understand-spend"])
+
+
+@pytest.mark.parametrize("command", [
+    ["cycle"],
+    ["work", "--kind", "classify"],
+    ["work", "--kind", "qualify_opportunity"],
+])
+def test_provider_execution_requires_a_persistent_budget_before_database(command, monkeypatch):
+    monkeypatch.delenv("TGTC_SPEND_BUDGET_ID", raising=False)
+    monkeypatch.setattr(cli, "connect", lambda *a, **k: pytest.fail("must fail before database"))
+    with pytest.raises(SystemExit, match="without TGTC_SPEND_BUDGET_ID"):
         cli.main(command + ["--i-understand-spend"])

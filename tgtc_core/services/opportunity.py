@@ -44,6 +44,7 @@ from ..policy.campaigns import buyer_titles, is_founder_tier, resolve_campaign_i
 from ..policy.requirements import excluded_industry, rule
 from ..providers.apollo import ApolloClient, ApolloResult, Outcome, person_org_domain
 from . import provider_state
+from .spend_budget import SpendBudget
 from .suppression import account_keys, check as suppression_check, company_function_keys
 
 #: Approval refusals that describe the OPPORTUNITY (not the candidate): no other
@@ -85,6 +86,7 @@ class OpportunityService:
     def __init__(self, conn: psycopg.Connection, apollo: ApolloClient, *, campaign_env: Dict[str, str],
                  signing_key: str, retry_hours: float = 6.0, people_search_max_pages: int = 2,
                  person_uniqueness: bool = True, verify_on_import: bool = False,
+                 spend_budget: Optional[SpendBudget] = None,
                  now: Callable[[], datetime] = lambda: datetime.now(timezone.utc)):
         self.conn = conn
         self.apollo = apollo
@@ -94,6 +96,7 @@ class OpportunityService:
         self.search_pages = max(1, people_search_max_pages)
         self.person_uniqueness = person_uniqueness
         self.verify_on_import = verify_on_import
+        self.spend_budget = spend_budget
         self.now = now
         self._work_item = None
 
@@ -142,7 +145,13 @@ class OpportunityService:
                     "VALUES ('apollo', %s, %s, %s, %s, %s) RETURNING id",
                     (operation, opportunity_id, person_ref_value or None, jsonb(params), estimated_credits),
                 )
-                return int(cur.fetchone()["id"])
+                attempt_id = int(cur.fetchone()["id"])
+                if self.spend_budget:
+                    self.spend_budget.reserve_attempt(
+                        cur, attempt_id=attempt_id, provider="apollo", operation=operation,
+                        estimated_credits=float(estimated_credits or 0),
+                    )
+                return attempt_id
 
     def _finish(self, attempt_id: int, result: ApolloResult, *, operation: str, estimated: Optional[float]) -> None:
         status = {Outcome.SERVED: "served", Outcome.TIMEOUT: "uncertain", Outcome.CREDIT_EXHAUSTED: "refused",
@@ -158,6 +167,8 @@ class OpportunityService:
                         "INSERT INTO credit_events (provider, operation, attempt_id, requests, estimated_credits, confirmed_credits, basis) VALUES ('apollo', %s, %s, 1, %s, NULL, 'estimate')",
                         (operation, attempt_id, estimated),
                     )
+        if self.spend_budget:
+            self.spend_budget.finish_attempt(attempt_id, status)
 
     def _guard_provider(self, *, chargeable: bool = True) -> None:
         """Reserve only at a chargeable call. A free search can find no usable
