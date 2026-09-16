@@ -75,6 +75,7 @@ def test_same_rejected_job_is_not_reopened_or_reclassified_on_identical_observat
 
 def test_known_outside_size_is_excluded_upstream_on_a_new_partition(conn, clock):
     row = make_posting_row(id="known-large", title="Analyst", organization="Large Co", domain="large.example",
+                          description="Analyze revenue operations data for a full-time remote position.",
                           org_linkedin_slug="large-co", org_linkedin_headcount=2000,
                           date_created=clock() - timedelta(hours=4, minutes=30))
     pid = seed_posting(conn, clock, row)
