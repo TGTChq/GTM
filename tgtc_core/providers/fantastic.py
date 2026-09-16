@@ -8,7 +8,9 @@ every row before returning it.
 
 from __future__ import annotations
 
+import json
 import random
+import re
 import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -35,9 +37,11 @@ class FantasticQuotaError(Exception):
 
 
 class FantasticRequestError(Exception):
-    def __init__(self, stage: str, code: str, status: Optional[int] = None):
+    def __init__(self, stage: str, code: str, status: Optional[int] = None,
+                 response_summary: Optional[Dict[str, Any]] = None):
         super().__init__(f"{stage}:{code}")
         self.stage, self.code, self.status = stage, code, status
+        self.response_summary = dict(response_summary or {})
 
 
 @dataclass(frozen=True)
@@ -76,6 +80,76 @@ def read_quota(resp: Response) -> Quota:
         requests_limit=geti("x-api-requests-limit"), requests_remaining=geti("x-api-requests-remaining"),
         next_billing_date=str(nbd).strip() if nbd else None,
     )
+
+
+_SAFE_ERROR_KEYS = frozenset({"code", "detail", "error", "field", "loc", "message", "msg", "type"})
+
+
+def _redact_error_text(value: Any, secrets: Tuple[str, ...]) -> str:
+    text = str(value)
+    for secret in secrets:
+        if secret:
+            text = text.replace(secret, "[REDACTED]")
+    text = re.sub(r"(?i)\b(Bearer|Basic)\s+[A-Za-z0-9._~+/=-]+", r"\1 [REDACTED]", text)
+    text = re.sub(
+        r"(?i)([\"']?(?:api[_-]?key|token|password|secret)[\"']?\s*[:=]\s*)"
+        r"[\"']?[^\s,;}\]\"']+[\"']?",
+        r"\1[REDACTED]",
+        text,
+    )
+    return text[:300]
+
+
+def _safe_error_value(value: Any, *, secrets: Tuple[str, ...] = (), depth: int = 0) -> Any:
+    """Keep only bounded diagnostic fields from an untrusted provider response.
+
+    Error bodies occasionally contain the rejected input or echoed request headers.
+    Those are never persisted.  The small allow-list is enough for common FastAPI
+    and JSON error shapes while excluding credentials and arbitrary response data.
+    """
+    if isinstance(value, (str, int, float, bool)):
+        return _redact_error_text(value, secrets)
+    if depth > 3:
+        return None
+    if isinstance(value, list):
+        items = [_safe_error_value(item, secrets=secrets, depth=depth + 1) for item in value[:5]]
+        return [item for item in items if item not in (None, {}, [])]
+    if isinstance(value, dict):
+        out: Dict[str, Any] = {}
+        for key, item in value.items():
+            if str(key).lower() not in _SAFE_ERROR_KEYS:
+                continue
+            safe = _safe_error_value(item, secrets=secrets, depth=depth + 1)
+            if safe not in (None, {}, []):
+                out[str(key)[:80]] = safe
+        return out
+    return None
+
+
+def error_response_summary(resp: Response, *, secrets: Tuple[str, ...] = ()) -> Dict[str, Any]:
+    """Return a secrets-safe, bounded summary for a non-success response."""
+    out: Dict[str, Any] = {"status": int(resp.status)}
+    parsed_quota = read_quota(resp)
+    quota = {
+        key: value for key, value in {
+            "jobs_limit": parsed_quota.jobs_limit,
+            "jobs_remaining": parsed_quota.jobs_remaining,
+            "requests_limit": parsed_quota.requests_limit,
+            "requests_remaining": parsed_quota.requests_remaining,
+        }.items() if value is not None
+    }
+    if quota:
+        out["quota"] = quota
+    payload = resp.json()
+    if isinstance(payload, dict):
+        body = _safe_error_value(payload, secrets=secrets)
+        if body:
+            candidate = dict(out, body=body)
+            if len(json.dumps(candidate, ensure_ascii=True).encode("utf-8")) <= 4096:
+                out["body"] = body
+            else:
+                out["body"] = {"error": "response_summary_truncated"}
+    return out
 
 
 def strip_pii(record: Dict[str, Any]) -> Tuple[Dict[str, Any], int]:
@@ -132,7 +206,10 @@ class FantasticClient:
                 self._sleep(min(4.0, (2 ** attempt) * 0.2))
                 continue
             if resp.status != 200:
-                raise FantasticRequestError("http_response", f"http_{resp.status}", resp.status)
+                raise FantasticRequestError(
+                    "http_response", f"http_{resp.status}", resp.status,
+                    response_summary=error_response_summary(resp, secrets=(self._key,)),
+                )
             payload = resp.json()
             if payload is None:
                 raise FantasticRequestError("json_parsing", "malformed_json", resp.status)
@@ -159,7 +236,8 @@ class FantasticClient:
 
 def build_window_params(*, lower_iso: str, upper_iso: str, limit: int, offset: int, time_frame: str,
                         source: Optional[str] = None, location: Optional[str] = "United States",
-                        exclude_ats_duplicate: bool = True) -> Dict[str, Any]:
+                        exclude_ats_duplicate: bool = True,
+                        include_basic_organization_details: bool = False) -> Dict[str, Any]:
     """Window request WITHOUT title/description filters.
 
     ``date_created_gte/lt`` are proven-honoured bounds; ``time_frame`` is intersected
@@ -174,8 +252,9 @@ def build_window_params(*, lower_iso: str, upper_iso: str, limit: int, offset: i
         "limit": int(limit),
         "offset": int(offset),
         "description_format": "text",
-        "include_basic_organization_details": "true",
     }
+    if include_basic_organization_details:
+        params["include_basic_organization_details"] = "true"
     if source:
         params["source"] = source
     if exclude_ats_duplicate:

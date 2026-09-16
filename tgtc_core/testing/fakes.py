@@ -107,6 +107,12 @@ class FakeFantastic:
             return _json(401, {"error": "unauthorized"})
         if self.quota_exhausted:
             return _json(429, {"error": "quota exhausted"})
+        # Mirror endpoint-specific request validation so simulated integration tests
+        # reject the same cross-feed parameter mistake as the live API.
+        if path.endswith("/active-jb") and "include_basic_organization_details" in p:
+            return _json(400, {"error": "include_basic_organization_details is active-ats only"})
+        if path.endswith("/active-ats") and "exclude_ats_duplicate" in p:
+            return _json(400, {"error": "exclude_ats_duplicate is active-jb only"})
         limit = int(p.get("limit", ["100"])[0])
         offset = int(p.get("offset", ["0"])[0])
         fail = self.fail_offsets.pop(offset, None)

@@ -56,11 +56,13 @@ class SourceSpec:
     #: The job-board feed can drop rows that also appear in the ATS feed. Doing so is
     #: only correct when the ATS feed is acquired too.
     supports_exclude_ats_duplicate: bool
+    #: This request toggle exists only on the ATS endpoint; JB fields are always on.
+    supports_basic_organization_details: bool
 
 
 SOURCE_SPECS: Dict[str, SourceSpec] = {
-    SOURCE_JOB_BOARDS: SourceSpec(SOURCE_JOB_BOARDS, ENDPOINT_JOB_BOARDS, True),
-    SOURCE_ATS: SourceSpec(SOURCE_ATS, ENDPOINT_ATS, False),
+    SOURCE_JOB_BOARDS: SourceSpec(SOURCE_JOB_BOARDS, ENDPOINT_JOB_BOARDS, True, False),
+    SOURCE_ATS: SourceSpec(SOURCE_ATS, ENDPOINT_ATS, False, True),
 }
 DEFAULT_SOURCES: Tuple[str, ...] = (SOURCE_JOB_BOARDS, SOURCE_ATS)
 
@@ -302,7 +304,8 @@ class AcquisitionService:
         spec = SOURCE_SPECS[source]
         exclude = spec.supports_exclude_ats_duplicate and SOURCE_ATS in self.sources
         params = build_window_params(lower_iso=_iso(lower), upper_iso=_iso(upper), limit=self.page_limit, offset=offset,
-                                     time_frame=self.time_frame, location=self.location, exclude_ats_duplicate=exclude)
+                                     time_frame=self.time_frame, location=self.location, exclude_ats_duplicate=exclude,
+                                     include_basic_organization_details=spec.supports_basic_organization_details)
         return spec.endpoint, params
 
     # --- planning ---------------------------------------------------------
@@ -542,7 +545,8 @@ class AcquisitionService:
                 run.stop_reason = "quota_refused"
                 break
             except FantasticRequestError as exc:
-                self._finish_attempt(attempt_id, "failed", exc.status, exc.stage, exc.code)
+                self._finish_attempt(attempt_id, "failed", exc.status, exc.stage, exc.code,
+                                     response_summary=exc.response_summary)
                 if self.spend_budget:
                     self.spend_budget.finish_attempt(attempt_id, "failed")
                 with transaction(self.conn):
@@ -652,12 +656,15 @@ class AcquisitionService:
             run.stop_reason = run.stop_reason or "page_budget"
         return run
 
-    def _finish_attempt(self, attempt_id: int, status: str, http_status: Optional[int], error_class: str, error_code: str) -> None:
+    def _finish_attempt(self, attempt_id: int, status: str, http_status: Optional[int], error_class: str, error_code: str,
+                        response_summary: Optional[Dict[str, Any]] = None) -> None:
         with transaction(self.conn):
             with self.conn.cursor() as cur:
                 cur.execute(
-                    "UPDATE request_attempts SET status = %s, http_status = %s, error_class = %s, error_code = %s, finished_at = now() WHERE id = %s",
-                    (status, http_status, error_class[:80], error_code[:200], attempt_id),
+                    "UPDATE request_attempts SET status = %s, http_status = %s, error_class = %s, error_code = %s, "
+                    "response_summary = %s, finished_at = now() WHERE id = %s",
+                    (status, http_status, error_class[:80], error_code[:200],
+                     jsonb(response_summary) if response_summary else None, attempt_id),
                 )
 
     def _credit_event(self, attempt_id: int, operation: str, *, requests: int, estimated: Optional[int], confirmed: Optional[int]) -> None:

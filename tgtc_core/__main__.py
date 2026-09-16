@@ -122,9 +122,32 @@ def cmd_cycle(args) -> int:
     conn = connect(args.database_url or s.database_url)
     apply_schema(conn)
     r = _runner(conn, s, allow_spend=args.i_understand_spend)
-    print(json.dumps(r.cycle(acquire=not args.no_acquire, deliver=not args.no_deliver,
-                             max_items=args.max_items).to_dict(), indent=2, default=str))
+    report = r.cycle(acquire=not args.no_acquire, deliver=not args.no_deliver,
+                     max_items=args.max_items)
+    print(json.dumps(report.to_dict(), indent=2, default=str))
+    failure = _bounded_acceptance_failure(report, acquire=not args.no_acquire)
+    if failure:
+        print(f"bounded acceptance failed: {failure}", file=sys.stderr)
+        return 1
     return 0
+
+
+def _bounded_acceptance_failure(report, *, acquire: bool) -> str:
+    """Turn a provider-level acquisition failure into a failed bounded deployment.
+
+    The ordinary production CLI keeps its historical best-effort exit behaviour.
+    A paid acceptance run must not look green when every provider page failed at
+    request time.  A valid empty page remains a successful transport check.
+    """
+    if os.environ.get("TGTC_ACCEPTANCE_MODE", "").strip() != "bounded" or not acquire:
+        return ""
+    pages = sum(int(item.get("pages") or 0) for item in report.acquisition)
+    if pages == 0:
+        for item in report.acquisition:
+            stop = str(item.get("stop_reason") or "")
+            if stop.startswith("request_error:"):
+                return stop
+    return ""
 
 
 def cmd_work(args) -> int:

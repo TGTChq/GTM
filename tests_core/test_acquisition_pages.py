@@ -79,6 +79,23 @@ def test_limit_pages_and_short_page_completes(conn, clock):
     assert fake.requests[0]["params"]["description_format"] == "text"
 
 
+def test_request_shape_keeps_ats_only_organization_toggle_off_job_board(conn, clock):
+    fake = FakeFantastic()
+    svc = acquisition(conn, fake, clock, sources=(acq.SOURCE_JOB_BOARDS, acq.SOURCE_ATS))
+    lower = clock() - timedelta(hours=5)
+    upper = lower + timedelta(hours=1)
+
+    jb_endpoint, jb = svc.request_params(acq.SOURCE_JOB_BOARDS, lower=lower, upper=upper, offset=0)
+    ats_endpoint, ats = svc.request_params(acq.SOURCE_ATS, lower=lower, upper=upper, offset=0)
+
+    assert jb_endpoint == "/v1/active-jb"
+    assert "include_basic_organization_details" not in jb
+    assert jb["exclude_ats_duplicate"] == "true"
+    assert ats_endpoint == "/v1/active-ats"
+    assert ats["include_basic_organization_details"] == "true"
+    assert "exclude_ats_duplicate" not in ats
+
+
 def test_adjacent_partitions_include_lower_and_exclude_upper_boundary(conn, clock):
     lower = clock() - timedelta(hours=5)
     upper = clock() - timedelta(hours=4)
@@ -106,7 +123,9 @@ def test_failed_later_page_keeps_earlier_pages_and_resumes_from_its_own_cursor(c
     assert run.stop_reason == "request_error:http_404" and run.pages == 1
     assert sql1(conn, "SELECT next_offset || ':' || state FROM source_partitions WHERE id = %s", (pid,)) == "3:open"
     assert sql1(conn, "SELECT count(*) FROM postings") == 3
-    assert sql1(conn, "SELECT status FROM request_attempts ORDER BY id DESC LIMIT 1") == "failed"
+    attempt = sqlall(conn, "SELECT status, response_summary FROM request_attempts ORDER BY id DESC LIMIT 1")[0]
+    assert attempt["status"] == "failed"
+    assert attempt["response_summary"] == {"status": 404, "body": {"error": "simulated_404"}}
     run2 = svc.run_partition(pid)
     assert run2.stop_reason == "complete" and sql1(conn, "SELECT count(*) FROM postings") == 7
     assert [r["params"]["offset"] for r in fake.requests] == ["0", "3", "3", "6"]
