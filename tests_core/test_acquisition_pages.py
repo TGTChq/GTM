@@ -125,7 +125,12 @@ def test_failed_later_page_keeps_earlier_pages_and_resumes_from_its_own_cursor(c
     assert sql1(conn, "SELECT count(*) FROM postings") == 3
     attempt = sqlall(conn, "SELECT status, response_summary FROM request_attempts ORDER BY id DESC LIMIT 1")[0]
     assert attempt["status"] == "failed"
-    assert attempt["response_summary"] == {"status": 404, "body": {"error": "simulated_404"}}
+    # The fake credential "sim" is also the error message's prefix; conservative
+    # redaction must remove it even when embedded in another word.
+    assert attempt["response_summary"] == {
+        "status": 404,
+        "body": {"error": "[REDACTED]ulated_404"},
+    }
     run2 = svc.run_partition(pid)
     assert run2.stop_reason == "complete" and sql1(conn, "SELECT count(*) FROM postings") == 7
     assert [r["params"]["offset"] for r in fake.requests] == ["0", "3", "3", "6"]

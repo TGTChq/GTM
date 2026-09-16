@@ -5,6 +5,7 @@ import json
 import pytest
 
 from tgtc_core.providers.fantastic import FantasticClient, FantasticRequestError
+from tgtc_core.providers.fantastic import _redact_error_text
 from tgtc_core.providers.http import Response
 
 
@@ -44,3 +45,7 @@ def test_http_error_summary_redacts_credentials_and_ignores_arbitrary_fields():
     assert "OTHER-SENSITIVE-TOKEN" not in serialized
     assert len(serialized.encode("utf-8")) <= 4096
     assert "api_key" not in serialized and "unrelated" not in serialized and "input" not in serialized
+
+
+def test_short_configured_secret_is_redacted_inside_other_text():
+    assert _redact_error_text("simulated_404", ("sim",)) == "[REDACTED]ulated_404"
