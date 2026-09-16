@@ -9,7 +9,7 @@ from tests_core.helpers import opportunity_service, sql1, sqlall
 from tests_core.seed import apollo_for, good_buyer, seed_opportunity
 
 
-def test_org_id_fallback_runs_when_domain_results_are_all_already_judged(conn, clock):
+def test_org_id_candidate_is_not_delayed_until_a_new_posting_after_bad_domain_match(conn, clock):
     domain, org = "acme.com", "Acme"
     pid, eid, oid = seed_opportunity(conn, clock, headcount=None)       # forces org enrich -> apollo_org_id known
     judged = good_buyer(domain, org, id="p-judged", email="judged@acme.com", status="extrapolated")
@@ -17,12 +17,12 @@ def test_org_id_fallback_runs_when_domain_results_are_all_already_judged(conn, c
     fake = apollo_for(domain, org, people=[judged])
     fake.people_by_org_id[f"org-{domain}"] = [judged, fresh]            # the org-id selector knows one more person
     out = opportunity_service(conn, fake, clock).process(oid)
-    assert out.outcome == "closed" and out.reason.startswith("no_verified_buyer")
-    # new evidence reopens; the domain selector returns only the judged person -> fallback by org id
+    assert out.outcome == "approved" and sql1(conn, "SELECT lead_json->>'email' FROM approvals") == "fresh@acme.com"
+    # New evidence must not buy either person again after the approval.
     from tests_core.seed import seed_opportunity as seed2
     seed2(conn, clock, domain=domain, org_name=org, job_id="job-2")
     out2 = opportunity_service(conn, fake, clock).process(oid)
-    assert out2.outcome == "approved" and sql1(conn, "SELECT lead_json->>'email' FROM approvals") == "fresh@acme.com"
+    assert out2.outcome == "closed"
     selectors = [("organization_ids[]" in r["params"], "q_organization_domains_list[]" in r["params"])
                  for r in fake.requests if r["path"].endswith("/mixed_people/api_search")]
     assert (False, True) in selectors and (True, False) in selectors    # both selectors were used

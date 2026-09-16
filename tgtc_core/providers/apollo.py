@@ -53,8 +53,19 @@ class ApolloResult:
         return self.outcome is Outcome.SERVED
 
     def summary(self) -> Dict[str, Any]:
-        return {"outcome": self.outcome.value, "status": self.status, "error_code": self.error_code,
-                "message": self.message[:300], "context": self.context, "retry_after": self.retry_after}
+        summary = {"outcome": self.outcome.value, "status": self.status, "error_code": self.error_code,
+                   "message": self.message[:300], "context": self.context, "retry_after": self.retry_after}
+        if self.served and isinstance(self.data.get("people"), list):
+            # Counts, never candidates/PII, make search coverage auditable.
+            summary["returned_people"] = len(self.data["people"])
+            page = self.data.get("pagination") or {}
+            for name in ("page", "per_page", "total_pages", "total_entries"):
+                value = page.get(name) if isinstance(page, dict) else None
+                if name == "total_entries" and value is None:
+                    value = self.data.get(name)
+                if type(value) is int and 0 <= value <= 1_000_000_000:
+                    summary[name] = value
+        return summary
 
 
 def _error_fields(body: str) -> Dict[str, Any]:
@@ -167,8 +178,9 @@ class ApolloClient:
 
     # --- documented 0 credits ---------------------------------------------
     def search_people(self, *, titles: List[str], domain: str = "", organization_id: str = "",
-                      page: int = 1, per_page: int = 25) -> ApolloResult:
-        params: List[tuple] = [("include_similar_titles", "false"), ("page", str(page)), ("per_page", str(per_page))]
+                      page: int = 1, per_page: int = 25, include_similar_titles: bool = False) -> ApolloResult:
+        params: List[tuple] = [("include_similar_titles", "true" if include_similar_titles else "false"),
+                              ("page", str(page)), ("per_page", str(per_page))]
         if organization_id:
             params.append(("organization_ids[]", organization_id))
         elif domain:

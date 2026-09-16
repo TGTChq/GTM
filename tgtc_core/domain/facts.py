@@ -69,8 +69,12 @@ def sentences(text: str) -> List[str]:
 def _matching(sents: Iterable[str], patterns: Sequence[str]) -> List[str]:
     out: List[str] = []
     for s in sents:
-        if any(re.search(p, s, re.I) for p in patterns):
-            out.append(s[:400])
+        match = next((m for p in patterns if (m := re.search(p, s, re.I))), None)
+        if match:
+            # A long scraped paragraph must retain the MATCH, not its first
+            # unrelated 400 characters, in the audit evidence.
+            start = max(0, match.start() - 100) if len(s) > 400 else 0
+            out.append(s[start:start + 400])
     return out
 
 
@@ -90,7 +94,7 @@ EMPLOYMENT_NEGATIVES: List[Tuple[str, List[str]]] = [
     ]),
     ("fixed_term", [r"\bfixed[- ]term\b", r"\b\d{1,2}[- ]month\s+(?:contract|term)\b"]),
     ("fractional", [r"\b(?:this|the) (?:is|role is|position is)\b[^.]{0,60}\bfractional\b", r"\bfractional (?:role|position|contractor|employee|engagement)\b"]),
-    ("contract", [r"\b(?:this|the) (?:is|role is|position is)\b[^.]{0,80}\b(?:contract|contractor)\b", r"\bindependent contractor\b", r"\bcontract[- ]to[- ]hire\b"]),
+    ("contract", [r"\b(?:this|the) (?:is|role is|position is)\b[^.]{0,80}\b(?:contract|contractor)\b", r"\b(?:work(?:ing)?|engaged|hired|join us) as an? independent contractor\b", r"^independent contractor(?: role| position)?$", r"\bcontract[- ]to[- ]hire\b"]),
     ("temporary", [r"\btemporary (?:role|position|job|assignment)\b", r"\btemp[- ]to[- ]hire\b"]),
     ("freelance", [r"\bfreelance(?:r)? (?:role|position|engagement)\b", r"\bseeking (?:a )?freelance"]),
     ("seasonal", [r"\bseasonal (?:role|position|job|employment)\b"]),
@@ -110,7 +114,8 @@ FIELD = [r"\bfield[- ]based\b", r"\bregular(?:ly)? visit(?:ing)? (?:customer|cli
 TRAVEL_HARD = [r"\btravel (?:up to |approximately |at least |minimum )?(?:20|2[5-9]|[3-9]\d|100)%", r"\bfrequent travel\b", r"\btravel regularly\b", r"\bmust live near (?:a|an) airport\b"]
 US_SCOPE = [r"\bremote (?:within|in|across) (?:the )?(?:u\.?s\.?|usa|united states)\b", r"\b(?:u\.?s\.?|usa|united states)[- ]based\b", r"\banywhere in (?:the )?(?:u\.?s\.?|united states)\b", r"\b(?:authorized|eligible) to work in the (?:u\.?s\.?|united states)\b"]
 FOREIGN_ONLY = [
-    r"\b(?:emea|apac|europe|european union|canada|uk|united kingdom|australia|india|philippines|latam)[- ]only\b",
+    r"\b(?:emea|apac|europe|european union|canada|uk|united kingdom|australia|india|philippines|latam)[- ]only\s+(?:role|position|job|candidates?|applicants?)\b",
+    r"\b(?:role|position|job|candidates?|applicants?)\s+(?:is |are )?(?:emea|apac|europe|canada|uk|australia|india|philippines|latam)[- ]only\b",
     r"\bmust be (?:based|located|resident) in (?:emea|apac|europe|canada|the uk|australia|india|the philippines|latam)\b",
     r"\bopen only to candidates (?:based|located) in (?:emea|apac|europe|canada|the uk|australia|india|the philippines|latam)\b",
 ]
@@ -120,8 +125,13 @@ CLEARANCE = [
     r"\bpublic trust(?: clearance)?\b",
     r"\b(?:top secret|ts/sci|ts sci)\b",
 ]
-LICENSE = [r"\b(?:active|current|valid) [A-Za-z ]{0,40}(?:license|licensure) (?:is )?(?:required|mandatory)\b"]
+LICENSE = [
+    r"\b(?:active|current|valid) [A-Za-z ]{0,40}(?:license|licensure) (?:is )?(?:required|mandatory)\b",
+    r"\blicensure (?:is )?required\b",
+    r"\bmust (?:be able to )?(?:acquire|obtain|maintain)(?: and maintain)? (?:a |an )?(?:gaming|nursing|medical|professional|state) license\b",
+]
 FACILITY = [
+    r"^(?:you will |duties include )?(?:provide|provides|providing) front desk support by greeting visitors\b",
     r"\bmust (?:work|operate) in (?:a|the) (?:laboratory|lab|warehouse|plant|factory|clinic|hospital)\b",
     r"\bphysical presence (?:is )?required\b",
     r"\b(?:lift|lifting)\s+(?:up to\s+)?\d{2,3}\s*(?:lbs|pounds)\b",
@@ -136,7 +146,7 @@ FACILITY = [
 # never alone: "Staff Accountant" is an IC title. ``lead`` never counts inside
 # "lead generation" / "lead routing" style phrases.
 TITLE_LEADERSHIP = re.compile(
-    r"\b(?:intern(?:ship)?|director|vice\s+president|vp|chief|c[-\s]?level|head\s+of|head\s*,)\b"
+    r"\b(?:director|vice\s+president|vp|chief|c[-\s]?level|head\s+of|head\s*,)\b"
     r"|\b(?:principal|staff)\s+(?:[a-z0-9&/-]+\s+){0,3}(?:engineer|developer|designer|analyst|scientist|administrator|architect)\b"
     r"|\blead\s+(?!generation\b|gen\b|qualification\b|scoring\b|routing\b|enrichment\b)(?:[a-z0-9&/-]+\s+){0,5}(?:engineer|developer|designer|analyst|scientist|administrator|manager)\b"
     r"|\b(?:engineer|developer|designer|analyst|scientist|administrator)\s+lead\b", re.I)
@@ -170,7 +180,7 @@ PROGRAM_PATTERNS = {
     "returnship": r"\breturnship\b",
     "internship": r"\bintern(?:ship)?\b",
     "co_op": r"\bco[- ]?op(?:erative education)?\b",
-    "volunteer": r"\bvolunteer (?:role|position|opportunity)\b",
+    "volunteer": r"\bvolunteer (?:advisory )?(?:role|position|opportunity)\b|\(volunteer\)",
 }
 GOVERNMENT_TITLE = re.compile(r"\b(?:federal|public sector|coast guard|department of homeland security|dhs)\b", re.I)
 
@@ -296,6 +306,15 @@ def extract_job_facts(
         ("physical_facility", FACILITY, "deliverability:physical_facility"),
     ):
         hits = _matching(sents, patterns)
+        if name == "physical_facility":
+            hits = [s for s in hits if not (
+                re.search(r"\bexperience (?:in |with )?(?:bedside|patient care)\b", s, re.I)
+                and not any(re.search(p, s, re.I) for p in FACILITY[:-1]))]
+            # Incidental office lifting is not evidence that the role itself is
+            # physical. Keep independent duties such as reception or machinery.
+            hits = [s for s in hits if not (
+                re.search(r"\blight lifting\s+(?:up to\s+)?(?:1\d|20)\s*(?:lbs|pounds)\b", s, re.I)
+                and not any(re.search(p, s, re.I) for p in FACILITY if "(?:lift|lifting)" not in p))]
         jf.facts[name] = Fact(name, "required" if hits else None, TEXT if hits else UNKNOWN, hits[0] if hits else "")
         if hits:
             jf.exclusions.append(Exclusion(reason, hits[0], TEXT))

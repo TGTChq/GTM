@@ -26,6 +26,7 @@ from ..db import work_queue
 from ..domain.identity import (
     domain_name_consistent, employer_anchors, employer_key, posting_canonical_key,
 )
+from ..domain.employer_attribution import employer_attribution_conflict
 
 
 @dataclass
@@ -156,6 +157,17 @@ def resolve_posting_identity(conn: psycopg.Connection, posting_id: int, *, now: 
             if posting["state"] == "expired":
                 return IdentityOutcome(posting_id, None, "closed", "posting_expired")
             org = dict(posting["org_json"] or {})
+            domain, _, _ = employer_anchors(org)
+            conflict = employer_attribution_conflict(
+                posting["description_text"], employer_name=posting["employer_name"] or "",
+                employer_domain=domain)
+            if conflict:
+                cur.execute("UPDATE postings SET state = 'closed', close_reason = %s, updated_at = now() WHERE id = %s",
+                            ("employer_attribution_conflict", posting_id))
+                cur.execute("INSERT INTO evidence (subject_kind, subject_id, fact, value, status, source, excerpt) "
+                            "VALUES ('posting', %s, 'employer_attribution_conflict', %s, 'recorded', %s, %s)",
+                            (posting_id, jsonb(conflict), posting["source"], conflict["excerpt"]))
+                return IdentityOutcome(posting_id, None, "closed", "employer_attribution_conflict")
             eid, ekey, reason = resolve_employer(conn, org=org, employer_name_fallback=posting["employer_name"] or "",
                                                 source=posting["source"])
             if eid is None:

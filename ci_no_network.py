@@ -16,10 +16,13 @@ from __future__ import annotations
 
 import socket
 import sys
+from urllib.parse import urlsplit
 
 _ALLOWED_HOSTS = frozenset({"localhost", "127.0.0.1", "::1", "0.0.0.0", ""})
 _AUDIT_ACTIVE = False
 _AUDIT_INSTALLED = False
+_CURRENT_TEST = "collection_or_startup"
+_UNEXPECTED_HTTP = set()
 
 
 class NetworkUseInTests(RuntimeError):
@@ -83,6 +86,43 @@ def pytest_configure(config) -> None:
     socket.create_connection = create_connection
     config._tgtc_restore_socket = (real_connect, real_connect_ex, real_create)
 
+    # Refuse requests before the transport, DNS, retries, or authentication can
+    # reach a provider. The audit hook remains the independent socket backstop.
+    # Tests that simulate requests at the request/retry seam still work normally.
+    try:
+        from requests.adapters import HTTPAdapter
+    except ImportError:
+        return
+    real_send = HTTPAdapter.send
+
+    def send(self, request, *args, **kwargs):
+        if urlsplit(request.url).hostname not in _ALLOWED_HOSTS:
+            if not _CURRENT_TEST.startswith("tests/test_offline_network_guard.py::"):
+                _UNEXPECTED_HTTP.add(_CURRENT_TEST)
+            raise NetworkUseInTests("offline suite refused external HTTP transport")
+        return real_send(self, request, *args, **kwargs)
+
+    HTTPAdapter.send = send
+    config._tgtc_restore_http = real_send
+
+
+def pytest_runtest_setup(item):
+    global _CURRENT_TEST
+    _CURRENT_TEST = item.nodeid
+
+
+def pytest_sessionfinish(session, exitstatus):
+    # A caller catching the guard's exception must not hide a missing mock.
+    if _UNEXPECTED_HTTP:
+        session.exitstatus = 1
+
+
+def pytest_terminal_summary(terminalreporter):
+    if _UNEXPECTED_HTTP:
+        terminalreporter.write_sep("=", "Unexpected external HTTP blocked; repair these test mocks")
+        for node in sorted(_UNEXPECTED_HTTP):
+            terminalreporter.write_line(node)
+
 
 def pytest_unconfigure(config) -> None:
     global _AUDIT_ACTIVE
@@ -90,3 +130,6 @@ def pytest_unconfigure(config) -> None:
     restore = getattr(config, "_tgtc_restore_socket", None)
     if restore:
         socket.socket.connect, socket.socket.connect_ex, socket.create_connection = restore
+    if hasattr(config, "_tgtc_restore_http"):
+        from requests.adapters import HTTPAdapter
+        HTTPAdapter.send = config._tgtc_restore_http

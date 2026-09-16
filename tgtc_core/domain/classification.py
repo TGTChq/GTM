@@ -16,6 +16,7 @@ the semantic port as optional context only.
 from __future__ import annotations
 
 import re
+import math
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Sequence, Tuple
 
@@ -335,18 +336,25 @@ def classify_posting(
 
 def _apply_semantic(result: ClassificationResult, response: InferenceResponse, desc: str, facts: JobFacts) -> ClassificationResult:
     """Model output is data. Re-validate everything before it can influence a decision."""
-    # The model may ADD an exclusion, never remove one (facts already ran).
-    if response.seniority in {"director_plus"} or response.people_management is True:
-        result.excluded = True
-        result.exclusion_reason = "seniority:model_reported_leadership" if response.seniority == "director_plus" else "people_management:model_reported"
-        result.notes.append("semantic_exclusion_confirmed_by_schema")
-        return result
-    if response.incompatible_reasons:
-        result.excluded = True
-        result.exclusion_reason = f"semantic:{response.incompatible_reasons[0]}"[:120]
+    from .exclusion_evidence import corroborates
+
+    claimed_exclusion = (response.seniority == "director_plus" or response.people_management is True
+                         or response.incompatible_reasons or response.exclusion_evidence)
+    if claimed_exclusion:
+        if not math.isfinite(response.confidence) or not 0.8 <= response.confidence <= 1:
+            result.notes.append("insufficient_evidence:semantic_exclusion_low_confidence")
+            return result
+        for evidence in response.exclusion_evidence:
+            code, excerpt = evidence.get("code", ""), evidence.get("excerpt", "")
+            if grounded(excerpt, desc) and corroborates(code, excerpt, desc):
+                result.excluded = True
+                result.exclusion_reason = f"semantic_evidence:{code}"
+                result.facts["semantic_exclusion"] = {"code": code, "excerpt": excerpt, "confidence": response.confidence}
+                return result
+        result.notes.append("insufficient_evidence:semantic_exclusion_ungrounded_or_unsupported")
         return result
     functions = [f for f in response.compatible_functions if f in FUNCTION_KEYS]
-    if not functions or response.confidence < 0.6:
+    if not functions or not math.isfinite(response.confidence) or not 0.6 <= response.confidence <= 1:
         result.notes.append("insufficient_evidence:semantic_low_confidence_or_no_function")
         return result
     grounded_resps: List[Responsibility] = []

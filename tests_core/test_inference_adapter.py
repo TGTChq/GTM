@@ -27,7 +27,7 @@ def test_request_uses_structured_output_and_treats_the_posting_as_data():
     assert params["system"][0]["cache_control"] == {"type": "ephemeral"}
     user = params["messages"][0]["content"]
     assert user.startswith("<posting>") and "Own accounts payable" in user
-    assert a.model_version.startswith("anthropic:claude-opus-5:posting-classification/1")
+    assert a.model_version.startswith("anthropic:claude-opus-5:posting-classification/2")
 
 
 def test_wire_schema_omits_unsupported_array_limits_but_local_caps_remain():

@@ -175,7 +175,7 @@ class DeliveryService:
             if row:
                 pid = (row["lead_json"] or {}).get("posting_id")
                 if pid:
-                    cur.execute("SELECT id, state, date_valid_through, content_hash FROM postings WHERE id = %s", (pid,))
+                    cur.execute("SELECT id, state, date_valid_through, content_hash, description_text FROM postings WHERE id = %s", (pid,))
                     posting = cur.fetchone()
         self.conn.commit()
         if not row:
@@ -185,6 +185,11 @@ class DeliveryService:
         lead = dict(row["lead_json"])
         # R11: the supporting vacancy must still be active and unchanged since approval.
         if posting is not None:
+            from ..domain.employer_attribution import employer_attribution_conflict
+            if employer_attribution_conflict(posting.get("description_text"),
+                                             employer_name=row["canonical_name"], employer_domain=row["domain"] or ""):
+                self._revoke(item.approval_id, "employer_attribution_conflict")
+                return "blocked", "employer_attribution_conflict"
             active, why = posting_is_active(dict(posting), now=moment)
             if not active:
                 self._revoke(item.approval_id, f"posting_no_longer_active:{why}")

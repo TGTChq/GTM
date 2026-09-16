@@ -1293,16 +1293,33 @@ def _process_company_strict(company_jobs: List[Dict]) -> Tuple[List[Dict], Dict]
         org = _cached_enrich_organization(input_domain, company_name, enrichment_website)
     # Mechanism B: corroborated employer-domain recovery. Only re-enriches on a
     # strongly-corroborated same-employer alternate domain; otherwise org is unchanged.
-    org, _domain_recovery = _recover_org_via_domain_corroboration(
-        org, input_domain, company_name, first, stats)
+    _domain_recovery = None
+    if not pre_reject_reason:
+        org, _domain_recovery = _recover_org_via_domain_corroboration(
+            org, input_domain, company_name, first, stats)
     founder_allowed = founder_allowed_for_employee_count(org.employee_count)
 
-    account_decision = AccountGate().evaluate(
-        org=org,
-        input_company_name=company_name,
-        input_domain=input_domain,
-        jobs=company_jobs,
-    )
+    if pre_reject_reason:
+        # found=False alone only means UNVERIFIED to AccountGate and would still
+        # allow contact discovery. Preserve the curated provider veto explicitly,
+        # before company-site resolution, people search or paid enrichment.
+        evidence = EvidenceBundle()
+        evidence.notes.append(pre_reject_reason)
+        account_decision = GateDecision(
+            gate="account", state=GateState.REJECT,
+            primary_reason=ReasonCode.REJECT_EXCLUDED_INDUSTRY,
+            evidence=evidence, next_action="exclude",
+            metadata={"canonical_company_name": company_name,
+                      "canonical_domain": input_domain,
+                      "provider_pre_reject_reason": pre_reject_reason},
+        )
+    else:
+        account_decision = AccountGate().evaluate(
+            org=org,
+            input_company_name=company_name,
+            input_domain=input_domain,
+            jobs=company_jobs,
+        )
     stats[f"account_{account_decision.state_value.lower()}"] += 1
     stats[f"account_reason__{_reason_family(str(account_decision.primary_reason))}"] += 1
 
@@ -1322,7 +1339,7 @@ def _process_company_strict(company_jobs: List[Dict]) -> Tuple[List[Dict], Dict]
     for bucket, bucket_jobs in jobs_by_bucket.items():
         bucket_stats_before = dict(stats)
         saved = custody.data.get("buckets", {}).get(bucket) if custody is not None else None
-        if saved and _checkpoint_reusable([saved["lead"]]):
+        if saved and not pre_reject_reason and _checkpoint_reusable([saved["lead"]]):
             leads.append(saved["lead"])
             for key, value in saved.get("stats", {}).items():
                 stats[key] += value

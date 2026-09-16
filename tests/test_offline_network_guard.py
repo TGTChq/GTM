@@ -15,3 +15,12 @@ def test_external_dns_is_refused_before_resolution():
 def test_a_socket_function_replacement_cannot_remove_the_audit_guard():
     with pytest.raises(ci_no_network.NetworkUseInTests, match="socket.connect"):
         sys.audit("socket.connect", None, ("192.0.2.1", 443))
+
+
+def test_external_http_is_refused_before_dns(monkeypatch):
+    import requests
+    def dns_must_not_run(*args, **kwargs):
+        pytest.fail("HTTP guard allowed DNS resolution")
+    monkeypatch.setattr(socket, "getaddrinfo", dns_must_not_run)
+    with pytest.raises(ci_no_network.NetworkUseInTests, match="external HTTP"):
+        requests.get("https://offline-test.invalid/", timeout=1)

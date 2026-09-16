@@ -42,6 +42,7 @@ from ..domain.gates import (
 from ..domain.identity import company_names_compatible, domain_name_consistent, person_ref, safe_employer_domain
 from ..policy.campaigns import buyer_titles, is_founder_tier, resolve_campaign_id
 from ..policy.requirements import excluded_industry, rule
+from ..domain.employer_attribution import employer_attribution_conflict
 from ..providers.apollo import ApolloClient, ApolloResult, Outcome, person_org_domain
 from . import provider_state
 from .spend_budget import SpendBudget
@@ -261,16 +262,18 @@ class OpportunityService:
 
     # --- candidates -------------------------------------------------------------
     def _search_candidates(self, opp: Dict[str, Any], emp: Dict[str, Any], titles: Sequence[str],
-                           excluded: Set[str]) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], Dict[str, int]]:
+                           excluded: Set[str], *, broaden: bool = False) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], Dict[str, int]]:
         """Returns (usable candidates, pre-enrichment rejections, stats).
 
-        The organization-id selector is tried when the domain selector leaves no USABLE
-        candidate after exclusions (already judged, already approved), not merely when
-        it returns nobody (recovery finding a).
+        Both known selectors are searched within the existing per-selector page
+        budget. A plausible search result can still fail enrichment; it must not
+        prevent the alternate selector from contributing a verified candidate.
         """
         usable: List[Dict[str, Any]] = []
         dropped: List[Dict[str, Any]] = []
-        stats = {"returned": 0, "excluded_already_judged": 0, "dropped_other_company": 0, "selectors_tried": 0}
+        stats = {"returned": 0, "excluded_already_judged": 0, "dropped_other_company": 0,
+                 "selectors_tried": 0, "pages_searched": 0, "page_caps_reached": 0,
+                 "broadened_searches": int(broaden)}
         seen: Set[str] = set()
         for selector in (("domain", emp["domain"]), ("organization_id", emp.get("apollo_org_id") or "")):
             if not selector[1]:
@@ -279,14 +282,19 @@ class OpportunityService:
             for page in range(1, self.search_pages + 1):
                 self._guard_provider(chargeable=False)
                 params = {selector[0]: selector[1], "titles": list(titles), "page": page}
+                if broaden:
+                    params["include_similar_titles"] = True
                 attempt_id = self._intent("people_search", opportunity_id=opp["id"], params=params, estimated_credits=0)
                 kwargs: Dict[str, Any] = {"titles": list(titles), "page": page}
+                if broaden:
+                    kwargs["include_similar_titles"] = True
                 kwargs[selector[0]] = selector[1]
                 result = self.apollo.search_people(**kwargs)
                 self._finish(attempt_id, result, operation="people_search", estimated=0)
                 self._handle_global(result, chargeable=False)
                 if not result.served:
                     break
+                stats["pages_searched"] += 1
                 page_people = [p for p in (result.data.get("people") or []) if isinstance(p, dict)]
                 stats["returned"] += len(page_people)
                 for p in page_people:
@@ -324,8 +332,16 @@ class OpportunityService:
                 total_pages = pagination.get("total_pages")
                 if len(page_people) < 25 or (isinstance(total_pages, int) and page >= total_pages):
                     break
-            if usable:
-                break
+                if page == self.search_pages:
+                    stats["page_caps_reached"] += 1
+        if not usable and not broaden:
+            # Broaden discovery only. Local authority, current employment,
+            # territory, suppression and verified email gates are unchanged.
+            extra, extra_dropped, extra_stats = self._search_candidates(opp, emp, titles, excluded, broaden=True)
+            usable.extend(extra)
+            dropped.extend(p for p in extra_dropped if p["_ref"] not in seen)
+            for key, value in extra_stats.items():
+                stats[key] += value
         return usable, dropped, stats
 
     def _rank(self, candidates: List[Dict[str, Any]], titles: Sequence[str]) -> List[Dict[str, Any]]:
@@ -496,6 +512,21 @@ class OpportunityService:
             return QualifyOutcome(opportunity_id, "closed", f"already_{opp['state']}")
         if not posting:
             return self._close(opportunity_id, "no_active_compatible_posting")
+        if employer_attribution_conflict(posting.get("description_text"),
+                                         employer_name=emp["canonical_name"], employer_domain=emp.get("domain") or ""):
+            return self._close(opportunity_id, "employer_attribution_conflict")
+        # Known disqualifiers precede paid organization enrichment. Unknown facts
+        # remain eligible for enrichment; do not spend to rediscover a rejection.
+        if emp.get("agency_flag") is True:
+            return self._close(opportunity_id, "employer_is_agency")
+        known_industry = excluded_industry(str(emp.get("industry") or ""))
+        if known_industry:
+            return self._close(opportunity_id, f"employer_excluded_industry:{known_industry}")
+        known_count = emp.get("employee_count")
+        if known_count is not None and known_count < int(rule("min_employees")):
+            return self._close(opportunity_id, "employer_too_small")
+        if known_count is not None and known_count > int(rule("max_employees")):
+            return self._close(opportunity_id, "employer_too_large")
         epoch = int(opp.get("evidence_epoch") or 1)
         if epoch > int(rule("max_evidence_epochs")):
             return self._close(opportunity_id, "evidence_epochs_exhausted")
@@ -570,7 +601,11 @@ class OpportunityService:
                 reason = "no_usable_candidates_in_search"
             else:
                 reason = "no_unjudged_candidates_remaining"
-            return self._close(opportunity_id, reason)
+            closed = self._close(opportunity_id, reason)
+            closed.details["search_coverage"] = stats
+            # A capped search is not evidence that Apollo has no more buyers.
+            closed.details["absence_proven"] = False
+            return closed
 
         made = 0
         for cand in candidates:

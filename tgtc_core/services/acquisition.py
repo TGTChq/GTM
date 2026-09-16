@@ -36,6 +36,10 @@ import psycopg
 from ..db.connection import jsonb, transaction
 from ..db import work_queue
 from ..domain.identity import content_hash
+from ..domain.acquisition_query import (
+    policy_filters, frozen_page_query, feed_covers_window, covering_time_frame, recent_size_exclusions,
+)
+from ..policy.requirements import rule
 from ..providers.fantastic import (
     ENDPOINT_ATS, ENDPOINT_JOB_BOARDS, FantasticAuthError, FantasticClient, FantasticQuotaError,
     FantasticRequestError, Page, build_window_params,
@@ -304,9 +308,35 @@ class AcquisitionService:
         spec = SOURCE_SPECS[source]
         exclude = spec.supports_exclude_ats_duplicate and SOURCE_ATS in self.sources
         params = build_window_params(lower_iso=_iso(lower), upper_iso=_iso(upper), limit=self.page_limit, offset=offset,
-                                     time_frame=self.time_frame, location=self.location, exclude_ats_duplicate=exclude,
+                                     time_frame=covering_time_frame(self.time_frame, lower, upper, self.now()),
+                                     location=self.location, exclude_ats_duplicate=exclude,
                                      include_basic_organization_details=spec.supports_basic_organization_details)
+        params.update(policy_filters())
         return spec.endpoint, params
+
+    def _partition_query(self, part: Dict[str, Any], endpoint: str, params: dict) -> dict:
+        with self.conn.cursor() as cur:
+            cur.execute("SELECT params_json FROM request_attempts WHERE partition_id = %s "
+                        "AND provider = 'fantastic' AND operation = 'page' "
+                        "AND status IN ('served', 'uncertain', 'intended') ORDER BY id LIMIT 1",
+                        (part["id"],))
+            row = cur.fetchone()
+            if row is None and not part["next_offset"]:
+                cur.execute("SELECT e.employee_count, e.linkedin_slug, e.created_at FROM employers e "
+                            "WHERE (e.employee_count < %s OR e.employee_count > %s) AND e.created_at > %s "
+                            "AND e.linkedin_slug IS NOT NULL AND NOT EXISTS "
+                            "(SELECT 1 FROM postings p WHERE p.employer_id = e.id "
+                            "AND p.close_reason = 'employer_attribution_conflict') "
+                            "ORDER BY e.id LIMIT 500", (int(rule("min_employees")), int(rule("max_employees")),
+                                                       self.now() - timedelta(days=7)))
+                slugs = recent_size_exclusions(list(cur.fetchall()), now=self.now(),
+                                              minimum=int(rule("min_employees")), maximum=int(rule("max_employees")))
+                if slugs:
+                    params["exclude_organization_slug"] = ",".join(slugs)
+        self.conn.commit()
+        return frozen_page_query({"endpoint": endpoint, **params},
+                                 dict(row["params_json"]) if row else None,
+                                 offset=int(part["next_offset"]), limit=self.page_limit)
 
     # --- planning ---------------------------------------------------------
     def plan_fresh_partitions(self, source: str = SOURCE_JOB_BOARDS, *, max_new: int = 24) -> List[int]:
@@ -492,14 +522,23 @@ class AcquisitionService:
             if breach:
                 run.stop_reason = breach
                 break
-            # Reserve immediately before the page call, including for newly planned
-            # partitions. Recovery planning must not consume or bypass this reservation.
+            offset = int(part["next_offset"])
+            endpoint, params = self.request_params(source, lower=part["window_start"], upper=part["window_end"], offset=offset)
+            try:
+                query = self._partition_query(part, endpoint, params)
+            except ValueError as exc:
+                run.stop_reason = str(exc)
+                break
+            if not feed_covers_window(query, part["window_start"], part["window_end"], self.now()):
+                run.stop_reason = "partition_outside_provider_time_frame"
+                break
+            # Query/coverage errors must not consume a provider recovery probe.
             gate = provider_state.reserve_probe(self.conn, PROVIDER, retry_hours=self.provider_retry_hours, now=self.now())
             if not gate["allowed"]:
                 run.stop_reason = f"provider_{gate['state']}"
                 break
-            offset = int(part["next_offset"])
-            endpoint, params = self.request_params(source, lower=part["window_start"], upper=part["window_end"], offset=offset)
+            endpoint = query.pop("endpoint")
+            params = query
             # 1) intent, committed before the call
             try:
                 with transaction(self.conn):

@@ -13,11 +13,12 @@ import json
 import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, Optional, Sequence
 
 from ..policy.campaigns import (CAMPAIGN_BY_FUNCTION, KNOWN_CONTROL_CAMPAIGN_IDS, POLICY_VERSION, size_band)
 from ..policy.requirements import rule
 from .identity import lead_key as make_lead_key
+from .employer_attribution import employer_attribution_conflict
 
 VALIDATION_VERSION = POLICY_VERSION  # deliberately != legacy config.VALIDATION_VERSION
 APPROVED_STATUS = "Approved"
@@ -141,6 +142,10 @@ def build_approved_lead(
     employer_domain = _clean(employer.get("domain")).lower()
     if not employer_name or not employer_domain:
         return ApprovalRefusal("employer_identity_incomplete", {"name": employer_name, "domain": employer_domain})
+    conflict = employer_attribution_conflict(posting.get("description_text"),
+                                            employer_name=employer_name, employer_domain=employer_domain)
+    if conflict:
+        return ApprovalRefusal("employer_attribution_conflict", conflict)
     count = employer.get("employee_count")
     if count is not None:
         if count < int(rule("min_employees")):

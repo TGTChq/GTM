@@ -142,26 +142,23 @@ class ProviderPreGateTests(unittest.TestCase):
 
     def test_pre_reject_skips_apollo_org_and_never_passes(self):
         import hiring_manager as HM
-        calls = {"enrich": 0}
-        def fake_enrich(**kw):
-            calls["enrich"] += 1
-            return HM.apollo.OrgEnrichment(found=True, employee_count=100)
         job = {"_org_industry": "Hospitals and Health Care", "employer_name": "Mercy", "employer_website": "mercy.com",
                "job_title": "Accountant", "_job_gate_decision": {}, "_role_gate_decision": {}}
         with mock.patch.object(config, "PROVIDER_FIRMOGRAPHIC_PRE_REJECT", True), \
                 mock.patch.object(config, "PROVIDER_PRE_REJECT_INDUSTRIES", ["Hospitals and Health Care"]), \
                 mock.patch.object(config, "APOLLO_RATE_LIMIT_DELAY", 0), \
-                mock.patch.object(HM.apollo, "enrich_organization", fake_enrich):
-            try:
-                leads, stats = HM._process_company_strict([job])
-            except Exception:
-                # Downstream gates may need richer fixtures; the contract under test
-                # is that Apollo org-enrich was NOT called and provenance was stamped.
-                leads, stats = [], {}
-        self.assertEqual(calls["enrich"], 0)
+                mock.patch.object(HM.apollo, "enrich_organization") as enrich, \
+                mock.patch.object(HM.apollo, "search_people_at_company", return_value=[]) as search, \
+                mock.patch.object(HM.AccountGate, "evaluate") as account:
+            leads, stats = HM._process_company_strict([job])
+        enrich.assert_not_called()
+        search.assert_not_called()
+        account.assert_not_called()
         self.assertEqual(job["_provider_pre_reject_reason"], "provider_industry:Hospitals and Health Care")
         self.assertTrue(job["_apollo_org_skipped"])
-        self.assertTrue(all(l.get("_final_state") != "FINAL_PASS" for l in leads))
+        self.assertEqual(len(leads), 1)
+        self.assertEqual(leads[0]["_final_state"], "REJECT")
+        self.assertEqual(stats["account_reject"], 1)
 
 
 class HunterGateTests(unittest.TestCase):

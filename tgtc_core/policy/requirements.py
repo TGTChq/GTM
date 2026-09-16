@@ -91,6 +91,7 @@ EXCLUDED_INDUSTRIES: FrozenSet[str] = frozenset({
     "human resources services", "outsourcing/offshoring", "events services", "broadcast media",
     "online media", "internet news", "news media", "media production", "digital news",
     "financial news", "newspapers", "book publishing", "chemicals",
+    "non-profit organization management",
 })
 
 STAFFING_INDUSTRIES: FrozenSet[str] = frozenset({

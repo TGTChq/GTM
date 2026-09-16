@@ -31,9 +31,9 @@ from ..db.connection import jsonb, transaction
 from ..policy.campaigns import FUNCTION_KEYS, POLICY_VERSION
 from ..services.spend_budget import BudgetExceeded, SpendBudget
 
-# This transport-schema repair does not change classification semantics. Keeping
-# the version preserves business receipts/cache; receipt-less SDK failures reopen.
-SCHEMA_VERSION = "posting-classification/1"
+# Exclusions now require grounded evidence. A new cache namespace prevents old,
+# unsupported rejection answers from being reused as proof under the new contract.
+SCHEMA_VERSION = "posting-classification/2"
 
 FUNCTION_DEFINITIONS: Dict[str, str] = {
     "product": "product management, product operations, product research/design execution",
@@ -66,9 +66,18 @@ RESPONSE_SCHEMA: Dict[str, Any] = {
         "seniority": {"type": "string", "enum": ["ic", "senior_ic", "manager", "director_plus", "unknown"]},
         "people_management": {"type": "boolean"},
         "incompatible_reasons": {"type": "array", "items": {"type": "string"}},
+        "exclusion_evidence": {
+            "type": "array", "description": "At most three exclusions, each supported by a verbatim posting excerpt.",
+            "items": {"type": "object", "properties": {
+                "code": {"type": "string", "enum": ["physical_work", "clinical_care", "field_work",
+                    "security_clearance", "professional_license", "substantial_travel", "employment",
+                    "people_management", "seniority", "inactive_posting"]},
+                "excerpt": {"type": "string"}},
+                "required": ["code", "excerpt"], "additionalProperties": False},
+        },
         "confidence": {"type": "number"},
     },
-    "required": ["compatible_functions", "responsibilities", "seniority", "people_management", "incompatible_reasons", "confidence"],
+    "required": ["compatible_functions", "responsibilities", "seniority", "people_management", "incompatible_reasons", "exclusion_evidence", "confidence"],
     "additionalProperties": False,
 }
 
@@ -81,7 +90,11 @@ SYSTEM_PROMPT = (
     "a short noun phrase (under 60 characters) and its excerpt must be copied VERBATIM from the posting text. "
     "Report seniority (director_plus for director/VP/head/chief roles) and whether the hire manages direct reports. "
     "List incompatible_reasons only for work that cannot be done remotely as knowledge work (physical, field, clinical, "
-    "clearance) or that is not a real open full-time role. confidence is 0 to 1."
+    "clearance) or that is not a real open full-time role. For EVERY exclusion, including seniority and people_management, "
+    "supply exclusion_evidence with a specific code and a verbatim excerpt establishing a REQUIRED duty or restriction. "
+    "Residence requirements, office/hybrid labels, occasional travel, preferred qualifications, serving healthcare clients, "
+    "and managing projects or processes alone are NOT exclusion evidence. Substantial travel means at least 20 percent. "
+    "Return empty exclusion_evidence when no exclusion is proven. confidence is 0 to 1."
 )
 
 
@@ -119,6 +132,7 @@ class InferenceResponse:
     seniority: str = "unknown"
     people_management: Optional[bool] = None
     incompatible_reasons: List[str] = field(default_factory=list)
+    exclusion_evidence: List[Dict[str, str]] = field(default_factory=list)
     confidence: float = 0.0
     model_version: str = ""
     unavailable_reason: str = ""
@@ -133,6 +147,7 @@ class InferenceResponse:
             "responsibilities": [{"phrase": r.phrase, "excerpt": r.excerpt} for r in self.responsibilities],
             "seniority": self.seniority, "people_management": self.people_management,
             "incompatible_reasons": list(self.incompatible_reasons), "confidence": self.confidence,
+            "exclusion_evidence": list(self.exclusion_evidence),
             "model_version": self.model_version, "unavailable_reason": self.unavailable_reason,
             "unavailable_kind": self.unavailable_kind, "usage": self.usage,
             "diagnostics": self.diagnostics,
@@ -148,6 +163,8 @@ class InferenceResponse:
             seniority=str(data.get("seniority") or "unknown"),
             people_management=data.get("people_management") if isinstance(data.get("people_management"), bool) else None,
             incompatible_reasons=[str(x)[:120] for x in (data.get("incompatible_reasons") or [])][:5],
+            exclusion_evidence=[{"code": str(e.get("code") or ""), "excerpt": str(e.get("excerpt") or "")[:600]}
+                                for e in (data.get("exclusion_evidence") or [])[:3] if isinstance(e, dict)],
             confidence=float(data.get("confidence") or 0.0),
             model_version=str(data.get("model_version") or model_version),
             unavailable_reason=str(data.get("unavailable_reason") or ""),
@@ -322,7 +339,11 @@ class AnthropicAdapter:
         if not isinstance(data, dict):
             return InferenceResponse(available=False, unavailable_reason="invalid_shape", unavailable_kind=UNAVAILABLE_TRANSIENT,
                                      model_version=self.model_version, usage=usage)
-        resp = InferenceResponse.from_dict(data, model_version=self.model_version)
+        try:
+            resp = InferenceResponse.from_dict(data, model_version=self.model_version)
+        except (TypeError, ValueError, OverflowError):
+            return InferenceResponse(available=False, unavailable_reason="invalid_shape", unavailable_kind=UNAVAILABLE_ANSWER,
+                                     model_version=self.model_version, usage=usage)
         resp.usage = usage
         return resp
 

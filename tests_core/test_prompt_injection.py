@@ -44,14 +44,15 @@ def test_semantic_answer_cannot_remove_a_deterministic_exclusion():
     assert happy.calls == 0  # hard exclusion decided before any model call
 
 
-def test_semantic_answer_can_add_an_exclusion_and_grounded_answer_is_accepted():
+def test_ungrounded_leadership_cannot_reject_and_grounded_positive_is_accepted():
     desc = ("This role coordinates a range of internal activities across teams and keeps the wheels turning day to day, "
             "supporting leadership with whatever is needed. Full-time, remote within the United States. ")
     leadership = ReplayAdapter({"h3": {"compatible_functions": ["operations"], "responsibilities": [
         {"phrase": "coordinates internal activities", "excerpt": "coordinates a range of internal activities across teams"}],
         "seniority": "director_plus", "people_management": True, "incompatible_reasons": [], "confidence": 0.9}})
     r = classify_posting(description=desc, title="", countries=["US"], content_hash="h3", inference=leadership)
-    assert r.excluded and r.exclusion_reason.startswith("seniority:") or r.exclusion_reason.startswith("people_management")
+    assert not r.decided
+    assert "insufficient_evidence:semantic_exclusion_ungrounded_or_unsupported" in r.notes
     good = ReplayAdapter({"h3": {"compatible_functions": ["operations"], "responsibilities": [
         {"phrase": "coordinates internal activities", "excerpt": "coordinates a range of internal activities across teams"}],
         "seniority": "ic", "people_management": False, "incompatible_reasons": [], "confidence": 0.9}})

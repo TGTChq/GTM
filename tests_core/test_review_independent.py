@@ -280,6 +280,10 @@ def test_partition_uses_its_actual_provider_feed(source, expected_endpoint, monk
             self.path = urlsplit(url).path
             raise CapturedRequest()  # stop at HTTP boundary, before receipt writes
     def answer(sql, params):
+        if 'SELECT params_json FROM request_attempts' in sql:
+            return []
+        if 'SELECT e.employee_count, e.linkedin_slug, e.created_at FROM employers' in sql:
+            return []
         assert 'INSERT INTO request_attempts' in sql, sql
         return [{'id': 1}]
     transport = CaptureTransport()

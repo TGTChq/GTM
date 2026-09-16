@@ -126,6 +126,14 @@ class FakeFantastic:
         window = [r for r in source_rows if lower <= datetime.fromisoformat(r["date_created"].replace("Z", "+00:00")) < upper]
         if path.endswith("/active-jb") and p.get("exclude_ats_duplicate", ["false"])[0] == "true":
             window = [r for r in window if not r.get("ats_duplicate")]
+        if p.get("organization_agency", [""])[0] == "exclude":
+            window = [r for r in window if r.get("org_linkedin_recruitment_agency_derived") is not True]
+        excluded_industries = set(p.get("exclude_organization_industry", [""])[0].split(",")) - {""}
+        if excluded_industries:
+            window = [r for r in window if r.get("org_linkedin_industry") not in excluded_industries]
+        excluded_slugs = set(p.get("exclude_organization_slug", [""])[0].split(",")) - {""}
+        if excluded_slugs:
+            window = [r for r in window if r.get("org_linkedin_slug") not in excluded_slugs]
         window.sort(key=lambda r: r["date_posted"], reverse=True)
         if self.repeat_page_at_offset is not None and offset == self.repeat_page_at_offset and not self._repeated:
             self._repeated = True
