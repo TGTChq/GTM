@@ -9,6 +9,7 @@ layer records every one of them (intent before the call, result after).
 from __future__ import annotations
 
 import json
+import math
 import re
 from dataclasses import dataclass, field
 from enum import Enum
@@ -21,7 +22,6 @@ CREDIT_MARKERS = (
     "credit limit", "no credits remaining", "buy more credits", "you have run out of",
     "billing.limit.credits_exhausted",
 )
-_SECRET_RE = re.compile(r'("?[\w-]*(?:api[_-]?key|authorization|token|password|secret)"?\s*[:=]\s*)("?)[^"\s,}]+("?)', re.I)
 
 
 class Outcome(str, Enum):
@@ -29,7 +29,7 @@ class Outcome(str, Enum):
     CREDIT_EXHAUSTED = "credit_exhausted"   # explicit body marker only
     RATE_LIMITED = "rate_limited"           # 429 / long Retry-After
     UNAUTHORIZED = "unauthorized"           # 401/403
-    VALIDATION = "validation"               # 404/422 without the marker: one record
+    VALIDATION = "validation"               # only person-match 404 proves record absence
     SERVER = "server"                       # 5xx / network
     TIMEOUT = "timeout"                     # uncertain: may have been charged
 
@@ -57,12 +57,9 @@ class ApolloResult:
                 "message": self.message[:300], "context": self.context, "retry_after": self.retry_after}
 
 
-def _sanitize(text: str) -> str:
-    return _SECRET_RE.sub(r"\1\2[REDACTED]\3", text or "")[:500].strip()
-
-
 def _error_fields(body: str) -> Dict[str, Any]:
-    out: Dict[str, Any] = {"message": _sanitize(body), "error_code": "", "context": {}}
+    # Never persist arbitrary provider text/context: it may echo credentials or PII.
+    out: Dict[str, Any] = {"message": "provider_error", "error_code": "", "context": {}}
     try:
         data = json.loads(body) if body else None
     except ValueError:
@@ -70,18 +67,20 @@ def _error_fields(body: str) -> Dict[str, Any]:
     if isinstance(data, dict):
         details = data.get("error_details") if isinstance(data.get("error_details"), dict) else {}
         code = data.get("error_code") or data.get("code") or details.get("code")
-        if code:
-            out["error_code"] = _sanitize(str(code))
-        msg = details.get("message") or data.get("error") or data.get("message") or data.get("error_message")
-        if msg:
-            out["message"] = _sanitize(msg if isinstance(msg, str) else json.dumps(msg))
+        if code == "BILLING.LIMIT.CREDITS_EXHAUSTED":
+            out["error_code"] = code
         ctx = details.get("context")
         if isinstance(ctx, dict):
             extracted = {}
-            for name, entry in ctx.items():
+            for name in ("credit_balance", "credit_type", "next_billing_date"):
+                entry = ctx.get(name)
                 value = entry.get("value") if isinstance(entry, dict) else entry
-                if isinstance(value, (str, int, float, bool)) or value is None:
-                    extracted[str(name)] = value
+                if name == "credit_balance" and type(value) in (int, float) and abs(value) < 1e12 and math.isfinite(value):
+                    extracted[name] = value
+                elif name == "credit_type" and value in ("lead credits", "email credits", "mobile credits", "export credits"):
+                    extracted[name] = value
+                elif name == "next_billing_date" and isinstance(value, str) and re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
+                    extracted[name] = value
             out["context"] = extracted
     return out
 
@@ -95,7 +94,8 @@ def classify(resp: Response) -> ApolloResult:
     ra = resp.header("Retry-After")
     if ra:
         try:
-            retry_after = float(ra)
+            parsed_retry = float(ra)
+            retry_after = min(parsed_retry, 900.0) if math.isfinite(parsed_retry) and parsed_retry >= 0 else None
         except ValueError:
             retry_after = None
     if resp.status >= 400 and any(m in lowered for m in CREDIT_MARKERS):
@@ -113,6 +113,9 @@ def classify(resp: Response) -> ApolloResult:
     else:
         outcome = Outcome.SERVER
     data = resp.json() if outcome is Outcome.SERVED else None
+    if outcome is Outcome.SERVED and not isinstance(data, dict):
+        outcome = Outcome.SERVER
+        fields = {"error_code": "invalid_response", "message": "invalid_response", "context": {}}
     return ApolloResult(outcome=outcome, status=resp.status, data=data if isinstance(data, dict) else {},
                         error_code=fields["error_code"], message=fields["message"], context=fields["context"],
                         retry_after=retry_after)
@@ -135,9 +138,19 @@ class ApolloClient:
                                    timeout=self._timeout)
         except TransportTimeout:
             return ApolloResult(outcome=Outcome.TIMEOUT, message="timeout")
-        except TransportError as exc:
-            return ApolloResult(outcome=Outcome.SERVER, message=str(exc)[:200])
-        return classify(resp)
+        except TransportError:
+            return ApolloResult(outcome=Outcome.SERVER, message="transport_error")
+        result = classify(resp)
+        if result.served:
+            key = {"/mixed_people/api_search": "people", "/organizations/enrich": "organization",
+                   "/people/match": "person"}[path]
+            value = result.data.get(key)
+            valid = (isinstance(value, list) and all(isinstance(p, dict) for p in value)) if key == "people" else (
+                key in result.data and (value is None or isinstance(value, dict)))
+            if not valid:
+                return ApolloResult(outcome=Outcome.SERVER, status=resp.status,
+                                    error_code="invalid_response", message="invalid_response")
+        return result
 
     # --- paid ---------------------------------------------------------------
     def enrich_organization(self, *, domain: str = "", name: str = "") -> ApolloResult:

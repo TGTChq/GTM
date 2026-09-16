@@ -5,6 +5,8 @@ from __future__ import annotations
 
 from datetime import timedelta
 
+import pytest
+
 from tgtc_core.db import connect
 from tgtc_core.providers.http import Response
 from tgtc_core.testing.fakes import CREDIT_BODY, FakeApollo
@@ -135,3 +137,38 @@ def test_missing_employer_facts_are_enriched_once_from_apollo_and_reused(conn, c
     assert ops[0] == "organization_enrich" and ops.count("organization_enrich") == 1
     assert sql1(conn, "SELECT employee_count FROM employers WHERE id = %s", (eid,)) == 140
     assert sql1(conn, "SELECT alias_value FROM employer_aliases WHERE employer_id = %s AND alias_kind = 'apollo_org_id'", (eid,)) == "org-acme.com"
+
+
+@pytest.mark.parametrize("status", [404, 422])
+def test_search_validation_waits_instead_of_closing_as_no_candidates(conn, clock, status):
+    _, _, oid = seed_opportunity(conn, clock)
+    fake = apollo_for("acme.com", "Acme")
+    fake.request = lambda *args, **kwargs: Response(status=status, text='{"error":"invalid request"}')
+    out = opportunity_service(conn, fake, clock).process(oid)
+    assert out.outcome == "wait" and out.reason == f"apollo_validation_http_{status}"
+    assert sql1(conn, "SELECT state FROM opportunities WHERE id = %s", (oid,)) == "open"
+    assert sql1(conn, "SELECT count(*) FROM approvals") == 0
+
+
+def test_org_validation_does_not_cache_false_not_found(conn, clock):
+    _, eid, oid = seed_opportunity(conn, clock, headcount=None)
+    fake = apollo_for("acme.com", "Acme")
+    original = fake.request
+    fake.request = lambda *args, **kwargs: Response(status=422, text='{"error":"invalid request"}')
+    out = opportunity_service(conn, fake, clock).process(oid)
+    assert out.outcome == "wait"
+    assert sql1(conn, "SELECT enriched_at FROM employers WHERE id = %s", (eid,)) is None
+    assert sql1(conn, "SELECT state FROM opportunities WHERE id = %s", (oid,)) == "open"
+    fake.request = original
+    assert opportunity_service(conn, fake, clock).process(oid).outcome == "approved"
+
+
+@pytest.mark.parametrize("body", ['{}', '{"people":null}', '{"people":"invalid"}', '{"people":["invalid"]}', '[]', 'not JSON'])
+def test_malformed_search_never_becomes_no_candidates(conn, clock, body):
+    _, _, oid = seed_opportunity(conn, clock)
+    fake = apollo_for("acme.com", "Acme")
+    fake.request = lambda *args, **kwargs: Response(status=200, text=body)
+    out = opportunity_service(conn, fake, clock).process(oid)
+    assert out.outcome == "retry" and out.reason == "apollo_server"
+    assert sql1(conn, "SELECT state FROM opportunities WHERE id = %s", (oid,)) == "open"
+    assert sql1(conn, "SELECT status FROM request_attempts ORDER BY id DESC LIMIT 1") == "failed"

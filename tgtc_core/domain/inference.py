@@ -31,6 +31,8 @@ from ..db.connection import jsonb, transaction
 from ..policy.campaigns import FUNCTION_KEYS, POLICY_VERSION
 from ..services.spend_budget import BudgetExceeded, SpendBudget
 
+# This transport-schema repair does not change classification semantics. Keeping
+# the version preserves business receipts/cache; receipt-less SDK failures reopen.
 SCHEMA_VERSION = "posting-classification/1"
 
 FUNCTION_DEFINITIONS: Dict[str, str] = {
@@ -49,9 +51,12 @@ FUNCTION_DEFINITIONS: Dict[str, str] = {
 RESPONSE_SCHEMA: Dict[str, Any] = {
     "type": "object",
     "properties": {
-        "compatible_functions": {"type": "array", "items": {"type": "string", "enum": list(FUNCTION_KEYS)}, "maxItems": 2},
+        # Anthropic structured outputs reject maxItems (HTTP 400). Keep these
+        # bounds in descriptions and enforce them locally in from_dict as well.
+        "compatible_functions": {"type": "array", "items": {"type": "string", "enum": list(FUNCTION_KEYS)},
+                                 "description": "At most two compatible functions."},
         "responsibilities": {
-            "type": "array", "maxItems": 3,
+            "type": "array", "description": "At most three grounded responsibilities.",
             "items": {
                 "type": "object",
                 "properties": {"phrase": {"type": "string"}, "excerpt": {"type": "string"}},
@@ -119,6 +124,7 @@ class InferenceResponse:
     unavailable_reason: str = ""
     unavailable_kind: str = ""
     usage: Dict[str, Any] = field(default_factory=dict)
+    diagnostics: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -129,13 +135,14 @@ class InferenceResponse:
             "incompatible_reasons": list(self.incompatible_reasons), "confidence": self.confidence,
             "model_version": self.model_version, "unavailable_reason": self.unavailable_reason,
             "unavailable_kind": self.unavailable_kind, "usage": self.usage,
+            "diagnostics": self.diagnostics,
         }
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any], *, model_version: str = "") -> "InferenceResponse":
         return cls(
             available=bool(data.get("available", True)),
-            compatible_functions=[str(f) for f in (data.get("compatible_functions") or []) if str(f) in FUNCTION_KEYS],
+            compatible_functions=[str(f) for f in (data.get("compatible_functions") or []) if str(f) in FUNCTION_KEYS][:2],
             responsibilities=[ResponsibilityItem(str(r.get("phrase", "")), str(r.get("excerpt", "")))
                               for r in (data.get("responsibilities") or []) if isinstance(r, dict)][:3],
             seniority=str(data.get("seniority") or "unknown"),
@@ -174,6 +181,37 @@ def classify_exception(exc: BaseException) -> str:
     if name in ("AuthenticationError", "PermissionDeniedError", "BadRequestError", "NotFoundError") or status in (400, 401, 403, 404):
         return UNAVAILABLE_CONFIG
     return UNAVAILABLE_TRANSIENT
+
+
+def safe_exception_diagnostics(exc: BaseException) -> Dict[str, Any]:
+    """Allowlisted SDK evidence only; never persist exception text/body or headers.
+
+    API messages can echo input data or credentials. Record known schema keywords
+    mentioned by an error, not its arbitrary message, so a refusal is diagnosable
+    without leaking a posting or a key into the request ledger.
+    """
+    out: Dict[str, Any] = {}
+    status = getattr(exc, "status_code", None)
+    if isinstance(status, int) and 100 <= status <= 599:
+        out["http_status"] = status
+    request_id = getattr(exc, "request_id", None)
+    if isinstance(request_id, str) and re.fullmatch(r"req_[A-Za-z0-9]{1,80}", request_id):
+        out["request_id"] = request_id
+    body = getattr(exc, "body", None)
+    error = body.get("error", body) if isinstance(body, dict) else {}
+    if isinstance(error, dict):
+        error_type = error.get("type")
+        if error_type in ("invalid_request_error", "authentication_error", "permission_error",
+                          "not_found_error", "rate_limit_error", "api_error", "overloaded_error"):
+            out["error_type"] = error_type
+        message = error.get("message")
+        if isinstance(message, str):
+            known = ("maxItems", "minItems", "minimum", "maximum", "minLength", "maxLength",
+                     "additionalProperties", "output_config", "cache_control", "max_tokens")
+            keywords = [key for key in known if re.search(r"\b" + key + r"\b", message[:4096])]
+            if keywords:
+                out["mentioned_keywords"] = keywords
+    return out
 
 
 class NullAdapter:
@@ -255,7 +293,8 @@ class AnthropicAdapter:
             message = self._send(params)
         except Exception as exc:  # noqa: BLE001 - any transport/API failure is "unavailable", never a guess
             return InferenceResponse(available=False, unavailable_reason=f"inference_error:{type(exc).__name__}",
-                                     unavailable_kind=classify_exception(exc), model_version=self.model_version)
+                                     unavailable_kind=classify_exception(exc), model_version=self.model_version,
+                                     diagnostics=safe_exception_diagnostics(exc))
         return self.parse_message(message)
 
     def parse_message(self, message: Any) -> InferenceResponse:
@@ -359,7 +398,8 @@ class BudgetedInference:
                     WHERE id = %s
                     """,
                     (status, response.unavailable_kind or None, response.unavailable_reason[:200] or None,
-                     jsonb({"available": response.available, "usage": usage}), attempt_id),
+                     jsonb({"available": response.available, "usage": usage,
+                            "diagnostics": response.diagnostics}), attempt_id),
                 )
         self.budget.finish_attempt(
             attempt_id, status, input_tokens_used=used("input_tokens"),

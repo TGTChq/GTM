@@ -3,15 +3,79 @@ truthful Instantly membership. SIMULATED Airtable/Instantly."""
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 
+from tgtc_core.providers.instantly import InstantlyResult
 from tgtc_core.services import opportunity as opp_mod
+from tgtc_core.services.delivery import DeliveryService, OutboxItem
 from tgtc_core.testing.fakes import FakeAirtable, FakeInstantly
 from tgtc_core.testing.scenario import CONTROL_ID_BY_CAMPAIGN_KEY
 from tests_core.helpers import delivery_service, opportunity_service, sql1, sqlall
 from tests_core.seed import apollo_for, seed_opportunity
 
 CS_CAMPAIGN = CONTROL_ID_BY_CAMPAIGN_KEY["customer_experience"]
+
+
+@pytest.mark.parametrize("result, outcome, reason", [
+    *[(InstantlyResult(False, status), "failed", "campaign_lookup_failed")
+      for status in (None, 401, 403, 404, 429, 500, 503)],
+    *[(InstantlyResult(True, 200, data), "failed", "campaign_response_invalid")
+      for data in ({}, {"id": CS_CAMPAIGN}, {"id": CS_CAMPAIGN, "status": None},
+                   {"id": CS_CAMPAIGN, "status": True}, {"id": CS_CAMPAIGN, "status": "1"},
+                   {"id": "wrong-campaign", "status": 1}, {"status": 1})],
+    *[(InstantlyResult(True, 200, {"id": CS_CAMPAIGN, "status": status}), "deferred", f"campaign_not_active:{status}")
+      for status in (0, 2, 3, 4, -1, 99)],
+])
+def test_campaign_preflight_fails_closed_without_database_or_send(monkeypatch, clock, result, outcome, reason):
+    """Portable safety regression: no membership/write call after an unverified campaign."""
+    def forbidden(*args, **kwargs):
+        pytest.fail("unverified campaign reached outbound delivery")
+
+    client = SimpleNamespace(get_campaign=lambda target: result, create_lead=forbidden, resolve_membership=forbidden)
+    svc = DeliveryService(None, airtable=None, instantly=client, now=clock)
+    changes = []
+    monkeypatch.setattr(svc, "_precheck", lambda item: None)
+    monkeypatch.setattr(svc, "_set", lambda item, state, **kw: changes.append((state, kw)))
+    monkeypatch.setattr(svc, "_receipt", forbidden)
+    item = OutboxItem(1, 1, "instantly", "key", {"campaign": CS_CAMPAIGN, "email": "buyer@example.com"},
+                      "claimed", 1, "token", "pending")
+    out = svc.process_instantly(item)
+    assert (out.outcome, out.reason) == (outcome, reason)
+    assert len(changes) == 1 and changes[0][0] == ("pending" if outcome == "deferred" else "failed")
+    assert changes[0][1]["available_at"] > clock()
+
+
+def test_campaign_lookup_failure_recovers_once_without_duplicate_enrollment(conn, clock, monkeypatch):
+    _approve(conn, clock)
+    ins = FakeInstantly(campaign_status={CS_CAMPAIGN: 1}, clock=clock)
+    svc = delivery_service(conn, None, ins, clock)
+    original = svc.instantly.get_campaign
+    monkeypatch.setattr(svc.instantly, "get_campaign", lambda target: InstantlyResult(False, 503))
+    assert [x.outcome for x in svc.drain("instantly")] == ["failed"]
+    assert ins.leads == {}
+    assert sql1(conn, "SELECT count(*) FROM delivery_receipts") == 0
+    assert sql1(conn, "SELECT state FROM approvals") == "approved"
+    monkeypatch.setattr(svc.instantly, "get_campaign", original)
+    clock.advance(hours=1)
+    assert [x.outcome for x in svc.drain("instantly")] == ["delivered"]
+    assert svc.drain("instantly") == []
+    assert len(ins.leads) == 1
+    assert len([r for r in ins.requests if r["method"] == "POST"]) == 1
+
+
+def test_preexisting_target_lead_is_reported_existing_without_duplicate(conn, clock):
+    _approve(conn, clock)
+    ins = FakeInstantly(campaign_status={CS_CAMPAIGN: 1}, clock=clock)
+    ins.leads["good.buyer@acme.com"] = {"id": "pre", "email": "good.buyer@acme.com", "campaign": CS_CAMPAIGN,
+                                        "timestamp_created": "2026-01-01T00:00:00+00:00"}
+    svc = delivery_service(conn, None, ins, clock)
+    assert [x.outcome for x in svc.drain("instantly")] == ["delivered"]
+    assert svc.drain("instantly") == []
+    assert len(ins.leads) == 1 and ins.leads["good.buyer@acme.com"]["id"] == "pre"
+    assert sql1(conn, "SELECT receipt_kind FROM delivery_receipts WHERE channel = 'instantly' ORDER BY id DESC LIMIT 1") == "existing"
+    assert sql1(conn, "SELECT count(*) FROM delivery_receipts WHERE receipt_kind = 'created'") == 0
 
 
 def _approve(conn, clock):

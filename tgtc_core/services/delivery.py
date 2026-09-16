@@ -271,11 +271,16 @@ class DeliveryService:
         email = str(payload["email"])
         if self.check_campaign_status:
             camp = self.instantly.get_campaign(target)
-            if camp.ok:
-                status = camp.data.get("status")
-                if status not in (None, 1):
-                    self._set(item, "pending", available_at=self.now() + timedelta(hours=1), error=f"campaign_status_{status}")
-                    return DeliveryOutcome(item.id, "instantly", "deferred", f"campaign_not_active:{status}")
+            if not camp.ok:
+                self._set(item, "failed", available_at=self._backoff_at(item), error=f"campaign_lookup_failed:{camp.status}")
+                return DeliveryOutcome(item.id, "instantly", "failed", "campaign_lookup_failed")
+            status = camp.data.get("status")
+            if str(camp.data.get("id") or "") != target or type(status) is not int:
+                self._set(item, "failed", available_at=self._backoff_at(item), error="campaign_response_invalid")
+                return DeliveryOutcome(item.id, "instantly", "failed", "campaign_response_invalid")
+            if status != 1:
+                self._set(item, "pending", available_at=self.now() + timedelta(hours=1), error=f"campaign_status_{status}")
+                return DeliveryOutcome(item.id, "instantly", "deferred", f"campaign_not_active:{status}")
         if item.version_state_before in ("in_flight", "claimed") or item.attempts > 1:
             membership, campaigns = self.instantly.resolve_membership(email, target)
             if membership == ALREADY_IN_TARGET_CAMPAIGN:

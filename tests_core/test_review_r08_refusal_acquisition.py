@@ -15,7 +15,7 @@ def test_persisted_refusal_withholds_acquisition_but_processing_continues(conn, 
     r = runner(conn, sc, clock)
     first = r.cycle()
     assert len(first.acquisition) > 0 and sql1(conn, "SELECT count(*) FROM postings") == 10
-    assert first.stages["qualify_opportunity"] == {"wait": 10}
+    assert first.stages["qualify_opportunity"] == {"wait": 10, "technical_failure": 10}
     assert sql1(conn, "SELECT state FROM provider_state WHERE provider = 'apollo'") == "refusing"
     fantastic_calls = len(sc.fantastic.requests)
     # next cycle: NO paid inventory is bought while the refusal stands; identity/classification still run

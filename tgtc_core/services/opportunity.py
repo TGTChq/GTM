@@ -178,7 +178,7 @@ class OpportunityService:
         if not gate["allowed"]:
             raise ProviderWait(f"apollo_{gate['state']}_until_{gate['next_attempt_after'].isoformat()}", gate["next_attempt_after"])
 
-    def _handle_global(self, result: ApolloResult, *, chargeable: bool = True) -> None:
+    def _handle_global(self, result: ApolloResult, *, chargeable: bool = True, allow_not_found: bool = False) -> None:
         """Refusals/throttles/timeouts raise; a served CHARGEABLE call records recovery.
         A served 0-credit search proves reachability, not credits."""
         moment = self.now()
@@ -195,6 +195,8 @@ class OpportunityService:
             raise ProviderWait("apollo_rate_limited", moment + timedelta(seconds=wait))
         if result.outcome is Outcome.TIMEOUT or result.outcome is Outcome.SERVER:
             raise ProviderRetry(result.outcome.value)
+        if result.outcome is Outcome.VALIDATION and not (allow_not_found and result.status == 404):
+            raise ProviderWait(f"apollo_validation_http_{result.status}", moment + timedelta(hours=self.retry_hours))
         if result.outcome is Outcome.SERVED and chargeable:
             provider_state.record_served(self.conn, "apollo", now=moment)
 
@@ -590,7 +592,7 @@ class OpportunityService:
             result = self.apollo.match_person(pid)
             self._finish(attempt_id, result, operation="person_match", estimated=1)
             try:
-                self._handle_global(result)
+                self._handle_global(result, allow_not_found=True)
             except ProviderWait as w:
                 self._record_attempt(opportunity_id, ref, "match", "refused", w.reason, epoch=epoch, attempt_id=attempt_id)
                 return QualifyOutcome(opportunity_id, "wait", w.reason, attempts_made=made, details={"until": w.until.isoformat()})

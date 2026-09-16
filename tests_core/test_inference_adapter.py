@@ -6,6 +6,8 @@ from __future__ import annotations
 import json
 from types import SimpleNamespace
 
+import pytest
+
 from tgtc_core.domain.inference import (
     RESPONSE_SCHEMA, AnthropicAdapter, CachedInference, InferenceRequest, ReplayAdapter,
 )
@@ -26,6 +28,117 @@ def test_request_uses_structured_output_and_treats_the_posting_as_data():
     user = params["messages"][0]["content"]
     assert user.startswith("<posting>") and "Own accounts payable" in user
     assert a.model_version.startswith("anthropic:claude-opus-5:posting-classification/1")
+
+
+def test_wire_schema_omits_unsupported_array_limits_but_local_caps_remain():
+    schema = AnthropicAdapter(api_key="k").build_params(_req())["output_config"]["format"]["schema"]
+    assert "maxItems" not in json.dumps(schema)
+    assert schema["additionalProperties"] is False
+    assert schema["properties"]["responsibilities"]["items"]["additionalProperties"] is False
+    response = AnthropicAdapter(api_key="k").parse_message(_message(json.dumps({
+        "compatible_functions": ["finance", "operations", "engineering"],
+        "responsibilities": [{"phrase": "accounts payable", "excerpt": "Own accounts payable"}] * 4,
+        "seniority": "ic", "people_management": False,
+        "incompatible_reasons": [], "confidence": 0.9,
+    })))
+    assert response.available
+    assert response.compatible_functions == ["finance", "operations"]
+    assert len(response.responsibilities) == 3
+
+
+def test_real_sdk_serializes_compatible_schema_without_network():
+    import anthropic
+    import httpx2 as httpx
+
+    captured = []
+
+    def handle(request):
+        payload = json.loads(request.content)
+        captured.append(payload)
+        assert "maxItems" not in json.dumps(payload["output_config"]["format"]["schema"])
+        return httpx.Response(200, json={
+            "id": "msg_offline", "type": "message", "role": "assistant", "model": "claude-opus-5",
+            "content": [{"type": "text", "text": json.dumps({
+                "compatible_functions": ["finance"], "responsibilities": [], "seniority": "ic",
+                "people_management": False, "incompatible_reasons": [], "confidence": 0.9,
+            })}], "stop_reason": "end_turn", "stop_sequence": None,
+            "usage": {"input_tokens": 100, "output_tokens": 40},
+        })
+
+    adapter = AnthropicAdapter(api_key="offline-key")
+    with anthropic.Anthropic(api_key="offline-key", max_retries=0,
+                             http_client=httpx.Client(transport=httpx.MockTransport(handle))) as client:
+        adapter._client = client
+        result = adapter.classify(_req())
+    assert result.available and len(captured) == 1
+    assert captured[0]["model"] == "claude-opus-5"
+    assert captured[0]["output_config"]["effort"] == "medium"
+    assert captured[0]["max_tokens"] == 1024
+
+
+def test_sdk_bad_request_diagnostic_is_bounded_and_contains_no_echoed_secrets():
+    import anthropic
+    import httpx2 as httpx
+
+    secret = "sk-ant-do-not-log"
+    body = {"type": "error", "error": {"type": "invalid_request_error",
+            "message": "output_config.format.schema: maxItems unsupported " + secret + " private posting " + "x" * 10000}}
+    calls = []
+
+    def handle(request):
+        calls.append(True)
+        return httpx.Response(400, json=body, headers={"request-id": "req_offline123"})
+
+    adapter = AnthropicAdapter(api_key=secret)
+    with anthropic.Anthropic(api_key=secret, max_retries=0,
+                             http_client=httpx.Client(transport=httpx.MockTransport(handle))) as client:
+        adapter._client = client
+        result = adapter.classify(_req())
+    assert len(calls) == 1 and not result.available
+    assert result.unavailable_kind == "config"
+    assert result.unavailable_reason == "inference_error:BadRequestError"
+    assert result.diagnostics == {"http_status": 400, "request_id": "req_offline123",
+                                  "error_type": "invalid_request_error",
+                                  "mentioned_keywords": ["maxItems", "output_config"]}
+    serialized = json.dumps(result.to_dict())
+    assert secret not in serialized and "private posting" not in serialized
+    assert len(json.dumps(result.diagnostics)) < 300
+
+
+@pytest.mark.parametrize("body", [None, "secret", {"error": "secret"}, {"error": {"type": "secret", "message": "secret"}}])
+def test_unrecognized_error_details_are_not_persisted(body):
+    from tgtc_core.domain.inference import safe_exception_diagnostics
+
+    exc = RuntimeError("secret")
+    exc.body = body
+    exc.request_id = "req_secret-with-unexpected-characters"
+    assert safe_exception_diagnostics(exc) == {}
+
+
+def test_budget_ledger_preserves_safe_inference_diagnostics(conn):
+    from tgtc_core.domain.inference import BudgetedInference, InferenceResponse
+    from tgtc_core.services.spend_budget import BudgetLimits, SpendBudget, create_budget
+
+    create_budget(conn, "offline-diagnostic", BudgetLimits(
+        anthropic_requests=1, anthropic_input_tokens=100000, anthropic_output_tokens=1024))
+
+    class Refused:
+        model_version = "offline-refused/1"
+
+        def classify(self, request):
+            return InferenceResponse(available=False, unavailable_kind="config",
+                                     unavailable_reason="inference_error:BadRequestError",
+                                     diagnostics={"http_status": 400, "mentioned_keywords": ["maxItems"]})
+
+    wrapped = BudgetedInference(conn, Refused(), SpendBudget(conn, "offline-diagnostic"))
+    assert not wrapped.classify(_req()).available
+    with conn.cursor() as cur:
+        cur.execute("SELECT status, response_summary FROM request_attempts WHERE provider = 'anthropic'")
+        row = cur.fetchone()
+        assert row["status"] == "refused"
+        assert row["response_summary"]["diagnostics"] == {"http_status": 400, "mentioned_keywords": ["maxItems"]}
+        cur.execute("SELECT count(*) AS n FROM spend_reservations WHERE budget_id = 'offline-diagnostic'")
+        assert cur.fetchone()["n"] == 1
 
 
 def _message(text, stop="end_turn"):

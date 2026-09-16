@@ -72,7 +72,7 @@ def test_runner_puts_transient_failures_in_waiting_and_resumes_them(conn, clock)
     r.inference = flaky
     r.inference_configured = True
     first = r.cycle()
-    assert first.stages["classify"] == {"wait": 1}
+    assert first.stages["classify"] == {"wait": 1, "technical_failure": 1}
     item = sqlall(conn, "SELECT state, waiting_on, available_at FROM work_items WHERE kind = 'classify'")[0]
     assert item["state"] == "waiting" and item["waiting_on"].startswith("inference_transient:")
     assert sql1(conn, "SELECT state FROM postings") == "identity_resolved"
@@ -120,3 +120,51 @@ def test_commercial_exclusion_and_insufficient_evidence_stay_closed(conn, clock)
     out2 = classify_one(conn, pid2, inference=FlakyAdapter(failures=0), now=clock())
     assert out2.outcome == "closed" and out2.reason.startswith("insufficient_evidence:description_too_short")
     assert reopen_for_inference(conn, model_version="anything/9", now=clock()) == 0
+
+
+def test_sdk_configuration_error_waits_without_business_receipt(conn, clock):
+    from tgtc_core.domain.inference import UNAVAILABLE_CONFIG
+
+    class BadSchema:
+        model_version = "anthropic:claude-opus-5:posting-classification/1"
+
+        def classify(self, request):
+            return InferenceResponse(available=False, unavailable_reason="inference_error:BadRequestError",
+                                     unavailable_kind=UNAVAILABLE_CONFIG, model_version=self.model_version)
+
+    pid = _seed_vague(conn, clock)
+    out = classify_one(conn, pid, inference=BadSchema(), now=clock())
+    assert out.outcome == "wait" and out.reason == "inference_config:inference_error:BadRequestError"
+    assert sql1(conn, "SELECT state FROM postings WHERE id = %s", (pid,)) == "identity_resolved"
+    assert sql1(conn, "SELECT count(*) FROM classifications") == 0
+
+
+def test_same_model_recovers_four_old_sdk_failures_but_preserves_business_receipt(conn, clock):
+    from tgtc_core.domain.inference import UNAVAILABLE_ANSWER
+
+    model = "anthropic:claude-opus-5:posting-classification/1"
+    pids = [_seed_vague(conn, clock, job_id=f"old-bad-request-{i}") for i in range(4)]
+    with conn.cursor() as cur:
+        cur.execute("UPDATE postings SET state = 'closed', close_reason = 'inference_unavailable:inference_error:BadRequestError' "
+                    "WHERE id = ANY(%s)", (pids,))
+    conn.commit()
+
+    class Refusal:
+        model_version = model
+
+        def classify(self, request):
+            return InferenceResponse(available=False, unavailable_kind=UNAVAILABLE_ANSWER,
+                                     unavailable_reason="refusal", model_version=model)
+
+    business_pid = _seed_vague(conn, clock, job_id="business-refusal")
+    assert classify_one(conn, business_pid, inference=Refusal(), now=clock()).outcome == "closed"
+    assert reopen_for_inference(conn, model_version=model, now=clock()) == 4
+    assert sql1(conn, "SELECT state FROM postings WHERE id = %s", (business_pid,)) == "closed"
+    replay = ReplayAdapter({sql1(conn, "SELECT content_hash FROM postings WHERE id = %s", (pid,)): ANSWER for pid in pids},
+                           model_version=model)
+    for pid in pids:
+        assert classify_one(conn, pid, inference=replay, now=clock()).outcome == "classified"
+    assert reopen_for_inference(conn, model_version=model, now=clock()) == 0
+    assert sql1(conn, "SELECT count(*) FROM postings") == 5
+    assert sql1(conn, "SELECT count(*) FROM opportunities") == 1
+    assert sql1(conn, "SELECT max(version) FROM posting_versions") == 1

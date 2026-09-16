@@ -72,6 +72,11 @@ def classify_one(conn: psycopg.Connection, posting_id: int, *, inference: Option
             # R03: nothing is closed, nothing is bought; the work item waits and resumes.
             return ClassifyOutcome(posting_id, "wait", f"inference_transient:{result.unavailable_reason}", [], result.method,
                                    retry_after=moment + timedelta(minutes=transient_backoff_minutes))
+        if kind == UNAVAILABLE_CONFIG and result.unavailable_reason.startswith("inference_error:"):
+            # A provider/SDK configuration failure is not evidence against the job.
+            # Keep it recoverable, without a business classification receipt.
+            return ClassifyOutcome(posting_id, "wait", f"inference_config:{result.unavailable_reason}", [], result.method,
+                                   retry_after=moment + timedelta(minutes=transient_backoff_minutes))
         reason = (f"inference_unavailable:{result.unavailable_reason or 'not_configured'}" if kind == UNAVAILABLE_CONFIG
                   else f"insufficient_evidence:{result.unavailable_reason or 'no_answer'}")
         with transaction(conn):
@@ -183,7 +188,8 @@ def _detach_from_open_opportunities(cur, posting_id: int, moment: datetime) -> N
 def reopen_for_inference(conn: psycopg.Connection, *, model_version: str, now: Optional[datetime] = None,
                          limit: int = 5000) -> int:
     """Postings closed because inference was unavailable or gave no answer are re-entered
-    once a (different) model version is configured. No re-acquisition, no modification:
+    when no receipt exists for the configured model/policy (including the same
+    model after a technical failure). No re-acquisition, no modification:
     the same posting id goes back to the classify queue."""
     if not model_version:
         return 0

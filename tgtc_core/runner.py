@@ -187,12 +187,17 @@ class Runner:
                         with transaction(self.conn):
                             work_queue.wait(self.conn, item, out.reason, out.retry_after or (self.now() + timedelta(minutes=self.s.inference_retry_minutes)))
                         counts["wait"] = counts.get("wait", 0) + 1
+                        if out.reason == "inference_transient:spend_budget_exhausted":
+                            counts["budget_exhausted"] = counts.get("budget_exhausted", 0) + 1
+                        elif out.reason.startswith(("inference_transient:", "inference_config:", "inference_unavailable:")):
+                            counts["technical_failure"] = counts.get("technical_failure", 0) + 1
                         continue
                 elif kind == "qualify_opportunity":
                     if opp_service is None:
                         with transaction(self.conn):
                             work_queue.wait(self.conn, item, "apollo_not_configured", self.now() + timedelta(hours=1))
                         counts["wait"] = counts.get("wait", 0) + 1
+                        counts["technical_failure"] = counts.get("technical_failure", 0) + 1
                         continue
                     out = opp_service.process(item.subject_id, work_item=item)
                     result = out.outcome
@@ -201,11 +206,13 @@ class Runner:
                         with transaction(self.conn):
                             work_queue.wait(self.conn, item, out.reason, until)
                         counts["wait"] = counts.get("wait", 0) + 1
+                        counts["technical_failure"] = counts.get("technical_failure", 0) + 1
                         continue
                     if result == "retry":
                         with transaction(self.conn):
                             work_queue.retry(self.conn, item, out.reason, backoff_seconds=self.s.retry_backoff_seconds, now=self.now())
                         counts["retry"] = counts.get("retry", 0) + 1
+                        counts["technical_failure"] = counts.get("technical_failure", 0) + 1
                         continue
                 else:
                     raise ValueError(f"unknown kind {kind}")
@@ -215,6 +222,8 @@ class Runner:
                     else:
                         work_queue.complete(self.conn, item)
                 counts[result] = counts.get(result, 0) + 1
+                if result == "closed" and getattr(out, "reason", "").startswith("inference_unavailable:"):
+                    counts["technical_failure"] = counts.get("technical_failure", 0) + 1
             except work_queue.LeaseLost:
                 self.conn.rollback()
                 counts["lease_lost"] = counts.get("lease_lost", 0) + 1
@@ -225,10 +234,16 @@ class Runner:
                 counts["budget_exhausted"] = counts.get("budget_exhausted", 0) + 1
             except Exception as exc:  # noqa: BLE001 - a technical failure retries; it never approves or rejects
                 self.conn.rollback()
-                log.exception("work item %s failed", item.id)
+                # No traceback/message: DB/provider exceptions can echo secrets or PII.
+                error_class = type(exc).__name__
+                if error_class not in {"ValueError", "TypeError", "KeyError", "LookupError", "RuntimeError",
+                                        "OperationalError", "InterfaceError", "IntegrityError", "EvidenceChanged"}:
+                    error_class = "UnexpectedError"
+                log.error("work item %s failed: %s", item.id, error_class)
                 with transaction(self.conn):
-                    work_queue.retry(self.conn, item, f"{type(exc).__name__}: {exc}", backoff_seconds=self.s.retry_backoff_seconds, now=self.now())
+                    work_queue.retry(self.conn, item, error_class, backoff_seconds=self.s.retry_backoff_seconds, now=self.now())
                 counts["error_retry"] = counts.get("error_retry", 0) + 1
+                counts["technical_failure"] = counts.get("technical_failure", 0) + 1
         self._log("work", kind, counts)
         return counts
 

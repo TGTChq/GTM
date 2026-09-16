@@ -133,21 +133,38 @@ def cmd_cycle(args) -> int:
 
 
 def _bounded_acceptance_failure(report, *, acquire: bool) -> str:
-    """Turn a provider-level acquisition failure into a failed bounded deployment.
+    """Expose technical failures in every stage of a bounded acceptance run.
 
     The ordinary production CLI keeps its historical best-effort exit behaviour.
     A paid acceptance run must not look green when every provider page failed at
-    request time.  A valid empty page remains a successful transport check.
+    request time, or when inference/enrichment failed without acquisition. A valid
+    empty page, business rejection and normal budget stop are not failures.
     """
-    if os.environ.get("TGTC_ACCEPTANCE_MODE", "").strip() != "bounded" or not acquire:
+    if os.environ.get("TGTC_ACCEPTANCE_MODE", "").strip() != "bounded":
         return ""
-    pages = sum(int(item.get("pages") or 0) for item in report.acquisition)
-    if pages == 0:
-        for item in report.acquisition:
-            stop = str(item.get("stop_reason") or "")
-            if stop.startswith("request_error:"):
-                return stop
-    return ""
+    if acquire:
+        pages = sum(int(item.get("pages") or 0) for item in report.acquisition)
+        if pages == 0:
+            for item in report.acquisition:
+                stop = str(item.get("stop_reason") or "")
+                if stop.startswith("request_error:"):
+                    return stop
+    failures = [failure for stage, counts in getattr(report, "stages", {}).items()
+                if (failure := _bounded_work_failure(stage, counts))]
+    return "; ".join(failures)
+
+
+def _bounded_work_failure(kind: str, counts: dict) -> str:
+    """Use per-run diagnostics, not historical ledger totals or approval yield.
+
+    ``technical_failure`` includes handled provider failures that would otherwise
+    be hidden in wait/closed totals. Generic waits and closes can be legitimate.
+    """
+    if os.environ.get("TGTC_ACCEPTANCE_MODE", "").strip() != "bounded":
+        return ""
+    failures = [f"{key}={counts[key]}" for key in ("technical_failure", "error_retry", "retry", "lease_lost")
+                if int(counts.get(key) or 0) > 0]
+    return f"{kind}: {', '.join(failures)}" if failures else ""
 
 
 def cmd_work(args) -> int:
@@ -157,7 +174,12 @@ def cmd_work(args) -> int:
         _require_persistent_budget(args, s)
     conn = connect(args.database_url or s.database_url)
     r = _runner(conn, s, allow_spend=args.i_understand_spend)
-    print(json.dumps(r.work(args.kind, max_items=args.max_items), indent=2))
+    counts = r.work(args.kind, max_items=args.max_items)
+    print(json.dumps(counts, indent=2))
+    failure = _bounded_work_failure(args.kind, counts)
+    if failure:
+        print(f"bounded acceptance failed: {failure}", file=sys.stderr)
+        return 1
     return 0
 
 
