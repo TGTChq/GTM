@@ -17,6 +17,7 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
 CREATE TABLE IF NOT EXISTS source_partitions (
     id                bigserial PRIMARY KEY,
     source            text NOT NULL,
+    query_profile     text NOT NULL DEFAULT 'legacy_v1',
     lane              text NOT NULL CHECK (lane IN ('fresh', 'backfill')),
     window_start      timestamptz NOT NULL,
     window_end        timestamptz NOT NULL,
@@ -35,7 +36,7 @@ CREATE TABLE IF NOT EXISTS source_partitions (
     lease_expires_at  timestamptz,
     created_at        timestamptz NOT NULL DEFAULT now(),
     updated_at        timestamptz NOT NULL DEFAULT now(),
-    UNIQUE (source, lane, window_start, window_end)
+    CONSTRAINT source_partitions_scope_uq UNIQUE (source, lane, window_start, window_end, query_profile)
 );
 
 -- Intent is written BEFORE any potentially chargeable request; the outcome after.

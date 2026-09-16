@@ -67,6 +67,9 @@ class Settings:
     fantastic_backfill_window_hours: int = 24
     fantastic_time_frame: str = "7d"
     fantastic_max_pages_per_partition: int = 50
+    # Opt-in: never silently change a deployed acquisition policy on code publish.
+    acquisition_strategy: str = "legacy_v1"
+    fantastic_cycle_page_slots: int = 10
     fantastic_min_jobs_quota_remaining: int = 90
     fantastic_min_requests_quota_remaining: int = 20
     #: Both contracted Fantastic feeds by default (review R02). ATS here is Fantastic's
@@ -85,6 +88,12 @@ class Settings:
     person_employer_uniqueness: bool = True
     instantly_verify_on_import: bool = False
     inference_enabled: bool = True
+
+    def __post_init__(self):
+        if self.acquisition_strategy not in {"legacy_v1", "balanced_v1"}:
+            raise ValueError("unknown_acquisition_strategy")
+        if not 5 <= self.fantastic_cycle_page_slots <= 100:
+            raise ValueError("TGTC_FANTASTIC_CYCLE_PAGE_SLOTS must be between 5 and 100")
 
     @classmethod
     def from_env(cls, env: Optional[Mapping[str, str]] = None) -> "Settings":
@@ -118,6 +127,8 @@ class Settings:
             fantastic_backfill_window_hours=_int(env, "TGTC_BACKFILL_WINDOW_HOURS", 24),
             fantastic_time_frame=str(env.get("TGTC_FANTASTIC_TIME_FRAME", "") or "7d"),
             fantastic_max_pages_per_partition=_int(env, "TGTC_FANTASTIC_MAX_PAGES_PER_PARTITION", 50),
+            acquisition_strategy=str(env.get("TGTC_ACQUISITION_STRATEGY", "") or "legacy_v1"),
+            fantastic_cycle_page_slots=int(env.get("TGTC_FANTASTIC_CYCLE_PAGE_SLOTS", "10") or "10"),
             fantastic_min_jobs_quota_remaining=_int(env, "TGTC_FANTASTIC_MIN_JOBS_QUOTA_REMAINING", 90),
             fantastic_min_requests_quota_remaining=_int(env, "TGTC_FANTASTIC_MIN_REQUESTS_QUOTA_REMAINING", 20),
             fantastic_sources=[x.strip() for x in str(env.get("TGTC_FANTASTIC_SOURCES", "") or ",".join(DEFAULT_FANTASTIC_SOURCES)).split(",") if x.strip()],
@@ -153,6 +164,7 @@ class Settings:
                 if f.name not in {"campaign_env"}:
                     out["limits"][f.name] = getattr(self, f.name)
         out["limits"]["fantastic_sources"] = list(self.fantastic_sources)
+        out["limits"]["acquisition_strategy"] = self.acquisition_strategy
         out["limits"]["airtable_base_id_present"] = bool(self.airtable_base_id)
         out["limits"]["airtable_table_name"] = self.airtable_table_name
         out["limits"]["inference_model"] = self.inference_model

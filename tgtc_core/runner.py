@@ -21,13 +21,14 @@ from .config import Settings
 from .db import work_queue
 from .db.connection import jsonb, transaction
 from .domain.inference import BudgetedInference, CachedInference, InferencePort, NullAdapter
+from .domain.acquisition_query import PRIORITY_PROFILE, DISCOVERY_PROFILE, balanced_slots
 from .providers.airtable import AirtableClient
 from .providers.apollo import ApolloClient
 from .providers.fantastic import FantasticClient
 from .providers.http import Transport
 from .providers.instantly import InstantlyClient
 from .services import provider_state
-from .services.acquisition import AcquisitionService
+from .services.acquisition import AcquisitionService, SOURCE_SPECS
 from .services.classification_service import classify_one, reopen_for_inference
 from .services.delivery import DeliveryService
 from .services.identity_service import resolve_posting_identity
@@ -129,6 +130,9 @@ class Runner:
             self._log("acquisition", "withheld", {"reason": f"apollo_{gate['state']}", "since": str(gate.get("refusing_since"))})
             return []
         svc = self._acquisition_service()
+        if self.s.acquisition_strategy == "balanced_v1":
+            return self._acquire_balanced(svc, fresh_partitions=fresh_partitions,
+                                          backfill_partitions=backfill_partitions, sources=sources)
         reports: List[Dict[str, Any]] = []
         for source in (sources or list(svc.sources)):
             recovered = svc.recover_partitions(source)
@@ -155,6 +159,58 @@ class Runner:
                                                        "pages": run.pages, "rows": run.rows, "new": run.new_postings})
                 if run.stop_reason in ("auth_refused", "quota_refused"):
                     break
+        return reports
+
+    def _acquire_balanced(self, svc: AcquisitionService, *, fresh_partitions: int,
+                          backfill_partitions: int, sources: Optional[List[str]]) -> List[Dict[str, Any]]:
+        """Priority + independent broad recovery, without a title gate.
+
+        One page per slot; all paths use the SAME persistent spend ceiling. Broad
+        recovery can rebuy priority rows: report unchanged rows, don't count those
+        as new leads. Its older cursors resume before newer recovery windows. Old
+        legacy partitions are deliberately NOT silently repurposed or marked done.
+        """
+        if self.spend_budget is None:
+            raise RuntimeError("balanced_acquisition_requires_persistent_spend_budget")
+        selected = tuple(sources or svc.sources)
+        if any(source not in SOURCE_SPECS for source in selected):
+            raise ValueError("unknown_fantastic_source")
+        slots = list(balanced_slots(selected, self.s.fantastic_cycle_page_slots))
+        svc.sources = selected  # don't exclude ATS duplicates when only JB is scheduled
+        for source in selected:
+            svc.recover_partitions(source)
+            for profile in (PRIORITY_PROFILE, DISCOVERY_PROFILE):
+                if fresh_partitions:
+                    svc.plan_fresh_partitions(source, max_new=fresh_partitions, profile=profile)
+                for _ in range(backfill_partitions):
+                    svc.plan_backfill_partition(source, profile=profile)
+        reports: List[Dict[str, Any]] = []
+        deferred: set[int] = set()
+        for source, profile in slots:
+            chosen = None
+            lanes = [("fresh", fresh_partitions), ("backfill", backfill_partitions)]
+            if backfill_partitions and svc.prefer_backfill(source, profile):
+                lanes.reverse()
+            for lane, count in lanes:
+                if not count:
+                    continue
+                ids = svc.open_partitions(lane, source, limit=max(count, self.s.fantastic_cycle_page_slots),
+                                          profile=profile, oldest_first=profile == DISCOVERY_PROFILE)
+                chosen = next((pid for pid in ids if pid not in deferred), None)
+                if chosen is not None:
+                    break
+            if chosen is None:
+                continue
+            run = svc.run_partition(chosen, max_pages=1)
+            details = {"source": source, "lane": lane, **run.__dict__}
+            reports.append(details)
+            self._log("acquisition", "partition", details)
+            if run.stop_reason != "page_budget":
+                deferred.add(chosen)
+            # Fail closed across feeds/profiles instead of cascading paid probes.
+            if (run.stop_reason in {"auth_refused", "quota_refused", "timeout_uncertain"}
+                    or run.stop_reason.startswith(("spend_budget_exhausted:", "request_error:", "provider_", "quota_reserve:"))):
+                break
         return reports
 
     # --- work items -------------------------------------------------------

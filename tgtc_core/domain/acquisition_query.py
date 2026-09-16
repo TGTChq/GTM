@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
+import csv
+import io
 import re
 
 # Exact, case-sensitive LinkedIn labels. No positive size/full-time/remote/title
@@ -19,6 +21,74 @@ EXCLUDED_LINKEDIN_INDUSTRIES = (
 def policy_filters() -> dict:
     return {"organization_agency": "exclude",
             "exclude_organization_industry": ",".join(EXCLUDED_LINKEDIN_INDUSTRIES)}
+
+
+LEGACY_PROFILE = "legacy_v1"
+PRIORITY_PROFILE = "priority_v1"
+DISCOVERY_PROFILE = "discovery_v1"
+QUERY_PROFILES = (LEGACY_PROFILE, PRIORITY_PROFILE, DISCOVERY_PROFILE)
+# Retrieval priorities, NOT an eligibility taxonomy. Product/operations/ecommerce
+# can appear under Management, Retail or Logistics. Match ANY assigned category,
+# not just the primary one. Do not infer physical work from an industry/category.
+PRIORITY_TAXONOMIES = (
+    "Technology", "Software", "Data & Analytics", "Engineering",
+    "Finance & Accounting", "Human Resources", "Sales", "Marketing",
+    "Customer Service & Support", "Administrative", "Creative & Media",
+    "Art & Design", "Management & Leadership", "Consulting", "Retail", "Logistics",
+)
+
+
+def validate_profile(profile: str) -> str:
+    if profile not in QUERY_PROFILES:
+        raise ValueError("unknown_acquisition_profile")
+    return profile
+
+
+def provider_list(values) -> str:
+    """Quote individual comma-containing values; HTTP encoding is the client's job."""
+    buf = io.StringIO()
+    csv.writer(buf, lineterminator="").writerow(values)
+    return buf.getvalue()
+
+
+def profile_filters(profile: str = LEGACY_PROFILE) -> dict:
+    """Versioned retrieval scope. Neither path requires a particular job title.
+
+    Discovery relaxes ALL priority gates, not only taxonomies: this is essential
+    for unknown headcounts and missing/mistagged employment data. It remains in
+    the same business market and retains explicit employer-sector policy.
+    """
+    from ..policy.requirements import rule
+    validate_profile(profile)
+    params = policy_filters()
+    if profile == PRIORITY_PROFILE:
+        params.update(ai_employment_type="FULL_TIME",
+                      organization_headcount_gte=int(rule("min_employees")),
+                      organization_headcount_lt=int(rule("max_employees")) + 1,
+                      ai_taxonomies_a=provider_list(PRIORITY_TAXONOMIES))
+    return params
+
+
+def count_query(endpoint: str, params: dict) -> tuple[str, dict]:
+    """Pure preflight builder. Does NOT execute a count or spend request credits."""
+    if endpoint not in ("/v1/active-ats", "/v1/active-jb"):
+        raise ValueError("unsupported_count_endpoint")
+    strip = {"endpoint", "limit", "offset", "cursor", "id", "description_format"}
+    strip |= ({"include_basic_organization_details"} if endpoint.endswith("-ats")
+              else {"exclude_recruiter_fields", "employment_type"})
+    return endpoint + "-count", {k: v for k, v in params.items() if k not in strip}
+
+
+def balanced_slots(sources: tuple[str, ...], pages: int):
+    """80/20 REQUEST SLOTS (not a dollar/row percentage), round-robin feeds.
+
+    A discovery slot arrives third so small budgets can observe both paths. Empty
+    or blocked slots aren't transferred to another scope behind the user's back.
+    """
+    if not sources or len(set(sources)) != len(sources) or not 5 * len(sources) <= pages <= 100:
+        raise ValueError("balanced_acquisition_requires_5_slots_per_source_up_to_100")
+    for slot in range(pages):
+        yield sources[slot % len(sources)], (DISCOVERY_PROFILE if slot % 5 == 2 else PRIORITY_PROFILE)
 
 
 def recent_size_exclusions(employers: list[dict], *, now: datetime, minimum: int, maximum: int) -> list[str]:

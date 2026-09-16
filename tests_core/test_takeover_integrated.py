@@ -127,7 +127,8 @@ def test_v1_migration_preserves_inventory_and_cursor(conn, clock):
     apply_schema(conn)
     assert sql1(conn, 'SELECT next_offset FROM source_partitions') == 100
     assert sql1(conn, 'SELECT provider_job_id FROM postings') == 'saved-job'
-    assert sql1(conn, 'SELECT max(version) FROM schema_migrations') == 4
+    assert sql1(conn, 'SELECT max(version) FROM schema_migrations') == 5
+    assert sql1(conn, 'SELECT query_profile FROM source_partitions') == 'legacy_v1'
 
 
 def test_late_page_keeps_a_receipt_without_overwriting_the_new_owner_data(conn, conn2, clock):

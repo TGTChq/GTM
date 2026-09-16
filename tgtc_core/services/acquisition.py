@@ -37,7 +37,8 @@ from ..db.connection import jsonb, transaction
 from ..db import work_queue
 from ..domain.identity import content_hash
 from ..domain.acquisition_query import (
-    policy_filters, frozen_page_query, feed_covers_window, covering_time_frame, recent_size_exclusions,
+    profile_filters, validate_profile, LEGACY_PROFILE, DISCOVERY_PROFILE,
+    frozen_page_query, feed_covers_window, covering_time_frame, recent_size_exclusions,
 )
 from ..policy.requirements import rule
 from ..providers.fantastic import (
@@ -107,11 +108,13 @@ def _parse_dt(value: Any) -> Optional[datetime]:
 @dataclass
 class PartitionRun:
     partition_id: int
+    query_profile: str = LEGACY_PROFILE
     pages: int = 0
     rows: int = 0
     new_postings: int = 0
     modified_postings: int = 0
     expired_postings: int = 0
+    unchanged_postings: int = 0
     duplicate_pages: int = 0
     stop_reason: str = ""
     quota: Dict[str, Any] = field(default_factory=dict)
@@ -304,14 +307,15 @@ class AcquisitionService:
         self.now = now
 
     # --- request shape per source (R02) -------------------------------------
-    def request_params(self, source: str, *, lower: datetime, upper: datetime, offset: int) -> Tuple[str, Dict[str, Any]]:
+    def request_params(self, source: str, *, lower: datetime, upper: datetime, offset: int,
+                       profile: str = LEGACY_PROFILE) -> Tuple[str, Dict[str, Any]]:
         spec = SOURCE_SPECS[source]
         exclude = spec.supports_exclude_ats_duplicate and SOURCE_ATS in self.sources
         params = build_window_params(lower_iso=_iso(lower), upper_iso=_iso(upper), limit=self.page_limit, offset=offset,
                                      time_frame=covering_time_frame(self.time_frame, lower, upper, self.now()),
                                      location=self.location, exclude_ats_duplicate=exclude,
                                      include_basic_organization_details=spec.supports_basic_organization_details)
-        params.update(policy_filters())
+        params.update(profile_filters(profile))
         return spec.endpoint, params
 
     def _partition_query(self, part: Dict[str, Any], endpoint: str, params: dict) -> dict:
@@ -321,7 +325,7 @@ class AcquisitionService:
                         "AND status IN ('served', 'uncertain', 'intended') ORDER BY id LIMIT 1",
                         (part["id"],))
             row = cur.fetchone()
-            if row is None and not part["next_offset"]:
+            if row is None and not part["next_offset"] and part.get("query_profile", LEGACY_PROFILE) != DISCOVERY_PROFILE:
                 cur.execute("SELECT e.employee_count, e.linkedin_slug, e.created_at FROM employers e "
                             "WHERE (e.employee_count < %s OR e.employee_count > %s) AND e.created_at > %s "
                             "AND e.linkedin_slug IS NOT NULL AND NOT EXISTS "
@@ -339,27 +343,29 @@ class AcquisitionService:
                                  offset=int(part["next_offset"]), limit=self.page_limit)
 
     # --- planning ---------------------------------------------------------
-    def plan_fresh_partitions(self, source: str = SOURCE_JOB_BOARDS, *, max_new: int = 24) -> List[int]:
+    def plan_fresh_partitions(self, source: str = SOURCE_JOB_BOARDS, *, max_new: int = 24,
+                              profile: str = LEGACY_PROFILE) -> List[int]:
         """Create hourly fresh windows from the last window end up to now - lag.
 
         Partitions are contiguous; a window that did not complete keeps its own state
         and new windows are still scheduled (blueprint: a historical gap never blocks
         fresh coverage).
         """
+        validate_profile(profile)
         moment = self.now()
         upper_bound = (moment - self.fresh_lag).replace(minute=0, second=0, microsecond=0)
         created: List[int] = []
         with transaction(self.conn):
             with self.conn.cursor() as cur:
-                cur.execute("SELECT MAX(window_end) AS e FROM source_partitions WHERE source = %s AND lane = 'fresh'", (source,))
+                cur.execute("SELECT MAX(window_end) AS e FROM source_partitions WHERE source = %s AND lane = 'fresh' AND query_profile = %s", (source, profile))
                 row = cur.fetchone()
                 start = row["e"] if row and row["e"] else upper_bound - self.fresh_window
                 while start < upper_bound and len(created) < max_new:
                     end = start + self.fresh_window
                     cur.execute(
-                        "INSERT INTO source_partitions (source, lane, window_start, window_end) VALUES (%s, 'fresh', %s, %s) "
-                        "ON CONFLICT (source, lane, window_start, window_end) DO NOTHING RETURNING id",
-                        (source, start, end),
+                        "INSERT INTO source_partitions (source, lane, window_start, window_end, query_profile) VALUES (%s, 'fresh', %s, %s, %s) "
+                        "ON CONFLICT (source, lane, window_start, window_end, query_profile) DO NOTHING RETURNING id",
+                        (source, start, end, profile),
                     )
                     r = cur.fetchone()
                     if r:
@@ -367,34 +373,46 @@ class AcquisitionService:
                     start = end
         return created
 
-    def plan_backfill_partition(self, source: str = SOURCE_JOB_BOARDS) -> Optional[int]:
+    def plan_backfill_partition(self, source: str = SOURCE_JOB_BOARDS, *, profile: str = LEGACY_PROFILE) -> Optional[int]:
+        validate_profile(profile)
         with transaction(self.conn):
             with self.conn.cursor() as cur:
-                cur.execute("SELECT MIN(window_start) AS s FROM source_partitions WHERE source = %s AND lane = 'backfill'", (source,))
+                cur.execute("SELECT MIN(window_start) AS s FROM source_partitions WHERE source = %s AND lane = 'backfill' AND query_profile = %s", (source, profile))
                 oldest_backfill = cur.fetchone()["s"]
-                cur.execute("SELECT MIN(window_start) AS s FROM source_partitions WHERE source = %s AND lane = 'fresh'", (source,))
+                cur.execute("SELECT MIN(window_start) AS s FROM source_partitions WHERE source = %s AND lane = 'fresh' AND query_profile = %s", (source, profile))
                 oldest_fresh = cur.fetchone()["s"]
                 end = oldest_backfill or oldest_fresh or (self.now() - self.fresh_lag)
                 start = end - self.backfill_window
                 cur.execute(
-                    "INSERT INTO source_partitions (source, lane, window_start, window_end) VALUES (%s, 'backfill', %s, %s) "
-                    "ON CONFLICT (source, lane, window_start, window_end) DO NOTHING RETURNING id",
-                    (source, start, end),
+                    "INSERT INTO source_partitions (source, lane, window_start, window_end, query_profile) VALUES (%s, 'backfill', %s, %s, %s) "
+                    "ON CONFLICT (source, lane, window_start, window_end, query_profile) DO NOTHING RETURNING id",
+                    (source, start, end, profile),
                 )
                 r = cur.fetchone()
                 return int(r["id"]) if r else None
 
-    def open_partitions(self, lane: str, source: str = SOURCE_JOB_BOARDS, limit: int = 10) -> List[int]:
+    def open_partitions(self, lane: str, source: str = SOURCE_JOB_BOARDS, limit: int = 10, *,
+                        profile: str = LEGACY_PROFILE, oldest_first: bool = False) -> List[int]:
         """Open partitions not under an active lease (R07)."""
         with self.conn.cursor() as cur:
             cur.execute(
-                "SELECT id FROM source_partitions WHERE source = %s AND lane = %s AND state = 'open' "
-                "AND (lease_expires_at IS NULL OR lease_expires_at <= %s) ORDER BY window_start DESC LIMIT %s",
-                (source, lane, self.now(), limit),
+                "SELECT id FROM source_partitions WHERE source = %s AND lane = %s AND query_profile = %s AND state = 'open' "
+                "AND (lease_expires_at IS NULL OR lease_expires_at <= %s) ORDER BY window_start "
+                + ("ASC" if oldest_first else "DESC") + " LIMIT %s",
+                (source, lane, profile, self.now(), limit),
             )
             ids = [int(r["id"]) for r in cur.fetchall()]
         self.conn.commit()
         return ids
+
+    def prefer_backfill(self, source: str, profile: str) -> bool:
+        """Periodic historical service based on persisted progress, not process age."""
+        with self.conn.cursor() as cur:
+            cur.execute("SELECT COALESCE(sum(pages_received),0) AS n FROM source_partitions "
+                        "WHERE source=%s AND query_profile=%s", (source, profile))
+            n = int(cur.fetchone()["n"])
+        self.conn.commit()
+        return n % 5 == 4
 
     # --- ownership (R07) --------------------------------------------------
     def claim_partition(self, partition_id: int) -> Optional[str]:
@@ -517,13 +535,15 @@ class AcquisitionService:
                 run.stop_reason = "lease_lost"
                 break
             source = part["source"]
+            run.query_profile = part.get("query_profile", LEGACY_PROFILE)
             prev_fp, prev_receipt_id = self._last_receipt_fingerprint(partition_id)
             breach = self._quota_breach(self._latest_quota(source))
             if breach:
                 run.stop_reason = breach
                 break
             offset = int(part["next_offset"])
-            endpoint, params = self.request_params(source, lower=part["window_start"], upper=part["window_end"], offset=offset)
+            endpoint, params = self.request_params(source, lower=part["window_start"], upper=part["window_end"], offset=offset,
+                                                  profile=run.query_profile)
             try:
                 query = self._partition_query(part, endpoint, params)
             except ValueError as exc:
@@ -531,6 +551,12 @@ class AcquisitionService:
                 break
             if not feed_covers_window(query, part["window_start"], part["window_end"], self.now()):
                 run.stop_reason = "partition_outside_provider_time_frame"
+                if run.query_profile != LEGACY_PROFILE:
+                    with transaction(self.conn):
+                        with self.conn.cursor() as cur:
+                            cur.execute("UPDATE source_partitions SET state = 'failed', last_error = %s, "
+                                        "updated_at = now() WHERE id = %s AND lease_token = %s",
+                                        (run.stop_reason, partition_id, token))
                 break
             # Query/coverage errors must not consume a provider recovery probe.
             gate = provider_state.reserve_probe(self.conn, PROVIDER, retry_hours=self.provider_retry_hours, now=self.now())
@@ -607,9 +633,9 @@ class AcquisitionService:
             with transaction(self.conn):
                 with self.conn.cursor() as cur:
                     cur.execute(
-                        "UPDATE request_attempts SET status = 'served', http_status = %s, finished_at = now(), response_summary = %s WHERE id = %s",
+                        "UPDATE request_attempts SET status = 'served', http_status = %s, finished_at = now(), response_summary = %s, confirmed_credits = %s WHERE id = %s",
                         (page.status, jsonb({"rows": len(page.rows), "quota": page.quota.to_dict(),
-                                             "pii_fields_dropped": page.pii_fields_dropped}), attempt_id),
+                                             "pii_fields_dropped": page.pii_fields_dropped}), page.quota.jobs_this_request, attempt_id),
                     )
                     # Lock and validate BEFORE changing posting facts. A stale response
                     # remains in the receipt; it cannot roll newer business data back.
@@ -619,7 +645,7 @@ class AcquisitionService:
                         (partition_id, token, offset, moment),
                     )
                     fenced = cur.fetchone() is None
-                    new_here = modified_here = expired_here = 0
+                    new_here = modified_here = expired_here = unchanged_here = 0
                     if not fenced:
                         for row in page.rows:
                             if not str(row.get("id") or "").strip():
@@ -637,6 +663,8 @@ class AcquisitionService:
                                                    lane=part["lane"], reopen=True, available_at=moment)
                             elif res.state == "expired":
                                 expired_here += 1
+                            elif res.state == "unchanged":
+                                unchanged_here += 1
                     # Fenced cursor advance: only the lease holder, only from the expected offset.
                     cur.execute(
                         """
@@ -669,8 +697,8 @@ class AcquisitionService:
                     cur.execute(
                         "INSERT INTO credit_events (provider, operation, attempt_id, requests, estimated_credits, confirmed_credits, basis) "
                         "VALUES ('fantastic', 'page', %s, 1, %s, %s, %s)",
-                        (attempt_id, len(page.rows), len(page.rows) if page.quota.jobs_remaining is not None else None,
-                         "provider_header" if page.quota.jobs_remaining is not None else "estimate"),
+                        (attempt_id, len(page.rows), page.quota.jobs_this_request,
+                         "provider_header" if page.quota.jobs_this_request is not None else "estimate"),
                     )
             if self.spend_budget:
                 self.spend_budget.finish_attempt(attempt_id, "served")
@@ -680,6 +708,7 @@ class AcquisitionService:
             run.new_postings += new_here
             run.modified_postings += modified_here
             run.expired_postings += expired_here
+            run.unchanged_postings += unchanged_here
             run.duplicate_pages += 1 if duplicate_page else 0
             run.quota = page.quota.to_dict()
             if fenced:

@@ -7,6 +7,7 @@ from __future__ import annotations
 from typing import Any, Dict
 
 import psycopg
+from .acquisition_metrics import acquisition_profiles
 
 
 def _one(cur, sql: str, params=()) -> Any:
@@ -27,6 +28,7 @@ def ledger(conn: psycopg.Connection) -> Dict[str, Any]:
         out["fantastic_uncertain_attempts"] = _one(cur, "SELECT count(*) FROM request_attempts WHERE provider = 'fantastic' AND status = 'uncertain'")
         out["page_receipts"] = _one(cur, "SELECT count(*) FROM page_receipts")
         out["duplicate_pages"] = _one(cur, "SELECT count(*) FROM page_receipts WHERE duplicate_of_receipt_id IS NOT NULL")
+        out["acquisition_profiles"] = acquisition_profiles(cur)
         out["unique_provider_ids_received"] = _one(cur, "SELECT count(DISTINCT x) FROM page_receipts, unnest(row_ids) AS x")
         out["postings"] = _one(cur, "SELECT count(*) FROM postings")
         out["postings_cross_source_duplicates"] = _one(cur, "SELECT count(*) FROM postings WHERE duplicate_of_posting_id IS NOT NULL")

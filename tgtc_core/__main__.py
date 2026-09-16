@@ -143,6 +143,17 @@ def _bounded_acceptance_failure(report, *, acquire: bool) -> str:
     if os.environ.get("TGTC_ACCEPTANCE_MODE", "").strip() != "bounded":
         return ""
     if acquire:
+        # A healthy priority page must not hide a broken discovery query (or the
+        # reverse). Legacy acceptance semantics remain backward-compatible.
+        for item in report.acquisition:
+            stop = str(item.get("stop_reason") or "")
+            if item.get("query_profile") in {"priority_v1", "discovery_v1"} and (
+                stop.startswith(("request_error:", "provider_")) or stop in {
+                    "auth_refused", "quota_refused", "timeout_uncertain", "lease_lost",
+                    "partition_outside_provider_time_frame", "duplicate_page_loop",
+                }
+            ):
+                return stop
         pages = sum(int(item.get("pages") or 0) for item in report.acquisition)
         if pages == 0:
             for item in report.acquisition:

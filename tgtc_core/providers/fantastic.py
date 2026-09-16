@@ -46,6 +46,7 @@ class FantasticRequestError(Exception):
 
 @dataclass(frozen=True)
 class Quota:
+    jobs_this_request: Optional[int] = None
     jobs_limit: Optional[int] = None
     jobs_remaining: Optional[int] = None
     requests_limit: Optional[int] = None
@@ -53,7 +54,8 @@ class Quota:
     next_billing_date: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
-        return {"jobs_limit": self.jobs_limit, "jobs_remaining": self.jobs_remaining,
+        return {"jobs_this_request": self.jobs_this_request,
+                "jobs_limit": self.jobs_limit, "jobs_remaining": self.jobs_remaining,
                 "requests_limit": self.requests_limit, "requests_remaining": self.requests_remaining,
                 "next_billing_date": self.next_billing_date}
 
@@ -76,6 +78,7 @@ def read_quota(resp: Response) -> Quota:
             return None
     nbd = resp.header("x-api-next-billing-date")
     return Quota(
+        jobs_this_request=geti("x-api-jobs-this-request") if str(resp.header("x-api-jobs-this-request") or "").isdigit() else None,
         jobs_limit=geti("x-api-jobs-limit"), jobs_remaining=geti("x-api-jobs-remaining"),
         requests_limit=geti("x-api-requests-limit"), requests_remaining=geti("x-api-requests-remaining"),
         next_billing_date=str(nbd).strip() if nbd else None,
