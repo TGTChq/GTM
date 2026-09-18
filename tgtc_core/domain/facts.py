@@ -229,16 +229,31 @@ def has_people_authority(description: str) -> Optional[str]:
     return None
 
 
-def _norm_emp(value: Optional[str]) -> str:
-    return re.sub(r"[^a-z]", "", str(value or "").lower())
+def _norm_emp_values(value: object) -> List[str]:
+    """Normalize scalar or multi-valued provider employment labels.
+
+    Fantastic can return ``ai_employment_type`` as a list.  Stringifying that
+    list collapsed values such as ``FULL_TIME`` + ``CONTRACTOR`` into one
+    unrecognized token, allowing the posting to escape the downstream gate.
+    Preserve every label so an explicit non-full-time value can win.
+    """
+    if value in (None, ""):
+        return []
+    if isinstance(value, (list, tuple, set, frozenset)):
+        out: List[str] = []
+        for item in value:
+            out.extend(_norm_emp_values(item))
+        return list(dict.fromkeys(out))
+    normalized = re.sub(r"[^a-z]", "", str(value).lower())
+    return [normalized] if normalized else []
 
 
 def extract_job_facts(
     *,
     title: Optional[str],
     description: Optional[str],
-    employment_type: Optional[str] = None,
-    ai_employment_type: Optional[str] = None,
+    employment_type: object = None,
+    ai_employment_type: object = None,
     location_type: Optional[str] = None,
     countries: Sequence[str] = (),
     location_text: Optional[str] = None,
@@ -269,11 +284,24 @@ def extract_job_facts(
             emp_value, emp_excerpt, emp_status = value, hits[0], TEXT
             break
     if not emp_value:
-        provider_emp = _norm_emp(ai_employment_type) or _norm_emp(employment_type)
-        if provider_emp in {"fulltime", "full_time"}:
-            emp_value, emp_excerpt, emp_status = "full_time", f"provider employment_type={ai_employment_type or employment_type}", PROVIDER
-        elif provider_emp in {"parttime", "contractor", "contract", "temporary", "intern", "internship", "volunteer", "other"}:
-            emp_value, emp_excerpt, emp_status = {"parttime": "part_time", "contractor": "contract", "intern": "internship", "internship": "internship"}.get(provider_emp, provider_emp), f"provider employment_type={ai_employment_type or employment_type}", PROVIDER
+        provider_values = list(dict.fromkeys(
+            _norm_emp_values(ai_employment_type) + _norm_emp_values(employment_type)
+        ))
+        negative_values = {
+            "parttime": "part_time", "contractor": "contract", "contract": "contract",
+            "fixedterm": "fixed_term", "temporary": "temporary", "temp": "temporary",
+            "freelance": "freelance", "seasonal": "seasonal", "intern": "internship",
+            "internship": "internship", "volunteer": "volunteer", "unpaid": "unpaid",
+            "fractional": "fractional", "other": "other",
+        }
+        # Provider filters are inclusion filters: a posting may be tagged both
+        # FULL_TIME and CONTRACTOR.  Any explicit incompatible label wins.
+        provider_negative = next((negative_values[v] for v in provider_values if v in negative_values), "")
+        provider_excerpt = f"provider employment_type={ai_employment_type!r}; raw_employment_type={employment_type!r}"
+        if provider_negative:
+            emp_value, emp_excerpt, emp_status = provider_negative, provider_excerpt, PROVIDER
+        elif "fulltime" in provider_values:
+            emp_value, emp_excerpt, emp_status = "full_time", provider_excerpt, PROVIDER
     if not emp_value:
         hits = _matching(sents, FULL_TIME)
         if hits:
