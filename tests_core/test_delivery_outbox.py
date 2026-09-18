@@ -8,6 +8,7 @@ from types import SimpleNamespace
 import pytest
 
 from tgtc_core.providers.instantly import InstantlyResult
+from tgtc_core.policy.campaigns import POLICY_VERSION
 from tgtc_core.services import opportunity as opp_mod
 from tgtc_core.services.delivery import DeliveryService, OutboxItem
 from tgtc_core.testing.fakes import FakeAirtable, FakeInstantly
@@ -105,7 +106,7 @@ def test_happy_path_writes_created_receipts_and_marks_the_approval_delivered(con
     assert [x.outcome for x in a] == ["delivered"] and [x.outcome for x in i] == ["delivered"]
     assert len(at.records) == 1 and len(ins.leads) == 1
     rec = list(at.records.values())[0]["fields"]
-    assert rec["Status"] == "Approved" and rec["Validation Version"] == "tgtc-core/1"
+    assert rec["Status"] == "Approved" and rec["Validation Version"] == POLICY_VERSION
     lead = list(ins.leads.values())[0]
     assert lead["campaign"] == CS_CAMPAIGN and lead["custom_variables"]["role_bucket"] == "customer_success"
     kinds = [r["receipt_kind"] for r in sqlall(conn, "SELECT receipt_kind FROM delivery_receipts ORDER BY id")]

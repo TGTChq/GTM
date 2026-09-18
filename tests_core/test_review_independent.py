@@ -17,7 +17,7 @@ from urllib.parse import urlsplit
 
 import pytest
 
-from tgtc_core.domain.approval import ApprovalRefusal, ApprovedLead, build_approved_lead
+from tgtc_core.domain.approval import ApprovalRefusal, build_approved_lead
 from tgtc_core.domain.gates import evaluate_contact
 from tgtc_core.domain.inference import InferenceResponse
 from tgtc_core.policy.campaigns import FUNCTION_KEYS, buyer_titles
@@ -351,6 +351,26 @@ def test_unusable_domain_results_do_not_hide_a_valid_org_id_candidate():
     assert svc.person["apollo_person_id"] == "right-role"
 
 
+@pytest.mark.parametrize("missing,reason", [
+    ("campaign", "configuration_pending:no_campaign_configured:product"),
+    ("signing_key", "configuration_pending:signing_key_missing"),
+])
+def test_missing_output_configuration_waits_before_any_apollo_call(missing, reason):
+    person = make_person(
+        id="right-role", first="Right", last="Buyer", title="VP Product",
+        org_name="Acme", org_domain="acme.com", email="right@acme.com", email_status="verified",
+    )
+    fake = FakeApollo(people_by_domain={"acme.com": [person]})
+    svc = OpportunityWithFixtureStorage(fake, "product")
+    if missing == "campaign":
+        svc.campaign_env = {}
+    else:
+        svc.signing_key = ""
+    out = svc.process(1)
+    assert (out.outcome, out.reason) == ("wait", reason)
+    assert fake.requests == [] and fake.served_paid == 0
+
+
 @pytest.mark.parametrize("scenario, reason", [
     ("empty", "no_candidates_found"),
     ("unusable", "no_usable_candidates_in_search"),
@@ -378,7 +398,8 @@ def test_empty_search_outcome_distinguishes_precheck_rejection_from_paid_history
     if scenario == "judged":
         svc._excluded_refs = lambda oid: ({"pid:search-person"}, set(), set())
     out = svc.process(1)
-    assert (out.outcome, out.reason) == ("closed", reason)
+    assert (out.outcome, out.reason) == ("wait", f"buyer_search_pending:{reason}")
+    assert out.details["absence_proven"] is False and out.details["until"]
     assert fake.served_paid == 0 and svc.approvals == []
     assert not any(r["path"].endswith("/people/match") for r in fake.requests)
     if scenario == "unusable":

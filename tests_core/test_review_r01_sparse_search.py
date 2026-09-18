@@ -61,10 +61,10 @@ def test_pre_enrichment_skip_is_not_a_permanent_blacklist(conn, clock):
     person["title"] = "Marketing Coordinator"
     fake = apollo_for("acme.com", "Acme", people=[person])
     out = opportunity_service(conn, fake, clock).process(oid)
-    assert out.outcome == "closed" and out.reason == "no_usable_candidates_in_search"
+    assert out.outcome == "wait" and out.reason == "buyer_search_pending:no_usable_candidates_in_search"
     assert sql1(conn, "SELECT outcome FROM candidate_attempts WHERE candidate_ref = 'pid:p-x'") == "skipped_pre_enrichment"
     assert fake.served_paid == 0
-    # new evidence reopens; the candidate now holds a buyer title
+    # the candidate can be reconsidered when its search-visible title changes
     from tests_core.seed import seed_opportunity as seed2
     person["title"] = BUYER_TITLE_BY_FUNCTION["customer_success"]
     seed2(conn, clock, job_id="job-2")

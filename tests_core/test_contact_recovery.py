@@ -5,10 +5,32 @@ from __future__ import annotations
 import pytest
 
 from tgtc_core.policy.campaigns import FUNCTION_KEYS
+from tgtc_core.services.opportunity import reopen_recoverable_opportunities
 from tgtc_core.testing.fakes import make_person
 from tgtc_core.testing.scenario import BUYER_TITLE_BY_FUNCTION
 from tests_core.helpers import opportunity_service, sql1, sqlall
 from tests_core.seed import apollo_for, good_buyer, seed_opportunity
+
+
+def test_recoverable_search_closure_is_reopened_without_incrementing_evidence_epoch(conn, clock):
+    _, _, oid = seed_opportunity(conn, clock)
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE opportunities SET state = 'closed', close_reason = 'no_candidates_found' WHERE id = %s",
+            (oid,),
+        )
+        cur.execute(
+            "UPDATE work_items SET state = 'closed', close_reason = 'no_candidates_found' "
+            "WHERE kind = 'qualify_opportunity' AND subject_id = %s",
+            (oid,),
+        )
+    conn.commit()
+    from tgtc_core.testing.scenario import campaign_env
+    assert reopen_recoverable_opportunities(
+        conn, campaign_env=campaign_env(), signing_key="test-key", now=clock(),
+    ) == 1
+    assert sql1(conn, "SELECT state || ':' || evidence_epoch FROM opportunities WHERE id = %s", (oid,)) == "open:1"
+    assert sql1(conn, "SELECT state FROM work_items WHERE kind = 'qualify_opportunity' AND subject_id = %s", (oid,)) == "ready"
 
 
 @pytest.mark.parametrize("function_key", FUNCTION_KEYS)
