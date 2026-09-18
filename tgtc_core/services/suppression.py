@@ -63,6 +63,24 @@ def account_keys(*, domain: str, name: str) -> Set[str]:
     return keys
 
 
+def company_function_contact_keys(conn: psycopg.Connection, keys: Iterable[str]) -> Set[str]:
+    """Distinct imported contacts across every stable alias of a company/function."""
+    normalized = sorted({str(key).strip().lower() for key in keys if str(key).strip()})
+    if not normalized:
+        return set()
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT contact_key, evidence FROM company_function_contacts WHERE company_function_key = ANY(%s)",
+            (normalized,),
+        )
+        out: Set[str] = set()
+        for row in cur.fetchall():
+            evidence = row["evidence"] if isinstance(row["evidence"], dict) else {}
+            email = str(evidence.get("email") or "").strip().lower()
+            out.add(f"email:{email}" if email else str(row["contact_key"]))
+        return out
+
+
 def add(conn: psycopg.Connection, *, kind: str, key: str, source: str, reason: str,
         evidence: Optional[Dict[str, Any]] = None) -> bool:
     with conn.cursor() as cur:
@@ -75,12 +93,14 @@ def add(conn: psycopg.Connection, *, kind: str, key: str, source: str, reason: s
 
 
 def check(conn: psycopg.Connection, *, email: str = "", company_function: Iterable[str] = (),
-          account: Iterable[str] = (), account_level: Optional[bool] = None) -> List[str]:
+          account: Iterable[str] = (), account_level: Optional[bool] = None,
+          company_function_limit: int = 1) -> List[str]:
     """Return the suppression hits as ``kind:key`` strings (empty = clear)."""
     checks: List[tuple] = []
     if email:
         checks.append(("person_email", email.strip().lower()))
-    for k in company_function:
+    company_keys = {str(k).strip().lower() for k in company_function if str(k).strip()}
+    for k in company_keys:
         checks.append(("company_function", k.lower()))
     if account_level is None:
         account_level = bool(rule("account_level_suppression"))
@@ -94,7 +114,12 @@ def check(conn: psycopg.Connection, *, email: str = "", company_function: Iterab
             "SELECT kind, key FROM suppressions WHERE (kind, key) IN (SELECT unnest(%s::text[]), unnest(%s::text[]))",
             ([c[0] for c in checks], [c[1] for c in checks]),
         )
-        return [f"{r['kind']}:{r['key']}" for r in cur.fetchall()]
+        hits = [f"{r['kind']}:{r['key']}" for r in cur.fetchall()]
+    if company_function_limit > 1 and company_keys:
+        existing = company_function_contact_keys(conn, company_keys)
+        if len(existing) < company_function_limit:
+            hits = [hit for hit in hits if not hit.startswith("company_function:")]
+    return hits
 
 
 def import_airtable_rows(conn: psycopg.Connection, rows: Sequence[Dict[str, Any]], *, source: str = "airtable_import") -> ImportCounts:
@@ -107,7 +132,8 @@ def import_airtable_rows(conn: psycopg.Connection, rows: Sequence[Dict[str, Any]
             status = str(fields.get("Status") or "").strip().lower()
             email = str(fields.get("Email") or "").strip().lower()
             bucket = str(fields.get("Role Bucket") or "").strip().lower()
-            evidence = {"record_id": rec.get("id"), "status": status, "lead_key": fields.get("Lead Key")}
+            evidence = {"record_id": rec.get("id"), "status": status, "lead_key": fields.get("Lead Key"),
+                        "email": email}
             inserted_any = False
             if email:
                 if add(conn, kind="person_email", key=email, source=source, reason=f"airtable_row:{status or 'blank'}", evidence=evidence):
@@ -119,11 +145,28 @@ def import_airtable_rows(conn: psycopg.Connection, rows: Sequence[Dict[str, Any]
                 slug = ""
                 if identity.startswith("linkedin:") and not fields.get("Outbound Hold") and confidence in {"high", "medium"}:
                     slug = identity.split(":", 1)[1]
+                lead_key = str(fields.get("Lead Key") or "").strip().lower()
+                record_id = str(rec.get("id") or "").strip().lower()
+                contact_key = (f"lead:{lead_key}" if lead_key else
+                               f"record:{record_id}" if record_id else f"email:{email}")
                 for key in company_function_keys(domain=str(fields.get("Website") or ""), name=str(fields.get("Company") or ""),
                                                  slug=slug, function_key=bucket):
                     if add(conn, kind="company_function", key=key, source=source, reason=f"active_airtable_row:{status or 'blank'}", evidence=evidence):
                         counts.by_kind["company_function"] = counts.by_kind.get("company_function", 0) + 1
                         inserted_any = True
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            "UPDATE company_function_contacts SET source = %s, evidence = evidence || %s "
+                            "WHERE company_function_key = %s AND contact_key = %s",
+                            (source, jsonb(evidence), key, contact_key),
+                        )
+                        cur.execute(
+                            "INSERT INTO company_function_contacts (company_function_key, contact_key, source, evidence) "
+                            "VALUES (%s, %s, %s, %s) ON CONFLICT DO NOTHING RETURNING contact_key",
+                            (key, contact_key, source, jsonb(evidence)),
+                        )
+                        if cur.fetchone() is not None:
+                            inserted_any = True
                 for key in account_keys(domain=str(fields.get("Website") or ""), name=str(fields.get("Company") or "")):
                     if add(conn, kind="account", key=key, source=source, reason=f"active_airtable_row:{status or 'blank'}", evidence=evidence):
                         counts.by_kind["account"] = counts.by_kind.get("account", 0) + 1
