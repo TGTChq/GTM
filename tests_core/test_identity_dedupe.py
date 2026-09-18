@@ -49,8 +49,11 @@ def test_one_person_is_not_approved_twice_across_functions(conn, clock):
     # finance must pick a DIFFERENT person even though the COO is in finance's hierarchy too
     assert sql1(conn, "SELECT lead_json->>'email' FROM approvals WHERE opportunity_id = %s", (o_fin,)) == "controller@acme.com"
     assert sql1(conn, "SELECT count(DISTINCT person_id) FROM approvals") == 2
-    # and if the COO had been the only candidate for finance, finance closes rather than double-approving
+    # and if the COO had been the only candidate for finance, finance remains
+    # deferred rather than double-approving; a later index refresh may expose a
+    # different qualified buyer.
     _, _, o_hr = seed_opportunity(conn, clock, function_key="people_hr", job_id="hr-1")
     fake.people_by_domain["acme.com"] = [dict(coo, title="Chief People Officer")]
     out2 = svc.process(o_hr)
-    assert out2.outcome == "closed" and sql1(conn, "SELECT count(*) FROM approvals") == 2
+    assert out2.outcome == "wait" and out2.reason == "buyer_search_pending:no_unjudged_candidates_remaining"
+    assert sql1(conn, "SELECT count(*) FROM approvals") == 2
