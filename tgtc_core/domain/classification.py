@@ -7,7 +7,10 @@ Order of decision (PRODUCT_CONTRACT §6):
    evidence and no strong competitor decides without any model call.
 3. Otherwise the semantic port is consulted; its answer is re-validated here (schema,
    grounding of every excerpt, hard exclusions). The model never approves.
-4. Port unavailable or answer ungrounded -> ``insufficient_evidence`` (reopenable).
+4. An unsupported semantic exclusion is ignored. It cannot suppress independently
+   grounded positive routing evidence from the same answer.
+5. Port unavailable or positive answer ungrounded -> ``insufficient_evidence``
+   (reopenable).
 
 The title is NOT an input to function scoring. It is carried as data and offered to
 the semantic port as optional context only.
@@ -342,17 +345,16 @@ def _apply_semantic(result: ClassificationResult, response: InferenceResponse, d
                          or response.incompatible_reasons or response.exclusion_evidence)
     if claimed_exclusion:
         if not math.isfinite(response.confidence) or not 0.8 <= response.confidence <= 1:
-            result.notes.append("insufficient_evidence:semantic_exclusion_low_confidence")
-            return result
-        for evidence in response.exclusion_evidence:
-            code, excerpt = evidence.get("code", ""), evidence.get("excerpt", "")
-            if grounded(excerpt, desc) and corroborates(code, excerpt, desc):
-                result.excluded = True
-                result.exclusion_reason = f"semantic_evidence:{code}"
-                result.facts["semantic_exclusion"] = {"code": code, "excerpt": excerpt, "confidence": response.confidence}
-                return result
-        result.notes.append("insufficient_evidence:semantic_exclusion_ungrounded_or_unsupported")
-        return result
+            result.notes.append("ignored_semantic_exclusion:low_confidence")
+        else:
+            for evidence in response.exclusion_evidence:
+                code, excerpt = evidence.get("code", ""), evidence.get("excerpt", "")
+                if grounded(excerpt, desc) and corroborates(code, excerpt, desc):
+                    result.excluded = True
+                    result.exclusion_reason = f"semantic_evidence:{code}"
+                    result.facts["semantic_exclusion"] = {"code": code, "excerpt": excerpt, "confidence": response.confidence}
+                    return result
+            result.notes.append("ignored_semantic_exclusion:ungrounded_or_unsupported")
     functions = [f for f in response.compatible_functions if f in FUNCTION_KEYS]
     if not functions or not math.isfinite(response.confidence) or not 0.6 <= response.confidence <= 1:
         result.notes.append("insufficient_evidence:semantic_low_confidence_or_no_function")

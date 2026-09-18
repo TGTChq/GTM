@@ -59,6 +59,15 @@ def test_size_band_override_and_global_fallback():
     assert new.resolve_campaign_id("product", 500, {}) == ""
 
 
+def test_shared_customer_experience_route_works_from_either_historical_env_name():
+    shared = "1747c87e-12e9-4477-bc4d-048223d39513"
+    success_only = {"INSTANTLY_CAMPAIGN_CUSTOMER_SUCCESS": shared}
+    support_only = {"INSTANTLY_CAMPAIGN_CUSTOMER_SUPPORT": shared}
+    assert new.resolve_campaign_id("customer_support", 200, success_only) == shared
+    assert new.resolve_campaign_id("customer_success", 200, support_only) == shared
+    assert new.campaign_route_configured("customer_support", success_only)
+
+
 def test_buyer_titles_founders_last_and_size_gated():
     with_founders = new.buyer_titles("finance", founder_allowed=True)
     without = new.buyer_titles("finance", founder_allowed=False)

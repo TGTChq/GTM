@@ -11,6 +11,7 @@ import pytest
 from tgtc_core.domain.inference import (
     RESPONSE_SCHEMA, AnthropicAdapter, CachedInference, InferenceRequest, ReplayAdapter,
 )
+from tgtc_core.db.connection import jsonb
 
 
 def _req(desc="Own accounts payable and receivable and the month-end close. Full-time, remote US.") -> InferenceRequest:
@@ -194,3 +195,27 @@ def test_db_cache_avoids_a_second_call_for_the_same_content(conn):
     assert not missing.available and inner.calls == 2
     cached.classify(InferenceRequest(content_hash="zzz", description="x" * 200))
     assert inner.calls == 3
+
+
+def test_v2_reuses_the_v1_raw_answer_without_another_model_call(conn):
+    payload = {
+        "available": True, "compatible_functions": ["finance"], "responsibilities": [
+            {"phrase": "accounts payable", "excerpt": "Own accounts payable and receivable"}
+        ], "seniority": "ic", "people_management": False, "incompatible_reasons": [],
+        "exclusion_evidence": [], "confidence": 0.9,
+    }
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO inference_cache (content_hash, policy_version, model_version, response_json) VALUES (%s, %s, %s, %s)",
+            ("abc", "tgtc-core/1", "replay/1", jsonb(payload)),
+        )
+    conn.commit()
+    inner = ReplayAdapter({})
+    cached = CachedInference(conn, inner, policy_version="tgtc-core/2")
+    out = cached.classify(_req())
+    assert out.available and out.compatible_functions == ["finance"]
+    assert inner.calls == 0 and (cached.hits, cached.misses) == (1, 0)
+    with conn.cursor() as cur:
+        cur.execute("SELECT count(*) AS n FROM inference_cache WHERE content_hash = 'abc' AND policy_version = 'tgtc-core/2'")
+        assert cur.fetchone()["n"] == 1
+    conn.commit()

@@ -51,8 +51,8 @@ def test_ungrounded_leadership_cannot_reject_and_grounded_positive_is_accepted()
         {"phrase": "coordinates internal activities", "excerpt": "coordinates a range of internal activities across teams"}],
         "seniority": "director_plus", "people_management": True, "incompatible_reasons": [], "confidence": 0.9}})
     r = classify_posting(description=desc, title="", countries=["US"], content_hash="h3", inference=leadership)
-    assert not r.decided
-    assert "insufficient_evidence:semantic_exclusion_ungrounded_or_unsupported" in r.notes
+    assert r.compatible_functions == ["operations"] and not r.excluded
+    assert "ignored_semantic_exclusion:ungrounded_or_unsupported" in r.notes
     good = ReplayAdapter({"h3": {"compatible_functions": ["operations"], "responsibilities": [
         {"phrase": "coordinates internal activities", "excerpt": "coordinates a range of internal activities across teams"}],
         "seniority": "ic", "people_management": False, "incompatible_reasons": [], "confidence": 0.9}})

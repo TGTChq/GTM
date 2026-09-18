@@ -16,7 +16,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Dict, Mapping, Optional, Tuple
 
-POLICY_VERSION = "tgtc-core/1"
+POLICY_VERSION = "tgtc-core/2"
 
 
 @dataclass(frozen=True)
@@ -89,6 +89,37 @@ def campaign_for_function(function_key: str) -> Optional[Campaign]:
     return CAMPAIGN_BY_FUNCTION.get(str(function_key or "").strip().lower())
 
 
+def campaign_env_names(function_key: str) -> Tuple[str, ...]:
+    """Configured env names that can serve the function's shared campaign.
+
+    CUSTOMER EXPERIENCE has two function keys but one Instantly campaign.  A
+    workspace that configures only one of the two historical env names should
+    still route both functions to that same campaign.
+    """
+    key = str(function_key or "").strip().lower()
+    primary = CAMPAIGN_ENV_BY_FUNCTION.get(key)
+    campaign = CAMPAIGN_BY_FUNCTION.get(key)
+    if not primary or not campaign:
+        return ()
+    siblings = tuple(
+        CAMPAIGN_ENV_BY_FUNCTION[fn]
+        for fn in campaign.functions
+        if fn != key and CAMPAIGN_ENV_BY_FUNCTION.get(fn)
+    )
+    return (primary, *siblings)
+
+
+def campaign_route_configured(function_key: str, env: Mapping[str, str]) -> bool:
+    """Whether any exact, shared or global route could serve this function."""
+    if str(env.get("INSTANTLY_CAMPAIGN_ID", "") or "").strip():
+        return True
+    return any(
+        str(env.get(f"{name}{suffix}", "") or "").strip()
+        for name in campaign_env_names(function_key)
+        for suffix in ("", "_SMALL", "_MID", "_LARGE")
+    )
+
+
 def resolve_campaign_id(function_key: str, employee_count: Optional[int], env: Mapping[str, str]) -> str:
     """The exact Instantly campaign id for a function, from configured env names.
 
@@ -97,8 +128,7 @@ def resolve_campaign_id(function_key: str, employee_count: Optional[int], env: M
     ``INSTANTLY_CAMPAIGN_ID``. An empty result means "no campaign configured" and
     the caller must refuse to approve.
     """
-    base_env = CAMPAIGN_ENV_BY_FUNCTION.get(str(function_key or "").strip().lower())
-    if base_env:
+    for base_env in campaign_env_names(function_key):
         band = size_band(employee_count).upper()
         specific = str(env.get(f"{base_env}_{band}", "") or "").strip()
         if specific:

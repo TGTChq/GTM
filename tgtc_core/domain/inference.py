@@ -445,10 +445,27 @@ class CachedInference:
             cur.execute("SELECT response_json FROM inference_cache WHERE content_hash = %s AND policy_version = %s AND model_version = %s",
                         (request.content_hash, self.policy_version, self.model_version))
             row = cur.fetchone()
+            # v2 changes local validation, not the prompt/schema. Reuse the raw
+            # v1 model answer and validate it under v2 instead of paying to ask
+            # the model the same question again for the existing backlog.
+            if row is None and self.policy_version == "tgtc-core/2":
+                cur.execute(
+                    "SELECT response_json FROM inference_cache WHERE content_hash = %s AND policy_version = %s AND model_version = %s",
+                    (request.content_hash, "tgtc-core/1", self.model_version),
+                )
+                row = cur.fetchone()
         self.conn.commit()
         if row:
             self.hits += 1
-            return InferenceResponse.from_dict(dict(row["response_json"]), model_version=self.model_version)
+            response = InferenceResponse.from_dict(dict(row["response_json"]), model_version=self.model_version)
+            with transaction(self.conn):
+                with self.conn.cursor() as cur:
+                    cur.execute(
+                        "INSERT INTO inference_cache (content_hash, policy_version, model_version, response_json) VALUES (%s, %s, %s, %s) "
+                        "ON CONFLICT DO NOTHING",
+                        (request.content_hash, self.policy_version, self.model_version, jsonb(response.to_dict())),
+                    )
+            return response
         self.misses += 1
         response = self.inner.classify(request)
         if response.available:

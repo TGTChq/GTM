@@ -19,7 +19,7 @@ def test_rejecting_requires_bounded_confidence(confidence):
     text = "You will provide direct patient care in the hospital."
     r = decide(text, code="clinical_care", excerpt=text, confidence=confidence)
     assert not r.decided
-    assert "insufficient_evidence:semantic_exclusion_low_confidence" in r.notes
+    assert "ignored_semantic_exclusion:low_confidence" in r.notes
 
 
 @pytest.mark.parametrize("claim", [
@@ -29,7 +29,7 @@ def test_rejecting_requires_bounded_confidence(confidence):
 def test_a_model_claim_without_a_quote_is_not_a_business_rejection(claim):
     r = decide("The employee prepares remote digital reports.", **claim)
     assert not r.decided
-    assert "insufficient_evidence:semantic_exclusion_ungrounded_or_unsupported" in r.notes
+    assert "ignored_semantic_exclusion:ungrounded_or_unsupported" in r.notes
 
 
 @pytest.mark.parametrize("code,text", [
@@ -81,3 +81,19 @@ def test_supported_positive_responsibilities_still_work():
     r = decide(text, compatible_functions=["operations"], responsibilities=[
         ResponsibilityItem("internal coordination", "coordinates internal activities across teams")])
     assert r.compatible_functions == ["operations"] and not r.excluded
+
+
+@pytest.mark.parametrize("confidence,note", [
+    (0.79, "ignored_semantic_exclusion:low_confidence"),
+    (0.95, "ignored_semantic_exclusion:ungrounded_or_unsupported"),
+])
+def test_unproven_exclusion_does_not_erase_grounded_positive_routing(confidence, note):
+    text = "The employee coordinates internal activities across teams."
+    r = decide(
+        text, code="people_management", excerpt="You will supervise a team",
+        confidence=confidence, compatible_functions=["operations"], responsibilities=[
+            ResponsibilityItem("internal coordination", "coordinates internal activities across teams")
+        ], people_management=True,
+    )
+    assert r.compatible_functions == ["operations"] and not r.excluded
+    assert note in r.notes

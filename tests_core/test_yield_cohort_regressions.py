@@ -82,6 +82,28 @@ def test_actual_contracts_stay_excluded(description):
     assert "employment:contract" in [e.reason for e in extract_job_facts(title="Analyst", description=description).exclusions]
 
 
+@pytest.mark.parametrize("labels,reason", [
+    (["FULL_TIME", "CONTRACTOR"], "employment:contract"),
+    (["FULL_TIME", "PART_TIME"], "employment:part_time"),
+    (["FULL_TIME", "INTERNSHIP"], "employment:internship"),
+])
+def test_multivalued_provider_employment_labels_cannot_hide_an_incompatible_type(labels, reason):
+    facts = extract_job_facts(
+        title="Analyst", description="Perform remote reporting and analysis for the team.",
+        ai_employment_type=labels,
+    )
+    assert reason in [e.reason for e in facts.exclusions]
+
+
+def test_full_time_provider_label_still_passes_when_it_is_the_only_type():
+    facts = extract_job_facts(
+        title="Analyst", description="Perform remote reporting and analysis for the team.",
+        ai_employment_type=["FULL_TIME"],
+    )
+    assert facts.get("employment_type").value == "full_time"
+    assert not [e for e in facts.exclusions if e.reason.startswith("employment:")]
+
+
 def test_volunteer_advisor_is_not_a_full_time_hr_opportunity():
     facts = extract_job_facts(title="Legal and Governance Advisor (Volunteer)",
         description="This is a volunteer advisory position. Commitment: 4–8 hours per month. HR Department.",

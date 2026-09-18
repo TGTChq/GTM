@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from tgtc_core.policy.campaigns import CAMPAIGN_BY_FUNCTION, FUNCTION_KEYS
+from tgtc_core.policy.campaigns import CAMPAIGN_BY_FUNCTION, FUNCTION_KEYS, POLICY_VERSION
 from tgtc_core.testing.scenario import CONTROL_ID_BY_CAMPAIGN_KEY, build_nine_route_scenario
 from tests_core.helpers import runner, sql1, sqlall
 
@@ -34,7 +34,7 @@ def test_every_route_produces_one_approved_lead_delivered_to_its_own_campaign(co
     # Airtable received one Approved row per approval with the core validation version
     assert len(sc.airtable.records) == 10
     assert {r["fields"]["Status"] for r in sc.airtable.records.values()} == {"Approved"}
-    assert {r["fields"]["Validation Version"] for r in sc.airtable.records.values()} == {"tgtc-core/1"}
+    assert {r["fields"]["Validation Version"] for r in sc.airtable.records.values()} == {POLICY_VERSION}
     assert sql1(conn, "SELECT count(*) FROM delivery_receipts WHERE receipt_kind = 'created'") == 20
     # spend is reported as requests + estimates, never as one-call-one-credit facts
     L = report.ledger

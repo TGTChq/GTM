@@ -8,7 +8,7 @@ import pytest
 
 from tgtc_core.domain import approval as ap
 from tgtc_core.domain.gates import evaluate_email
-from tgtc_core.policy.campaigns import KNOWN_CONTROL_CAMPAIGN_IDS
+from tgtc_core.policy.campaigns import POLICY_VERSION
 
 NOW = datetime(2026, 9, 8, tzinfo=timezone.utc)
 CID = "45ac1e03-67e7-4bdd-b372-808042104e4c"
@@ -78,7 +78,7 @@ def test_airtable_payload_is_approved_only_and_carries_the_core_validation_versi
     out = ap.build_approved_lead(**_inputs())
     fields = ap.airtable_fields(out.lead, out.fingerprint)
     assert fields["Status"] == "Approved"
-    assert fields["Validation Version"] == "tgtc-core/1"
+    assert fields["Validation Version"] == POLICY_VERSION
     assert fields["Validation Fingerprint"] == out.fingerprint
     assert fields["Lead Key"] == out.lead_key and fields["Campaign ID"] == CID and fields["Role Bucket"] == "product"
     for internal in ("Pending", "NEEDS_CHECK", "UNVERIFIED", "REROUTE", "ready", "waiting", "retry"):
