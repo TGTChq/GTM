@@ -39,8 +39,11 @@ def test_same_posting_replay_cannot_consume_another_evidence_epoch(conn, clock):
         classify_one(conn, pid, inference=None, now=clock())
     assert sql1(conn, 'SELECT evidence_epoch FROM opportunities WHERE id = %s', (oid,)) == 1
     assert sql1(conn, 'SELECT state FROM opportunities WHERE id = %s', (oid,)) == 'open'
+    # No paid candidate match was consumed, so additional commercial evidence
+    # joins the same open search epoch. Exhausted paid epochs are covered by the
+    # recovery suite and still advance on genuinely new evidence.
     seed_opportunity(conn, clock, job_id='genuinely-new-posting')
-    assert sql1(conn, 'SELECT evidence_epoch FROM opportunities WHERE id = %s', (oid,)) == 2
+    assert sql1(conn, 'SELECT evidence_epoch FROM opportunities WHERE id = %s', (oid,)) == 1
 
 
 def test_free_empty_search_does_not_consume_the_paid_recovery_probe(conn, clock):
