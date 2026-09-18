@@ -24,7 +24,7 @@ providers it says so.
 | Blueprint component | Path | Notes |
 |---|---|---|
 | Contracts | `rebuild/PRODUCT_CONTRACT.md`, `rebuild/INTEGRATION_MAP.md`, `rebuild/ACCEPTANCE.md` | reconciled with the repository; every legacy default is labelled `pending confirmation` |
-| Policy registry | `tgtc_core/policy/campaigns.py`, `tgtc_core/policy/requirements.py` | nine campaigns / ten functions, buyer hierarchies, 21 rules with provenance, `POLICY_VERSION = tgtc-core/1` |
+| Policy registry | `tgtc_core/policy/campaigns.py`, `tgtc_core/policy/requirements.py` | nine campaigns / ten functions, buyer hierarchies, 21 rules with provenance, `POLICY_VERSION = tgtc-core/2` |
 | Storage | `tgtc_core/db/schema.sql`, `db/migrate.py`, `db/connection.py`, `db/work_queue.py` | 21 tables (all blueprint identities), `FOR UPDATE SKIP LOCKED` claims, token+version leases |
 | Acquisition | `tgtc_core/providers/fantastic.py`, `services/acquisition.py` | fresh/backfill partitions, intent-before-call, rows+receipt+cursor in one transaction, duplicate-page hold, quota reserve, PII stripping, no title filters |
 | Identity | `tgtc_core/domain/identity.py`, `services/identity_service.py` | domain/slug/name anchors, alias corroboration, cross-source duplicate linking |
@@ -155,7 +155,7 @@ suppression adoption and any external delivery remain later cutover gates.
    acquisition and an Apollo refusal; a current pause is **not demonstrated** by the
    visible configuration. Do not assume `MAINTENANCE_ONLY` controls the active command.
    Structurally, core rows carry
-   `Validation Version = tgtc-core/1`, so a still-running Approved Sync skips them without
+   `Validation Version = tgtc-core/2`, so a still-running Approved Sync skips them without
    a write; the core's importer treats legacy rows as history. Both directions are guarded.
 5. **Schedule**: run `cycle` hourly (blueprint §5 proposal) or as three stage workers
    sharing the database; fresh/backfill share is `TGTC_FRESH_SHARE_PCT`.
