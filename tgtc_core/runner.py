@@ -34,7 +34,7 @@ from .services.delivery import DeliveryService
 from .services.identity_service import resolve_posting_identity
 from .services.lifecycle import expire_postings
 from .services.metrics import ledger
-from .services.opportunity import OpportunityService
+from .services.opportunity import OpportunityService, reopen_recoverable_opportunities
 from .services.scheduler import FairShare
 from .services.spend_budget import BudgetExceeded, SpendBudget
 
@@ -97,6 +97,10 @@ class Runner:
         out: Dict[str, Any] = dict(expire_postings(self.conn, now=self.now()))
         if self.inference_configured:
             out["reopened_for_inference"] = reopen_for_inference(self.conn, model_version=self.inference.model_version, now=self.now())
+        out["reopened_recoverable_opportunities"] = reopen_recoverable_opportunities(
+            self.conn, campaign_env=self.s.campaign_env, signing_key=self.s.signing_key,
+            now=self.now(),
+        )
         self._log("lifecycle", "pass", out)
         return out
 
@@ -262,7 +266,10 @@ class Runner:
                         with transaction(self.conn):
                             work_queue.wait(self.conn, item, out.reason, until)
                         counts["wait"] = counts.get("wait", 0) + 1
-                        counts["technical_failure"] = counts.get("technical_failure", 0) + 1
+                        if not out.reason.startswith("buyer_search_pending:"):
+                            counts["technical_failure"] = counts.get("technical_failure", 0) + 1
+                        else:
+                            counts["deferred_search"] = counts.get("deferred_search", 0) + 1
                         continue
                     if result == "retry":
                         with transaction(self.conn):
