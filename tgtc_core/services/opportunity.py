@@ -375,6 +375,12 @@ class OpportunityService:
                  "selectors_tried": 0, "pages_searched": 0, "page_caps_reached": 0,
                  "broadened_searches": int(broaden)}
         seen: Set[str] = set()
+        # A few portability/compatibility tests intentionally construct the
+        # service with ``__new__`` and only provide the historical
+        # ``search_pages`` attribute.  Keep the production default available
+        # for those legacy construction paths instead of making the new page
+        # size setting an implicit required dependency.
+        page_size = max(1, min(100, int(getattr(self, "search_page_size", 100))))
         for selector in (("domain", emp["domain"]), ("organization_id", emp.get("apollo_org_id") or "")):
             if not selector[1]:
                 continue
@@ -382,12 +388,12 @@ class OpportunityService:
             for page in range(1, self.search_pages + 1):
                 self._guard_provider(chargeable=False)
                 params = {selector[0]: selector[1], "titles": list(titles), "page": page,
-                          "per_page": self.search_page_size, "email_statuses": ["verified"]}
+                          "per_page": page_size, "email_statuses": ["verified"]}
                 if broaden:
                     params["include_similar_titles"] = True
                 attempt_id = self._intent("people_search", opportunity_id=opp["id"], params=params, estimated_credits=0)
                 kwargs: Dict[str, Any] = {"titles": list(titles), "page": page,
-                                          "per_page": self.search_page_size,
+                                          "per_page": page_size,
                                           "email_statuses": ["verified"]}
                 if broaden:
                     kwargs["include_similar_titles"] = True
@@ -433,7 +439,7 @@ class OpportunityService:
                     usable.append(p)
                 pagination = result.data.get("pagination") if isinstance(result.data.get("pagination"), dict) else {}
                 total_pages = pagination.get("total_pages")
-                if len(page_people) < self.search_page_size or (isinstance(total_pages, int) and page >= total_pages):
+                if len(page_people) < page_size or (isinstance(total_pages, int) and page >= total_pages):
                     break
                 if page == self.search_pages:
                     stats["page_caps_reached"] += 1
@@ -708,20 +714,24 @@ class OpportunityService:
             cur.execute("SELECT count(*) AS n FROM candidate_attempts WHERE opportunity_id = %s AND attempt_kind = 'match' "
                         "AND outcome NOT IN ('refused', 'uncertain') AND epoch = %s", (opportunity_id, epoch))
             matches_done = int(cur.fetchone()["n"])
-            cur.execute(
-                "SELECT a.id, lower(p.email) AS email FROM approvals a JOIN people p ON p.id = a.person_id "
-                "WHERE a.opportunity_id = %s AND a.state <> 'revoked'",
-                (opportunity_id,),
-            )
-            approved_rows = [dict(row) for row in cur.fetchall()]
+            approved_rows: List[Dict[str, Any]] = []
+            if self.max_contacts > 1:
+                cur.execute(
+                    "SELECT a.id, lower(p.email) AS email FROM approvals a JOIN people p ON p.id = a.person_id "
+                    "WHERE a.opportunity_id = %s AND a.state <> 'revoked'",
+                    (opportunity_id,),
+                )
+                approved_rows = [dict(row) for row in cur.fetchall()]
         self.conn.commit()
         approved_total = len(approved_rows)
-        existing_contacts = company_function_contact_keys(self.conn, company_keys)
-        existing_contacts.update(
-            f"email:{row['email']}" if row.get("email") else f"approval:{row['id']}"
-            for row in approved_rows
-        )
-        self.conn.commit()
+        existing_contacts: Set[str] = set()
+        if self.max_contacts > 1:
+            existing_contacts = company_function_contact_keys(self.conn, company_keys)
+            existing_contacts.update(
+                f"email:{row['email']}" if row.get("email") else f"approval:{row['id']}"
+                for row in approved_rows
+            )
+            self.conn.commit()
         if len(existing_contacts) >= self.max_contacts:
             self._finalize_approved(opportunity_id)
             return QualifyOutcome(
@@ -742,6 +752,13 @@ class OpportunityService:
                 approval_ids.append(approval_id)
                 approved_person_ids.append(int(reuse["id"]))
                 approved_refs.add(reuse["_ref"])
+                if self.max_contacts == 1:
+                    self._finalize_approved(opportunity_id)
+                    return QualifyOutcome(
+                        opportunity_id, "approved", "reused_verified_person",
+                        approval_id, int(reuse["id"]),
+                        details={"approvals_created": 1, "approved_total": 1},
+                    )
             elif decision.reason in CONFIGURATION_LEVEL_REFUSALS:
                 return self._wait_for_dependency(
                     opportunity_id, f"configuration_pending:{decision.reason}"
