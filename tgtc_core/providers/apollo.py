@@ -178,7 +178,8 @@ class ApolloClient:
 
     # --- documented 0 credits ---------------------------------------------
     def search_people(self, *, titles: List[str], domain: str = "", organization_id: str = "",
-                      page: int = 1, per_page: int = 25, include_similar_titles: bool = False) -> ApolloResult:
+                      page: int = 1, per_page: int = 100, include_similar_titles: bool = False,
+                      email_statuses: Optional[List[str]] = None) -> ApolloResult:
         params: List[tuple] = [("include_similar_titles", "true" if include_similar_titles else "false"),
                               ("page", str(page)), ("per_page", str(per_page))]
         if organization_id:
@@ -186,6 +187,7 @@ class ApolloClient:
         elif domain:
             params.append(("q_organization_domains_list[]", domain))
         params.extend(("person_titles[]", t) for t in titles)
+        params.extend(("contact_email_status[]", status) for status in (email_statuses or []))
         return self._call("POST", "/mixed_people/api_search", params)
 
 
