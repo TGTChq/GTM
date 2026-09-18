@@ -78,6 +78,32 @@ def test_generic_mailbox_and_wrong_domain_are_rejected_and_the_next_candidate_wi
     assert sql1(conn, "SELECT lead_json->>'email' FROM approvals") == f"good.buyer@{domain}"
 
 
+def test_one_opportunity_can_create_three_distinct_fully_gated_buyers(conn, clock):
+    domain, org = "acme.com", "Acme"
+    bad = good_buyer(domain, org, id="p-bad", email=f"bad@{domain}", status="extrapolated")
+    good = [good_buyer(domain, org, id=f"p-good-{i}", email=f"buyer{i}@{domain}") for i in range(3)]
+    _, _, oid = seed_opportunity(conn, clock)
+    fake = apollo_for(domain, org, people=[bad, *good])
+    out = opportunity_service(
+        conn, fake, clock,
+        max_contacts_per_opportunity=3,
+        run_id="three-contact-test",
+    ).process(oid)
+
+    assert out.outcome == "approved"
+    assert out.details == {"approvals_created": 3, "approved_total": 3}
+    assert sql1(conn, "SELECT count(*) FROM approvals WHERE opportunity_id = %s", (oid,)) == 3
+    assert sql1(conn, "SELECT count(*) FROM approvals WHERE run_id = 'three-contact-test'") == 3
+    assert sql1(conn, "SELECT count(DISTINCT person_id) FROM approvals WHERE opportunity_id = %s", (oid,)) == 3
+    assert sql1(conn, "SELECT count(*) FROM delivery_outbox WHERE channel = 'airtable'") == 3
+    assert sql1(conn, "SELECT count(*) FROM delivery_outbox WHERE channel = 'instantly'") == 3
+    reasons = {a["candidate_ref"]: a["reason"] for a in sqlall(
+        conn, "SELECT candidate_ref, reason FROM candidate_attempts WHERE attempt_kind = 'gate'"
+    )}
+    assert reasons["pid:p-bad"] == "email:not_verified:extrapolated"
+    assert {reasons[f"pid:p-good-{i}"] for i in range(3)} == {"approved"}
+
+
 def test_max_attempts_closes_with_reason_and_a_new_candidate_reopens_later(conn, clock):
     """Review (recovery b): the per-epoch cap closes the opportunity; NEW evidence reopens it
     into the next epoch with a fresh budget, the earlier history is kept, and candidates
@@ -110,6 +136,20 @@ def test_max_attempts_closes_with_reason_and_a_new_candidate_reopens_later(conn,
     assert fake.served_paid == 6
     # history is kept: every epoch-1 attempt row is still there
     assert sql1(conn, "SELECT count(*) FROM candidate_attempts WHERE opportunity_id = %s", (oid,)) >= 8
+
+
+def test_expanded_three_contact_budget_reopens_old_three_attempt_closure(conn, clock):
+    domain, org = "acme.com", "Acme"
+    people = [good_buyer(domain, org, id=f"old-{i}", email=f"old{i}@{domain}", status="extrapolated")
+              for i in range(4)]
+    _, _, oid = seed_opportunity(conn, clock)
+    assert opportunity_service(conn, apollo_for(domain, org, people=people), clock).process(oid).outcome == "closed"
+    from tgtc_core.testing.scenario import campaign_env
+    assert reopen_recoverable_opportunities(
+        conn, campaign_env=campaign_env(), signing_key="test-key", now=clock(),
+        max_contacts_per_opportunity=3,
+    ) == 1
+    assert sql1(conn, "SELECT state || ':' || evidence_epoch FROM opportunities WHERE id = %s", (oid,)) == "open:1"
 
 
 def test_corroborated_alternate_domain_email_passes_but_unrelated_domain_does_not(conn, clock):

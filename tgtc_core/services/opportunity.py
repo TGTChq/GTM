@@ -48,7 +48,12 @@ from ..domain.employer_attribution import employer_attribution_conflict
 from ..providers.apollo import ApolloClient, ApolloResult, Outcome, person_org_domain
 from . import provider_state
 from .spend_budget import SpendBudget
-from .suppression import account_keys, check as suppression_check, company_function_keys
+from .suppression import (
+    account_keys,
+    check as suppression_check,
+    company_function_contact_keys,
+    company_function_keys,
+)
 
 #: Approval refusals that describe the OPPORTUNITY (not the candidate): no other
 #: candidate can change them, so the opportunity closes with the reason.
@@ -105,6 +110,7 @@ def reopen_recoverable_opportunities(
     signing_key: str,
     now: Optional[datetime] = None,
     limit: int = 5000,
+    max_contacts_per_opportunity: int = 1,
 ) -> int:
     """Re-enter opportunities that were closed for a recoverable dependency.
 
@@ -122,11 +128,22 @@ def reopen_recoverable_opportunities(
                 SELECT o.id, o.function_key, o.lane, e.employee_count
                 FROM opportunities o
                 JOIN employers e ON e.id = o.employer_id
-                WHERE o.state = 'closed' AND o.close_reason = ANY(%s)
+                WHERE o.state = 'closed' AND (
+                    o.close_reason = ANY(%s)
+                    OR (
+                        o.close_reason LIKE 'no_verified_buyer_after_max_attempts:epoch_%%'
+                        AND (SELECT count(*) FROM candidate_attempts ca
+                             WHERE ca.opportunity_id = o.id AND ca.attempt_kind = 'match'
+                               AND ca.outcome NOT IN ('refused', 'uncertain')
+                               AND ca.epoch = o.evidence_epoch) < %s
+                    )
+                )
                 ORDER BY o.last_posting_at DESC
                 LIMIT %s
                 """,
-                (list(RECOVERABLE_OPPORTUNITY_CLOSE_REASONS), limit),
+                (list(RECOVERABLE_OPPORTUNITY_CLOSE_REASONS),
+                 int(rule("max_match_attempts_per_evidence_epoch")) * max(1, min(3, max_contacts_per_opportunity)),
+                 limit),
             )
             rows = [dict(row) for row in cur.fetchall()]
             reopened = 0
@@ -157,6 +174,8 @@ def reopen_recoverable_opportunities(
 class OpportunityService:
     def __init__(self, conn: psycopg.Connection, apollo: ApolloClient, *, campaign_env: Dict[str, str],
                  signing_key: str, retry_hours: float = 6.0, people_search_max_pages: int = 2,
+                 people_search_page_size: int = 100, run_id: str = "legacy-unattributed",
+                 max_contacts_per_opportunity: int = 1,
                  person_uniqueness: bool = True, verify_on_import: bool = False,
                  spend_budget: Optional[SpendBudget] = None,
                  now: Callable[[], datetime] = lambda: datetime.now(timezone.utc)):
@@ -166,6 +185,9 @@ class OpportunityService:
         self.signing_key = signing_key
         self.retry_hours = retry_hours
         self.search_pages = max(1, people_search_max_pages)
+        self.search_page_size = max(1, min(100, people_search_page_size))
+        self.run_id = run_id or "legacy-unattributed"
+        self.max_contacts = max(1, min(3, max_contacts_per_opportunity))
         self.person_uniqueness = person_uniqueness
         self.verify_on_import = verify_on_import
         self.spend_budget = spend_budget
@@ -353,17 +375,26 @@ class OpportunityService:
                  "selectors_tried": 0, "pages_searched": 0, "page_caps_reached": 0,
                  "broadened_searches": int(broaden)}
         seen: Set[str] = set()
+        # A few portability/compatibility tests intentionally construct the
+        # service with ``__new__`` and only provide the historical
+        # ``search_pages`` attribute.  Keep the production default available
+        # for those legacy construction paths instead of making the new page
+        # size setting an implicit required dependency.
+        page_size = max(1, min(100, int(getattr(self, "search_page_size", 100))))
         for selector in (("domain", emp["domain"]), ("organization_id", emp.get("apollo_org_id") or "")):
             if not selector[1]:
                 continue
             stats["selectors_tried"] += 1
             for page in range(1, self.search_pages + 1):
                 self._guard_provider(chargeable=False)
-                params = {selector[0]: selector[1], "titles": list(titles), "page": page}
+                params = {selector[0]: selector[1], "titles": list(titles), "page": page,
+                          "per_page": page_size, "email_statuses": ["verified"]}
                 if broaden:
                     params["include_similar_titles"] = True
                 attempt_id = self._intent("people_search", opportunity_id=opp["id"], params=params, estimated_credits=0)
-                kwargs: Dict[str, Any] = {"titles": list(titles), "page": page}
+                kwargs: Dict[str, Any] = {"titles": list(titles), "page": page,
+                                          "per_page": page_size,
+                                          "email_statuses": ["verified"]}
                 if broaden:
                     kwargs["include_similar_titles"] = True
                 kwargs[selector[0]] = selector[1]
@@ -408,7 +439,7 @@ class OpportunityService:
                     usable.append(p)
                 pagination = result.data.get("pagination") if isinstance(result.data.get("pagination"), dict) else {}
                 total_pages = pagination.get("total_pages")
-                if len(page_people) < 25 or (isinstance(total_pages, int) and page >= total_pages):
+                if len(page_people) < page_size or (isinstance(total_pages, int) and page >= total_pages):
                     break
                 if page == self.search_pages:
                     stats["page_caps_reached"] += 1
@@ -512,6 +543,7 @@ class OpportunityService:
             company_function=company_function_keys(domain=emp.get("domain") or "", name=emp["canonical_name"],
                                                    slug=emp.get("linkedin_slug") or "", function_key=opp["function_key"]),
             account=account_keys(domain=emp.get("domain") or "", name=emp["canonical_name"]),
+            company_function_limit=self.max_contacts,
         )
         self.conn.commit()
         employer_view = dict(emp)
@@ -524,7 +556,11 @@ class OpportunityService:
         )
 
     def _commit_approval(self, opp: Dict[str, Any], person_id: int, approved: ApprovedLead) -> int:
-        """Approval + both outbox items in ONE transaction."""
+        """One approval + both outbox items in ONE transaction.
+
+        The opportunity stays open until this qualification pass has collected
+        every independently valid contact available up to ``max_contacts``.
+        """
         lead = approved.lead
         with transaction(self.conn):
             work_queue.assert_owned(self.conn, self._work_item, now=self.now())
@@ -544,15 +580,18 @@ class OpportunityService:
                 cur.execute(
                     """
                     INSERT INTO approvals (opportunity_id, person_id, employer_id, campaign_key, function_key, campaign_id, policy_version,
-                                           lead_key, fingerprint, lead_json)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id
+                                           lead_key, fingerprint, lead_json, run_id)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id
                     """,
                     (opp["id"], person_id, opp["employer_id"], lead["campaign_key"], lead["function_key"], lead["campaign_id"],
-                     lead["policy_version"], approved.lead_key, approved.fingerprint, jsonb(lead)),
+                     lead["policy_version"], approved.lead_key, approved.fingerprint, jsonb(lead), self.run_id),
                 )
                 approval_id = int(cur.fetchone()["id"])
-                cur.execute("UPDATE opportunities SET state = 'approved', approved_person_id = %s, close_reason = NULL, updated_at = now() WHERE id = %s",
-                            (person_id, opp["id"]))
+                cur.execute(
+                    "UPDATE opportunities SET approved_person_id = COALESCE(approved_person_id, %s), "
+                    "close_reason = NULL, updated_at = now() WHERE id = %s",
+                    (person_id, opp["id"]),
+                )
                 cur.execute(
                     "INSERT INTO delivery_outbox (approval_id, channel, idempotency_key, payload_json, available_at) VALUES (%s, 'airtable', %s, %s, %s)",
                     (approval_id, f"airtable:{approved.lead_key}", jsonb(airtable_fields(lead, approved.fingerprint)), self.now()),
@@ -564,6 +603,17 @@ class OpportunityService:
                      self.now()),
                 )
         return approval_id
+
+    def _finalize_approved(self, opportunity_id: int) -> None:
+        with transaction(self.conn):
+            work_queue.assert_owned(self.conn, self._work_item, now=self.now())
+            with self.conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE opportunities SET state = 'approved', close_reason = NULL, updated_at = now() "
+                    "WHERE id = %s AND state = 'open' AND EXISTS ("
+                    "SELECT 1 FROM approvals WHERE opportunity_id = %s AND state <> 'revoked')",
+                    (opportunity_id, opportunity_id),
+                )
 
     def _gate_enriched(self, enriched: Dict[str, Any], emp: Dict[str, Any], titles: Sequence[str], founder_allowed: bool,
                        employer_domains: Set[str]):
@@ -617,11 +667,15 @@ class OpportunityService:
         epoch = int(opp.get("evidence_epoch") or 1)
         if epoch > int(rule("max_evidence_epochs")):
             return self._close(opportunity_id, "evidence_epochs_exhausted")
+        company_keys = company_function_keys(
+            domain=emp.get("domain") or "", name=emp["canonical_name"],
+            slug=emp.get("linkedin_slug") or "", function_key=opp["function_key"],
+        )
         hits = suppression_check(
             self.conn,
-            company_function=company_function_keys(domain=emp.get("domain") or "", name=emp["canonical_name"],
-                                                   slug=emp.get("linkedin_slug") or "", function_key=opp["function_key"]),
+            company_function=company_keys,
             account=account_keys(domain=emp.get("domain") or "", name=emp["canonical_name"]),
+            company_function_limit=self.max_contacts,
         )
         self.conn.commit()
         if hits:
@@ -652,13 +706,41 @@ class OpportunityService:
         founder_allowed = count is not None and count <= int(rule("founder_fallback_max_employees"))
         titles = buyer_titles(opp["function_key"], founder_allowed=founder_allowed)
         employer_domains = {emp["domain"]} | self._alias_domains(emp["id"])
-        max_attempts = int(rule("max_match_attempts_per_evidence_epoch"))
+        # The operational attempt allowance scales with the contact quota; the
+        # evidence and approval gates themselves are unchanged for every person.
+        max_attempts = int(rule("max_match_attempts_per_evidence_epoch")) * self.max_contacts
         judged, approved_refs, suppressed_emails = self._excluded_refs(opportunity_id)
         with self.conn.cursor() as cur:
             cur.execute("SELECT count(*) AS n FROM candidate_attempts WHERE opportunity_id = %s AND attempt_kind = 'match' "
                         "AND outcome NOT IN ('refused', 'uncertain') AND epoch = %s", (opportunity_id, epoch))
             matches_done = int(cur.fetchone()["n"])
+            approved_rows: List[Dict[str, Any]] = []
+            if self.max_contacts > 1:
+                cur.execute(
+                    "SELECT a.id, lower(p.email) AS email FROM approvals a JOIN people p ON p.id = a.person_id "
+                    "WHERE a.opportunity_id = %s AND a.state <> 'revoked'",
+                    (opportunity_id,),
+                )
+                approved_rows = [dict(row) for row in cur.fetchall()]
         self.conn.commit()
+        approved_total = len(approved_rows)
+        existing_contacts: Set[str] = set()
+        if self.max_contacts > 1:
+            existing_contacts = company_function_contact_keys(self.conn, company_keys)
+            existing_contacts.update(
+                f"email:{row['email']}" if row.get("email") else f"approval:{row['id']}"
+                for row in approved_rows
+            )
+            self.conn.commit()
+        if len(existing_contacts) >= self.max_contacts:
+            self._finalize_approved(opportunity_id)
+            return QualifyOutcome(
+                opportunity_id, "approved", "contact_quota_already_reached",
+                details={"approvals_created": 0, "approved_total": approved_total},
+            )
+
+        approval_ids: List[int] = []
+        approved_person_ids: List[int] = []
 
         # 1) reuse a person already verified at this employer within TTL -- through the SAME gates (R04)
         reuse = self._reusable_person(emp, titles, founder_allowed, approved_refs, suppressed_emails, employer_domains, opportunity_id, epoch)
@@ -667,12 +749,21 @@ class OpportunityService:
             if isinstance(decision, ApprovedLead):
                 approval_id = self._commit_approval(opp, int(reuse["id"]), decision)
                 self._record_attempt(opportunity_id, reuse["_ref"], "gate", "pass", "reused_verified_person", epoch=epoch, person_id=int(reuse["id"]))
-                return QualifyOutcome(opportunity_id, "approved", "reused_verified_person", approval_id, int(reuse["id"]))
-            if decision.reason in CONFIGURATION_LEVEL_REFUSALS:
+                approval_ids.append(approval_id)
+                approved_person_ids.append(int(reuse["id"]))
+                approved_refs.add(reuse["_ref"])
+                if self.max_contacts == 1:
+                    self._finalize_approved(opportunity_id)
+                    return QualifyOutcome(
+                        opportunity_id, "approved", "reused_verified_person",
+                        approval_id, int(reuse["id"]),
+                        details={"approvals_created": 1, "approved_total": 1},
+                    )
+            elif decision.reason in CONFIGURATION_LEVEL_REFUSALS:
                 return self._wait_for_dependency(
                     opportunity_id, f"configuration_pending:{decision.reason}"
                 )
-            if decision.reason in OPPORTUNITY_LEVEL_REFUSALS:
+            elif decision.reason in OPPORTUNITY_LEVEL_REFUSALS:
                 return self._close(opportunity_id, f"approval_refused:{decision.reason}")
 
         # 2) candidate discovery (0-credit search), with the org-id fallback on no USABLE candidate
@@ -688,6 +779,14 @@ class OpportunityService:
                 self._record_attempt(opportunity_id, p["_ref"], "gate", "skipped_pre_enrichment", p["_drop_reason"], epoch=epoch,
                                      details={"title": p.get("title"), "org": person_organization(p).get("name")})
         if not candidates:
+            if approval_ids:
+                self._finalize_approved(opportunity_id)
+                return QualifyOutcome(
+                    opportunity_id, "approved", "approved_available_contacts",
+                    approval_ids[0], approved_person_ids[0],
+                    details={"approvals_created": len(approval_ids),
+                             "approved_total": approved_total + len(approval_ids)},
+                )
             if stats["returned"] == 0:
                 reason = "no_candidates_found"
             elif any(p["_ref"] not in judged | approved_refs for p in dropped):
@@ -706,6 +805,8 @@ class OpportunityService:
 
         made = 0
         for cand in candidates:
+            if len(existing_contacts) + len(approval_ids) >= self.max_contacts:
+                break
             if matches_done + made >= max_attempts:
                 break
             ref = cand["_ref"]
@@ -772,7 +873,17 @@ class OpportunityService:
                 self._record_attempt(opportunity_id, ref, "gate", "fail", "person_already_approved_elsewhere", epoch=epoch, person_id=person_id)
                 continue
             self._record_attempt(opportunity_id, ref, "gate", "pass", "approved", epoch=epoch, person_id=person_id)
-            return QualifyOutcome(opportunity_id, "approved", "approved", approval_id, person_id, attempts_made=made)
+            approval_ids.append(approval_id)
+            approved_person_ids.append(person_id)
+
+        if approval_ids:
+            self._finalize_approved(opportunity_id)
+            return QualifyOutcome(
+                opportunity_id, "approved", "approved",
+                approval_ids[0], approved_person_ids[0], attempts_made=made,
+                details={"approvals_created": len(approval_ids),
+                         "approved_total": approved_total + len(approval_ids)},
+            )
 
         if matches_done + made >= max_attempts:
             return self._close(opportunity_id, f"no_verified_buyer_after_max_attempts:epoch_{epoch}")

@@ -8,6 +8,7 @@ from tgtc_core.testing.fakes import FakeAirtable, FakeInstantly
 from tgtc_core.testing.scenario import CONTROL_ID_BY_CAMPAIGN_KEY
 from tests_core.helpers import delivery_service, opportunity_service, sql1, sqlall
 from tests_core.seed import apollo_for, seed_opportunity
+from tests_core.seed import good_buyer
 
 CS_CAMPAIGN = CONTROL_ID_BY_CAMPAIGN_KEY["customer_experience"]
 
@@ -33,7 +34,7 @@ def test_reply_event_suppresses_future_approval_of_the_same_person(conn, clock):
     apply_outcome_event(conn, provider="instantly", event_type="reply", dedupe_key="r-1", email="good.buyer@acme.com")
     pid, eid, oid = seed_opportunity(conn, clock)
     out = opportunity_service(conn, apollo_for("acme.com", "Acme"), clock).process(oid)
-    assert out.outcome == "closed"
+    assert out.outcome == "wait" and out.reason == "buyer_search_pending:no_verified_buyer_in_candidates"
     reasons = {a["reason"] for a in sqlall(conn, "SELECT reason FROM candidate_attempts")}
     assert "suppressed:person_email" in reasons
     assert sql1(conn, "SELECT count(*) FROM approvals") == 0
@@ -54,6 +55,28 @@ def test_active_company_function_history_closes_before_any_spend(conn, clock):
     pid2, _, oid2 = seed_opportunity(conn, clock, function_key="finance", job_id="fin-1")
     hits = check(conn, company_function=company_function_keys(domain="acme.com", name="Acme", slug="", function_key="finance"))
     assert hits == []
+
+
+def test_three_contact_quota_counts_existing_airtable_history(conn, clock):
+    from tgtc_core.services.suppression import import_airtable_rows
+
+    row = {"id": "rec1", "fields": {
+        "Lead Key": "acme.com|old@acme.com|customer_success", "Company": "Acme",
+        "Website": "https://acme.com", "Role Bucket": "customer_success",
+        "Status": "Approved", "Email": "old@acme.com",
+    }}
+    first = import_airtable_rows(conn, [row])
+    second = import_airtable_rows(conn, [row])
+    assert first.inserted == 1 and second.already_present == 1
+    _, _, oid = seed_opportunity(conn, clock)
+    people = [good_buyer("acme.com", "Acme", id=f"new-{i}", email=f"new{i}@acme.com") for i in range(3)]
+    out = opportunity_service(
+        conn, apollo_for("acme.com", "Acme", people=people), clock,
+        max_contacts_per_opportunity=3,
+    ).process(oid)
+    assert out.outcome == "approved"
+    assert out.details["approvals_created"] == 2
+    assert sql1(conn, "SELECT count(*) FROM approvals WHERE opportunity_id = %s", (oid,)) == 2
 
 
 def test_error_and_rejected_rows_do_not_suppress(conn):

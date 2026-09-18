@@ -34,13 +34,16 @@ def test_content_refusal_is_not_reopened_each_cycle_for_the_same_model(conn, clo
 def test_same_posting_replay_cannot_consume_another_evidence_epoch(conn, clock):
     pid, _, oid = seed_opportunity(conn, clock)
     fake = apollo_for('acme.com', 'Acme', people=[])
-    assert opportunity_service(conn, fake, clock).process(oid).outcome == 'closed'
+    assert opportunity_service(conn, fake, clock).process(oid).outcome == 'wait'
     for _ in range(5):
         classify_one(conn, pid, inference=None, now=clock())
     assert sql1(conn, 'SELECT evidence_epoch FROM opportunities WHERE id = %s', (oid,)) == 1
-    assert sql1(conn, 'SELECT state FROM opportunities WHERE id = %s', (oid,)) == 'closed'
+    assert sql1(conn, 'SELECT state FROM opportunities WHERE id = %s', (oid,)) == 'open'
+    # No paid candidate match was consumed, so additional commercial evidence
+    # joins the same open search epoch. Exhausted paid epochs are covered by the
+    # recovery suite and still advance on genuinely new evidence.
     seed_opportunity(conn, clock, job_id='genuinely-new-posting')
-    assert sql1(conn, 'SELECT evidence_epoch FROM opportunities WHERE id = %s', (oid,)) == 2
+    assert sql1(conn, 'SELECT evidence_epoch FROM opportunities WHERE id = %s', (oid,)) == 1
 
 
 def test_free_empty_search_does_not_consume_the_paid_recovery_probe(conn, clock):
@@ -48,7 +51,7 @@ def test_free_empty_search_does_not_consume_the_paid_recovery_probe(conn, clock)
     _, _, second = seed_opportunity(conn, clock, domain='beta.com', org_name='Beta', job_id='job-beta')
     provider_state.record_refusal(conn, 'apollo', 'credits_exhausted', now=clock())
     clock.advance(hours=6, seconds=1)
-    assert opportunity_service(conn, apollo_for('acme.com', 'Acme', people=[]), clock).process(first).outcome == 'closed'
+    assert opportunity_service(conn, apollo_for('acme.com', 'Acme', people=[]), clock).process(first).outcome == 'wait'
     fake = apollo_for('beta.com', 'Beta', people=[good_buyer('beta.com', 'Beta', id='beta-buyer')])
     assert opportunity_service(conn, fake, clock).process(second).outcome == 'approved'
     assert fake.served_paid == 1
@@ -127,7 +130,7 @@ def test_v1_migration_preserves_inventory_and_cursor(conn, clock):
     apply_schema(conn)
     assert sql1(conn, 'SELECT next_offset FROM source_partitions') == 100
     assert sql1(conn, 'SELECT provider_job_id FROM postings') == 'saved-job'
-    assert sql1(conn, 'SELECT max(version) FROM schema_migrations') == 5
+    assert sql1(conn, 'SELECT max(version) FROM schema_migrations') == 6
     assert sql1(conn, 'SELECT query_profile FROM source_partitions') == 'legacy_v1'
 
 

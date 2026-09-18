@@ -16,7 +16,7 @@ def test_rejected_contact_reconsidered_from_cache_remains_rejected(conn, clock):
     _, eid, o_product = seed_opportunity(conn, clock, function_key="product", domain=domain, org_name=org)
     fake = apollo_for(domain, org, function_key="product", people=[emea])
     out = opportunity_service(conn, fake, clock).process(o_product)
-    assert out.outcome == "closed"
+    assert out.outcome == "wait" and out.reason == "buyer_search_pending:no_verified_buyer_in_candidates"
     assert sql1(conn, "SELECT reason FROM candidate_attempts WHERE candidate_ref = 'pid:p-emea' AND attempt_kind = 'gate'") == "contact:territory_mismatch"
     # the enriched record is stored, with evidence and WITHOUT an employer attribution
     person = sqlall(conn, "SELECT employer_id, email_status, facts_json FROM people WHERE apollo_person_id = 'p-emea'")[0]
@@ -28,7 +28,8 @@ def test_rejected_contact_reconsidered_from_cache_remains_rejected(conn, clock):
     _, _, o2 = seed2(conn, clock, function_key="product", domain=domain, org_name=org, job_id="job-2")
     assert o2 == o_product
     out2 = opportunity_service(conn, fake, clock).process(o2)
-    assert out2.outcome == "closed" and sql1(conn, "SELECT count(*) FROM approvals") == 0
+    assert out2.outcome == "wait" and out2.reason.startswith("buyer_search_pending:")
+    assert sql1(conn, "SELECT count(*) FROM approvals") == 0
 
 
 def test_cached_person_is_reused_only_when_every_gate_passes_for_this_function(conn, clock):
@@ -43,7 +44,7 @@ def test_cached_person_is_reused_only_when_every_gate_passes_for_this_function(c
     _, _, o_mkt = seed_opportunity(conn, clock, function_key="marketing", domain=domain, org_name=org, job_id="mkt-1")
     fake.people_by_domain[domain] = [coo]          # the search would also only return the COO
     out = opportunity_service(conn, fake, clock).process(o_mkt)
-    assert out.outcome == "closed"
+    assert out.outcome == "wait" and out.reason.startswith("buyer_search_pending:")
     assert sql1(conn, "SELECT count(*) FROM approvals") == 1
 
 

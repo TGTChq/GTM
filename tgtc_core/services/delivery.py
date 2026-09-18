@@ -54,7 +54,8 @@ class OutboxItem:
 class DeliveryService:
     def __init__(self, conn: psycopg.Connection, *, airtable: Optional[AirtableClient], instantly: Optional[InstantlyClient],
                  lease_seconds: int = 300, backoff_seconds: int = 120, max_attempts: int = 8,
-                 check_campaign_status: bool = True, now: Callable[[], datetime] = lambda: datetime.now(timezone.utc)):
+                 check_campaign_status: bool = True, max_contacts_per_opportunity: int = 1,
+                 now: Callable[[], datetime] = lambda: datetime.now(timezone.utc)):
         self.conn = conn
         self.airtable = airtable
         self.instantly = instantly
@@ -62,6 +63,7 @@ class DeliveryService:
         self.backoff = backoff_seconds
         self.max_attempts = max_attempts
         self.check_campaign_status = check_campaign_status
+        self.max_contacts = max(1, min(3, max_contacts_per_opportunity))
         self.now = now
 
     # --- claim (R06) ----------------------------------------------------------
@@ -201,6 +203,7 @@ class DeliveryService:
             self.conn, email=lead.get("email", ""),
             company_function=company_function_keys(domain=row["domain"] or "", name=row["canonical_name"], slug=row["linkedin_slug"] or "", function_key=lead["function_key"]),
             account=account_keys(domain=row["domain"] or "", name=row["canonical_name"]),
+            company_function_limit=self.max_contacts,
         )
         self.conn.commit()
         own_keys = {f"company_function:{k}" for k in company_function_keys(domain=row["domain"] or "", name=row["canonical_name"], slug=row["linkedin_slug"] or "", function_key=lead["function_key"])}

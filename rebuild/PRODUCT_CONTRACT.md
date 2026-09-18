@@ -23,17 +23,21 @@ complete** leads to Airtable and to the matching Instantly campaign with no manu
 review step. Keep traceability from posting to reply/meeting/contract when those
 outcomes are available.
 
-The design objective of 1,000 new, distinct Approved leads per day is retained as a
-**design target**. It is not a demonstrated rate and nothing in this branch claims
-one. Throughput and buyer availability are measured separately (see
-`ACCEPTANCE.md §4`).
+The production controller targets 1,000 new, distinct Approved Airtable leads per
+run. It repeats acquisition and every processing stage until 1,000 terminal
+Airtable create/reconcile receipts attributable to that run exist, or an explicit
+spend, round or no-progress boundary stops it. A boundary is a visible non-success;
+database approvals, provider calls and historical rows never satisfy the target.
+The controller is capacity, not proof: only a live run reaching the receipt target
+demonstrates the rate.
 
 ## 2. Commercial unit
 
 The commercial unit is the **opportunity = employer × function**, carrying one or
 more postings. Rules:
 
-* Several postings of the same function at the same employer are one opportunity.
+* Several postings of the same function at the same employer are one opportunity,
+  which may produce up to three independently gated buyers.
 * Two functions at one employer are two opportunities and may reach two different
   buyers. They never reach the **same person twice**: a person–employer pair is
   approved at most once (`approvals` has a unique index on the person while the
@@ -152,17 +156,18 @@ The model is never asked to approve. Approval is deterministic (`§8`).
    (`people.email_verified_at` within `PERSON_EVIDENCE_TTL_DAYS`, default 45).
 2. Use employer facts from Fantastic (headcount, industry) before paying Apollo for
    organization enrichment; enrich only missing facts.
-3. Apollo People Search (documented 0 credits) by employer domain, falling back to
-   `organization_ids[]` when the domain search returns nobody; buyer titles by
+3. Apollo People Search (documented 0 credits) requests up to 100 verified-email
+   profiles per page by employer domain and `organization_ids[]`; buyer titles by
    function; candidates ordered direct manager → executive → founder (size-gated).
    Candidates already attempted for this opportunity, already approved anywhere,
    or suppressed are excluded **before** the broad search so they cannot block
    recovery.
-4. Enrich (People Match, paid) the best untried candidate; on a negative gate
-   outcome move to the next distinct candidate, up to
-   `MAX_MATCH_ATTEMPTS_PER_OPPORTUNITY` (default 3, legacy value). Every attempt is
-   a `candidate_attempts` row with reason and outcome. A negative result is never
-   stored as a successful search.
+4. Enrich (People Match, paid) the best untried candidates; on a negative gate
+   outcome move to the next distinct candidate. The legacy allowance of three
+   match attempts scales with the configured contact quota (maximum three contacts).
+   Every candidate still passes the complete deterministic gate independently.
+   Every attempt is a `candidate_attempts` row with reason and outcome. A negative
+   result is never stored as a successful search.
 5. `reveal_personal_emails=false`, `reveal_phone_number=false`. No waterfalls.
 6. Every potentially chargeable call writes a `request_attempts` row **before** the
    HTTP request and a result after it. A timeout is `uncertain`, not free.
@@ -177,7 +182,7 @@ Control-A copy needs (`open_role`, `role_focus`, company display name, HM title)
 sources and dates; the policy version; and a passing suppression check at approval
 time.
 
-The approval and its two outbox items (`airtable`, `instantly`) are written in
+Each approval and its two outbox items (`airtable`, `instantly`) are written in
 **one transaction**. Consumers are idempotent: before any send they re-check
 suppressions, approval validity and campaign availability; on restart an
 `in_flight` item is **reconciled by stable identity** (`Lead Key` in Airtable,
