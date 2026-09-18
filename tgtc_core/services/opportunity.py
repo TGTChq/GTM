@@ -40,7 +40,9 @@ from ..domain.gates import (
     title_matches,
 )
 from ..domain.identity import company_names_compatible, domain_name_consistent, person_ref, safe_employer_domain
-from ..policy.campaigns import buyer_titles, is_founder_tier, resolve_campaign_id
+from ..policy.campaigns import (
+    campaign_route_configured, buyer_titles, is_founder_tier, resolve_campaign_id,
+)
 from ..policy.requirements import excluded_industry, rule
 from ..domain.employer_attribution import employer_attribution_conflict
 from ..providers.apollo import ApolloClient, ApolloResult, Outcome, person_org_domain
@@ -53,8 +55,21 @@ from .suppression import account_keys, check as suppression_check, company_funct
 OPPORTUNITY_LEVEL_REFUSALS = frozenset({
     "suppressed", "posting_too_old", "posting_expired", "posting_not_active", "posting_excluded",
     "employer_identity_incomplete", "employer_too_small", "employer_too_large", "employer_excluded_industry",
-    "employer_is_agency", "no_campaign_configured", "campaign_id_not_allowed", "signing_key_missing",
+    "employer_is_agency",
     "no_responsibility_evidence", "copy_fields_incomplete", "function_not_compatible",
+})
+
+# These are runtime dependencies, not evidence that the opportunity is bad.
+# Closing them permanently both loses volume and can waste Apollo credits before
+# discovering a missing Instantly route.
+CONFIGURATION_LEVEL_REFUSALS = frozenset({
+    "no_campaign_configured", "campaign_id_not_allowed", "signing_key_missing",
+})
+
+RECOVERABLE_OPPORTUNITY_CLOSE_REASONS = frozenset({
+    "no_candidates_found", "no_usable_candidates_in_search",
+    "no_unjudged_candidates_remaining", "no_verified_buyer_in_candidates",
+    *(f"approval_refused:{reason}" for reason in CONFIGURATION_LEVEL_REFUSALS),
 })
 
 #: Stored per person so reuse can run the SAME gates later without a new paid call.
@@ -81,6 +96,62 @@ class ProviderWait(Exception):
 
 class ProviderRetry(Exception):
     pass
+
+
+def reopen_recoverable_opportunities(
+    conn: psycopg.Connection,
+    *,
+    campaign_env: Dict[str, str],
+    signing_key: str,
+    now: Optional[datetime] = None,
+    limit: int = 5000,
+) -> int:
+    """Re-enter opportunities that were closed for a recoverable dependency.
+
+    This does not create a new evidence epoch: no new commercial evidence was
+    invented. It simply restores the existing opportunity and lets the current
+    configuration/search policy decide its next state.
+    """
+    if not signing_key:
+        return 0
+    moment = now or datetime.now(timezone.utc)
+    with transaction(conn):
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT o.id, o.function_key, o.lane, e.employee_count
+                FROM opportunities o
+                JOIN employers e ON e.id = o.employer_id
+                WHERE o.state = 'closed' AND o.close_reason = ANY(%s)
+                ORDER BY o.last_posting_at DESC
+                LIMIT %s
+                """,
+                (list(RECOVERABLE_OPPORTUNITY_CLOSE_REASONS), limit),
+            )
+            rows = [dict(row) for row in cur.fetchall()]
+            reopened = 0
+            for row in rows:
+                route_ready = (
+                    bool(resolve_campaign_id(row["function_key"], row.get("employee_count"), campaign_env))
+                    if row.get("employee_count") is not None
+                    else campaign_route_configured(row["function_key"], campaign_env)
+                )
+                if not route_ready:
+                    continue
+                cur.execute(
+                    "UPDATE opportunities SET state = 'open', close_reason = NULL, reopened_at = %s, updated_at = now() "
+                    "WHERE id = %s AND state = 'closed'",
+                    (moment, row["id"]),
+                )
+                if not cur.rowcount:
+                    continue
+                work_queue.enqueue(
+                    conn, kind="qualify_opportunity", subject_kind="opportunity",
+                    subject_id=int(row["id"]), lane=row["lane"], reopen=True,
+                    available_at=moment,
+                )
+                reopened += 1
+    return reopened
 
 
 class OpportunityService:
@@ -135,6 +206,13 @@ class OpportunityService:
                 cur.execute("UPDATE opportunities SET state = 'closed', close_reason = %s, updated_at = now() WHERE id = %s",
                             (reason[:200], opportunity_id))
         return QualifyOutcome(opportunity_id, "closed", reason)
+
+    def _wait_for_dependency(self, opportunity_id: int, reason: str, *, hours: Optional[float] = None,
+                             details: Optional[Dict[str, Any]] = None) -> QualifyOutcome:
+        until = self.now() + timedelta(hours=self.retry_hours if hours is None else hours)
+        payload = dict(details or {})
+        payload["until"] = until.isoformat()
+        return QualifyOutcome(opportunity_id, "wait", reason, details=payload)
 
     def _intent(self, operation: str, *, opportunity_id: int, person_ref_value: str = "", params: Dict[str, Any],
                 estimated_credits: Optional[float]) -> int:
@@ -527,6 +605,15 @@ class OpportunityService:
             return self._close(opportunity_id, "employer_too_small")
         if known_count is not None and known_count > int(rule("max_employees")):
             return self._close(opportunity_id, "employer_too_large")
+        # Refuse to spend Apollo credits when the output route cannot currently
+        # produce a lead. A shared campaign env (for example Customer Experience)
+        # counts as configured for either of its function keys.
+        if not self.signing_key:
+            return self._wait_for_dependency(opportunity_id, "configuration_pending:signing_key_missing")
+        if not campaign_route_configured(opp["function_key"], self.campaign_env):
+            return self._wait_for_dependency(
+                opportunity_id, f"configuration_pending:no_campaign_configured:{opp['function_key']}"
+            )
         epoch = int(opp.get("evidence_epoch") or 1)
         if epoch > int(rule("max_evidence_epochs")):
             return self._close(opportunity_id, "evidence_epochs_exhausted")
@@ -557,6 +644,10 @@ class OpportunityService:
             return self._close(opportunity_id, "employer_too_small")
         if count is not None and count > int(rule("max_employees")):
             return self._close(opportunity_id, "employer_too_large")
+        if not resolve_campaign_id(opp["function_key"], count, self.campaign_env):
+            return self._wait_for_dependency(
+                opportunity_id, f"configuration_pending:no_campaign_for_size:{opp['function_key']}"
+            )
 
         founder_allowed = count is not None and count <= int(rule("founder_fallback_max_employees"))
         titles = buyer_titles(opp["function_key"], founder_allowed=founder_allowed)
@@ -577,6 +668,10 @@ class OpportunityService:
                 approval_id = self._commit_approval(opp, int(reuse["id"]), decision)
                 self._record_attempt(opportunity_id, reuse["_ref"], "gate", "pass", "reused_verified_person", epoch=epoch, person_id=int(reuse["id"]))
                 return QualifyOutcome(opportunity_id, "approved", "reused_verified_person", approval_id, int(reuse["id"]))
+            if decision.reason in CONFIGURATION_LEVEL_REFUSALS:
+                return self._wait_for_dependency(
+                    opportunity_id, f"configuration_pending:{decision.reason}"
+                )
             if decision.reason in OPPORTUNITY_LEVEL_REFUSALS:
                 return self._close(opportunity_id, f"approval_refused:{decision.reason}")
 
@@ -601,11 +696,13 @@ class OpportunityService:
                 reason = "no_usable_candidates_in_search"
             else:
                 reason = "no_unjudged_candidates_remaining"
-            closed = self._close(opportunity_id, reason)
-            closed.details["search_coverage"] = stats
             # A capped search is not evidence that Apollo has no more buyers.
-            closed.details["absence_proven"] = False
-            return closed
+            # Keep the opportunity open and retry later as Apollo's index changes.
+            return self._wait_for_dependency(
+                opportunity_id, f"buyer_search_pending:{reason}",
+                hours=max(24.0, self.retry_hours),
+                details={"search_coverage": stats, "absence_proven": False},
+            )
 
         made = 0
         for cand in candidates:
@@ -661,6 +758,10 @@ class OpportunityService:
             if isinstance(decision, ApprovalRefusal):
                 self._record_attempt(opportunity_id, ref, "gate", "fail", f"approval_refused:{decision.reason}", epoch=epoch,
                                      person_id=person_id, details=decision.details)
+                if decision.reason in CONFIGURATION_LEVEL_REFUSALS:
+                    return self._wait_for_dependency(
+                        opportunity_id, f"configuration_pending:{decision.reason}"
+                    )
                 if decision.reason in OPPORTUNITY_LEVEL_REFUSALS:
                     return self._close(opportunity_id, f"approval_refused:{decision.reason}")
                 continue
@@ -675,7 +776,11 @@ class OpportunityService:
 
         if matches_done + made >= max_attempts:
             return self._close(opportunity_id, f"no_verified_buyer_after_max_attempts:epoch_{epoch}")
-        return self._close(opportunity_id, "no_verified_buyer_in_candidates")
+        return self._wait_for_dependency(
+            opportunity_id, "buyer_search_pending:no_verified_buyer_in_candidates",
+            hours=max(24.0, self.retry_hours),
+            details={"absence_proven": False, "attempts_made": made},
+        )
 
     def _alias_domains(self, employer_id: int) -> Set[str]:
         with self.conn.cursor() as cur:
