@@ -53,6 +53,19 @@ def test_search_valid_empty_list_remains_business_absence():
     assert result.served and result.data == {'people': []}
 
 
+def test_people_search_requests_full_page_and_verified_email_profiles():
+    calls = []
+
+    def request(*args, **kwargs):
+        calls.append(kwargs["params"])
+        return Response(status=200, text='{"people":[]}')
+
+    client = ApolloClient(SimpleNamespace(request=request), base_url='https://offline', api_key='unused')
+    assert client.search_people(titles=['VP Operations'], email_statuses=['verified']).served
+    assert ('per_page', '100') in calls[0]
+    assert ('contact_email_status[]', 'verified') in calls[0]
+
+
 @pytest.mark.parametrize('value,expected', [('nan', None), ('inf', None), ('-1', None), ('1e50', 900.0), ('30', 30.0)])
 def test_retry_after_is_finite_nonnegative_and_bounded(value, expected):
     result = classify(Response(status=429, text='{}', headers={'Retry-After': value}))

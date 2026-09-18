@@ -7,6 +7,7 @@ from tgtc_core import __main__ as cli
 
 @pytest.mark.parametrize("command", [
     ["cycle"],
+    ["run-target"],
     ["work", "--kind", "classify"],
     ["deliver"],
 ])
@@ -23,6 +24,7 @@ def test_missing_spend_acknowledgement_refuses_before_database(command, monkeypa
 
 @pytest.mark.parametrize("command", [
     ["cycle"],
+    ["run-target"],
     ["work", "--kind", "classify"],
     ["deliver"],
 ])
@@ -41,6 +43,7 @@ def test_acknowledged_command_reaches_database_setup(command, monkeypatch):
 
 @pytest.mark.parametrize("command", [
     ["cycle"],
+    ["run-target"],
     ["work", "--kind", "classify"],
     ["work", "--kind", "qualify_opportunity"],
 ])
