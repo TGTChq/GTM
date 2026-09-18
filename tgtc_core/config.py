@@ -80,7 +80,19 @@ class Settings:
     partition_lease_seconds: int = 900
     inference_retry_minutes: int = 15
     apollo_people_search_max_pages: int = 2
+    # Apollo documents up to 100 results/page for People API Search.  Search is
+    # zero-credit; paid person matching remains separately budgeted.
+    apollo_people_search_page_size: int = 100
     apollo_availability_retry_hours: float = 6.0
+    # A production target run keeps cycling until this many NEW approvals from
+    # its own run have terminal Airtable create/reconcile receipts.
+    approved_target_per_run: int = 1000
+    target_max_rounds: int = 100
+    target_stall_rounds: int = 2
+    # The user-approved volume policy permits up to three independently gated
+    # buyers for one employer/function opportunity.  Each contact still passes
+    # the complete employment, authority, territory, LinkedIn and email gates.
+    max_contacts_per_opportunity: int = 3
     lease_seconds: int = 300
     retry_backoff_seconds: int = 120
     fresh_share_pct: int = 80
@@ -94,6 +106,16 @@ class Settings:
             raise ValueError("unknown_acquisition_strategy")
         if not 5 <= self.fantastic_cycle_page_slots <= 100:
             raise ValueError("TGTC_FANTASTIC_CYCLE_PAGE_SLOTS must be between 5 and 100")
+        if not 1 <= self.apollo_people_search_page_size <= 100:
+            raise ValueError("TGTC_APOLLO_PEOPLE_SEARCH_PAGE_SIZE must be between 1 and 100")
+        if self.approved_target_per_run < 1:
+            raise ValueError("TGTC_APPROVED_TARGET_PER_RUN must be positive")
+        if self.target_max_rounds < 1:
+            raise ValueError("TGTC_TARGET_MAX_ROUNDS must be positive")
+        if self.target_stall_rounds < 1:
+            raise ValueError("TGTC_TARGET_STALL_ROUNDS must be positive")
+        if not 1 <= self.max_contacts_per_opportunity <= 3:
+            raise ValueError("TGTC_MAX_CONTACTS_PER_OPPORTUNITY must be between 1 and 3")
 
     @classmethod
     def from_env(cls, env: Optional[Mapping[str, str]] = None) -> "Settings":
@@ -137,7 +159,12 @@ class Settings:
             partition_lease_seconds=_int(env, "TGTC_PARTITION_LEASE_SECONDS", 900),
             inference_retry_minutes=_int(env, "TGTC_INFERENCE_RETRY_MINUTES", 15),
             apollo_people_search_max_pages=_int(env, "TGTC_APOLLO_PEOPLE_SEARCH_MAX_PAGES", 2),
+            apollo_people_search_page_size=_int(env, "TGTC_APOLLO_PEOPLE_SEARCH_PAGE_SIZE", 100),
             apollo_availability_retry_hours=float(_int(env, "TGTC_APOLLO_AVAILABILITY_RETRY_HOURS", 6)),
+            approved_target_per_run=_int(env, "TGTC_APPROVED_TARGET_PER_RUN", 1000),
+            target_max_rounds=_int(env, "TGTC_TARGET_MAX_ROUNDS", 100),
+            target_stall_rounds=_int(env, "TGTC_TARGET_STALL_ROUNDS", 2),
+            max_contacts_per_opportunity=_int(env, "TGTC_MAX_CONTACTS_PER_OPPORTUNITY", 3),
             lease_seconds=_int(env, "TGTC_LEASE_SECONDS", 300),
             retry_backoff_seconds=_int(env, "TGTC_RETRY_BACKOFF_SECONDS", 120),
             fresh_share_pct=_int(env, "TGTC_FRESH_SHARE_PCT", 80),

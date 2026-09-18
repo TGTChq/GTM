@@ -5,6 +5,7 @@ Subcommands:
   describe           print settings presence/limits and the policy manifest (no secrets)
   check-db           authenticated PostgreSQL SELECTs only; does not install the schema
   cycle              acquisition + stages + delivery against the REAL providers configured
+  run-target         repeat cycles until this run creates the Airtable target
   work --kind K      drain one stage
   deliver            drain the outbox
   ledger             print the reconciled ledger
@@ -13,7 +14,7 @@ Subcommands:
   demo               end-to-end run against SIMULATED providers on an embedded PostgreSQL
 
 Nothing here deploys, merges or changes live configuration. ``cycle``/``work``/
-``deliver`` will spend provider credits when given real credentials -- they are the
+``run-target``/``deliver`` will spend provider credits when given real credentials -- they are the
 production path, and they refuse to run without an explicit ``--i-understand-spend``.
 With ``TGTC_ACCEPTANCE_MODE=read_only``, only ``describe`` and ``check-db`` are
 allowed; the spend acknowledgement does not override that restriction.
@@ -108,10 +109,10 @@ def _require_acceptance_command(args) -> None:
     if mode == "read_only" and args.cmd not in ("describe", "check-db"):
         raise SystemExit("TGTC_ACCEPTANCE_MODE=read_only allows only describe and check-db")
     if mode == "bounded":
-        allowed = ("describe", "check-db", "migrate", "budget", "ledger", "cycle", "work")
+        allowed = ("describe", "check-db", "migrate", "budget", "ledger", "cycle", "run-target", "work")
         if args.cmd not in allowed:
             raise SystemExit("TGTC_ACCEPTANCE_MODE=bounded blocks delivery and unbounded maintenance commands")
-        if args.cmd == "cycle" and not args.no_deliver:
+        if args.cmd in ("cycle", "run-target") and not args.no_deliver:
             raise SystemExit("TGTC_ACCEPTANCE_MODE=bounded requires --no-deliver")
 
 
@@ -128,6 +129,32 @@ def cmd_cycle(args) -> int:
     failure = _bounded_acceptance_failure(report, acquire=not args.no_acquire)
     if failure:
         print(f"bounded acceptance failed: {failure}", file=sys.stderr)
+        return 1
+    return 0
+
+
+def cmd_run_target(args) -> int:
+    """Target-seeking production controller; only Airtable is delivered here."""
+    _require_spend_acknowledgement(args.i_understand_spend)
+    s = _settings()
+    _require_persistent_budget(args, s)
+    conn = connect(args.database_url or s.database_url)
+    apply_schema(conn)
+    r = _runner(conn, s, allow_spend=args.i_understand_spend)
+    report = r.run_to_target(
+        target=args.target,
+        max_rounds=args.max_rounds,
+        max_items=args.max_items,
+        acquire=not args.no_acquire,
+        deliver=not args.no_deliver,
+    )
+    print(json.dumps(report.to_dict(), indent=2, default=str))
+    if not report.target_met:
+        print(
+            f"target run incomplete: {report.airtable_created}/{report.target} Airtable leads; "
+            f"stop_reason={report.stop_reason}",
+            file=sys.stderr,
+        )
         return 1
     return 0
 
@@ -296,18 +323,22 @@ def cmd_demo(args) -> int:
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(prog="tgtc_core", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="cmd", required=True)
-    for name, fn in (("migrate", cmd_migrate), ("describe", cmd_describe), ("cycle", cmd_cycle), ("work", cmd_work),
+    for name, fn in (("migrate", cmd_migrate), ("describe", cmd_describe), ("cycle", cmd_cycle),
+                     ("run-target", cmd_run_target), ("work", cmd_work),
                      ("deliver", cmd_deliver), ("ledger", cmd_ledger), ("import-airtable", cmd_import_airtable),
                      ("prune", cmd_prune), ("demo", cmd_demo), ("check-db", cmd_check_db), ("budget", cmd_budget)):
         p = sub.add_parser(name)
         p.add_argument("--database-url", default="")
-        p.add_argument("--max-items", type=int, default=1000)
+        p.add_argument("--max-items", type=int, default=10000 if name == "run-target" else 1000)
         p.add_argument("--no-acquire", action="store_true")
         p.add_argument("--no-deliver", action="store_true")
         p.add_argument("--budget-id", default="")
         p.add_argument("--i-understand-spend", action="store_true", help="required for cycle/work/deliver against real providers")
         if name == "work":
             p.add_argument("--kind", required=True, choices=("resolve_identity", "classify", "qualify_opportunity"))
+        if name == "run-target":
+            p.add_argument("--target", type=int, default=None)
+            p.add_argument("--max-rounds", type=int, default=None)
         if name == "budget":
             p.add_argument("--expires-hours", type=int, default=24)
             p.add_argument("--fantastic-requests", type=int, required=True)

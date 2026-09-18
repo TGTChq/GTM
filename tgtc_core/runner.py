@@ -11,6 +11,7 @@ PostgreSQL.
 from __future__ import annotations
 
 import logging
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Dict, List, Optional
@@ -60,6 +61,37 @@ class CycleReport:
                 "scheduler": self.scheduler, "ledger": self.ledger}
 
 
+@dataclass
+class TargetRunReport:
+    """Auditable result for one target-seeking production run.
+
+    ``target_met`` is intentionally based on terminal Airtable create/reconcile
+    receipts attributed to this run.  Database approvals alone never satisfy the
+    external acceptance target.
+    """
+
+    run_id: str
+    target: int
+    target_met: bool = False
+    stop_reason: str = ""
+    rounds_completed: int = 0
+    approvals_created: int = 0
+    airtable_created: int = 0
+    rounds: List[Dict[str, Any]] = field(default_factory=list)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "run_id": self.run_id,
+            "target": self.target,
+            "target_met": self.target_met,
+            "stop_reason": self.stop_reason,
+            "rounds_completed": self.rounds_completed,
+            "approvals_created": self.approvals_created,
+            "airtable_created": self.airtable_created,
+            "rounds": self.rounds,
+        }
+
+
 class Runner:
     def __init__(self, conn: psycopg.Connection, settings: Settings, *, fantastic_transport: Optional[Transport],
                  apollo_transport: Optional[Transport], airtable_transport: Optional[Transport],
@@ -68,7 +100,7 @@ class Runner:
         self.conn = conn
         self.s = settings
         self.now = now
-        self.run_id = run_id or self.now().strftime("%Y%m%dT%H%M%SZ")
+        self.run_id = run_id or f"{self.now().strftime('%Y%m%dT%H%M%S.%fZ')}-{uuid.uuid4().hex[:8]}"
         self.spend_budget = SpendBudget(conn, settings.spend_budget_id, now=now) if settings.spend_budget_id else None
         self.fantastic = FantasticClient(fantastic_transport, base_url=settings.fantastic_base_url,
                                          api_key=settings.fantastic_api_key,
@@ -99,7 +131,7 @@ class Runner:
             out["reopened_for_inference"] = reopen_for_inference(self.conn, model_version=self.inference.model_version, now=self.now())
         out["reopened_recoverable_opportunities"] = reopen_recoverable_opportunities(
             self.conn, campaign_env=self.s.campaign_env, signing_key=self.s.signing_key,
-            now=self.now(),
+            now=self.now(), max_contacts_per_opportunity=self.s.max_contacts_per_opportunity,
         )
         self._log("lifecycle", "pass", out)
         return out
@@ -224,6 +256,9 @@ class Runner:
         return OpportunityService(self.conn, self.apollo, campaign_env=self.s.campaign_env, signing_key=self.s.signing_key,
                                   retry_hours=self.s.apollo_availability_retry_hours,
                                   people_search_max_pages=self.s.apollo_people_search_max_pages,
+                                  people_search_page_size=self.s.apollo_people_search_page_size,
+                                  run_id=self.run_id,
+                                  max_contacts_per_opportunity=self.s.max_contacts_per_opportunity,
                                   person_uniqueness=self.s.person_employer_uniqueness,
                                   verify_on_import=self.s.instantly_verify_on_import,
                                   spend_budget=self.spend_budget, now=self.now)
@@ -261,6 +296,10 @@ class Runner:
                         continue
                     out = opp_service.process(item.subject_id, work_item=item)
                     result = out.outcome
+                    if result == "approved":
+                        counts["approved_leads"] = counts.get("approved_leads", 0) + int(
+                            out.details.get("approvals_created", 1)
+                        )
                     if result == "wait":
                         until = datetime.fromisoformat(out.details["until"]) if out.details.get("until") else self.now() + timedelta(hours=1)
                         with transaction(self.conn):
@@ -310,11 +349,16 @@ class Runner:
         self._log("work", kind, counts)
         return counts
 
-    def deliver(self, *, max_items: int = 500) -> Dict[str, Dict[str, int]]:
+    def deliver(self, *, max_items: int = 500,
+                channels: tuple[str, ...] = ("airtable", "instantly")) -> Dict[str, Dict[str, int]]:
         svc = DeliveryService(self.conn, airtable=self.airtable, instantly=self.instantly, lease_seconds=self.s.lease_seconds,
-                              backoff_seconds=self.s.retry_backoff_seconds, now=self.now)
+                              backoff_seconds=self.s.retry_backoff_seconds,
+                              max_contacts_per_opportunity=self.s.max_contacts_per_opportunity, now=self.now)
         report: Dict[str, Dict[str, int]] = {}
-        for channel in ("airtable", "instantly"):
+        unknown = set(channels) - {"airtable", "instantly"}
+        if unknown:
+            raise ValueError(f"unknown delivery channels: {sorted(unknown)}")
+        for channel in channels:
             counts: Dict[str, int] = {}
             for outcome in svc.drain(channel, max_items=max_items):
                 counts[outcome.outcome] = counts.get(outcome.outcome, 0) + 1
@@ -322,7 +366,8 @@ class Runner:
         self._log("delivery", "drain", report)
         return report
 
-    def cycle(self, *, acquire: bool = True, deliver: bool = True, max_items: int = 1000) -> CycleReport:
+    def cycle(self, *, acquire: bool = True, deliver: bool = True, max_items: int = 1000,
+              delivery_channels: tuple[str, ...] = ("airtable", "instantly")) -> CycleReport:
         report = CycleReport(run_id=self.run_id)
         self._log("cycle", "start", {"settings": self.s.describe()})
         report.lifecycle = self.lifecycle()
@@ -334,7 +379,7 @@ class Runner:
         for stage in STAGES:
             report.stages[stage] = self.work(stage, max_items=max_items)
         if deliver:
-            report.delivery = self.deliver(max_items=max_items)
+            report.delivery = self.deliver(max_items=max_items, channels=delivery_channels)
         else:
             report.delivery = {"airtable": {"withheld": 1}, "instantly": {"withheld": 1}}
         report.scheduler = self.scheduler.to_dict()
@@ -342,3 +387,101 @@ class Runner:
         self.conn.commit()
         self._log("cycle", "end", {"stages": report.stages, "delivery": report.delivery})
         return report
+
+    def _target_counts(self) -> Dict[str, int]:
+        """Current non-revoked approvals and Airtable creations for this run only."""
+        with self.conn.cursor() as cur:
+            cur.execute(
+                "SELECT count(*) AS n FROM approvals WHERE run_id = %s AND state <> 'revoked'",
+                (self.run_id,),
+            )
+            approvals = int(cur.fetchone()["n"])
+            cur.execute(
+                """
+                SELECT count(DISTINCT a.id) AS n
+                FROM approvals a
+                JOIN delivery_outbox o ON o.approval_id = a.id AND o.channel = 'airtable'
+                JOIN delivery_receipts r ON r.outbox_id = o.id AND r.channel = 'airtable'
+                WHERE a.run_id = %s AND a.state <> 'revoked'
+                  AND r.receipt_kind IN ('created', 'reconciled')
+                """,
+                (self.run_id,),
+            )
+            airtable = int(cur.fetchone()["n"])
+        self.conn.commit()
+        return {"approvals_created": approvals, "airtable_created": airtable}
+
+    @staticmethod
+    def _budget_stopped(report: CycleReport) -> bool:
+        if any(str(item.get("stop_reason") or "").startswith("spend_budget_exhausted:")
+               for item in report.acquisition):
+            return True
+        return any(int(counts.get("budget_exhausted") or 0) > 0 for counts in report.stages.values())
+
+    @staticmethod
+    def _round_activity(report: CycleReport) -> int:
+        acquired = sum(int(item.get("new_postings") or 0) for item in report.acquisition)
+        stage_items = sum(sum(int(value or 0) for value in counts.values()) for counts in report.stages.values())
+        delivered = sum(
+            int(value or 0)
+            for counts in report.delivery.values()
+            for key, value in counts.items()
+            if key not in {"withheld", "deferred"}
+        )
+        return acquired + stage_items + delivered
+
+    def run_to_target(self, *, target: Optional[int] = None, max_rounds: Optional[int] = None,
+                      max_items: int = 10000, acquire: bool = True, deliver: bool = True) -> TargetRunReport:
+        """Keep cycling until the run itself creates ``target`` Airtable leads.
+
+        The controller is deliberately bounded by the persistent spend budget,
+        ``max_rounds`` and a no-progress detector.  Reaching any boundary is a
+        visible non-success; it is never reported as meeting the target.
+        Instantly is not drained here: target acceptance is isolated to Airtable.
+        """
+        wanted = int(self.s.approved_target_per_run if target is None else target)
+        rounds_limit = int(self.s.target_max_rounds if max_rounds is None else max_rounds)
+        if wanted < 1 or rounds_limit < 1 or max_items < 1:
+            raise ValueError("target, max_rounds and max_items must be positive")
+        out = TargetRunReport(run_id=self.run_id, target=wanted)
+        stalled = 0
+        self._log("target", "start", {"target": wanted, "max_rounds": rounds_limit,
+                                        "max_items": max_items, "deliver": deliver})
+        for round_number in range(1, rounds_limit + 1):
+            before = self._target_counts()
+            report = self.cycle(acquire=acquire, deliver=deliver, max_items=max_items,
+                                delivery_channels=("airtable",))
+            after = self._target_counts()
+            activity = self._round_activity(report)
+            gained = after["airtable_created"] - before["airtable_created"]
+            out.rounds.append({
+                "round": round_number,
+                "approvals_created": after["approvals_created"],
+                "airtable_created": after["airtable_created"],
+                "new_approvals": after["approvals_created"] - before["approvals_created"],
+                "new_airtable": gained,
+                "acquisition_new_postings": sum(int(item.get("new_postings") or 0) for item in report.acquisition),
+                "stages": report.stages,
+                "delivery": report.delivery,
+            })
+            out.rounds_completed = round_number
+            out.approvals_created = after["approvals_created"]
+            out.airtable_created = after["airtable_created"]
+            if deliver and out.airtable_created >= wanted:
+                out.target_met = True
+                out.stop_reason = "target_reached"
+                break
+            if not deliver and out.approvals_created >= wanted:
+                out.stop_reason = "approval_target_reached_without_airtable_delivery"
+                break
+            if self._budget_stopped(report):
+                out.stop_reason = "spend_budget_exhausted"
+                break
+            stalled = stalled + 1 if activity == 0 else 0
+            if stalled >= self.s.target_stall_rounds:
+                out.stop_reason = "no_progress"
+                break
+        if not out.stop_reason:
+            out.stop_reason = "max_rounds_reached"
+        self._log("target", "end", out.to_dict())
+        return out
