@@ -396,13 +396,15 @@ CREATE TABLE IF NOT EXISTS approvals (
     lead_key         text NOT NULL,
     fingerprint      text NOT NULL,
     lead_json        jsonb NOT NULL,
+    run_id           text NOT NULL DEFAULT 'legacy-unattributed',
     state            text NOT NULL DEFAULT 'approved' CHECK (state IN ('approved', 'delivered', 'revoked')),
     revoke_reason    text,
     approved_at      timestamptz NOT NULL DEFAULT now(),
     updated_at       timestamptz NOT NULL DEFAULT now(),
-    UNIQUE (opportunity_id),
     UNIQUE (lead_key)
 );
+CREATE UNIQUE INDEX IF NOT EXISTS approvals_opportunity_person_uq
+    ON approvals (opportunity_id, person_id);
 -- One person, one active approval, across every function of the employer.
 CREATE UNIQUE INDEX IF NOT EXISTS approvals_person_active_uq
     ON approvals (person_id) WHERE state <> 'revoked';
@@ -454,6 +456,20 @@ CREATE TABLE IF NOT EXISTS suppressions (
     created_at  timestamptz NOT NULL DEFAULT now(),
     UNIQUE (kind, key)
 );
+
+-- Distinct active Airtable contacts behind company/function suppressions.  The
+-- legacy suppression key remains for compatibility; this table makes the
+-- user-approved quota of up to three contacts measurable instead of binary.
+CREATE TABLE IF NOT EXISTS company_function_contacts (
+    company_function_key text NOT NULL,
+    contact_key          text NOT NULL,
+    source               text NOT NULL,
+    evidence             jsonb NOT NULL DEFAULT '{}'::jsonb,
+    created_at           timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (company_function_key, contact_key)
+);
+CREATE INDEX IF NOT EXISTS company_function_contacts_contact_idx
+    ON company_function_contacts (contact_key);
 
 CREATE TABLE IF NOT EXISTS outcome_events (
     id           bigserial PRIMARY KEY,
