@@ -157,6 +157,9 @@ class OpportunityWithFixtureStorage(OpportunityService):
         self.approvals.append(approved)
         return 1
 
+    def _finalize_approved(self, opportunity_id):
+        pass  # persistence is outside this portable fixture's scope
+
     def _close(self, opportunity_id, reason):
         return QualifyOutcome(opportunity_id, 'closed', reason)
 
