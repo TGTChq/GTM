@@ -95,4 +95,3 @@ def test_target_delivery_is_airtable_only():
     runner.cycle = cycle
     runner.run_to_target(target=1)
     assert calls[0]["delivery_channels"] == ("airtable",)
-
