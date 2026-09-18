@@ -265,6 +265,7 @@ class Runner:
 
     def work(self, kind: str, *, max_items: int = 1000) -> Dict[str, int]:
         counts: Dict[str, int] = {}
+        approved_leads = 0
         opp_service = self._opportunity_service() if kind == "qualify_opportunity" and self.apollo else None
         for _ in range(max_items):
             item = self.scheduler.claim(self.conn, kind=kind, lease_seconds=self.s.lease_seconds, now=self.now())
@@ -297,9 +298,7 @@ class Runner:
                     out = opp_service.process(item.subject_id, work_item=item)
                     result = out.outcome
                     if result == "approved":
-                        counts["approved_leads"] = counts.get("approved_leads", 0) + int(
-                            out.details.get("approvals_created", 1)
-                        )
+                        approved_leads += int(out.details.get("approvals_created", 1))
                     if result == "wait":
                         until = datetime.fromisoformat(out.details["until"]) if out.details.get("until") else self.now() + timedelta(hours=1)
                         with transaction(self.conn):
@@ -346,6 +345,11 @@ class Runner:
                     work_queue.retry(self.conn, item, error_class, backoff_seconds=self.s.retry_backoff_seconds, now=self.now())
                 counts["error_retry"] = counts.get("error_retry", 0) + 1
                 counts["technical_failure"] = counts.get("technical_failure", 0) + 1
+        # Preserve the historical one-result-per-item report shape when every
+        # approved opportunity creates exactly one lead.  Surface the distinct
+        # lead count only when multi-contact recovery makes it differ.
+        if kind == "qualify_opportunity" and approved_leads != counts.get("approved", 0):
+            counts["approved_leads"] = approved_leads
         self._log("work", kind, counts)
         return counts
 
