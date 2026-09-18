@@ -34,7 +34,7 @@ def test_reply_event_suppresses_future_approval_of_the_same_person(conn, clock):
     apply_outcome_event(conn, provider="instantly", event_type="reply", dedupe_key="r-1", email="good.buyer@acme.com")
     pid, eid, oid = seed_opportunity(conn, clock)
     out = opportunity_service(conn, apollo_for("acme.com", "Acme"), clock).process(oid)
-    assert out.outcome == "closed"
+    assert out.outcome == "wait" and out.reason == "buyer_search_pending:no_verified_buyer_in_candidates"
     reasons = {a["reason"] for a in sqlall(conn, "SELECT reason FROM candidate_attempts")}
     assert "suppressed:person_email" in reasons
     assert sql1(conn, "SELECT count(*) FROM approvals") == 0
