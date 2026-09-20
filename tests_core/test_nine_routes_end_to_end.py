@@ -74,3 +74,37 @@ def test_restart_mid_cycle_resumes_without_duplicates(conn, clock):
     report = r2.cycle(acquire=True)
     assert report.stages["classify"] == {"classified": 10} and report.stages["qualify_opportunity"] == {"approved": 10}
     assert sql1(conn, "SELECT count(*) FROM postings") == 10 and sql1(conn, "SELECT count(*) FROM approvals") == 10
+
+
+# ---------------------------------------------------------------------------
+# Final whole-branch review, I8 (IMPORTANT): after task 9 every end-to-end
+# exercise of the nine routes was pinned to max_contacts_per_opportunity=1 --
+# the constructor's bare default, NOT the shipped production default of 3
+# (config.py Settings.max_contacts_per_opportunity). Contact depth at the real
+# quota was covered only by three fakes-based unit tests, so the depth
+# behaviour of the whole runner -- what the work queue does with an opportunity
+# that approved one contact and wants more -- had no end-to-end coverage at all.
+# This is that variant; the pinned tests above are kept because they assert
+# per-campaign ROUTING, which needs a terminal approved state.
+# ---------------------------------------------------------------------------
+
+def test_at_the_production_contact_quota_every_route_approves_and_waits_for_more(conn, clock):
+    sc = build_nine_route_scenario(clock())
+    r = runner(conn, sc, clock)   # no max_contacts override: config.py's shipped default of 3
+    assert r.s.max_contacts_per_opportunity == 3
+    report = r.cycle()
+    assert report.stages["resolve_identity"] == {"resolved": 10}
+    assert report.stages["classify"] == {"classified": 10}
+    # One qualifying buyer per employer in this scenario, so each opportunity
+    # approves that contact and stays OPEN waiting for a role-diverse second --
+    # never the terminal 'approved' state, and never a technical failure.
+    assert report.stages["qualify_opportunity"] == {"wait": 10, "deferred_search": 10}
+    assert sql1(conn, "SELECT count(*) FROM approvals") == 10
+    assert sql1(conn, "SELECT count(*) FROM opportunities WHERE state = 'open'") == 10
+    waiting = sqlall(conn, "SELECT state, waiting_on FROM work_items WHERE kind = 'qualify_opportunity'")
+    assert len(waiting) == 10
+    assert {w["state"] for w in waiting} == {"waiting"}
+    assert all(str(w["waiting_on"] or "").startswith("buyer_search_pending:") for w in waiting), waiting
+    # The approved leads are still delivered: depth does not hold delivery back.
+    assert report.delivery == {"airtable": {"delivered": 10}, "instantly": {"delivered": 10}}
+    assert len(sc.instantly.leads) == 10 and len(sc.airtable.records) == 10
