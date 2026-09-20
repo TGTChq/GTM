@@ -266,6 +266,126 @@ OUTSOURCING_TEXT = [
     r"\b(?:professional employer organization|peo services?|co[- ]employment|worksite employees?)\b",
 ]
 
+# --- company size (Phase 2 audit task 5, 2026-09-19, Luis) -------------------
+
+#: Target company size, 25-1,000 employees. Two independently populated provider
+#: fields (a company's own headcount and its declared size BAND) can and do
+#: disagree -- measured 1,436 rows where headcount is inside 25-1,000 while the
+#: declared band is above 1,000 (71 rows the other way), on top of 216 too_large
+#: rejects from a single-field read. A conflict is never silently resolved in
+#: either direction: it is its own bucket (`firmographic_conflict` /
+#: `unknown_firmographics`), never a reject and never a confirmed in-range
+#: company, unless a free (non-paid) resolution succeeds first.
+TARGET_MIN_EMPLOYEES = 25
+TARGET_MAX_EMPLOYEES = 1000
+
+_SIZE_BAND_RANGE = re.compile(r"^\s*(\d[\d,]*)\s*-\s*(\d[\d,]*)\s*(?:employees?)?\s*$", re.I)
+_SIZE_BAND_PLUS = re.compile(r"^\s*(\d[\d,]*)\s*\+\s*(?:employees?)?\s*$", re.I)
+_SIZE_BAND_SINGLE = re.compile(r"^\s*(\d[\d,]*)\s*employees?\s*$", re.I)
+
+#: Cheapest-resolution step 1 (task 5): an employee count the EMPLOYER states
+#: about itself in the posting text. Deliberately narrow self-description
+#: phrasing only -- never a bare number near "employees" (which also matches
+#: eligibility-threshold boilerplate unrelated to the company's own size).
+STATED_HEADCOUNT_PATTERNS = [
+    r"\b(?:we (?:are|have)|team of|company of|organization of|organisation of|staff of|"
+    r"workforce of|employs?)\s+(?:approximately |about |over |more than |roughly )?"
+    r"(\d{1,3}(?:,\d{3})*)\+?\s*(?:people|employees|team members|staff|professionals)\b",
+    r"\b(\d{1,3}(?:,\d{3})*)\+?\s*(?:employees|team members)\s+"
+    r"(?:worldwide|globally|across|strong|company[- ]wide)\b",
+]
+
+
+def _to_int(value: object) -> Optional[int]:
+    if value in (None, ""):
+        return None
+    try:
+        return int(str(value).replace(",", "").strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def parse_size_band(band: Optional[str]) -> Optional[Tuple[int, Optional[int]]]:
+    """A provider size-band string ("201-500", "1,001-5,000 employees", "10,001+")
+    to a numeric (low, high) range. ``high=None`` means open-ended. Returns None
+    when absent or not one of the recognised shapes -- an unparsable band is not
+    a reliable populated source.
+    """
+    s = str(band or "").strip()
+    if not s:
+        return None
+    m = _SIZE_BAND_RANGE.match(s)
+    if m:
+        lo, hi = _to_int(m.group(1)), _to_int(m.group(2))
+        return (lo, hi) if lo is not None and hi is not None else None
+    m = _SIZE_BAND_PLUS.match(s)
+    if m:
+        lo = _to_int(m.group(1))
+        return (lo, None) if lo is not None else None
+    m = _SIZE_BAND_SINGLE.match(s)
+    if m:
+        lo = _to_int(m.group(1))
+        return (lo, lo) if lo is not None else None
+    return None
+
+
+def _classify_size_range(lo: int, hi: Optional[int]) -> str:
+    """inside / outside / indeterminate against the 25-1,000 target for ONE
+    source's numeric range. A range that straddles a target boundary (e.g.
+    "501-2,000") is indeterminate, not a vote either way."""
+    if hi is not None and lo >= TARGET_MIN_EMPLOYEES and hi <= TARGET_MAX_EMPLOYEES:
+        return "inside"
+    if hi is not None and (hi < TARGET_MIN_EMPLOYEES or lo > TARGET_MAX_EMPLOYEES):
+        return "outside"
+    if hi is None and lo > TARGET_MAX_EMPLOYEES:
+        return "outside"
+    return "indeterminate"
+
+
+def size_state(headcount: Optional[int] = None, size_band: Optional[str] = None) -> str:
+    """Three-state, source-agnostic company-size decision (Decision 2, 2026-09-19):
+
+    - all reliable populated sources agree inside 25-1,000 -> "in_range"
+    - all reliable populated sources agree outside -> "out_of_range"
+    - reliable sources conflict across the boundary -> "firmographic_conflict"
+    - nothing usable (absent, or the lone source is itself indeterminate) ->
+      "unknown_firmographics"
+
+    Deliberately takes no job posting -- it is a pure function of whatever
+    company-size sources are available, reusable outside `extract_job_facts`
+    (e.g. task 5b's source-accuracy measurement).
+    """
+    votes: List[str] = []
+    hc = _to_int(headcount)
+    if hc is not None:
+        votes.append(_classify_size_range(hc, hc))
+    band_range = parse_size_band(size_band) if size_band not in (None, "") else None
+    if band_range is not None:
+        votes.append(_classify_size_range(*band_range))
+    if not votes:
+        return "unknown_firmographics"
+    determinate = [v for v in votes if v != "indeterminate"]
+    if any(v == "inside" for v in determinate) and any(v == "outside" for v in determinate):
+        return "firmographic_conflict"
+    if len(votes) == 1:
+        return {"inside": "in_range", "outside": "out_of_range", "indeterminate": "unknown_firmographics"}[votes[0]]
+    # 2+ populated sources, no inside/outside clash between them.
+    if determinate and all(v == "inside" for v in determinate):
+        return "in_range"
+    if determinate and all(v == "outside" for v in determinate):
+        return "out_of_range"
+    return "unknown_firmographics"
+
+
+def _extract_stated_headcount(text: str) -> Optional[int]:
+    for pattern in STATED_HEADCOUNT_PATTERNS:
+        m = re.search(pattern, text or "", re.I)
+        if m:
+            n = _to_int(m.group(1))
+            if n is not None:
+                return n
+    return None
+
 
 def has_people_authority(description: str) -> Optional[str]:
     """Clause-scoped: returns the offending clause, or None."""
@@ -308,6 +428,7 @@ def extract_job_facts(
     employer_name: Optional[str] = None,
     agency_flag: Optional[bool] = None,
     org_industry: Optional[str] = None,
+    company: Optional[Dict[str, object]] = None,
 ) -> JobFacts:
     """Facts first, exclusions second. Absent text yields UNKNOWN facts, never a guess."""
     jf = JobFacts()
@@ -501,6 +622,46 @@ def extract_job_facts(
     industry = str(org_industry or "").strip().lower()
     if industry in {"staffing and recruiting", "staffing & recruiting", "human resources services", "outsourcing/offshoring", "outsourcing and offshoring consulting"}:
         jf.exclusions.append(Exclusion("agency:provider_industry", industry, PROVIDER))
+
+    # company size (Phase 2 audit task 5, 2026-09-19): only computed when the
+    # caller supplies `company` -- every caller before this task omits it, so
+    # this stays fully backward compatible (no Fact/Exclusion/review_reason).
+    if company:
+        headcount = company.get("headcount")
+        size_band = company.get("size_band")
+        state = size_state(headcount, size_band)
+        excerpt = f"headcount={headcount!r}; size_band={size_band!r}"
+        if state == "firmographic_conflict":
+            # Cheapest resolution first, and it must be free (Decision 2): (1) an
+            # employee count stated in the description text, (2) any other
+            # already-populated provider field on the row. Never a paid call. If
+            # nothing resolves it, it stays `firmographic_conflict`.
+            resolved, resolved_source = _extract_stated_headcount(desc), "description_stated_headcount"
+            if resolved is None:
+                for key, value in company.items():
+                    if key in {"headcount", "size_band"} or value in (None, ""):
+                        continue
+                    cand = _to_int(value)
+                    if cand is None:
+                        band = parse_size_band(str(value))
+                        if band is not None and _classify_size_range(*band) != "indeterminate":
+                            lo, hi = band
+                            cand = lo if hi is None else (lo + hi) // 2
+                    if cand is not None:
+                        resolved, resolved_source = cand, f"provider_field:{key}"
+                        break
+            if resolved is not None:
+                resolved_state = size_state(resolved, None)
+                if resolved_state in {"in_range", "out_of_range"}:
+                    state = resolved_state
+                    excerpt += f"; resolved via {resolved_source}={resolved}"
+        jf.facts["company_size"] = Fact("company_size", state, PROVIDER, excerpt, RULE_VERSION)
+        if state == "out_of_range":
+            jf.exclusions.append(Exclusion("company:size:out_of_range", excerpt, PROVIDER, RULE_VERSION))
+        elif state in {"firmographic_conflict", "unknown_firmographics"}:
+            # Its own reported review/unknown bucket -- never a reject, never
+            # counted as a confirmed 25-1,000 company (Decision 2).
+            jf.review_reasons.append(f"company:{state}")
 
     jf.facts["description_present"] = Fact("description_present", len(desc.strip()) >= 200, TEXT if desc.strip() else UNKNOWN, f"{len(desc.strip())} chars")
     return jf

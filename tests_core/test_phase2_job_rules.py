@@ -10,7 +10,7 @@ physical-duty boilerplate (Task 3). See .superpowers/sdd/phase2/task-1-3-brief.m
 """
 from __future__ import annotations
 
-from tgtc_core.domain.facts import extract_job_facts
+from tgtc_core.domain.facts import extract_job_facts, size_state
 
 
 # --- Task 1: seniority never rejects on its own -----------------------------
@@ -139,3 +139,69 @@ def test_genuine_fixed_term_contract_still_excludes():
                               description="This is a 6-month fixed term contract with possible extension.",
                               ai_employment_type="FULL_TIME")
     assert any(e.reason.startswith("employment:fixed_term") for e in facts.exclusions)
+
+
+# --- Task 5: company size, three states (2026-09-19, Luis) -------------------
+# Decision 2: target 25-1,000 employees. All reliable populated sources agree
+# inside -> accept; all agree outside -> reject; sources conflict across the
+# boundary -> firmographic_conflict/unknown_firmographics, preserved, never a
+# reject and never counted as confirmed in-range. `size_state` is a new,
+# standalone, source-agnostic function on facts.py -- it does not depend on a
+# job posting at all, so the brief's test bodies are used verbatim.
+
+def test_sources_agree_inside_range_accepts():
+    assert size_state(headcount=400, size_band="201-500") == "in_range"
+
+
+def test_sources_agree_outside_range_rejects():
+    assert size_state(headcount=5000, size_band="1,001-5,000") == "out_of_range"
+
+
+def test_sources_conflicting_across_the_boundary_is_a_conflict():
+    assert size_state(headcount=400, size_band="1,001-5,000") == "firmographic_conflict"
+
+
+def test_single_populated_source_inside_range_accepts():
+    assert size_state(headcount=400, size_band=None) == "in_range"
+
+
+def test_no_populated_source_is_unknown():
+    assert size_state(headcount=None, size_band=None) == "unknown_firmographics"
+
+
+def test_a_band_straddling_the_boundary_is_not_a_conflict_by_itself():
+    # 501-1,000 lies inside; 1,001-5,000 lies outside; a band that spans 1,000 is indeterminate
+    assert size_state(headcount=None, size_band="501-2,000") == "unknown_firmographics"
+
+
+def test_conflict_is_never_an_exclusion():
+    facts = extract_job_facts(title="Controller", description="Remote finance role.",
+                              company={"headcount": 400, "size_band": "1,001-5,000"})
+    assert not any(e.reason.startswith("company:size") for e in facts.exclusions)
+    assert any("firmographic_conflict" in r for r in facts.review_reasons)
+
+
+def test_company_size_out_of_range_excludes():
+    facts = extract_job_facts(title="Controller", description="Remote finance role.",
+                              company={"headcount": 5000, "size_band": "1,001-5,000"})
+    assert any(e.reason.startswith("company:size") for e in facts.exclusions)
+    assert not facts.review_reasons
+
+
+def test_company_size_conflict_resolved_by_description_stated_headcount():
+    """Task 5's 'cheapest resolution first' step 1: an employee count stated in the
+    description text. Here it agrees with the size_band (both outside), resolving
+    the headcount-vs-band conflict without a paid call."""
+    facts = extract_job_facts(
+        title="Controller",
+        description="Remote finance role at a company of about 3,000 employees worldwide.",
+        company={"headcount": 400, "size_band": "1,001-5,000"})
+    assert any(e.reason == "company:size:out_of_range" for e in facts.exclusions)
+    assert not facts.review_reasons
+
+
+def test_no_company_argument_adds_no_size_fact_or_exclusion():
+    """Backward compatibility: every caller before this task omits `company`."""
+    facts = extract_job_facts(title="Controller", description="Remote finance role.")
+    assert not any(e.reason.startswith("company:size") for e in facts.exclusions)
+    assert not any(r.startswith("company:") for r in facts.review_reasons)
