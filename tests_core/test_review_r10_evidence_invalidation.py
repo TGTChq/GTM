@@ -65,10 +65,18 @@ def test_countries_change_invalidates_market_and_headcount_change_reaches_the_em
     pid = res.posting_id
     resolve_posting_identity(conn, pid, now=clock())
     classify_one(conn, pid, inference=None, now=clock())
-    res2 = upsert_posting(conn, source="fantastic:active-jb", row=_row(clock, countries=("GB",), headcount=5000), lane="fresh", now=clock())
+    # org_linkedin_size is set to agree with the new headcount (both reliable
+    # sources outside 25-1,000) -- make_posting_row's default band ("51-200")
+    # would otherwise read as a genuine firmographic_conflict against a
+    # headcount of 5000 (Decision 2, 2026-09-19) and the employer would no
+    # longer reject outright, which is not what this test is about.
+    res2 = upsert_posting(conn, source="fantastic:active-jb",
+                          row=_row(clock, countries=("GB",), headcount=5000, org_linkedin_size="1,001-5,000"),
+                          lane="fresh", now=clock())
     conn.commit()
     assert res2.state == "modified" and set(res2.changes) >= {"countries_derived", "org_linkedin_headcount"}
     assert sql1(conn, "SELECT employee_count FROM employers") == 5000
+    assert sql1(conn, "SELECT size_band FROM employers") == "1,001-5,000"
     assert sql1(conn, "SELECT countries FROM postings WHERE id = %s", (pid,)) == ["GB"]
     out = classify_one(conn, pid, inference=None, now=clock())
     # the provider country no longer shows the US and the text carries 'remote within the US' only as

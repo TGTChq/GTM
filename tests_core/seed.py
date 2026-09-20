@@ -26,12 +26,14 @@ def seed_posting(conn, clock, row: Dict[str, Any], *, source: str = SOURCE_JOB_B
 
 def seed_opportunity(conn, clock, *, function_key: str = "customer_success", domain: str = "acme.com",
                      org_name: str = "Acme", title: Optional[str] = None, description: Optional[str] = None,
-                     headcount: Optional[int] = 120, job_id: str = "job-1", source: str = SOURCE_JOB_BOARDS,
+                     headcount: Optional[int] = 120, size_band: Optional[str] = None, job_id: str = "job-1",
+                     source: str = SOURCE_JOB_BOARDS,
                      lane: str = "fresh", hours_ago: float = 4.0, inference=None) -> Tuple[int, Optional[int], Optional[int]]:
     ex = example_for(function_key)
+    extra = {"org_linkedin_size": size_band} if size_band is not None else {}
     row = make_posting_row(id=job_id, title=title if title is not None else ex.title, organization=org_name, domain=domain,
                            description=description or ex.description, date_created=clock() - timedelta(hours=hours_ago),
-                           headcount=headcount)
+                           headcount=headcount, **extra)
     pid = seed_posting(conn, clock, row, source=source, lane=lane)
     out = resolve_posting_identity(conn, pid, now=clock())
     if out.employer_id is None:

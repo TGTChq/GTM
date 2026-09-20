@@ -17,6 +17,7 @@ from typing import Any, Dict, Optional, Sequence
 
 from ..policy.campaigns import (CAMPAIGN_BY_FUNCTION, KNOWN_CONTROL_CAMPAIGN_IDS, POLICY_VERSION, size_band)
 from ..policy.requirements import rule
+from .facts import resolve_company_size, size_reject_reason
 from .identity import lead_key as make_lead_key
 from .employer_attribution import employer_attribution_conflict
 
@@ -146,13 +147,20 @@ def build_approved_lead(
                                             employer_name=employer_name, employer_domain=employer_domain)
     if conflict:
         return ApprovalRefusal("employer_attribution_conflict", conflict)
+    # Company size (Decision 2, 2026-09-19; wired live, task 5c 2026-09-20): the
+    # SAME resolve_company_size predicate services/opportunity.py's own size
+    # gate calls -- a stored headcount alone can no longer mask a conflict
+    # against the employer's declared LinkedIn size band. This is the final
+    # approval-time check, downstream of opportunity.py's own gate; a genuine
+    # firmographic conflict/unknown was already let through there (never
+    # discarded merely because two sources conflict) and is let through here
+    # too -- it is never a reject, only out_of_range is.
     count = employer.get("employee_count")
-    if count is not None:
-        if count < int(rule("min_employees")):
-            return ApprovalRefusal("employer_too_small", {"employee_count": count})
-        if count > int(rule("max_employees")):
-            return ApprovalRefusal("employer_too_large", {"employee_count": count})
-    elif rule("require_employee_count"):
+    state, _size_excerpt, effective = resolve_company_size(
+        count, employer.get("size_band"), description=str(posting.get("description_text") or ""))
+    if state == "out_of_range":
+        return ApprovalRefusal(size_reject_reason(effective), {"employee_count": count, "size_band": employer.get("size_band")})
+    if state == "unknown_firmographics" and rule("require_employee_count"):
         return ApprovalRefusal("insufficient_evidence:employee_count")
     if employer.get("excluded_industry"):
         return ApprovalRefusal("employer_excluded_industry", {"industry": employer.get("industry")})

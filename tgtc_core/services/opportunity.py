@@ -35,7 +35,7 @@ import psycopg
 from ..db.connection import jsonb, transaction
 from ..db import work_queue
 from ..domain.approval import ApprovalRefusal, ApprovedLead, airtable_fields, build_approved_lead, instantly_payload
-from ..domain.facts import RULE_VERSION
+from ..domain.facts import RULE_VERSION, resolve_company_size, size_reject_reason
 from ..domain.gates import (
     corroborated_alternate_domains, evaluate_contact, evaluate_email, person_organization, pre_enrichment_check,
     title_matches,
@@ -366,6 +366,48 @@ class OpportunityService:
                 cur.execute("UPDATE opportunities SET state = 'closed', close_reason = %s, updated_at = now() WHERE id = %s",
                             (reason[:200], opportunity_id))
         return QualifyOutcome(opportunity_id, "closed", reason)
+
+    # --- company size (Decision 2, 2026-09-19; wired live, task 5c 2026-09-20) --
+    def _size_gate(self, opportunity_id: int, emp: Dict[str, Any], posting: Dict[str, Any]) -> Optional[QualifyOutcome]:
+        """The ONE live company-size decision point. ``process()`` below calls this
+        at both places it used to compare ``employee_count`` against min/max
+        directly (before AND after paid organization enrichment) -- a single
+        stored headcount can no longer mask a conflict against the employer's
+        declared LinkedIn size band the way the old duplicated inline check did
+        (measured: 1,436 rows where headcount reads inside 25-1,000 while the
+        declared band reads above it, 71 the other way, plus 216 too_large
+        rejects from the headcount-alone read -- facts.py's own company-size
+        comment).
+
+        Returns ``None`` to proceed (in_range, or a conflict/unknown that must
+        never discard a potentially eligible company by itself -- Decision 2);
+        a ``QualifyOutcome`` (from ``_close``) only when every reliable
+        populated source agrees the employer is out of range. A conflict or
+        unknown result is recorded as ``evidence`` (its own reported bucket)
+        rather than silently dropped or silently counted as confirmed
+        25-1,000; it is never a reject.
+
+        Never a paid call: ``resolve_company_size``'s free resolution reads
+        only the posting's own description text and already-populated
+        employer fields.
+        """
+        state, excerpt, effective = resolve_company_size(
+            emp.get("employee_count"), emp.get("size_band"),
+            description=str(posting.get("description_text") or ""),
+        )
+        if state == "out_of_range":
+            return self._close(opportunity_id, size_reject_reason(effective))
+        if state in ("firmographic_conflict", "unknown_firmographics") and emp.get("id") is not None:
+            with self.conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO evidence (subject_kind, subject_id, fact, value, status, source, excerpt) "
+                    "VALUES ('employer', %s, %s, %s, 'recorded', 'tgtc_core', %s)",
+                    (emp["id"], f"company:{state}",
+                     jsonb({"employee_count": emp.get("employee_count"), "size_band": emp.get("size_band")}),
+                     excerpt[:300]),
+                )
+            self.conn.commit()
+        return None
 
     def _wait_for_dependency(self, opportunity_id: int, reason: str, *, hours: Optional[float] = None,
                              details: Optional[Dict[str, Any]] = None) -> QualifyOutcome:
@@ -844,11 +886,9 @@ class OpportunityService:
         known_industry = excluded_industry(str(emp.get("industry") or ""))
         if known_industry:
             return self._close(opportunity_id, f"employer_excluded_industry:{known_industry}")
-        known_count = emp.get("employee_count")
-        if known_count is not None and known_count < int(rule("min_employees")):
-            return self._close(opportunity_id, "employer_too_small")
-        if known_count is not None and known_count > int(rule("max_employees")):
-            return self._close(opportunity_id, "employer_too_large")
+        size_outcome = self._size_gate(opportunity_id, emp, posting)
+        if size_outcome is not None:
+            return size_outcome
         # Refuse to spend Apollo credits when the output route cannot currently
         # produce a lead. A shared campaign env (for example Customer Experience)
         # counts as configured for either of its function keys.
@@ -887,11 +927,10 @@ class OpportunityService:
         ind = excluded_industry(str(emp.get("industry") or ""))
         if ind:
             return self._close(opportunity_id, f"employer_excluded_industry:{ind}")
+        size_outcome = self._size_gate(opportunity_id, emp, posting)
+        if size_outcome is not None:
+            return size_outcome
         count = emp.get("employee_count")
-        if count is not None and count < int(rule("min_employees")):
-            return self._close(opportunity_id, "employer_too_small")
-        if count is not None and count > int(rule("max_employees")):
-            return self._close(opportunity_id, "employer_too_large")
         if not resolve_campaign_id(opp["function_key"], count, self.campaign_env):
             return self._wait_for_dependency(
                 opportunity_id, f"configuration_pending:no_campaign_for_size:{opp['function_key']}"
