@@ -41,12 +41,78 @@ def _norm(text: str) -> str:
     return " ".join(re.sub(r"[^a-z0-9]+", " ", str(text or "").lower()).split())
 
 
+#: Phase 2 audit task 8 (2026-09-19): the buyer-title gate is an exact-phrase
+#: substring match, so it misses common real-world spellings of the SAME titles
+#: ``campaigns.py``'s own buyer hierarchies already list ("Vice President, X" for
+#: "VP X"; "SVP X"/"EVP X" for "VP X"; "Human Resources Manager" for "HR
+#: Manager"). These collapse a title's own seniority wording to the same short
+#: form the buyer-title lists are written in, rather than adding a second title
+#: list -- ``buyer_titles()`` in campaigns.py is unchanged.
+_ABBREVIATION_COLLAPSE: Tuple[Tuple[str, str], ...] = (
+    (r"\bsenior vice president\b", "vp"),
+    (r"\bexecutive vice president\b", "vp"),
+    (r"\bvice president\b", "vp"),
+    (r"\bsvp\b", "vp"),
+    (r"\bevp\b", "vp"),
+    (r"\bhuman resources\b", "hr"),
+)
+
+#: 494 candidates were dropped by the old exact-phrase gate; widening the match
+#: must not ALSO widen it into over-matching (Q21: 10/22 "Operations" approvals
+#: were warehouse/IT/clinical "Operations Manager" -- a different domain's use of
+#: the same generic English word). A qualifier naming one of those other domains,
+#: immediately before the matched buyer-title phrase, means this is not that
+#: buyer hierarchy's title even though the phrase is a literal substring.
+_UNRELATED_TITLE_QUALIFIERS: Tuple[str, ...] = (
+    "warehouse", "clinical", "it", "supply chain", "manufacturing", "plant", "distribution",
+    "logistics", "network", "retail", "flight", "laboratory", "lab", "field", "production",
+    "fleet", "security", "hospital", "pharmacy", "call center", "contact center",
+)
+
+
+def _canonicalize(text: str) -> str:
+    t = _norm(text)
+    for pattern, replacement in _ABBREVIATION_COLLAPSE:
+        t = re.sub(pattern, replacement, t)
+    return " ".join(t.split())
+
+
+def _title_variants(title: str) -> List[str]:
+    """The title's canonical form, plus -- for a leading "<Seniority>, <Function>"
+    shape ("Director, Customer Success", "Vice President, Revenue Operations") --
+    the "<Function> <Seniority>" and "<Seniority> of <Function>" forms
+    ``DIRECT_BUYER_TITLES``/``EXECUTIVE_BUYER_TITLES`` are themselves written in.
+    A comma-led title is otherwise word-order-incompatible with those lists even
+    after abbreviation collapse."""
+    variants = [_canonicalize(title)]
+    m = re.match(r"^([A-Za-z .&/-]+?),\s*(.+)$", str(title or "").strip())
+    if m:
+        lead, rest = _canonicalize(m.group(1)), _canonicalize(m.group(2))
+        if lead and rest:
+            variants.append(f"{rest} {lead}")
+            variants.append(f"{lead} of {rest}")
+    return variants
+
+
+def _has_unrelated_qualifier(prefix: str) -> bool:
+    prefix = prefix.strip()
+    if not prefix:
+        return False
+    return any(prefix == q or prefix.endswith(" " + q) for q in _UNRELATED_TITLE_QUALIFIERS)
+
+
 def title_matches(title: str, targets: Iterable[str]) -> bool:
-    n = _norm(title)
+    variants = _title_variants(title)
     for t in targets:
-        c = _norm(t)
-        if c and (n == c or re.search(r"\b" + re.escape(c) + r"\b", n)):
-            return True
+        c = _canonicalize(t)
+        if not c:
+            continue
+        for v in variants:
+            if v == c:
+                return True
+            m = re.search(r"\b" + re.escape(c) + r"\b", v)
+            if m and not _has_unrelated_qualifier(v[:m.start()]):
+                return True
     return False
 
 
