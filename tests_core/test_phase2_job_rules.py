@@ -10,7 +10,7 @@ physical-duty boilerplate (Task 3). See .superpowers/sdd/phase2/task-1-3-brief.m
 """
 from __future__ import annotations
 
-from tgtc_core.domain.facts import extract_job_facts, size_state
+from tgtc_core.domain.facts import RULE_VERSION, extract_job_facts, size_state
 
 
 # --- Task 1: seniority never rejects on its own -----------------------------
@@ -205,3 +205,59 @@ def test_no_company_argument_adds_no_size_fact_or_exclusion():
     facts = extract_job_facts(title="Controller", description="Remote finance role.")
     assert not any(e.reason.startswith("company:size") for e in facts.exclusions)
     assert not any(r.startswith("company:") for r in facts.review_reasons)
+
+
+# --- Fix round 1 (2026-09-19, independent review, Changes Requested) --------
+
+# IMPORTANT: employment is a changed decision path in this batch (task 4) and
+# must carry RULE_VERSION on both the Fact and any Exclusion it produces,
+# exactly like tasks 1-3's changed paths (facts.py:584,586,596) and task 5's
+# own company_size Fact/Exclusion (facts.py:658,660) already do.
+
+def test_employment_exclusion_carries_rule_version():
+    facts = extract_job_facts(title="Bookkeeper", description="Part-time, 20 hours per week.",
+                              ai_employment_type="PART_TIME")
+    emp_exclusion = next(e for e in facts.exclusions if e.reason.startswith("employment:"))
+    assert emp_exclusion.rule_version == RULE_VERSION
+
+
+def test_full_time_employment_fact_carries_rule_version_even_without_an_exclusion():
+    facts = extract_job_facts(title="Analyst", description="This is a full-time, permanent position.",
+                              ai_employment_type="FULL_TIME")
+    assert facts.facts["employment_type"].rule_version == RULE_VERSION
+
+
+# CRITICAL: free-resolution step 2 (an already-populated field on `company`
+# besides headcount/size_band) had no semantic filter on which field counts as
+# an employee-count surrogate -- any numeric-parseable field (founded_year, a
+# follower count, a phone-number fragment) was silently treated as a headcount
+# and could flip a conflict into a false in_range or a false out_of_range
+# reject, exactly what Decision 2 forbids. Fixed by restricting step 2 to an
+# explicit allow-list of fields that actually denote employee count
+# (COMPANY_SIZE_SURROGATE_FIELDS) and refusing implausible resolved values
+# (_plausible_headcount) regardless of which step produced them.
+
+def test_conflict_not_resolved_by_an_unrelated_numeric_field():
+    facts = extract_job_facts(
+        title="Controller", description="Remote finance role.",
+        company={"headcount": 400, "size_band": "1,001-5,000", "founded_year": 1998})
+    assert not any(e.reason.startswith("company:size") for e in facts.exclusions)
+    assert any("firmographic_conflict" in r for r in facts.review_reasons)
+
+
+def test_conflict_resolved_by_an_allow_listed_employee_count_field():
+    facts = extract_job_facts(
+        title="Controller", description="Remote finance role.",
+        company={"headcount": 400, "size_band": "1,001-5,000", "employee_count": 3000})
+    assert any(e.reason == "company:size:out_of_range" for e in facts.exclusions)
+    assert not facts.review_reasons
+
+
+def test_conflict_not_resolved_by_an_implausible_employee_count_value():
+    """Mirrors the review's own example: a phone-number fragment stored (by data
+    error) in an otherwise allow-listed field must not be treated as a headcount."""
+    facts = extract_job_facts(
+        title="Controller", description="Remote finance role.",
+        company={"headcount": 400, "size_band": "1,001-5,000", "employee_count": 4155551234})
+    assert not any(e.reason.startswith("company:size") for e in facts.exclusions)
+    assert any("firmographic_conflict" in r for r in facts.review_reasons)

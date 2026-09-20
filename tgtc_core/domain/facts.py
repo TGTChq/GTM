@@ -387,6 +387,25 @@ def _extract_stated_headcount(text: str) -> Optional[int]:
     return None
 
 
+#: Fix round 1 (2026-09-19, CRITICAL): fields on the `company` mapping that
+#: plausibly denote an employee count, for free-resolution step 2 (an
+#: already-populated PROVIDER field, not the employer's own text statement --
+#: step 1 above). Iterating `company.items()` with no semantic filter treated
+#: ANY numeric-parseable field (founded_year, a follower count, a phone-number
+#: fragment) as a headcount surrogate, silently able to flip a
+#: firmographic_conflict into a false in_range or, worse, a false
+#: out_of_range reject -- exactly what Decision 2 forbids ("never discard a
+#: potentially eligible company just because two sources conflict"). A tuple,
+#: not a set, so the resolution order among surrogate fields is deterministic.
+COMPANY_SIZE_SURROGATE_FIELDS = ("employee_count", "headcount_estimate", "staff_count", "num_employees")
+
+#: A plausible employee-count value, applied to the resolved candidate
+#: regardless of which step produced it (an allow-listed field can still hold a
+#: garbage value, e.g. the phone-number-fragment example above).
+def _plausible_headcount(n: Optional[int]) -> bool:
+    return n is not None and 1 <= n <= 10_000_000
+
+
 def has_people_authority(description: str) -> Optional[str]:
     """Clause-scoped: returns the offending clause, or None."""
     for clause in (c.strip() for c in CLAUSE_SPLIT.split(description or "") if c.strip()):
@@ -500,9 +519,16 @@ def extract_job_facts(
             emp_value, emp_excerpt, emp_status = "full_time", text_full_time_hits[0], TEXT
         else:
             emp_value, emp_excerpt, emp_status = "full_time", provider_excerpt, PROVIDER
-    jf.facts["employment_type"] = Fact("employment_type", emp_value, emp_status if emp_value else UNKNOWN, emp_excerpt)
+    # Fix round 1 (2026-09-19, IMPORTANT): employment is a changed decision path
+    # in this batch (task 4's priority restructuring + FIXED_TERM_INCIDENTAL
+    # narrowing) and must carry RULE_VERSION like tasks 1-3's changed paths and
+    # task 5's own company_size Fact/Exclusion already do -- on the WHOLE
+    # employment_type Fact/Exclusion, not conditionally per row, mirroring how
+    # task 3 stamps every physical_facility Fact/Exclusion regardless of
+    # whether that specific row's outcome was actually altered by the change.
+    jf.facts["employment_type"] = Fact("employment_type", emp_value, emp_status if emp_value else UNKNOWN, emp_excerpt, RULE_VERSION)
     if emp_value and emp_value != "full_time":
-        jf.exclusions.append(Exclusion(f"employment:{emp_value}", emp_excerpt, emp_status))
+        jf.exclusions.append(Exclusion(f"employment:{emp_value}", emp_excerpt, emp_status, RULE_VERSION))
 
     # arrangement / deliverability
     arrangement, arr_excerpt = None, ""
@@ -638,8 +664,12 @@ def extract_job_facts(
             # nothing resolves it, it stays `firmographic_conflict`.
             resolved, resolved_source = _extract_stated_headcount(desc), "description_stated_headcount"
             if resolved is None:
-                for key, value in company.items():
-                    if key in {"headcount", "size_band"} or value in (None, ""):
+                # CRITICAL fix round 1: only an explicit allow-list of fields
+                # that actually denote employee count, never any
+                # numeric-parseable field on `company`.
+                for key in COMPANY_SIZE_SURROGATE_FIELDS:
+                    value = company.get(key)
+                    if value in (None, ""):
                         continue
                     cand = _to_int(value)
                     if cand is None:
@@ -650,7 +680,10 @@ def extract_job_facts(
                     if cand is not None:
                         resolved, resolved_source = cand, f"provider_field:{key}"
                         break
-            if resolved is not None:
+            # Refuse an implausible resolved value regardless of which step
+            # produced it -- an allow-listed field can still hold a garbage
+            # number (CRITICAL fix round 1).
+            if resolved is not None and _plausible_headcount(resolved):
                 resolved_state = size_state(resolved, None)
                 if resolved_state in {"in_range", "out_of_range"}:
                     state = resolved_state
