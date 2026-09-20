@@ -66,7 +66,11 @@ def test_candidate_outcomes_are_pinned(case):
 
 @pytest.mark.parametrize("case", by_requirement("seniority_title_not_rejected"), ids=lambda c: c["case"])
 def test_director_vp_head_title_is_not_an_automatic_rejection(case):
-    assert case["current_outcome"] == "rejected:seniority:leadership_or_principal"
+    # Phase 2 audit task 1 (2026-09-19, Luis): facts.py itself no longer rejects on a
+    # leadership/principal title alone, so "current" (qualify_row) and "candidate"
+    # policy now agree here. Before the audit, qualify_row returned
+    # "rejected:seniority:leadership_or_principal" for every one of these cases.
+    assert not case["current_outcome"].startswith("rejected:seniority")
     alone = candidate(case["row"], steps=(cq.SENIORITY_MANAGEMENT,))
     assert not alone["outcome"].startswith("rejected:seniority")
     result = candidate(case["row"])

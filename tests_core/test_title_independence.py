@@ -36,9 +36,13 @@ def test_attractive_title_with_physical_work_is_excluded():
     assert excluded and reason.startswith("deliverability:") and fns == ()
 
 
-def test_leadership_title_is_excluded_even_with_ic_looking_work():
-    excluded, reason, _ = _decide("Director of Finance", next(x for x in CORPUS if x.key == "fin2").description)
-    assert excluded and reason == "seniority:leadership_or_principal"
+def test_leadership_title_alone_does_not_exclude_ic_looking_work():
+    # Phase 2 audit task 1 (2026-09-19, Luis): a leadership title is data about role
+    # level, not a gate. "Director of Finance" over the fin2 IC description (no direct
+    # reports, no people-management language) must classify on the work, same as any
+    # other title -- this used to hard-exclude on the title word alone.
+    excluded, reason, fns = _decide("Director of Finance", next(x for x in CORPUS if x.key == "fin2").description)
+    assert not excluded and fns == ("finance",)
 
 
 def test_staff_accountant_is_not_a_leadership_title():

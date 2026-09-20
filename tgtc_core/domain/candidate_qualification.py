@@ -881,6 +881,14 @@ def qualify_candidate(row: Mapping[str, Any], *, now: datetime, steps: Iterable[
     if not arrangement and str(row.get("location_type") or "").upper() == "TELECOMMUTE":
         arrangement = "remote"
     out["work_arrangement"] = arrangement or "unknown"
+    if SENIORITY_MANAGEMENT in on:
+        # Phase 2 audit task 1 (2026-09-19, Luis): facts.py now records a leadership/
+        # principal title as the `role_level` FACT only -- it is never in
+        # facts.exclusions, so the loop below (which downgrades an exclusion to a flag)
+        # no longer sees it. Read the fact directly so this policy's own
+        # "carried as data, not a gate" flag is unaffected by that fix.
+        if facts.get("role_level").value == "leadership_or_principal":
+            flags.append("seniority:leadership_or_principal")
     hard: List[Tuple[str, str]] = []
     for e in facts.exclusions:
         reason = e.reason

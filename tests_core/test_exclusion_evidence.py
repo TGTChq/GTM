@@ -39,7 +39,6 @@ def test_a_model_claim_without_a_quote_is_not_a_business_rejection(claim):
     ("security_clearance", "An active security clearance is required for this role."),
     ("substantial_travel", "This role requires up to 25% travel."),
     ("employment", "This is a part-time position with a fixed schedule."),
-    ("seniority", "This position is a director of operations."),
     ("field_work", "This is a field-based position at customer premises."),
 ])
 def test_grounded_supported_exclusions_have_an_audit_trail(code, text):
@@ -56,6 +55,12 @@ def test_grounded_supported_exclusions_have_an_audit_trail(code, text):
     ("security_clearance", "No security clearance is required for this role."),
     ("clinical_care", "Experience providing direct patient care is preferred."),
     ("made_up_rule", "You will provide direct patient care in the hospital."),
+    # Phase 2 audit task 1 (2026-09-19, Luis): a title word (Director/VP/Head/Chief/
+    # Lead/Senior) is never on its own grounds for rejection -- corroborates() no
+    # longer finds a "seniority:" exclusion in facts.py to back this model claim, so
+    # it is correctly ignored rather than honoured. See tgtc_core/domain/facts.py
+    # (role_level fact) and .superpowers/sdd/phase2/task-1-3-brief.md.
+    ("seniority", "This position is a director of operations."),
 ])
 def test_a_real_quote_alone_does_not_establish_an_exclusion(code, text):
     r = decide(text, code=code, excerpt=text)

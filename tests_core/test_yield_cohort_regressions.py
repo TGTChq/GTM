@@ -72,8 +72,11 @@ def test_reddit_privacy_notice_does_not_turn_full_time_into_contract():
         description="We evaluate your application for employment or an independent contractor role, as applicable.")
     assert facts.get("employment_type").value == "full_time"
     assert "employment:contract" not in [e.reason for e in facts.exclusions]
-    # Correct the explanation, not the underlying agreed seniority policy.
-    assert "seniority:leadership_or_principal" in [e.reason for e in facts.exclusions]
+    # Phase 2 audit task 1 (2026-09-19, Luis): "Staff Software Engineer" still records
+    # leadership_or_principal as a role_level FACT (TITLE_LEADERSHIP still matches it),
+    # but that fact is never, on its own, grounds for exclusion any more.
+    assert facts.get("role_level").value == "leadership_or_principal"
+    assert "seniority:leadership_or_principal" not in [e.reason for e in facts.exclusions]
 
 
 @pytest.mark.parametrize("description", ["You will work as an independent contractor.",

@@ -106,13 +106,18 @@ def test_missing_configuration_closes_distinctly_and_reopens_when_configured(con
 
 def test_commercial_exclusion_and_insufficient_evidence_stay_closed(conn, clock):
     """These are not technical failures: no waiting, no automatic resumption without new evidence."""
+    # Phase 2 audit task 1 (2026-09-19): a leadership title alone ("Director of Finance")
+    # no longer deterministically excludes (facts.py role_level is a fact only), so this
+    # exercises a different, still-valid deterministic exclusion (employment:part_time)
+    # to prove the same "closed, not waiting" behaviour for a commercial exclusion.
     row = make_posting_row(id="excl-1", title="Director of Finance", organization="Acme", domain="acme.com",
-                           description=VAGUE, date_created=clock() - timedelta(hours=4))
+                           description="This is a part-time position with a fixed schedule. " + VAGUE,
+                           date_created=clock() - timedelta(hours=4))
     pid = seed_posting(conn, clock, row)
     from tgtc_core.services.identity_service import resolve_posting_identity
     resolve_posting_identity(conn, pid, now=clock())
     out = classify_one(conn, pid, inference=FlakyAdapter(failures=0), now=clock())
-    assert out.outcome == "closed" and out.reason == "seniority:leadership_or_principal"
+    assert out.outcome == "closed" and out.reason == "employment:part_time"
     short = make_posting_row(id="short-1", title="Ops", organization="Acme", domain="acme.com", description="Apply now.",
                              date_created=clock() - timedelta(hours=4))
     pid2 = seed_posting(conn, clock, short)

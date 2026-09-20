@@ -20,6 +20,15 @@ PROVIDER = "provider"
 TEXT = "text"
 UNKNOWN = "unknown"
 
+#: Phase 2 offline audit (2026-09-19): tasks 1-3 correct false rejections in the
+#: seniority, people-management and physical-facility rules below. Facts and
+#: exclusions produced by a changed decision path carry this rule_version so a
+#: replay can tell audited output from pre-audit (be3af32) output. See
+#: .superpowers/sdd/phase2/task-1-3-brief.md. No policy switch existed to keep the
+#: old behaviour reachable in-process; the prior behaviour is only replayable from
+#: git history (commit before each task) or the counterfactual harness.
+RULE_VERSION = "tgtc-core/3-audit"
+
 
 @dataclass(frozen=True)
 class Fact:
@@ -27,6 +36,7 @@ class Fact:
     value: object
     status: str  # provider | text | unknown
     excerpt: str = ""
+    rule_version: str = ""
 
     @property
     def known(self) -> bool:
@@ -38,6 +48,7 @@ class Exclusion:
     reason: str
     excerpt: str
     source: str
+    rule_version: str = ""
 
 
 @dataclass
@@ -54,8 +65,10 @@ class JobFacts:
 
     def to_dict(self) -> Dict[str, object]:
         return {
-            "facts": {k: {"value": v.value, "status": v.status, "excerpt": v.excerpt[:300]} for k, v in self.facts.items()},
-            "exclusions": [{"reason": e.reason, "excerpt": e.excerpt[:300], "source": e.source} for e in self.exclusions],
+            "facts": {k: {"value": v.value, "status": v.status, "excerpt": v.excerpt[:300], "rule_version": v.rule_version}
+                     for k, v in self.facts.items()},
+            "exclusions": [{"reason": e.reason, "excerpt": e.excerpt[:300], "source": e.source, "rule_version": e.rule_version}
+                          for e in self.exclusions],
         }
 
 
@@ -361,7 +374,16 @@ def extract_job_facts(
     else:
         jf.facts["intent_market"] = Fact("intent_market", None, UNKNOWN)
 
-    # role level: title (when present) and role statements in the text
+    # role level: title (when present) and role statements in the text.
+    #
+    # Phase 2 audit task 1 (2026-09-19, Luis): a leadership/principal title is a FACT
+    # for later decision-maker mapping. It is never, on its own, a reason to reject the
+    # job -- measured 397 decisive rejects on this alone, 54.5% of a labelled sample
+    # invalid, ~217 valid jobs lost per pool. Do not resurrect the old
+    # `Exclusion("seniority:leadership_or_principal", ...)` append below; campaign fit
+    # and actual responsibilities decide eligibility, not the title word. The pre-audit
+    # behaviour is only replayable from git history (this file before this commit) or
+    # the counterfactual harness -- this module has no policy switch to invent one.
     level_excerpt = ""
     if title and TITLE_LEADERSHIP.search(title):
         level_excerpt = title
@@ -369,10 +391,9 @@ def extract_job_facts(
     if not level_excerpt and m:
         level_excerpt = m.group(0)
     if level_excerpt:
-        jf.facts["role_level"] = Fact("role_level", "leadership_or_principal", TEXT, level_excerpt)
-        jf.exclusions.append(Exclusion("seniority:leadership_or_principal", level_excerpt, TEXT))
+        jf.facts["role_level"] = Fact("role_level", "leadership_or_principal", TEXT, level_excerpt, RULE_VERSION)
     else:
-        jf.facts["role_level"] = Fact("role_level", "ic_or_manager_unstated", TEXT if title else UNKNOWN, title)
+        jf.facts["role_level"] = Fact("role_level", "ic_or_manager_unstated", TEXT if title else UNKNOWN, title, RULE_VERSION)
     authority = has_people_authority(desc)
     jf.facts["people_management"] = Fact("people_management", bool(authority), TEXT if authority else UNKNOWN, authority or "")
     if authority:
