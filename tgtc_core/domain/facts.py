@@ -151,6 +151,15 @@ FACILITY = [
     r"\b(?:forklift|pallet jack)\b",
     r"\b(?:patient care|bedside)\b[^.]{0,80}\b(?:required|responsibilit)",
 ]
+#: Phase 2 audit task 3 (2026-09-19, Luis): ADA-boilerplate lifting language is not
+#: evidence the JOB is physical. Measured: of 541 decisive physical_facility rejects,
+#: the matched spans were lift/lifting NN lbs 390, forklift/pallet jack 150, and one real
+#: clinical duty; FN rate 7.7%, ~42 valid jobs lost per pool. This narrows the
+#: lift/lifting pattern only -- forklift/pallet jack and the other FACILITY spans are
+#: untouched, so a genuine physical core duty still excludes.
+FACILITY_LIFT_INCIDENTAL = re.compile(
+    r"\b(?:occasionally|occasional|as needed|from time to time|infrequently|rarely|"
+    r"with (?:or without )?(?:reasonable )?accommodations?)\b", re.I)
 
 # --- role level (job_quality.py) ---------------------------------------------
 
@@ -356,9 +365,18 @@ def extract_job_facts(
             hits = [s for s in hits if not (
                 re.search(r"\blight lifting\s+(?:up to\s+)?(?:1\d|20)\s*(?:lbs|pounds)\b", s, re.I)
                 and not any(re.search(p, s, re.I) for p in FACILITY if "(?:lift|lifting)" not in p))]
-        jf.facts[name] = Fact(name, "required" if hits else None, TEXT if hits else UNKNOWN, hits[0] if hits else "")
+            # Task 3 (2026-09-19): ADA-boilerplate ("occasionally", "as needed", "with or
+            # without reasonable accommodation") on a lift/lifting clause is incidental
+            # boilerplate, not a physical core duty. Narrows the rule, does not delete
+            # it -- forklift/pallet jack and the other FACILITY spans below still
+            # exclude on their own.
+            hits = [s for s in hits if not (
+                re.search(FACILITY[3], s, re.I) and FACILITY_LIFT_INCIDENTAL.search(s)
+                and not any(re.search(p, s, re.I) for p in FACILITY if p != FACILITY[3]))]
+        rv = RULE_VERSION if name == "physical_facility" else ""
+        jf.facts[name] = Fact(name, "required" if hits else None, TEXT if hits else UNKNOWN, hits[0] if hits else "", rv)
         if hits:
-            jf.exclusions.append(Exclusion(reason, hits[0], TEXT))
+            jf.exclusions.append(Exclusion(reason, hits[0], TEXT, rv))
 
     # market
     foreign = _matching(sents, FOREIGN_ONLY)
