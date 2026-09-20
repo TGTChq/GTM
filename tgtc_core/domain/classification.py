@@ -24,7 +24,7 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Sequence, Tuple
 
 from ..policy.campaigns import CAMPAIGN_BY_FUNCTION, FUNCTION_KEYS, POLICY_VERSION
-from .facts import JobFacts, extract_job_facts, sentences
+from .facts import RULE_VERSION, JobFacts, extract_job_facts, sentences
 from .inference import (
     UNAVAILABLE_ANSWER, UNAVAILABLE_CONFIG, UNAVAILABLE_TRANSIENT,
     InferencePort, InferenceRequest, InferenceResponse, grounded,
@@ -168,6 +168,34 @@ LEXICON: Dict[str, Tuple[Signal, ...]] = {
 
 assert set(LEXICON) == set(FUNCTION_KEYS), "lexicon must cover every function key"
 
+#: Phase 2 audit task 6 (2026-09-19): the approved exclusion -- quota-carrying sales
+#: is excluded from GTM Systems unless RevOps, Sales Ops or GTM-systems work is
+#: primary -- was never implemented. The holdout measured 8.7% precision (2/23): 19
+#: of 21 misses were plain quota-carrying sales postings (Account Executive, SDR)
+#: that reach ``gtm_revenue`` dominance purely on the lexicon's own selling-verb
+#: signals ("quota", "sales cycle", "prospecting", "closing deals" ...).
+#:
+#: These two sets categorize the SAME canonical phrases ``score_functions`` already
+#: matched for ``gtm_revenue`` -- no second detection pass, so the "is this selling
+#: or ops" view cannot drift from the lexicon that produced the evidence (the
+#: established pattern: see ``exclusion_evidence.py``'s reuse of ``facts.py``).
+#: "partnerships and business development" is deliberately in neither set: it is
+#: not clearly one or the other and stays neutral.
+GTM_OPS_PHRASES = frozenset({
+    "CRM administration and automation", "lead routing and enrichment", "outbound systems",
+    "revenue reporting and forecasting", "revenue operations",
+})
+GTM_SELLING_PHRASES = frozenset({
+    "quota and compensation operations", "sales development and prospecting", "sales execution",
+})
+
+
+def _gtm_revenue_scope(hits: List[Tuple[Signal, str]]) -> Tuple[int, int]:
+    """(selling score, ops score) from the phrases already matched for gtm_revenue."""
+    selling = sum(sig.weight for sig, _ in hits if sig.phrase in GTM_SELLING_PHRASES)
+    ops = sum(sig.weight for sig, _ in hits if sig.phrase in GTM_OPS_PHRASES)
+    return selling, ops
+
 
 @dataclass
 class Responsibility:
@@ -302,6 +330,17 @@ def classify_posting(
     scores, hits = score_functions(desc)
     result.scores = dict(scores)
     dominant = _dominant(scores, hits)
+    if dominant == "gtm_revenue":
+        selling, ops = _gtm_revenue_scope(hits[dominant])
+        if selling and selling >= ops:
+            result.method = METHOD_DETERMINISTIC
+            result.excluded = True
+            result.exclusion_reason = "role:quota_carrying_sales"
+            result.facts["role_exclusion"] = {
+                "code": "quota_carrying_sales", "rule_version": RULE_VERSION,
+                "selling_score": selling, "ops_score": ops,
+            }
+            return result
     if dominant:
         result.compatible_functions = [dominant]
         result.campaign_keys = [CAMPAIGN_BY_FUNCTION[dominant].key]
