@@ -60,12 +60,19 @@ _LINKEDIN_SIZE_BANDS: Tuple[Tuple[int, Optional[int], str], ...] = (
 )
 
 
-def _consistent_size_band(headcount: Optional[int]) -> str:
+def _consistent_size_band(headcount: Optional[int]) -> Optional[str]:
     """The declared LinkedIn size band for a given headcount, so a fake row's
     two size sources never silently disagree unless a caller asks for that
-    (via `org_linkedin_size=...` in `**extra`, applied after this default)."""
+    (via `org_linkedin_size=...` in `**extra`, applied after this default).
+
+    Final whole-branch review (CANARY, 2026-09-20): ``headcount=None`` used to
+    yield "51-200" -- a fixture with NO headcount silently declared an in-range
+    size band, i.e. it INVENTED a second size source. Under the three-state
+    policy that turns "unknown" fixtures into in-range ones (it did exactly
+    that to the canary's own "no company size" row). No headcount and no band
+    is the honest shape of an unknown employer."""
     if headcount is None:
-        return "51-200"
+        return None
     for lo, hi, label in _LINKEDIN_SIZE_BANDS:
         if headcount >= lo and (hi is None or headcount <= hi):
             return label

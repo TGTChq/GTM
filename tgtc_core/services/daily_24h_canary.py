@@ -51,6 +51,7 @@ from ..domain.acquisition_query import (
 from ..domain.candidate_qualification import approved_industry_query_labels
 from ..domain.classification import classify_posting
 from ..domain.employer_attribution import employer_attribution_conflict
+from ..domain.facts import resolve_company_size, size_reject_reason
 from ..domain.identity import employer_anchors, employer_key, posting_canonical_key
 from ..policy.requirements import excluded_industry, rule
 from ..providers.fantastic import (
@@ -446,13 +447,27 @@ def qualify_row(row: Mapping[str, Any], *, now: datetime) -> Dict[str, Any]:
     industry = excluded_industry(str(row.get("org_linkedin_industry") or ""))
     if industry:
         return {**out, "outcome": f"rejected:employer_excluded_industry:{industry}"}
-    headcount = _int(row.get("org_linkedin_headcount"))
-    if headcount is None:
+    # Final whole-branch review, CANARY (2026-09-20): the SAME company-size
+    # predicate the live gates use (services/opportunity._size_gate and
+    # domain/approval.build_approved_lead both call resolve_company_size), on
+    # the SAME rule() bounds. This read org_linkedin_headcount alone while every
+    # other stage of this same function had already moved to the three-state
+    # policy -- one canary running two different policies, which is worse than
+    # either. A conflict is a review bucket, never a reject (Decision 2:
+    # never discard a potentially eligible company merely because two sources
+    # disagree); only a verdict every populated source agrees on rejects.
+    min_employees, max_employees = int(rule("min_employees")), int(rule("max_employees"))
+    size_state_value, _size_excerpt, effective = resolve_company_size(
+        row.get("org_linkedin_headcount"), row.get("org_linkedin_size"),
+        description=str(row.get("description_text") or ""),
+        min_employees=min_employees, max_employees=max_employees,
+    )
+    if size_state_value == "out_of_range":
+        return {**out, "outcome": f"rejected:{size_reject_reason(effective, min_employees=min_employees)}"}
+    if size_state_value == "unknown_firmographics":
         return {**out, "outcome": "ambiguous:company_size_unknown"}
-    if headcount < int(rule("min_employees")):
-        return {**out, "outcome": "rejected:employer_too_small"}
-    if headcount > int(rule("max_employees")):
-        return {**out, "outcome": "rejected:employer_too_large"}
+    if size_state_value == "firmographic_conflict":
+        return {**out, "outcome": "ambiguous:firmographic_conflict"}
     return {**out, "outcome": "qualified_pre_contact"}
 
 

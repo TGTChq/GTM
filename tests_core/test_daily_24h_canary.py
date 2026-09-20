@@ -346,3 +346,52 @@ def test_count_preflight_parses_documented_body_shapes():
         assert total == 42
     probe = feed.requests[-1]
     assert probe["path"] == "/v1/active-jb-count" and "time_frame" not in probe["params"]
+
+
+# ---------------------------------------------------------------------------
+# Final whole-branch review, CANARY: the "frozen instrument" ruling was wrong.
+# qualify_row calls classify_posting -> extract_job_facts, so tasks 1-4 and 6
+# ALREADY changed this canary's output (the committed fixture diff proves it).
+# What it did NOT have was the company-size half: three-state size everywhere
+# else, a single-field org_linkedin_headcount read here -- one canary running
+# two different policies. It now asks the SAME resolve_company_size /
+# size_reject_reason predicate the live gates (services/opportunity._size_gate,
+# domain/approval.build_approved_lead) ask.
+# ---------------------------------------------------------------------------
+
+def _qualify(**over):
+    return canary.qualify_row(row(1, **over), now=NOW)["outcome"]
+
+
+def test_the_canary_size_verdict_matches_the_live_size_predicate():
+    from tgtc_core.domain.facts import resolve_company_size
+    from tgtc_core.policy.requirements import rule
+
+    cases = [(120, "51-200 employees"), (120, None), (5000, "1,001-5,000 employees"),
+             (5000, "51-200 employees"), (None, "51-200 employees"), (None, None), (12, "1-10 employees")]
+    for headcount, band in cases:
+        outcome = _qualify(headcount=headcount, org_linkedin_size=band)
+        state, _excerpt, _effective = resolve_company_size(
+            headcount, band, description=ENG,
+            min_employees=int(rule("min_employees")), max_employees=int(rule("max_employees")))
+        expected_prefix = {"in_range": "qualified_pre_contact", "out_of_range": "rejected:employer_too",
+                           "firmographic_conflict": "ambiguous:firmographic_conflict",
+                           "unknown_firmographics": "ambiguous:company_size_unknown"}[state]
+        assert outcome.startswith(expected_prefix), (headcount, band, state, outcome)
+
+
+def test_the_canary_never_rejects_a_firmographic_conflict():
+    """headcount 5000 alone reads employer_too_large; the employer's own declared
+    band reads clearly in range. Decision 2: never discard a potentially eligible
+    company merely because two sources conflict -- so it is a review bucket."""
+    assert _qualify(headcount=5000, org_linkedin_size="51-200 employees") == "ambiguous:firmographic_conflict"
+
+
+def test_the_canary_reads_the_declared_band_when_no_headcount_is_present():
+    assert _qualify(headcount=None, org_linkedin_size="51-200 employees") == "qualified_pre_contact"
+    assert _qualify(headcount=None, org_linkedin_size=None) == "ambiguous:company_size_unknown"
+
+
+def test_the_canary_still_rejects_an_employer_every_source_agrees_is_out_of_range():
+    assert _qualify(headcount=5000, org_linkedin_size="1,001-5,000 employees") == "rejected:employer_too_large"
+    assert _qualify(headcount=12, org_linkedin_size="1-10 employees") == "rejected:employer_too_small"
