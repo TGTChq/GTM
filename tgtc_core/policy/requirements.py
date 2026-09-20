@@ -81,18 +81,49 @@ def rule(key: str):
     return RULE_BY_KEY[key].value
 
 
+#: Phase 3 audit (2026-09-20). The excluded-industry list is a POLICY CONSTANT, not a
+#: ``Fact``/``Exclusion``: ``excluded_industry`` returns a label and its callers turn that
+#: into the reason string ``employer_excluded_industry:<label>``. There is no Fact object to
+#: carry a rule version, so the version of the LIST is declared here instead, beside it.
+EXCLUDED_INDUSTRIES_RULE_VERSION = "tgtc-core/3-audit"
+
+#: Industry labels that are NOT approved exclusions and must never exclude an employer.
+#:
+#: Luis (OPEN_DECISIONS.md, Q6, restated in the 2026-09-20 resolution pass): "Online news,
+#: digital media and media production stay allowed" -- the fixed rules name CRM, staffing/RPO,
+#: true intermediaries and the approved industries, and media is not among them. D3 keeps the
+#: approved list itself as-is. The evaluator's frozen rubric §4.K says the same from the other
+#: side: "online news, digital media, internet publishing and media production are NOT on the
+#: approved list ... do not exclude".
+#:
+#: These six labels were imported from ``config.APOLLO_EXCLUDED_INDUSTRY_KEYWORDS`` at 5d87851
+#: as ``legacy_default_pending_confirmation``; the confirmation came back NO. Measured on the
+#: two frozen corpora (7,349 net-new rows): they account for 33 of the 81 excluded-industry
+#: hits (40.7%) -- ``internet news`` 30, ``media production`` 3.
+#:
+#: Kept as a named set rather than simply deleted so the removal reads as a decision with a
+#: source, and so a future re-import of the legacy list cannot silently restore them.
+MEDIA_INDUSTRIES_NOT_EXCLUDED: FrozenSet[str] = frozenset({
+    "online media", "internet news", "news media", "media production", "digital news",
+    "financial news",
+})
+
 #: Apollo industry taxonomy labels that exclude an employer
-#: (``config.APOLLO_EXCLUDED_INDUSTRY_KEYWORDS`` at 5d87851). Exact match, or the
-#: label followed by " / " or " - " (Apollo appends qualifiers that way).
+#: (``config.APOLLO_EXCLUDED_INDUSTRY_KEYWORDS`` at 5d87851, minus
+#: ``MEDIA_INDUSTRIES_NOT_EXCLUDED``). Exact match, or the label followed by " / " or " - "
+#: (Apollo appends qualifiers that way). ``broadcast media``, ``newspapers`` and
+#: ``book publishing`` ARE on the approved list and stay.
 EXCLUDED_INDUSTRIES: FrozenSet[str] = frozenset({
     "staffing and recruiting", "staffing", "recruiting", "government administration",
     "nonprofit organization management", "hospital & health care", "hospitals and health care",
     "health care", "healthcare", "mental health care", "mental health", "medical practice",
     "human resources services", "outsourcing/offshoring", "events services", "broadcast media",
-    "online media", "internet news", "news media", "media production", "digital news",
-    "financial news", "newspapers", "book publishing", "chemicals",
+    "newspapers", "book publishing", "chemicals",
     "non-profit organization management",
 })
+
+assert not (EXCLUDED_INDUSTRIES & MEDIA_INDUSTRIES_NOT_EXCLUDED), (
+    "an industry Luis ruled allowed is back on the excluded list")
 
 STAFFING_INDUSTRIES: FrozenSet[str] = frozenset({
     "staffing and recruiting", "staffing", "recruiting", "human resources services",
