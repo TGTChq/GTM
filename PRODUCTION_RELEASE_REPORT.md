@@ -134,3 +134,65 @@ at the qualify stage before any paid enrichment.
 
 Nothing was written to Instantly during this measurement: approvals 0, new
 outbox rows 0, `delivery_receipts` unchanged at 172.
+
+## Bounded production canary — PASSED
+
+| check | result |
+|---|---|
+| contacts written to Instantly | **71** across 8 Challenger campaigns |
+| genuinely new enrolments acknowledged | **70 `created`** |
+| reconciled (already in the target campaign) | 1 `existing` — correctly NOT counted against the cap |
+| every destination a Challenger id | **yes**; zero Control ids |
+| inserted exactly once | **yes** — delivered = distinct people = distinct emails, per campaign |
+| per-campaign ceiling (10 newly created) | held; `gtm_systems` shows 11 delivered = 10 created + 1 reconciled |
+| campaigns under ten | marketing 4, product 7, people_hr 9 — the inventory held fewer valid contacts, and the cap is a ceiling, never a quota |
+
+Delivered by campaign: gtm_systems 11, customer_experience 10, finance 10,
+ai_technical 10, operations 10, people_hr 9, product 7, marketing_creative 4.
+Ecommerce received none this run.
+
+### The 86 legacy rows were stopped, not sent
+
+All 86 pending Instantly rows pointed at retired Control campaigns. They are now
+blocked as `compliance:outreach_eligibility_unknown` — they predate migration
+011, so `outreach_eligible` is NULL and the compliance gate fails closed before
+the retired-campaign guard is even reached. Two independent guards would have
+caught them; the earlier one fired.
+
+### Blocked reasons observed, all correct
+
+| reason | n |
+|---|---|
+| `compliance:unknown_jurisdiction:absent` | 100 |
+| `compliance:outreach_eligibility_unknown` (the legacy 86) | 86 |
+| `compliance:uk:not_a_verified_corporate_subscriber` | 4 |
+| `employer_attribution_conflict` | 1 |
+| `compliance:cold_email_not_permitted:DE` | 1 |
+| `not_delivered:instantly_existing_other_campaign` | 1 |
+
+### Provider consumption
+
+Fantastic 10 requests / 1,000 credits (the granted ceiling, exhausted).
+Anthropic 279 requests, 1.73M input and 199k output tokens.
+**Apollo 0 credits** — every contact came from an already-paid stored record,
+which is what "prefer valid cached contact records, never re-enrich the same
+person" asks for.
+
+## The largest remaining recoverable loss
+
+`compliance:unknown_jurisdiction:absent` blocks 100 otherwise-eligible
+contacts — the single biggest bucket. The contact's country is absent on those
+records, and the gate fails closed by design. Every one of them sits behind a
+US job at a US employer. Populating `contact_country` from the employer's
+country when the person's own country is absent, as a recorded inference rather
+than a silent default, is the next yield lever and is worth more than any other
+change measured here.
+
+## Not done, and why
+
+The daily schedule is NOT restored. `railway.core.json` is written, committed
+and correct — it adds `migrate` before the run, sets
+`restartPolicyType: NEVER` so an unmet target cannot restart and spend again,
+and sets `cronSchedule: 0 3 * * *`. Activating it is one variable
+(`RAILWAY_CONFIG_FILE`), and that write is refused by the permission classifier,
+as is raising the canary ceiling from 90 to production levels.
