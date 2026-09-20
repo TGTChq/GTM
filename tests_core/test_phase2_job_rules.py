@@ -51,3 +51,27 @@ def test_real_physical_core_duty_still_excludes():
     facts = extract_job_facts(title="Warehouse Associate",
                               description="Operate a forklift for the duration of the shift and palletize orders on the floor.")
     assert any("physical" in e.reason for e in facts.exclusions)
+
+
+# --- Task 3 boundary pins, fix round 1 (2026-09-19): IMPORTANT finding --------
+# test_real_physical_core_duty_still_excludes above never touches the lift/lifting
+# pattern or FACILITY_LIFT_INCIDENTAL (it only exercises the untouched forklift
+# span), so it does not by itself prove the narrowing is scoped correctly. These
+# two pin the actual boundary the review asked for.
+
+def test_lift_with_ada_qualifier_and_genuine_physical_evidence_still_excludes():
+    """A lift clause carrying the ADA qualifier ("occasionally") that ALSO shares
+    its sentence with other physical evidence (forklift) must still exclude -- the
+    narrowing only clears a lift clause that is the SOLE physical evidence."""
+    facts = extract_job_facts(title="Warehouse Associate",
+                              description="Occasionally lift up to 25 pounds while operating a forklift on the floor.")
+    assert any("physical" in e.reason for e in facts.exclusions)
+
+
+def test_lift_with_only_the_ada_qualifier_as_evidence_does_not_exclude():
+    """Mirrors RULE_AUDIT.md's `facility_lift_25` probe verbatim ("ADA boilerplate
+    on an office job"): when the lift clause's ONLY physical evidence is the
+    qualifier itself, it must not exclude."""
+    facts = extract_job_facts(title="Customer Success Manager",
+                              description="Physical demands: must be able to lift up to 25 pounds occasionally.")
+    assert not any("physical" in e.reason for e in facts.exclusions)

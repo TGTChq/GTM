@@ -35,7 +35,6 @@ def test_a_model_claim_without_a_quote_is_not_a_business_rejection(claim):
 @pytest.mark.parametrize("code,text", [
     ("clinical_care", "You will provide direct patient care in the hospital."),
     ("physical_work", "You will clean floors and restrooms at the facility."),
-    ("people_management", "You will supervise a team of employees."),
     ("security_clearance", "An active security clearance is required for this role."),
     ("substantial_travel", "This role requires up to 25% travel."),
     ("employment", "This is a part-time position with a fixed schedule."),
@@ -61,10 +60,42 @@ def test_grounded_supported_exclusions_have_an_audit_trail(code, text):
     # it is correctly ignored rather than honoured. See tgtc_core/domain/facts.py
     # (role_level fact) and .superpowers/sdd/phase2/task-1-3-brief.md.
     ("seniority", "This position is a director of operations."),
+    # Phase 2 audit fix round 1 (2026-09-19, CRITICAL finding): people management is
+    # never on its own grounds for rejection either, on THIS (semantic/LLM) path any
+    # more than on the deterministic one -- corroborates() no longer finds a
+    # "people_management" exclusion in facts.py to back this model claim. Before this
+    # fix, corroborates() called has_people_authority(excerpt) directly, bypassing
+    # facts.exclusions entirely, so task 2 alone did not close this path.
+    ("people_management", "You will supervise a team of employees."),
 ])
 def test_a_real_quote_alone_does_not_establish_an_exclusion(code, text):
     r = decide(text, code=code, excerpt=text)
     assert not r.decided
+
+
+def test_semantic_incidental_lifting_claim_is_not_corroborated():
+    """CRITICAL finding, fix round 1 (2026-09-19): PATTERNS["physical_work"][0] is
+    byte-identical to the pre-task-3 facts.FACILITY lift/lifting pattern, but was
+    never updated with facts.FACILITY_LIFT_INCIDENTAL. Reuses that same regex
+    object (not a copy) so the two rules cannot drift apart again."""
+    text = "Physical demands: must be able to lift up to 25 pounds occasionally."
+    r = decide(text, code="physical_work", excerpt=text)
+    assert not r.decided
+
+
+def test_semantic_lift_with_other_physical_evidence_still_corroborates():
+    """The narrowing only drops a lift/lifting-alone-with-an-ADA-qualifier clause;
+    a genuinely physical sentence (here, lift + forklift together) still excludes
+    on the semantic path, exactly as on the deterministic one."""
+    text = "Occasionally lift up to 25 pounds while operating a forklift on the floor."
+    r = decide(text, code="physical_work", excerpt=text)
+    assert r.excluded and r.exclusion_reason == "semantic_evidence:physical_work"
+
+
+def test_semantic_genuine_physical_work_claim_still_corroborates():
+    text = "Operate a forklift for the duration of the shift and palletize orders on the floor."
+    r = decide(text, code="physical_work", excerpt=text)
+    assert r.excluded and r.exclusion_reason == "semantic_evidence:physical_work"
 
 
 def test_fabricated_excerpt_cannot_reject_and_cannot_silently_approve():

@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import re
 
-from .facts import CLEARANCE, FIELD, LICENSE, TRAVEL_HARD, extract_job_facts, has_people_authority
+from .facts import CLEARANCE, FACILITY_LIFT_INCIDENTAL, FIELD, LICENSE, TRAVEL_HARD, extract_job_facts
 
 PATTERNS = {
     "physical_work": [
@@ -45,10 +45,28 @@ def corroborates(code: str, excerpt: str, description: str = "") -> bool:
     # A quoted negation/preference is not proof of a mandatory restriction.
     if re.search(r"\b(?:not required|no .{0,65}required|without|optional|preferred|desirable|not responsible|no direct reports)\b", context, re.I):
         return False
-    if code == "people_management":
-        return bool(has_people_authority(excerpt))
-    if code in {"employment", "seniority", "inactive_posting"}:
+    # Phase 2 audit fix round 1 (2026-09-19, CRITICAL): "people_management" used to
+    # call has_people_authority(excerpt) directly, bypassing facts.exclusions
+    # entirely -- so removing the standalone exclusion in facts.py (task 2) did not
+    # stop the semantic/LLM fallback from still rejecting on it. Routing it through
+    # the same extract_job_facts().exclusions check as employment/seniority/
+    # inactive_posting shares the one predicate that matters (an exclusion no
+    # longer exists to find) instead of duplicating a second copy of the rule that
+    # can drift again.
+    if code in {"employment", "seniority", "inactive_posting", "people_management"}:
         facts = extract_job_facts(title=None, description=excerpt)
-        prefix = {"employment": "employment:", "seniority": "seniority:", "inactive_posting": "active:"}[code]
+        prefix = {"employment": "employment:", "seniority": "seniority:", "inactive_posting": "active:",
+                  "people_management": "people_management"}[code]
         return any(e.reason.startswith(prefix) for e in facts.exclusions)
+    if code == "physical_work":
+        # Same task-3 narrowing as facts.FACILITY: a lift/lifting clause qualified
+        # by ADA-boilerplate language (FACILITY_LIFT_INCIDENTAL, imported from
+        # facts.py rather than copied) is not evidence of physical work unless
+        # another physical_work span is present in the same excerpt.
+        lift_pattern = PATTERNS["physical_work"][0]
+        lift_hit = re.search(lift_pattern, excerpt, re.I)
+        other_hit = any(re.search(p, excerpt, re.I) for p in PATTERNS["physical_work"][1:])
+        if lift_hit and not other_hit and FACILITY_LIFT_INCIDENTAL.search(excerpt):
+            return False
+        return bool(lift_hit or other_hit)
     return any(re.search(p, excerpt, re.I) for p in PATTERNS.get(code, ()))

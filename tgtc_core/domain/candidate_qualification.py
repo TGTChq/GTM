@@ -895,11 +895,13 @@ def qualify_candidate(row: Mapping[str, Any], *, now: datetime, steps: Iterable[
     hard: List[Tuple[str, str]] = []
     for e in facts.exclusions:
         reason = e.reason
-        if reason.startswith("seniority:") or reason == "people_management":
-            if SENIORITY_MANAGEMENT in on:
-                flags.append(reason)
-                continue
-        elif reason.startswith(("employment:", "program:", "active:")):
+        # A "seniority:"/"people_management" branch used to live here, downgrading
+        # that exclusion to a flag when SENIORITY_MANAGEMENT was on. Phase 2 audit
+        # fix round 1 (2026-09-19): facts.exclusions can never carry either reason
+        # any more (tasks 1-2), so that branch was dead code; removed rather than
+        # left unreachable. The flags themselves are now set directly above, from
+        # the role_level/people_management FACTS.
+        if reason.startswith(("employment:", "program:", "active:")):
             if EMPLOYMENT_PRECISION in on:
                 continue   # re-decided below
         elif reason in {"agency:staffing_text", "agency:outsourcing_text"}:
