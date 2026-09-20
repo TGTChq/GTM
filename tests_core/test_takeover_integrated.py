@@ -130,7 +130,7 @@ def test_v1_migration_preserves_inventory_and_cursor(conn, clock):
     apply_schema(conn)
     assert sql1(conn, 'SELECT next_offset FROM source_partitions') == 100
     assert sql1(conn, 'SELECT provider_job_id FROM postings') == 'saved-job'
-    assert sql1(conn, 'SELECT max(version) FROM schema_migrations') == 10   # 010: approvals.company_size_sources
+    assert sql1(conn, 'SELECT max(version) FROM schema_migrations') == 11   # 011: country compliance jurisdiction
     assert sql1(conn, 'SELECT query_profile FROM source_partitions') == 'legacy_v1'
 
 

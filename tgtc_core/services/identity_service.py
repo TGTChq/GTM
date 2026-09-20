@@ -27,6 +27,7 @@ from ..domain.identity import (
     domain_name_consistent, employer_anchors, employer_key, posting_canonical_key,
 )
 from ..domain.employer_attribution import employer_attribution_conflict
+from ..domain.jurisdiction import corporate_subscriber_status, observe_company_country, observe_legal_entity_type
 
 
 @dataclass
@@ -68,6 +69,16 @@ def resolve_employer(conn: psycopg.Connection, *, org: Dict[str, Any], employer_
     key = employer_key(domain, slug, nk)
     if not key:
         return None, "", "employer_identity_unresolved"
+    # `tgtc-compliance/1`: the EMPLOYER's own jurisdiction and legal form, from
+    # the provider's organization block and from nowhere else. The posting's
+    # `countries` is the JOB's country and is deliberately not consulted here --
+    # a job's location does not determine whose jurisdiction the company is in,
+    # and this is the function that would otherwise be the easiest place to
+    # blur the two. Both are stored even when they resolve to unknown, because
+    # `corporate_subscriber_status` = "unknown" is a fact ("never verified"),
+    # and an unknown entity type is never treated as corporate.
+    entity_type = observe_legal_entity_type(org)
+    entity_status = corporate_subscriber_status(entity_type)
     with conn.cursor() as cur:
         eid = _find_alias(cur, "domain", domain) if domain else None
         via = "domain" if eid else ""
@@ -86,13 +97,16 @@ def resolve_employer(conn: psycopg.Connection, *, org: Dict[str, Any], employer_
                 with conn.transaction():
                     cur.execute(
                         """
-                        INSERT INTO employers (canonical_name, name_key, domain, linkedin_slug, employee_count, size_band, industry, agency_flag, facts_json)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id
+                        INSERT INTO employers (canonical_name, name_key, domain, linkedin_slug, employee_count, size_band, industry, agency_flag,
+                                               company_country, employer_legal_entity_type, corporate_subscriber_status, facts_json)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id
                         """,
                         (name or nk or domain or slug, nk or name.lower(), domain or None, slug or None,
                          _int(org.get("org_linkedin_headcount")), org.get("org_linkedin_size") or None,
                          org.get("org_linkedin_industry") or None,
-                         _bool(org.get("org_linkedin_recruitment_agency_derived")), jsonb({"source": source, "org": org})),
+                         _bool(org.get("org_linkedin_recruitment_agency_derived")),
+                         observe_company_country(org) or None, entity_type or None, entity_status,
+                         jsonb({"source": source, "org": org})),
                     )
                     eid = int(cur.fetchone()["id"])
                     _add_alias(cur, eid, "domain", domain, {"source": source, "basis": "organization_url_or_derived"})
@@ -129,11 +143,24 @@ def resolve_employer(conn: psycopg.Connection, *, org: Dict[str, Any], employer_
             _add_alias(cur, eid, "name_key", nk, {"source": source, "basis": f"matched_via_{via}"})
         headcount = _int(org.get("org_linkedin_headcount"))
         size_band_value = org.get("org_linkedin_size") or None
-        if headcount is not None or size_band_value is not None:
+        company_country = observe_company_country(org) or None
+        if headcount is not None or size_band_value is not None or company_country or entity_type:
+            # COALESCE, like every other corroboration on this path: a later
+            # observation fills a blank, it never overwrites what an earlier one
+            # established. `corporate_subscriber_status` follows whichever
+            # entity type is actually stored afterwards, so the column and the
+            # gate can never be computed by two different rules.
             cur.execute(
                 "UPDATE employers SET employee_count = COALESCE(employee_count, %s), "
-                "size_band = COALESCE(size_band, %s), industry = COALESCE(industry, %s), updated_at = now() WHERE id = %s",
-                (headcount, size_band_value, org.get("org_linkedin_industry") or None, eid))
+                "size_band = COALESCE(size_band, %s), industry = COALESCE(industry, %s), "
+                "company_country = COALESCE(company_country, %s), "
+                "employer_legal_entity_type = COALESCE(employer_legal_entity_type, %s), updated_at = now() WHERE id = %s",
+                (headcount, size_band_value, org.get("org_linkedin_industry") or None,
+                 company_country, entity_type or None, eid))
+            cur.execute("SELECT employer_legal_entity_type FROM employers WHERE id = %s", (eid,))
+            stored_form = cur.fetchone()["employer_legal_entity_type"]
+            cur.execute("UPDATE employers SET corporate_subscriber_status = %s WHERE id = %s",
+                        (corporate_subscriber_status(stored_form), eid))
         return eid, key, f"employer_{via}"
 
 

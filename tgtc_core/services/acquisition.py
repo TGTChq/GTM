@@ -143,9 +143,16 @@ def posting_content_hash(row: Dict[str, Any]) -> str:
 
 
 def org_block(row: Dict[str, Any]) -> Dict[str, Any]:
+    # `org_linkedin_locations`/`org_linkedin_headquarters`/`org_linkedin_type` are
+    # the EMPLOYER's own jurisdiction and legal-form evidence (`tgtc-compliance/1`,
+    # migration 011) -- the only evidence in a provider row about the company
+    # itself rather than the job. Kept out of TRACKED_ROW_FIELDS on purpose: they
+    # are stored facts, not decision inputs whose change should re-version and
+    # reclassify every existing posting.
     keys = ("organization", "organization_url", "org_linkedin_name", "org_linkedin_slug", "org_linkedin_website",
             "org_linkedin_headcount", "org_linkedin_size", "org_linkedin_industry",
-            "org_linkedin_recruitment_agency_derived", "domain_derived", "linkedin_url")
+            "org_linkedin_recruitment_agency_derived", "domain_derived", "linkedin_url",
+            "org_linkedin_locations", "org_linkedin_headquarters", "org_linkedin_type")
     return {k: row.get(k) for k in keys if row.get(k) not in (None, "", [])}
 
 

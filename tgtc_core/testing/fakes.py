@@ -195,11 +195,19 @@ CREDIT_BODY = {
 
 def make_person(*, id: str, first: str, last: str, title: str, org_name: str, org_domain: str,
                 email: Optional[str], email_status: Optional[str], linkedin: Optional[str] = None,
-                org_id: str = "", headline: str = "", current: bool = True) -> Dict[str, Any]:
+                org_id: str = "", headline: str = "", current: bool = True,
+                country: str = "United States") -> Dict[str, Any]:
     """A FULL person record as ``people/match`` returns it. The search fake projects it
-    to the documented limited shape."""
+    to the documented limited shape.
+
+    ``country`` is the PERSON's own jurisdiction, which Apollo returns on a
+    match and which `tgtc-compliance/1` makes the only country a person gate may
+    decide on. A real person record carries one, so the fixture does too; pass
+    ``country=""`` for the record that does not, which fails closed for sending.
+    """
     return {
         "id": id, "first_name": first, "last_name": last, "name": f"{first} {last}", "title": title, "headline": headline,
+        **({"country": country} if country else {}),
         "linkedin_url": linkedin if linkedin is not None else f"https://www.linkedin.com/in/{first.lower()}-{last.lower()}-{id}",
         "organization": {"id": org_id or f"org-{org_domain}", "name": org_name, "primary_domain": org_domain},
         "employment_history": [{"organization_name": org_name, "current": current, "end_date": None if current else "2024-01-01"}],

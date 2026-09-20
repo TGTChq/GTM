@@ -34,7 +34,11 @@ import psycopg
 
 from ..db.connection import jsonb, transaction
 from ..db import work_queue
-from ..domain.approval import ApprovalRefusal, ApprovedLead, airtable_fields, build_approved_lead, instantly_payload
+from ..domain.approval import (
+    COMPLIANCE_LEAD_FIELDS, ApprovalRefusal, ApprovedLead, airtable_fields, build_approved_lead,
+    instantly_payload, outreach_blocked_reason,
+)
+from ..domain.jurisdiction import observe_contact_country
 from ..domain.facts import RULE_VERSION, resolve_company_size, size_corroborated, size_reject_reason
 from ..domain.gates import (
     corroborated_alternate_domains, evaluate_contact, evaluate_email, person_organization, pre_enrichment_check,
@@ -44,6 +48,7 @@ from ..domain.identity import company_names_compatible, domain_name_consistent, 
 from ..policy.campaigns import (
     DIRECT_BUYER_TITLES, campaign_route_configured, buyer_titles, is_founder_tier, resolve_campaign_id,
 )
+from ..policy.compliance import DISABLED, person_enrichment_allowed
 from ..policy.requirements import excluded_industry, rule
 from ..domain.employer_attribution import employer_attribution_conflict
 from ..providers.apollo import ApolloClient, ApolloResult, Outcome, person_org_domain
@@ -322,6 +327,8 @@ class OpportunityService:
                  max_contacts_per_opportunity: int = 1,
                  person_uniqueness: bool = True, verify_on_import: bool = False,
                  spend_budget: Optional[SpendBudget] = None,
+                 outreach_legal_basis: str = "", outreach_legal_basis_evidence: str = "",
+                 outreach_privacy_notice_configured: bool = False, outreach_privacy_notice_days: int = 30,
                  now: Callable[[], datetime] = lambda: datetime.now(timezone.utc)):
         self.conn = conn
         self.apollo = apollo
@@ -335,6 +342,25 @@ class OpportunityService:
         self.person_uniqueness = person_uniqueness
         self.verify_on_import = verify_on_import
         self.spend_budget = spend_budget
+        # `tgtc-compliance/1`. The deployment-level half of the outreach
+        # decision. Every default is the fail-closed value: absent, the UK gate
+        # blocks and its leads are retained and counted rather than sent.
+        #
+        # `unsubscribe_available` and `suppression_available` are asserted true
+        # because this core's own send path provides them structurally, not as
+        # a convenience default: every Instantly campaign carries the
+        # unsubscribe link, and `services/delivery.py::_precheck` runs
+        # `suppression_check` against the `suppressions` table before EVERY
+        # send on both channels. If either ever stops being true, this is the
+        # line that has to change.
+        self.outreach_controls: Dict[str, Any] = {
+            "legal_basis": outreach_legal_basis,
+            "legal_basis_evidence": outreach_legal_basis_evidence,
+            "privacy_notice_configured": bool(outreach_privacy_notice_configured),
+            "privacy_notice_days": int(outreach_privacy_notice_days),
+            "unsubscribe_available": True,
+            "suppression_available": True,
+        }
         self.now = now
         self._work_item = None
 
@@ -416,6 +442,32 @@ class OpportunityService:
         if state == "out_of_range":
             return self._close(opportunity_id, size_reject_reason(effective, min_employees=min_employees))
         return None
+
+    # --- country compliance (`tgtc-compliance/1`) ---------------------------
+    def _enrichment_jurisdiction_gate(self, emp: Dict[str, Any]) -> str:
+        """The block reason when this EMPLOYER's country forbids person
+        enrichment, or ``""`` to proceed. Runs with the other known
+        disqualifiers, i.e. before any paid Apollo call, so a jurisdiction the
+        matrix says `no` for costs nothing.
+
+        It decides on ``employers.company_country`` and names it: this is a
+        permission about processing the personal data of people at a company in
+        that country, and the company's country is the only jurisdiction known
+        before a person has been enriched. The CONTACT's own country decides
+        the outreach gate later, on ``people.contact_country``, and the two are
+        never substituted for one another.
+
+        Only a DISABLED verdict blocks. An unknown company country does NOT --
+        "fail closed for sending, open for capacity" is about sends, and
+        `employers.company_country` is NULL for every row that predates
+        migration 011, so failing closed here would halt the pipeline while
+        protecting nothing: the send gate downstream already fails closed on
+        the contact's own unknown jurisdiction. A CONDITIONAL verdict (UK)
+        likewise proceeds to enrichment and is decided at approval, where the
+        conditions can actually be evaluated.
+        """
+        decision = person_enrichment_allowed(emp.get("company_country"))
+        return decision.reason if decision.status == DISABLED else ""
 
     def _record_size_review(self, emp: Dict[str, Any], state: str, excerpt: str) -> None:
         """Keep this employer's company-size review bucket equal to its CURRENT
@@ -779,14 +831,16 @@ class OpportunityService:
                 cur.execute(
                     """
                     INSERT INTO people (apollo_person_id, linkedin_url, first_name, last_name, title, employer_id, organization_name,
-                                        organization_domain, email, email_status, email_authority, email_verified_at, facts_json)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                                        organization_domain, email, email_status, email_authority, email_verified_at,
+                                        contact_country, facts_json)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     ON CONFLICT (apollo_person_id) WHERE apollo_person_id IS NOT NULL DO UPDATE SET
                         linkedin_url = COALESCE(EXCLUDED.linkedin_url, people.linkedin_url), first_name = EXCLUDED.first_name,
                         last_name = EXCLUDED.last_name, title = EXCLUDED.title, employer_id = EXCLUDED.employer_id,
                         organization_name = EXCLUDED.organization_name, organization_domain = EXCLUDED.organization_domain,
                         email = COALESCE(EXCLUDED.email, people.email), email_status = COALESCE(EXCLUDED.email_status, people.email_status),
                         email_authority = EXCLUDED.email_authority, email_verified_at = COALESCE(EXCLUDED.email_verified_at, people.email_verified_at),
+                        contact_country = COALESCE(EXCLUDED.contact_country, people.contact_country),
                         facts_json = people.facts_json || EXCLUDED.facts_json, updated_at = now()
                     RETURNING id
                     """,
@@ -794,6 +848,12 @@ class OpportunityService:
                      enriched.get("title"), emp["id"] if employment_verified else None, org.get("name") or enriched.get("organization_name"),
                      person_org_domain(enriched) or None, email, status, "apollo" if email else None,
                      self.now() if status == "verified" else None,
+                     # `tgtc-compliance/1`: the PERSON's own jurisdiction, from the
+                     # person record the provider returned. The employer's country is
+                     # deliberately not a fallback -- people work for companies abroad,
+                     # and this is the field the outreach gate decides on. NULL when
+                     # the provider returned none, which is unknown, which fails closed.
+                     observe_contact_country(enriched) or None,
                      jsonb({"email_alignment": email_alignment, "headline": enriched.get("headline"), "enriched": evidence,
                             "enriched_at": self.now().isoformat(), "employment_verified": employment_verified})),
                 )
@@ -820,7 +880,7 @@ class OpportunityService:
             posting=posting, classification=classification, employer=employer_view, person=person_row,
             function_key=opp["function_key"], campaign_id=campaign_id,
             allowed_campaign_ids=list(self.campaign_env.values()), signing_key=self.signing_key, now=self.now(),
-            suppression_hits=hits,
+            suppression_hits=hits, outreach_controls=self.outreach_controls,
         )
 
     def _commit_approval(self, opp: Dict[str, Any], person_id: int, approved: ApprovedLead) -> int:
@@ -845,31 +905,52 @@ class OpportunityService:
                         or current_posting["content_hash"] != lead["posting_content_hash"]
                         or (current_posting["date_valid_through"] and current_posting["date_valid_through"] < self.now())):
                     raise work_queue.EvidenceChanged("approval input changed during qualification")
+                compliance_columns = ", ".join(COMPLIANCE_LEAD_FIELDS)
+                compliance_placeholders = ", ".join(["%s"] * len(COMPLIANCE_LEAD_FIELDS))
                 cur.execute(
-                    """
+                    f"""
                     INSERT INTO approvals (opportunity_id, person_id, employer_id, campaign_key, function_key, campaign_id, policy_version,
-                                           lead_key, fingerprint, lead_json, run_id, company_size_state, company_size_sources)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id
+                                           lead_key, fingerprint, lead_json, run_id, company_size_state, company_size_sources,
+                                           {compliance_columns})
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, {compliance_placeholders}) RETURNING id
                     """,
                     (opp["id"], person_id, opp["employer_id"], lead["campaign_key"], lead["function_key"], lead["campaign_id"],
                      lead["policy_version"], approved.lead_key, approved.fingerprint, jsonb(lead), self.run_id,
-                     lead.get("company_size_state"), lead.get("company_size_sources")),
+                     lead.get("company_size_state"), lead.get("company_size_sources"),
+                     # `tgtc-compliance/1`: the decision travels onto the row it is
+                     # later read from. Empty text is stored as NULL so "never
+                     # observed" and "observed as blank" never become one value for
+                     # a jurisdiction; outreach_eligible is a real boolean and is
+                     # passed through as one.
+                     *[lead.get(f) if f == "outreach_eligible" else (lead.get(f) or None)
+                       for f in COMPLIANCE_LEAD_FIELDS]),
                 )
                 approval_id = int(cur.fetchone()["id"])
+                # Fail closed for sending, open for capacity: a lead the country
+                # gates blocked is approved, stored and counted, but neither of
+                # its outbox items is ever claimable. `blocked` is this outbox's
+                # own existing terminal state for "do not deliver", and the
+                # reason comes from the SAME predicate the delivery pre-check
+                # asks, never a second copy of the rule.
+                outbox_block = outreach_blocked_reason(lead)
+                outbox_state = "blocked" if outbox_block else "pending"
                 cur.execute(
                     "UPDATE opportunities SET approved_person_id = COALESCE(approved_person_id, %s), "
                     "close_reason = NULL, updated_at = now() WHERE id = %s",
                     (person_id, opp["id"]),
                 )
                 cur.execute(
-                    "INSERT INTO delivery_outbox (approval_id, channel, idempotency_key, payload_json, available_at) VALUES (%s, 'airtable', %s, %s, %s)",
-                    (approval_id, f"airtable:{approved.lead_key}", jsonb(airtable_fields(lead, approved.fingerprint)), self.now()),
+                    "INSERT INTO delivery_outbox (approval_id, channel, idempotency_key, payload_json, available_at, state, blocked_reason) "
+                    "VALUES (%s, 'airtable', %s, %s, %s, %s, %s)",
+                    (approval_id, f"airtable:{approved.lead_key}", jsonb(airtable_fields(lead, approved.fingerprint)), self.now(),
+                     outbox_state, outbox_block or None),
                 )
                 cur.execute(
-                    "INSERT INTO delivery_outbox (approval_id, channel, idempotency_key, payload_json, available_at) VALUES (%s, 'instantly', %s, %s, %s)",
+                    "INSERT INTO delivery_outbox (approval_id, channel, idempotency_key, payload_json, available_at, state, blocked_reason) "
+                    "VALUES (%s, 'instantly', %s, %s, %s, %s, %s)",
                     (approval_id, f"instantly:{lead['campaign_id']}:{lead['email']}",
                      jsonb(instantly_payload(lead, skip_if_in_workspace=self.person_uniqueness, verify_on_import=self.verify_on_import)),
-                     self.now()),
+                     self.now(), outbox_state, outbox_block or None),
                 )
         return approval_id
 
@@ -975,6 +1056,9 @@ class OpportunityService:
         known_industry = excluded_industry(str(emp.get("industry") or ""))
         if known_industry:
             return self._close(opportunity_id, f"employer_excluded_industry:{known_industry}")
+        enrichment_block = self._enrichment_jurisdiction_gate(emp)
+        if enrichment_block:
+            return self._close(opportunity_id, enrichment_block)
         size_outcome = self._size_gate(opportunity_id, emp, posting)
         if size_outcome is not None:
             return size_outcome

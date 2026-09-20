@@ -12,6 +12,7 @@ from dataclasses import dataclass, field, fields
 from typing import Any, Dict, List, Mapping, Optional
 
 from .policy.campaigns import CAMPAIGN_ENV_BY_FUNCTION, POLICY_VERSION
+from .policy.compliance import COMPLIANCE_RULE_VERSION
 
 DEFAULT_FANTASTIC_SOURCES = ("fantastic:active-jb", "fantastic:active-ats")
 
@@ -100,6 +101,19 @@ class Settings:
     person_employer_uniqueness: bool = True
     instantly_verify_on_import: bool = False
     inference_enabled: bool = True
+    # --- country compliance (`tgtc-compliance/1`) ---------------------------
+    # The deployment-level groundwork the UK regime requires before any outreach:
+    # a documented lawful basis and its evidence reference, and a configured
+    # privacy-notice process. Absent -- the default -- the UK gate fails closed
+    # and every UK lead is approved, retained and counted as
+    # COMPLIANCE_BLOCKED_CONDITION rather than sent. These are deployment facts
+    # a human asserts; nothing in the code can discover them, so nothing here
+    # defaults them to true.
+    outreach_legal_basis: str = ""
+    outreach_legal_basis_evidence: str = ""
+    outreach_privacy_notice_configured: bool = False
+    #: The matrix's "no later than one month after obtaining third-party data".
+    outreach_privacy_notice_days: int = 30
 
     def __post_init__(self):
         if self.acquisition_strategy not in {"legacy_v1", "balanced_v1"}:
@@ -172,6 +186,10 @@ class Settings:
             person_employer_uniqueness=_bool(env, "TGTC_PERSON_EMPLOYER_UNIQUENESS", True),
             instantly_verify_on_import=_bool(env, "INSTANTLY_VERIFY_ON_IMPORT", False),
             inference_enabled=_bool(env, "TGTC_INFERENCE_ENABLED", True),
+            outreach_legal_basis=str(env.get("TGTC_OUTREACH_LEGAL_BASIS", "") or ""),
+            outreach_legal_basis_evidence=str(env.get("TGTC_OUTREACH_LEGAL_BASIS_EVIDENCE", "") or ""),
+            outreach_privacy_notice_configured=_bool(env, "TGTC_OUTREACH_PRIVACY_NOTICE_CONFIGURED", False),
+            outreach_privacy_notice_days=_int(env, "TGTC_OUTREACH_PRIVACY_NOTICE_DAYS", 30),
         )
 
     def describe(self) -> Dict[str, Any]:
@@ -195,4 +213,9 @@ class Settings:
         out["limits"]["airtable_base_id_present"] = bool(self.airtable_base_id)
         out["limits"]["airtable_table_name"] = self.airtable_table_name
         out["limits"]["inference_model"] = self.inference_model
+        # Presence, never the value: a lawful-basis reference is not a secret,
+        # but the manifest's job is to say whether the UK groundwork is in place.
+        out["limits"]["compliance_rule_version"] = COMPLIANCE_RULE_VERSION
+        out["limits"]["outreach_legal_basis_present"] = bool(self.outreach_legal_basis)
+        out["limits"]["outreach_legal_basis_evidence_present"] = bool(self.outreach_legal_basis_evidence)
         return out

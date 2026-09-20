@@ -261,7 +261,12 @@ class Runner:
                                   max_contacts_per_opportunity=self.s.max_contacts_per_opportunity,
                                   person_uniqueness=self.s.person_employer_uniqueness,
                                   verify_on_import=self.s.instantly_verify_on_import,
-                                  spend_budget=self.spend_budget, now=self.now)
+                                  spend_budget=self.spend_budget,
+                                  outreach_legal_basis=self.s.outreach_legal_basis,
+                                  outreach_legal_basis_evidence=self.s.outreach_legal_basis_evidence,
+                                  outreach_privacy_notice_configured=self.s.outreach_privacy_notice_configured,
+                                  outreach_privacy_notice_days=self.s.outreach_privacy_notice_days,
+                                  now=self.now)
 
     def work(self, kind: str, *, max_items: int = 1000) -> Dict[str, int]:
         counts: Dict[str, int] = {}

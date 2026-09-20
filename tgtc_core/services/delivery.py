@@ -23,6 +23,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 import psycopg
 
 from ..db.connection import jsonb, transaction
+from ..domain.approval import outreach_blocked_reason
 from ..providers.airtable import AirtableClient
 from ..providers.instantly import ALREADY_IN_TARGET_CAMPAIGN, MEMBERSHIP_UNKNOWN, NEWLY_CREATED, InstantlyClient, classify_membership
 from .lifecycle import posting_is_active
@@ -171,7 +172,9 @@ class DeliveryService:
         """Return (state, reason) to stop, or None to proceed."""
         moment = self.now()
         with self.conn.cursor() as cur:
-            cur.execute("SELECT a.state, a.lead_json, e.canonical_name, e.domain, e.linkedin_slug FROM approvals a JOIN employers e ON e.id = a.employer_id WHERE a.id = %s", (item.approval_id,))
+            cur.execute("SELECT a.state, a.lead_json, a.outreach_eligible, a.outreach_block_reason, "
+                        "e.canonical_name, e.domain, e.linkedin_slug "
+                        "FROM approvals a JOIN employers e ON e.id = a.employer_id WHERE a.id = %s", (item.approval_id,))
             row = cur.fetchone()
             posting = None
             if row:
@@ -199,6 +202,22 @@ class DeliveryService:
             if lead.get("posting_content_hash") and posting["content_hash"] != lead.get("posting_content_hash"):
                 self._revoke(item.approval_id, "posting_evidence_changed_since_approval")
                 return "blocked", "posting_evidence_changed_since_approval"
+        # Country compliance (`tgtc-compliance/1`), checked on BOTH channels
+        # before anything leaves the process. The approval writer already
+        # created a blocked lead's outbox items in the `blocked` state, so this
+        # is the second, independent refusal rather than the only one: it
+        # catches items that were re-queued, and every approval made before
+        # these columns existed, whose NULL verdict is unknown and therefore
+        # never "yes". Same predicate as the writer, not a copy.
+        #
+        # Deliberately AFTER the R11 evidence checks above and before anything
+        # is sent. Those checks REVOKE the approval when the supporting vacancy
+        # has gone or changed hands; short-circuiting on compliance first would
+        # leave a genuinely misattributed approval un-revoked and merely
+        # unsent, which loses a data-integrity finding to a delivery decision.
+        compliance_block = outreach_blocked_reason(row)
+        if compliance_block:
+            return "blocked", compliance_block
         hits = suppression_check(
             self.conn, email=lead.get("email", ""),
             company_function=company_function_keys(domain=row["domain"] or "", name=row["canonical_name"], slug=row["linkedin_slug"] or "", function_key=lead["function_key"]),

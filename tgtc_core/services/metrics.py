@@ -29,6 +29,15 @@ CONFIRMED_SIZE_PREDICATE = (
 CONFIRMED_SIZE_COUNT_SQL = f"SELECT count(*) FROM approvals WHERE {CONFIRMED_SIZE_PREDICATE}"
 REVIEW_SIZE_COUNT_SQL = f"SELECT count(*) FROM approvals WHERE NOT ({CONFIRMED_SIZE_PREDICATE}) AND state <> 'revoked'"
 
+#: An approval the country gates cleared for outreach (`tgtc-compliance/1`).
+#: Written once, as SQL, so the eligible and blocked buckets are exact
+#: complements of each other and of approved_distinct. The same rule
+#: ``domain.approval.outreach_blocked_reason`` applies row by row: anything
+#: other than an explicit TRUE is blocked, NULL (a legacy approval from before
+#: migration 011) included -- unknown is never "yes".
+OUTREACH_ELIGIBLE_PREDICATE = "state <> 'revoked' AND outreach_eligible IS TRUE"
+COMPLIANCE_BLOCKED_PREDICATE = "state <> 'revoked' AND outreach_eligible IS DISTINCT FROM TRUE"
+
 
 def _one(cur, sql: str, params=()) -> Any:
     cur.execute(sql, params)
@@ -106,6 +115,41 @@ def ledger(conn: psycopg.Connection) -> Dict[str, Any]:
         cur.execute(f"SELECT campaign_key, count(*) AS n FROM approvals WHERE NOT ({CONFIRMED_SIZE_PREDICATE}) "
                     "AND state <> 'revoked' GROUP BY campaign_key")
         out["approved_by_campaign_review_size"] = {r["campaign_key"]: int(r["n"]) for r in cur.fetchall()}
+        # --- country compliance (`tgtc-compliance/1`) -----------------------
+        # The counting rule: "outreach-eligible contacts" and
+        # "compliance-blocked contacts" are reported separately and never summed
+        # into one another, and neither is ever folded into approved_distinct as
+        # if it were the whole approved set. DE/AE/SA contacts are real, counted
+        # capacity (COMPLIANCE_BLOCKED_CAPACITY, "not the same as zero-yield")
+        # that can never appear in a ready-to-send figure -- the eligible bucket
+        # is the only one a send draws from, and it is defined by an explicit
+        # TRUE rather than by "not blocked".
+        out["compliance_rule_version"] = _one(
+            cur, "SELECT max(compliance_rule_version) FROM approvals WHERE state <> 'revoked'")
+        out["outreach_eligible_contacts"] = _one(cur, f"SELECT count(*) FROM approvals WHERE {OUTREACH_ELIGIBLE_PREDICATE}")
+        out["compliance_blocked_contacts"] = _one(cur, f"SELECT count(*) FROM approvals WHERE {COMPLIANCE_BLOCKED_PREDICATE}")
+        cur.execute(f"SELECT COALESCE(outreach_block_reason, 'compliance:outreach_eligibility_unknown') AS reason, count(*) AS n "
+                    f"FROM approvals WHERE {COMPLIANCE_BLOCKED_PREDICATE} GROUP BY 1 ORDER BY n DESC")
+        out["compliance_blocked_by_reason"] = {str(r["reason"]): int(r["n"]) for r in cur.fetchall()}
+        # Per-country, on the CONTACT's own jurisdiction -- the only one an
+        # outreach decision may be read against. A row whose contact country was
+        # never observed is reported under "unknown", never merged into a
+        # country that happened to appear elsewhere on the record.
+        cur.execute("SELECT COALESCE(NULLIF(contact_country, ''), 'unknown') AS country, count(*) AS n "
+                    "FROM approvals WHERE state <> 'revoked' GROUP BY 1")
+        out["approved_by_contact_country"] = {str(r["country"]): int(r["n"]) for r in cur.fetchall()}
+        cur.execute(f"SELECT COALESCE(NULLIF(contact_country, ''), 'unknown') AS country, count(*) AS n "
+                    f"FROM approvals WHERE {OUTREACH_ELIGIBLE_PREDICATE} GROUP BY 1")
+        out["outreach_eligible_by_contact_country"] = {str(r["country"]): int(r["n"]) for r in cur.fetchall()}
+        cur.execute(f"SELECT COALESCE(NULLIF(contact_country, ''), 'unknown') AS country, count(*) AS n "
+                    f"FROM approvals WHERE {COMPLIANCE_BLOCKED_PREDICATE} GROUP BY 1")
+        out["compliance_blocked_by_contact_country"] = {str(r["country"]): int(r["n"]) for r in cur.fetchall()}
+        # Opportunities refused paid person enrichment by the matrix, kept with
+        # a named reason rather than deleted. A different UNIT from the contact
+        # counts above and never added to them.
+        cur.execute("SELECT close_reason, count(*) AS n FROM opportunities "
+                    "WHERE state = 'closed' AND close_reason LIKE 'compliance:%%' GROUP BY 1 ORDER BY n DESC")
+        out["opportunities_compliance_blocked_by_reason"] = {str(r["close_reason"]): int(r["n"]) for r in cur.fetchall()}
         out["airtable_receipts_created"] = _one(cur, "SELECT count(*) FROM delivery_receipts WHERE channel = 'airtable' AND receipt_kind IN ('created','reconciled')")
         out["instantly_receipts_created"] = _one(cur, "SELECT count(*) FROM delivery_receipts WHERE channel = 'instantly' AND receipt_kind IN ('created','reconciled')")
         out["instantly_receipts_existing"] = _one(cur, "SELECT count(*) FROM delivery_receipts WHERE channel = 'instantly' AND receipt_kind = 'existing'")

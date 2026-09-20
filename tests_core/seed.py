@@ -28,9 +28,14 @@ def seed_opportunity(conn, clock, *, function_key: str = "customer_success", dom
                      org_name: str = "Acme", title: Optional[str] = None, description: Optional[str] = None,
                      headcount: Optional[int] = 120, size_band: Optional[str] = None, job_id: str = "job-1",
                      source: str = SOURCE_JOB_BOARDS,
-                     lane: str = "fresh", hours_ago: float = 4.0, inference=None) -> Tuple[int, Optional[int], Optional[int]]:
+                     lane: str = "fresh", hours_ago: float = 4.0, inference=None,
+                     **row_extra: Any) -> Tuple[int, Optional[int], Optional[int]]:
+    """``row_extra`` reaches ``make_posting_row`` unchanged, so a test can set any
+    provider field on the seeded row (``countries=("GB",)``,
+    ``org_linkedin_locations=[...]``) without a second seeding helper."""
     ex = example_for(function_key)
     extra = {"org_linkedin_size": size_band} if size_band is not None else {}
+    extra.update(row_extra)
     row = make_posting_row(id=job_id, title=title if title is not None else ex.title, organization=org_name, domain=domain,
                            description=description or ex.description, date_created=clock() - timedelta(hours=hours_ago),
                            headcount=headcount, **extra)

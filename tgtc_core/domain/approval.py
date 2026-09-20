@@ -12,11 +12,15 @@ import hmac
 import json
 import re
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
-from typing import Any, Dict, Optional, Sequence
+from datetime import datetime, timedelta, timezone
+from typing import Any, Dict, Mapping, Optional, Sequence
 
 from ..policy.campaigns import (CAMPAIGN_BY_FUNCTION, KNOWN_CONTROL_CAMPAIGN_IDS, POLICY_VERSION, size_band)
+from ..policy.compliance import (
+    COMPLIANCE_RULE_VERSION, ENTITY_UNKNOWN, OPT_OUT_NONE, ComplianceRecord, evaluate,
+)
 from ..policy.requirements import rule
+from .jurisdiction import observe_job_country
 from .facts import MIN_CORROBORATING_SIZE_SOURCES, resolve_company_size, size_reject_reason, size_sources_agreeing
 from .identity import lead_key as make_lead_key
 from .employer_attribution import employer_attribution_conflict
@@ -100,8 +104,25 @@ def build_approved_lead(
     signing_key: str,
     now: Optional[datetime] = None,
     suppression_hits: Sequence[str] = (),
+    outreach_controls: Optional[Mapping[str, Any]] = None,
 ) -> ApprovedLead | ApprovalRefusal:
-    """Every requirement of PRODUCT_CONTRACT §8, checked in order, with a named refusal."""
+    """Every requirement of PRODUCT_CONTRACT §8, checked in order, with a named refusal.
+
+    ``outreach_controls`` carries the deployment-level half of the country
+    compliance decision (`tgtc-compliance/1`): the lawful basis and its evidence
+    reference, whether a privacy-notice process is configured and within how
+    many days it falls due, and whether the send path actually provides an
+    unsubscribe mechanism and a suppression check. The jurisdiction half comes
+    from the stored fields on the posting, employer and person and from nowhere
+    else.
+
+    The compliance verdict is NOT a refusal. "Fail closed for sending, open for
+    capacity": a blocked record is approved, stored, categorised and counted --
+    it simply carries ``outreach_eligible = False`` and a named
+    ``outreach_block_reason``, and ``_commit_approval`` creates its outbox items
+    already blocked. Refusing here instead would delete exactly the records the
+    matrix says to retain.
+    """
     moment = now or datetime.now(timezone.utc)
     if suppression_hits:
         return ApprovalRefusal("suppressed", {"hits": list(suppression_hits)})
@@ -200,9 +221,12 @@ def build_approved_lead(
     if not open_role or not focus:
         return ApprovalRefusal("copy_fields_incomplete", {"open_role": open_role, "role_focus": focus})
 
+    compliance = compliance_decision(posting=posting, employer=employer, person=person,
+                                     email=email, moment=moment, controls=outreach_controls)
     lk = make_lead_key(employer_domain, email, function_key)
     lead: Dict[str, Any] = {
         "lead_key": lk,
+        **compliance,
         "posting_id": posting.get("id"),
         "posting_source": posting.get("source"),
         "posting_provider_id": posting.get("provider_job_id"),
@@ -264,6 +288,100 @@ def _iso(value: Any) -> str:
     if isinstance(value, datetime):
         return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
     return str(value or "")
+
+
+# ---------------------------------------------------------------------------
+# Country compliance (`tgtc-compliance/1`)
+# ---------------------------------------------------------------------------
+
+#: The twelve fields COMPLIANCE_MATRIX.md names, in the order migration 011
+#: stores them. Written once so the lead, the approvals row and the ledger all
+#: agree on what "the compliance fields" means.
+COMPLIANCE_LEAD_FIELDS: Sequence[str] = (
+    "job_country", "company_country", "contact_country", "employer_legal_entity_type",
+    "corporate_subscriber_status", "compliance_rule_version", "legal_basis", "legal_basis_evidence",
+    "privacy_notice_due_at", "opt_out_status", "outreach_eligible", "outreach_block_reason",
+)
+
+
+def compliance_decision(*, posting: Mapping[str, Any], employer: Mapping[str, Any], person: Mapping[str, Any],
+                        email: str, moment: datetime,
+                        controls: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
+    """The twelve stored compliance fields for one lead.
+
+    Each of the three countries comes from ITS OWN subject and from nothing
+    else: the job's from the posting's provider country list, the company's from
+    the employer row, the contact's from the person row. There is no fallback
+    between them, which is what makes "a job's location does not determine the
+    contact's jurisdiction" a property of the code rather than a comment.
+
+    ``opt_out_status``: the person's stored value when one exists. Otherwise
+    ``none``, and that is a fact rather than an assumption -- this function is
+    unreachable unless the caller's suppression check came back clean, since
+    ``build_approved_lead`` refuses on any suppression hit before reaching here.
+    """
+    controls = dict(controls or {})
+    privacy_configured = bool(controls.get("privacy_notice_configured"))
+    due_days = int(controls.get("privacy_notice_days") or 30)
+    privacy_due_at = moment + timedelta(days=due_days) if privacy_configured else None
+    record = ComplianceRecord(
+        job_country=observe_job_country(posting.get("countries")),
+        company_country=str(employer.get("company_country") or ""),
+        contact_country=str(person.get("contact_country") or ""),
+        employer_legal_entity_type=str(employer.get("employer_legal_entity_type") or ""),
+        corporate_subscriber_status=str(employer.get("corporate_subscriber_status") or ENTITY_UNKNOWN),
+        legal_basis=str(controls.get("legal_basis") or ""),
+        legal_basis_evidence=str(controls.get("legal_basis_evidence") or ""),
+        privacy_notice_configured=privacy_configured,
+        privacy_notice_due_at=privacy_due_at,
+        opt_out_status=str(person.get("opt_out_status") or OPT_OUT_NONE),
+        email=email,
+        email_alignment=str(person.get("email_alignment") or ""),
+        email_status=str(person.get("email_status") or ""),
+        unsubscribe_available=bool(controls.get("unsubscribe_available")),
+        suppression_available=bool(controls.get("suppression_available")),
+    )
+    decision = evaluate(record)
+    return {
+        "job_country": record.job_country,
+        "company_country": record.company_country,
+        "contact_country": record.contact_country,
+        "employer_legal_entity_type": record.employer_legal_entity_type,
+        "corporate_subscriber_status": record.corporate_subscriber_status,
+        "compliance_rule_version": COMPLIANCE_RULE_VERSION,
+        "legal_basis": record.legal_basis,
+        "legal_basis_evidence": record.legal_basis_evidence,
+        # ISO text, not a datetime: the lead travels through ``jsonb`` into
+        # approvals.lead_json and both delivery payloads, and json.dumps has no
+        # datetime encoder. PostgreSQL casts the text into the timestamptz
+        # column; ``None`` (no configured privacy-notice process) stays NULL.
+        "privacy_notice_due_at": _iso(privacy_due_at) if privacy_due_at else None,
+        "opt_out_status": record.opt_out_status,
+        "outreach_eligible": decision.outreach_eligible,
+        "outreach_block_reason": decision.outreach_block_reason,
+        "compliance_capacity_category": decision.capacity_category,
+        "compliance_gates": {k: v.as_dict() for k, v in decision.gates.items()},
+    }
+
+
+def outreach_blocked_reason(row: Mapping[str, Any]) -> str:
+    """``""`` when this approved lead may be sent to; the named block reason when
+    it may not.
+
+    ONE definition, asked by both call sites that must agree: the approval
+    writer, which decides whether an outbox item is created ``pending`` or
+    already ``blocked``, and the delivery pre-check, which refuses to send.
+    Copying it would let the two drift, and the direction of the drift that
+    matters is the one where a record blocked at approval becomes sendable at
+    delivery.
+
+    Anything other than an explicit ``True`` blocks -- including ``None``, which
+    is what a lead approved before these columns existed carries. Unknown is
+    never "yes".
+    """
+    if row.get("outreach_eligible") is True:
+        return ""
+    return str(row.get("outreach_block_reason") or "") or "compliance:outreach_eligibility_unknown"
 
 
 # ---------------------------------------------------------------------------
