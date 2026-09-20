@@ -11,7 +11,7 @@ from tgtc_core.domain.acquisition_query import (
 from tgtc_core.domain.employer_attribution import employer_attribution_conflict
 from tgtc_core.domain.facts import extract_job_facts
 from tgtc_core.domain.approval import build_approved_lead, ApprovalRefusal
-from tgtc_core.policy.requirements import excluded_industry
+from tgtc_core.policy.requirements import MEDIA_INDUSTRIES_NOT_EXCLUDED, excluded_industry
 from tgtc_core.services.delivery import DeliveryService
 from tgtc_core.services.opportunity import OpportunityService
 from tests_core.test_approval_gate import _inputs
@@ -245,6 +245,16 @@ def test_filters_only_exclude_existing_policy_industries_and_agencies():
     assert set(filters) == {"organization_agency", "exclude_organization_industry"}
     assert all(excluded_industry(x) for x in filters["exclude_organization_industry"].split(","))
     assert filters["organization_agency"] == "exclude"
+
+
+def test_the_acquisition_filter_does_not_drop_industries_luis_allows():
+    """Phase 3: the provider-side filter is the ONE place an allowed industry can be lost
+    invisibly -- a label sent as `exclude_organization_industry` means those jobs are never
+    acquired, so no downstream eligibility change can recover them."""
+    sent = {x.strip().lower() for x in policy_filters()["exclude_organization_industry"].split(",")}
+    assert not (sent & MEDIA_INDUSTRIES_NOT_EXCLUDED), sorted(sent & MEDIA_INDUSTRIES_NOT_EXCLUDED)
+    # the approved media exclusions are still sent
+    assert {"broadcast media", "newspapers", "book publishing"} <= sent
 
 
 def test_resume_preserves_old_unfiltered_query_without_changing_offset_meaning():

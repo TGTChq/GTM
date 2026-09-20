@@ -8,13 +8,20 @@ import re
 
 # Exact, case-sensitive LinkedIn labels. No positive size/full-time/remote/title
 # gates: those would silently discard allowed jobs with missing provider fields.
+#
+# This list is the PROVIDER-SIDE half of the excluded-industry policy, and it is the one
+# place an allowed industry can be lost invisibly: a label sent here means the jobs are
+# never acquired, so no downstream eligibility change can recover them. It must therefore
+# stay a subset of `policy.requirements.EXCLUDED_INDUSTRIES` --
+# `test_filters_only_exclude_existing_policy_industries_and_agencies` asserts exactly that,
+# and it is what caught "Online Media"/"Media Production" still being sent after Luis ruled
+# online news, digital media and media production ALLOWED (OPEN_DECISIONS.md Q6/D3).
 EXCLUDED_LINKEDIN_INDUSTRIES = (
     "Staffing and Recruiting", "Government Administration",
     "Non-profit Organization Management", "Hospital & Health Care",
     "Hospitals and Health Care", "Mental Health Care", "Medical Practice",
     "Human Resources Services", "Outsourcing/Offshoring", "Events Services",
-    "Broadcast Media", "Online Media", "Media Production", "Newspapers",
-    "Book Publishing", "Chemicals",
+    "Broadcast Media", "Newspapers", "Book Publishing", "Chemicals",
 )
 
 
