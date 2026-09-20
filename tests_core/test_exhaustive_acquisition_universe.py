@@ -29,9 +29,11 @@ from tgtc_core.domain.exhaustive_routing import FLAG_ENV
 
 ON = {FLAG_ENV: "1"}
 
-#: The three positive gates that fail closed on a null provider field.
+#: The firmographic gates that fail closed on a null provider field. These are
+#: the MEASURED loss: Wellfound and YC rows carry no firmographics at all, so a
+#: headcount range or an employment-type equality drops 100% of them.
 FAIL_CLOSED_ON_NULL = ("ai_employment_type", "organization_headcount_gte",
-                       "organization_headcount_lt", "ai_taxonomies_a")
+                       "organization_headcount_lt")
 
 
 def test_the_exhaustive_profile_exists_and_validates():
@@ -39,10 +41,23 @@ def test_the_exhaustive_profile_exists_and_validates():
     assert validate_profile(EXHAUSTIVE_PROFILE) == EXHAUSTIVE_PROFILE
 
 
-def test_exhaustive_sends_no_filter_that_fails_closed_on_a_missing_field():
+def test_exhaustive_drops_the_firmographic_gates_that_fail_closed():
     params = profile_filters(EXHAUSTIVE_PROFILE)
     for gate in FAIL_CLOSED_ON_NULL:
         assert gate not in params, f"{gate} would drop rows whose provider field is null"
+
+
+def test_exhaustive_keeps_the_professional_taxonomies():
+    """Measured, first canary: removing the taxonomy filter did not widen the
+    KNOWLEDGE-WORK universe, it imported the frontline labour market -- Usher,
+    Ramp Agent, Car Wash Associate, Bartender, Teller, CDL-A Dump Truck Driver,
+    Prepared Foods Cook. Each one costs a credit to buy and then rejects.
+
+    The taxonomy filter is an affirmative selection of the professional labour
+    market, enforced before a credit is spent. Rows with a NULL taxonomy are
+    not lost: the discovery slot below buys them unfiltered."""
+    params = profile_filters(EXHAUSTIVE_PROFILE)
+    assert "ai_taxonomies_a" in params
 
 
 def test_priority_still_sends_them_so_the_two_arms_stay_comparable():
@@ -90,11 +105,21 @@ def test_flag_off_slot_allocation_is_unchanged():
     assert EXHAUSTIVE_PROFILE not in {p for _, p in slots}
 
 
-def test_flag_on_gives_the_widened_profile_four_slots_in_five():
-    slots = list(balanced_slots(SOURCES, 10, env=ON))
-    profiles = [p for _, p in slots]
-    assert profiles.count(EXHAUSTIVE_PROFILE) == 8
+def test_flag_on_splits_three_exhaustive_one_discovery_one_narrow():
+    """Three slots buy the widened professional universe, one buys UNFILTERED
+    so a null-taxonomy row is still reachable, and one keeps the narrow arm so
+    the run can say whether widening paid."""
+    profiles = [p for _, p in balanced_slots(SOURCES, 10, env=ON)]
+    assert profiles.count(EXHAUSTIVE_PROFILE) == 6
+    assert profiles.count(DISCOVERY_PROFILE) == 2
     assert profiles.count(PRIORITY_PROFILE) == 2
+
+
+def test_a_null_taxonomy_row_is_still_reachable():
+    """The discovery slot sends no taxonomy filter at all."""
+    assert "ai_taxonomies_a" not in profile_filters(DISCOVERY_PROFILE)
+    profiles = [p for _, p in balanced_slots(SOURCES, 10, env=ON)]
+    assert DISCOVERY_PROFILE in profiles
 
 
 def test_a_narrow_control_arm_always_survives():
@@ -111,7 +136,7 @@ def test_both_sources_still_get_both_arms():
         by_source.setdefault(source, set()).add(profile)
     assert set(by_source) == set(SOURCES)
     for source, profiles in by_source.items():
-        assert profiles == {EXHAUSTIVE_PROFILE, PRIORITY_PROFILE}, source
+        assert profiles == {EXHAUSTIVE_PROFILE, DISCOVERY_PROFILE, PRIORITY_PROFILE}, source
 
 
 def test_slot_allocation_is_deterministic():

@@ -81,6 +81,21 @@ def profile_filters(profile: str = LEGACY_PROFILE) -> dict:
                       organization_headcount_gte=int(rule("min_employees")),
                       organization_headcount_lt=int(rule("max_employees")) + 1,
                       ai_taxonomies_a=provider_list(PRIORITY_TAXONOMIES))
+    if profile == EXHAUSTIVE_PROFILE:
+        # Drops the two FIRMOGRAPHIC gates, which are the measured loss: a
+        # Wellfound or YC row carries no headcount and no employment type, so
+        # a range or an equality on those fields discards 100% of them.
+        #
+        # KEEPS the taxonomy filter. Measured in the first production canary:
+        # removing it did not widen the knowledge-work universe, it imported
+        # the frontline labour market -- Usher, Ramp Agent, Car Wash Associate,
+        # Bartender, Teller, CDL-A Dump Truck Driver, Prepared Foods Cook --
+        # and each of those costs a credit to buy and then rejects. Selecting
+        # the professional labour market affirmatively, before a credit is
+        # spent, is both cheaper and more accurate than a blocklist of titles.
+        # A row with a NULL taxonomy is not lost: the discovery slot in
+        # `balanced_slots` buys unfiltered.
+        params.update(ai_taxonomies_a=provider_list(PRIORITY_TAXONOMIES))
     return params
 
 
@@ -107,8 +122,13 @@ def balanced_slots(sources: tuple[str, ...], pages: int, env=None):
         # Four slots in five buy the widened universe; the fifth keeps the
         # narrow arm alive so the run itself measures whether widening paid --
         # qualified units per record, arm against arm, with no separate probe.
+        # Three slots buy the widened professional universe, one buys
+        # UNFILTERED so a null-taxonomy row stays reachable, and one keeps the
+        # narrow arm so the run can say whether widening paid.
+        widened = {0: EXHAUSTIVE_PROFILE, 1: EXHAUSTIVE_PROFILE, 2: PRIORITY_PROFILE,
+                   3: DISCOVERY_PROFILE, 4: EXHAUSTIVE_PROFILE}
         for slot in range(pages):
-            yield sources[slot % len(sources)], (PRIORITY_PROFILE if slot % 5 == 2 else EXHAUSTIVE_PROFILE)
+            yield sources[slot % len(sources)], widened[slot % 5]
         return
     for slot in range(pages):
         yield sources[slot % len(sources)], (DISCOVERY_PROFILE if slot % 5 == 2 else PRIORITY_PROFILE)
