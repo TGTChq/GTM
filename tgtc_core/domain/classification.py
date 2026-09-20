@@ -28,7 +28,7 @@ from ..policy.campaigns import (
 )
 from .exhaustive_routing import (
     RULE_VERSION as EXHAUSTIVE_RULE_VERSION,
-    TitleRoute, exhaustive_enabled, fallback_route, route_by_title,
+    TitleRoute, exhaustive_enabled, fallback_route, physical_title_reason, route_by_title,
 )
 from .facts import RULE_VERSION, JobFacts, extract_job_facts, sentences
 from .inference import (
@@ -407,6 +407,19 @@ def classify_posting(
         result.exclusion_reason = facts.exclusions[0].reason
         result.method = METHOD_DETERMINISTIC
         return result
+
+    # 1b) affirmative title evidence that the duties are physical. Runs before
+    # any routing, because scope never overrides an eligibility gate: without
+    # it the OPERATIONS fallback dresses a Residential Plumber up as a
+    # corporate operations role (measured, first production canary 2026-09-20).
+    if exhaustive:
+        physical = physical_title_reason(title)
+        if physical:
+            result.excluded = True
+            result.exclusion_reason = physical
+            result.method = METHOD_DETERMINISTIC
+            result.rule_version = EXHAUSTIVE_RULE_VERSION
+            return result
 
     desc = str(description or "")
     if len(desc.strip()) < 120:

@@ -160,7 +160,87 @@ def fallback_route(title: Optional[str]) -> TitleRoute:
     )
 
 
+#: Affirmative title evidence that the essential duties are physical, and so
+#: cannot be delivered by remote talent. A HARD EXCLUSION, naming exactly the
+#: categories the policy already lists.
+#:
+#: Measured need, from the first production canary (2026-09-20): 834 of 1,084
+#: assignments fell through to the OPERATIONS fallback, and the sample was
+#: Residential Plumber, Soup Packer, Oil Delivery Driver, Manual Machinist,
+#: Refrigeration Mechanic, Day Porter, General Laborer. ``facts.py`` reads the
+#: DESCRIPTION for physical duties and those postings never state them in the
+#: patterns it matches, so the fallback dressed them up as Operations -- which
+#: is the one thing the policy says the fallback must never do.
+#:
+#: Deliberately specific. An ambiguous title ("Coordinator", "Assistant
+#: Manager", "Project Manager") is NOT caught: unknown is never evidence of
+#: exclusion.
+PHYSICAL_TITLE_REASON = "deliverability:physical_title"
+
+_PHYSICAL_TITLE_PATTERNS: Tuple[str, ...] = (
+    # patient care and clinical
+    r"\b(?:registered |licensed |practical )?nurse\b|\bnursing\b|\brn\b|\blpn\b|\bcna\b",
+    r"\bpatient\b|\bbedside\b|\bclinical (?:assistant|aide|coordinator|technician)\b",
+    r"\bmedical assistant\b|\bphysical therapist\b|\boccupational therapist\b|\bphlebotom",
+    r"\bpharmacy tech|\bcaregiver\b|\bcare giver\b|\bhome health\b|\bdental (?:assistant|hygienist)\b",
+    r"\boptician\b|\bveterinar|\bradiolog|\bsonograph|\bparamedic\b|\bsurgical tech",
+    # warehouse and fulfilment
+    r"\bwarehouse\b|\bpacker\b|\bpicker\b|\bmaterial handler\b|\bforklift\b|\bpallet\b",
+    r"\bstocker\b|\bstock (?:associate|clerk)\b|\bparts staging\b|\bfulfillment (?:associate|center)\b",
+    # driving and delivery
+    r"\bdriver\b|\bcourier\b|\bdelivery (?:associate|specialist|professional|driver)\b|\bcdl\b",
+    # construction and trades
+    r"\bplumber\b|\belectrician\b|\bcarpenter\b|\bwelder\b|\bmason\b|\broofer\b|\bhvac\b",
+    r"\bmechanic\b|\bmachinist\b|\bfabricat(?:or|ion)\b|\bpipefitter\b|\bironworker\b",
+    r"\blaborer\b|\blabourer\b|\bconstruction\b|\bwaterproofing\b|\bscaffold",
+    # equipment operation and manufacturing floor
+    r"\boperator\b|\bassembler\b|\bproduction (?:associate|worker|operator|supervisor|manager)\b",
+    r"\bmanufacturing (?:associate|operator|supervisor|technician)\b|\bsupervisor, manufacturing\b",
+    r"\bmachine (?:operator|tender)\b|\bpress operator\b",
+    # laboratory bench
+    r"\blab(?:oratory)? (?:technician|tech|assistant|aide)\b|\bbench (?:chemist|scientist)\b",
+    # retail floor and food
+    r"\bcashier\b|\bbarista\b|\bcook\b|\bchef\b|\bbaker\b|\bfood (?:service|prep)\b",
+    r"\bbartender\b|\bdishwasher\b|\bbusser\b|\bwaiter\b|\bwaitress\b",
+    # cleaning, facilities and grounds
+    r"\bjanitor|\bcustodian\b|\bhousekeep|\bporter\b|\bgroundskeep|\blandscap",
+    r"\bmaintenance (?:technician|tech|worker|mechanic|associate)\b",
+    r"\bfacilities (?:technician|tech|maintenance)\b|\bcleaner\b",
+    # physical security
+    r"\bsecurity (?:guard|officer)\b|\bpatrol\b|\bloss prevention\b",
+    # field installation and repair
+    r"\bfield (?:service|technician|engineer|installer)\b|\binstaller\b|\bservice technician\b",
+    r"\bcalibration technician\b|\bupgrade technician\b|\brepair technician\b|\blineman\b",
+    # classroom and in-person instruction
+    r"\bteacher\b|\beducator\b|\bparaprofessional\b|\bteaching assistant\b|\bpersonal aide\b",
+    r"\bpreschool\b|\bchildcare\b|\bdaycare\b",
+    # marine and transport crews
+    r"\bcaptain\b|\bdeckhand\b|\bshoreman\b|\blongshore",
+)
+
+_PHYSICAL_TITLE_RX: Tuple["re.Pattern[str]", ...] = tuple(
+    re.compile(p, re.I) for p in _PHYSICAL_TITLE_PATTERNS
+)
+
+
+def physical_title_reason(title: Optional[str]) -> Optional[str]:
+    """The named hard-exclusion reason for a physical title, or None.
+
+    None means "this title is not affirmative evidence of physical duties",
+    never "this job is fine": the description-level rules in ``facts.py`` run
+    regardless, and they are unchanged.
+    """
+    text = str(title or "").strip()
+    if not text:
+        return None
+    for rx in _PHYSICAL_TITLE_RX:
+        if rx.search(text):
+            return PHYSICAL_TITLE_REASON
+    return None
+
+
 __all__ = [
     "FLAG_ENV", "RULE_VERSION", "FALLBACK_FUNCTION", "FALLBACK_PHRASE",
-    "TitleRoute", "exhaustive_enabled", "route_by_title", "fallback_route",
+    "PHYSICAL_TITLE_REASON", "TitleRoute", "exhaustive_enabled", "route_by_title",
+    "fallback_route", "physical_title_reason",
 ]
