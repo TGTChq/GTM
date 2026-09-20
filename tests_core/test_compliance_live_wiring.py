@@ -322,6 +322,18 @@ def test_the_ledger_reports_the_two_compliance_buckets_separately_and_they_recon
     assert counts["outreach_eligible_by_contact_country"] == {"US": 1}
 
 
+def test_the_ledger_reports_every_rule_version_present_not_just_one(conn, clock):
+    """A database holding approvals decided under two different rule versions
+    must show both. Collapsing them to one value would let a figure be read as
+    if the whole set had been decided under the newer rules."""
+    _approve_one(conn, clock)
+    assert ledger(conn)["compliance_rule_versions"] == {c.COMPLIANCE_RULE_VERSION: 1}
+    with conn.cursor() as cur:
+        cur.execute("UPDATE approvals SET compliance_rule_version = NULL")
+    conn.commit()
+    assert ledger(conn)["compliance_rule_versions"] == {"unversioned": 1}
+
+
 def test_the_ledger_never_reports_a_ready_to_send_total_that_includes_a_blocked_country(conn, clock):
     """The one number this whole task exists to make impossible."""
     for i, country in enumerate(("Germany", "United Arab Emirates", "Saudi Arabia")):

@@ -124,8 +124,13 @@ def ledger(conn: psycopg.Connection) -> Dict[str, Any]:
         # that can never appear in a ready-to-send figure -- the eligible bucket
         # is the only one a send draws from, and it is defined by an explicit
         # TRUE rather than by "not blocked".
-        out["compliance_rule_version"] = _one(
-            cur, "SELECT max(compliance_rule_version) FROM approvals WHERE state <> 'revoked'")
+        # Every rule version present, not one of them: a database holding
+        # approvals decided under two different versions must show both, or a
+        # figure can be read as if the whole set had been decided under the
+        # newer rules. A row from before migration 011 is "unversioned".
+        cur.execute("SELECT COALESCE(NULLIF(compliance_rule_version, ''), 'unversioned') AS v, count(*) AS n "
+                    "FROM approvals WHERE state <> 'revoked' GROUP BY 1 ORDER BY n DESC")
+        out["compliance_rule_versions"] = {str(r["v"]): int(r["n"]) for r in cur.fetchall()}
         out["outreach_eligible_contacts"] = _one(cur, f"SELECT count(*) FROM approvals WHERE {OUTREACH_ELIGIBLE_PREDICATE}")
         out["compliance_blocked_contacts"] = _one(cur, f"SELECT count(*) FROM approvals WHERE {COMPLIANCE_BLOCKED_PREDICATE}")
         cur.execute(f"SELECT COALESCE(outreach_block_reason, 'compliance:outreach_eligibility_unknown') AS reason, count(*) AS n "

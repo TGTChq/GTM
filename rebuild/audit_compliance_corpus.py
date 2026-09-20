@@ -43,7 +43,7 @@ import gzip
 import json
 import sys
 from collections import Counter
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, Iterator, List, Mapping, Optional
 
@@ -53,7 +53,7 @@ if str(ROOT) not in sys.path:
 
 from tgtc_core.domain.identity import employer_anchors, employer_key  # noqa: E402
 from tgtc_core.domain.jurisdiction import (  # noqa: E402
-    corporate_subscriber_status, observe_company_country, observe_job_country,
+    corporate_subscriber_status, observe_company_country, observe_job_country, observe_legal_entity_type,
 )
 from tgtc_core.policy import compliance as cp  # noqa: E402
 from tgtc_core.services.acquisition import org_block  # noqa: E402
@@ -94,7 +94,7 @@ def classify_record(row: Mapping[str, Any]) -> CorpusRow:
     row = dict(row or {})
     org = org_block(row)
     domain, slug, name_key = employer_anchors({**org, "organization": org.get("organization") or ""})
-    entity_type = _entity_type(org)
+    entity_type = observe_legal_entity_type(org)
     record = cp.ComplianceRecord(
         job_country=observe_job_country(row.get("countries_derived")),
         company_country=observe_company_country(org),
@@ -126,12 +126,6 @@ def classify_record(row: Mapping[str, Any]) -> CorpusRow:
         counterfactual_cold_email_status=cp.cold_email_allowed(
             record.company_country, **record.conditions()).status,
     )
-
-
-def _entity_type(org: Mapping[str, Any]) -> str:
-    from tgtc_core.domain.jurisdiction import observe_legal_entity_type
-
-    return observe_legal_entity_type(org)
 
 
 def aggregate(rows: Iterable[CorpusRow]) -> Dict[str, Any]:
@@ -258,4 +252,4 @@ if __name__ == "__main__":
     raise SystemExit(main())
 
 
-__all__ = ["CorpusRow", "aggregate", "classify_record", "read_records", "run", "main", "asdict"]
+__all__ = ["CorpusRow", "aggregate", "classify_record", "read_records", "run", "main"]
