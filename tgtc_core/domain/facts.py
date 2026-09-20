@@ -150,7 +150,27 @@ REMOTE = [r"\bfully remote\b", r"\b100% remote\b", r"\bremote (?:role|position|j
 HYBRID = [r"\bhybrid (?:role|position|schedule|work model)\b", r"\b(?:one|two|three|four|five|[1-5]) days? (?:a|per) week[^.]{0,80}\boffice\b", r"\bin[- ]office requirement\b"]
 ONSITE = [r"\bon[- ]site\b", r"\bonsite\b", r"\bin[- ]person\b", r"\boffice[- ]based\b", r"\bmust (?:work|report|be) (?:in|at) (?:the|our) office\b"]
 FIELD = [r"\bfield[- ]based\b", r"\bregular(?:ly)? visit(?:ing)? (?:customer|client) sites\b", r"\bon customer sites\b"]
-TRAVEL_HARD = [r"\btravel (?:up to |approximately |at least |minimum )?(?:20|2[5-9]|[3-9]\d|100)%", r"\bfrequent travel\b", r"\btravel regularly\b", r"\bmust live near (?:a|an) airport\b"]
+#: Phase 3 audit (2026-09-20, Luis D4): "Exclude when field or territory duties are a CORE
+#: RESPONSIBILITY. Drop the proposed >= 50% numeric: it was my invention, and 'essential'
+#: already carries the test. Incidental conference travel never excludes."
+#:
+#: The numeric pattern that used to lead this list --
+#: ``\btravel (?:up to |approximately |at least |minimum )?(?:20|2[5-9]|[3-9]\d|100)%`` --
+#: excluded at a stated 20%, stricter than both the number Luis withdrew and the frozen
+#: rubric's own 50% parameter (§4.G, which additionally names "conferences, quarterly
+#: off-sites, trips to HQ" as NOT sufficient). It is gone: travel VOLUME is not the test.
+#:
+#: Measured on the two frozen corpora (7,349 net-new rows): 125 rows (1.70%) are excluded
+#: on a percentage span alone, with no FIELD evidence and none of the qualitative markers
+#: below -- 56 stating 50%+, 57 stating 25-49%, 12 stating 20-24%. 25 of the 125 name
+#: conferences, industry events or HQ in the very same sentence. Only 1 row carries a
+#: percentage alongside a qualitative marker, and 61 rows match a qualitative marker alone
+#: and are unaffected.
+#:
+#: What remains describes travel that is structural to the job rather than a volume, and
+#: the whole FIELD list still runs first, so a genuine field or territory role is excluded
+#: on evidence of the DUTY -- which is what the approved exclusion asks for.
+TRAVEL_HARD = [r"\bfrequent travel\b", r"\btravel regularly\b", r"\bmust live near (?:a|an) airport\b"]
 US_SCOPE = [r"\bremote (?:within|in|across) (?:the )?(?:u\.?s\.?|usa|united states)\b", r"\b(?:u\.?s\.?|usa|united states)[- ]based\b", r"\banywhere in (?:the )?(?:u\.?s\.?|united states)\b", r"\b(?:authorized|eligible) to work in the (?:u\.?s\.?|united states)\b"]
 FOREIGN_ONLY = [
     r"\b(?:emea|apac|europe|european union|canada|uk|united kingdom|australia|india|philippines|latam)[- ]only\s+(?:role|position|job|candidates?|applicants?)\b",
@@ -754,9 +774,12 @@ def extract_job_facts(
             arrangement, arr_excerpt = "remote", (hits[0] if hits else f"provider location_type={lt}")
         elif lt in {"hybrid", "onsite", "on-site"}:
             arrangement, arr_excerpt = lt.replace("on-site", "onsite"), f"provider location_type={lt}"
-    jf.facts["work_arrangement"] = Fact("work_arrangement", arrangement, TEXT if arrangement else UNKNOWN, arr_excerpt)
+    # Changed decision path (phase 3, Luis D4: travel volume alone is not essential field
+    # travel), so the Fact AND the Exclusion carry the audit rule version.
+    jf.facts["work_arrangement"] = Fact("work_arrangement", arrangement, TEXT if arrangement else UNKNOWN,
+                                        arr_excerpt, RULE_VERSION)
     if arrangement in {"field_work", "travel"}:
-        jf.exclusions.append(Exclusion(f"deliverability:{arrangement}", arr_excerpt, TEXT))
+        jf.exclusions.append(Exclusion(f"deliverability:{arrangement}", arr_excerpt, TEXT, RULE_VERSION))
 
     for name, patterns, reason in (
         ("security_clearance", CLEARANCE, "deliverability:security_clearance"),

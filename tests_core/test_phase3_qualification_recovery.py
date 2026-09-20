@@ -203,3 +203,59 @@ def test_the_model_can_still_exclude_on_a_real_physical_duty():
 def test_a_lifting_clause_beside_a_real_duty_still_corroborates():
     excerpt = "Lift up to 50 pounds while operating machinery on the floor."
     assert corroborates("physical_work", excerpt, excerpt)
+
+
+# --- C: travel volume alone is not essential field travel -------------------
+# Luis, OPEN_DECISIONS.md D4 (2026-09-20 resolution pass): "Exclude when field or
+# territory duties are a CORE RESPONSIBILITY. Drop the proposed >= 50% numeric: it was
+# my invention, and 'essential' already carries the test. Incidental conference travel
+# never excludes."
+#
+# The deployed rule excluded at >= 20% stated travel -- stricter than both the number
+# Luis withdrew and the frozen rubric's own 50% parameter (§4.G, which additionally
+# names "conferences, quarterly off-sites, trips to HQ" as NOT sufficient). The numeric
+# patterns are removed. The qualitative essentiality markers (frequent travel, travel
+# regularly, must live near an airport) and the whole FIELD list are untouched, so a
+# genuine field or territory role still excludes -- through evidence of the DUTY, which
+# is what the approved exclusion asks for.
+
+_TRAVEL_PERCENT_ONLY = (
+    "Ability to travel up to 25% of the time to industry events and conferences.",
+    "Travel up to 20%.",
+    "Able to work overtime and travel up to 25% to various office locations.",
+    "Both Domestic and International Travel up to 20%.",
+    "This role requires travel approximately 50% of the time.",
+)
+
+_TRAVEL_STILL_EXCLUDES = (
+    "This position is a support role with frequent travel, typically three to five-day trips.",
+    "You will travel regularly to keep the accounts moving.",
+    "Must live near an airport.",
+)
+
+
+def test_a_stated_travel_percentage_alone_no_longer_excludes():
+    for text in _TRAVEL_PERCENT_ONLY:
+        facts = extract_job_facts(title="Social Media Lead", description=text + " " + _FILLER)
+        assert not any(e.reason == "deliverability:travel" for e in facts.exclusions), text
+
+
+def test_essential_travel_language_still_excludes():
+    for text in _TRAVEL_STILL_EXCLUDES:
+        facts = extract_job_facts(title="Account Manager", description=text + " " + _FILLER)
+        assert any(e.reason == "deliverability:travel" for e in facts.exclusions), text
+
+
+def test_field_duties_still_exclude_independently_of_travel_volume():
+    for text in ("This is a field-based role.", "You will regularly visit customer sites.",
+                 "The work is performed on customer sites."):
+        facts = extract_job_facts(title="Engineer", description=text + " " + _FILLER)
+        assert any(e.reason == "deliverability:field_work" for e in facts.exclusions), text
+
+
+def test_the_travel_decision_path_carries_the_audit_rule_version():
+    facts = extract_job_facts(title="Account Manager",
+                              description=_TRAVEL_STILL_EXCLUDES[0] + " " + _FILLER)
+    exclusion = next(e for e in facts.exclusions if e.reason == "deliverability:travel")
+    assert exclusion.rule_version == RULE_VERSION
+    assert facts.facts["work_arrangement"].rule_version == RULE_VERSION
