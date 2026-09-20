@@ -35,13 +35,14 @@ import psycopg
 from ..db.connection import jsonb, transaction
 from ..db import work_queue
 from ..domain.approval import ApprovalRefusal, ApprovedLead, airtable_fields, build_approved_lead, instantly_payload
+from ..domain.facts import RULE_VERSION
 from ..domain.gates import (
     corroborated_alternate_domains, evaluate_contact, evaluate_email, person_organization, pre_enrichment_check,
     title_matches,
 )
 from ..domain.identity import company_names_compatible, domain_name_consistent, person_ref, safe_employer_domain
 from ..policy.campaigns import (
-    campaign_route_configured, buyer_titles, is_founder_tier, resolve_campaign_id,
+    DIRECT_BUYER_TITLES, campaign_route_configured, buyer_titles, is_founder_tier, resolve_campaign_id,
 )
 from ..policy.requirements import excluded_industry, rule
 from ..domain.employer_attribution import employer_attribution_conflict
@@ -80,6 +81,88 @@ RECOVERABLE_OPPORTUNITY_CLOSE_REASONS = frozenset({
 #: Stored per person so reuse can run the SAME gates later without a new paid call.
 EVIDENCE_KEYS = ("title", "headline", "linkedin_url", "organization", "employment_history", "city", "state", "country",
                  "seniority", "organization_name", "organization_domain")
+
+# ---------------------------------------------------------------------------
+# Phase 2 audit task 9 (2026-09-19): contact depth 2-3, role-diverse, person-unique.
+#
+# Authority: search 2-3 role-diverse contacts per company x campaign -- the
+# functional hiring owner, the executive functional leader, and a TA/People
+# leader when appropriate. Three people in the same role are NOT
+# diversification. A person counts once globally.
+#
+# Measured defect: contact depth never exceeds 1 (86/86 approved opportunities
+# had exactly one contact; no purchase ever followed a first approval), because
+# ``_finalize_approved`` moves the opportunity to the terminal 'approved' state
+# on ANY approval, whether or not the configured quota was met, and it never
+# reopens (``process()`` refuses any opportunity whose state isn't 'open').
+# Ranking (``_rank``, below) followed title-list order with no notion of
+# persona at all.
+# ---------------------------------------------------------------------------
+PERSONA_FUNCTIONAL_OWNER = "functional_owner"
+PERSONA_EXECUTIVE_LEADER = "executive_leader"
+PERSONA_TA_PEOPLE_LEADER = "ta_people_leader"
+CONTACT_PERSONAS = (PERSONA_FUNCTIONAL_OWNER, PERSONA_EXECUTIVE_LEADER, PERSONA_TA_PEOPLE_LEADER)
+
+#: Within the people_hr buyer hierarchy specifically, a Talent-Acquisition title
+#: is its own persona (distinct from generic HR/People-ops titles): a TA/People
+#: leader is a genuinely different contact from an HR functional owner even
+#: though both are in the SAME buyer hierarchy (task 9 authority, "a TA/People
+#: leader when appropriate").
+_TA_PEOPLE_TITLES = ("Talent Acquisition Director", "Head of Talent Acquisition")
+
+
+def contact_persona(title: str, function_key: str) -> str:
+    """Which of the three diversification personas a buyer title represents.
+
+    Shares the SAME title hierarchy ``campaigns.py`` already searches
+    (``DIRECT_BUYER_TITLES`` = the functional hiring owner) and the SAME
+    matcher (``title_matches``) instead of a second title classifier, so this
+    view cannot drift from what was actually searched. Anything not a direct
+    manager (and not a people_hr TA title) is the executive functional leader
+    -- ``buyer_titles()`` only ever returns direct-manager or executive-tier
+    titles (founders last, or never).
+    """
+    if function_key == "people_hr" and title_matches(title, _TA_PEOPLE_TITLES):
+        return PERSONA_TA_PEOPLE_LEADER
+    if title_matches(title, DIRECT_BUYER_TITLES.get(function_key, ())):
+        return PERSONA_FUNCTIONAL_OWNER
+    return PERSONA_EXECUTIVE_LEADER
+
+
+@dataclass
+class ContactState:
+    """How many independently-approved contacts an opportunity already holds,
+    and which people/personas they are -- what ``wants_more_contacts`` and
+    ``select_next_contact`` decide against."""
+    existing_person_keys: Set[str] = field(default_factory=set)
+    existing_personas: List[str] = field(default_factory=list)
+
+    @property
+    def count(self) -> int:
+        return len(self.existing_person_keys)
+
+    def wants_more_contacts(self, max_contacts: int) -> bool:
+        """Never raises the configured maximum: clamped to [1, 3] here too, the
+        same clamp ``OpportunityService.__init__`` applies to its own setting."""
+        return self.count < max(1, min(3, max_contacts))
+
+
+def select_next_contact(
+    *, candidates: Sequence[Dict[str, Any]],
+    existing_person_keys: Set[str] = frozenset(),
+    existing_personas: Sequence[str] = (),
+) -> Optional[Dict[str, Any]]:
+    """The next candidate worth pursuing: never a person already held (globally
+    unique), and a persona not yet represented preferred over one already held
+    ("three people in the same role are NOT diversification"). Falls back to
+    the first still-eligible candidate, in the order given, once every persona
+    present is already represented (or candidates carry no persona)."""
+    held_personas = set(existing_personas)
+    unheld = [c for c in candidates if c.get("person_key") not in existing_person_keys]
+    for cand in unheld:
+        if cand.get("persona") and cand["persona"] not in held_personas:
+            return cand
+    return unheld[0] if unheld else None
 
 
 @dataclass
@@ -717,7 +800,7 @@ class OpportunityService:
             approved_rows: List[Dict[str, Any]] = []
             if self.max_contacts > 1:
                 cur.execute(
-                    "SELECT a.id, lower(p.email) AS email FROM approvals a JOIN people p ON p.id = a.person_id "
+                    "SELECT a.id, lower(p.email) AS email, p.title FROM approvals a JOIN people p ON p.id = a.person_id "
                     "WHERE a.opportunity_id = %s AND a.state <> 'revoked'",
                     (opportunity_id,),
                 )
@@ -732,7 +815,15 @@ class OpportunityService:
                 for row in approved_rows
             )
             self.conn.commit()
-        if len(existing_contacts) >= self.max_contacts:
+        # Task 9: how many contacts (and which personas) this opportunity already
+        # holds -- the single source of truth ``wants_more_contacts`` and
+        # ``select_next_contact`` decide against for the rest of this call.
+        state = ContactState(
+            existing_person_keys=set(existing_contacts),
+            existing_personas=[contact_persona(str(row.get("title") or ""), opp["function_key"])
+                              for row in approved_rows if row.get("title")],
+        )
+        if not state.wants_more_contacts(self.max_contacts):
             self._finalize_approved(opportunity_id)
             return QualifyOutcome(
                 opportunity_id, "approved", "contact_quota_already_reached",
@@ -748,16 +839,29 @@ class OpportunityService:
             decision = self._approve(opp, emp, posting, classification, reuse)
             if isinstance(decision, ApprovedLead):
                 approval_id = self._commit_approval(opp, int(reuse["id"]), decision)
-                self._record_attempt(opportunity_id, reuse["_ref"], "gate", "pass", "reused_verified_person", epoch=epoch, person_id=int(reuse["id"]))
+                self._record_attempt(opportunity_id, reuse["_ref"], "gate", "pass", "reused_verified_person", epoch=epoch, person_id=int(reuse["id"]),
+                                     details={"rule_version": RULE_VERSION})
                 approval_ids.append(approval_id)
                 approved_person_ids.append(int(reuse["id"]))
                 approved_refs.add(reuse["_ref"])
-                if self.max_contacts == 1:
+                state.existing_person_keys.add(reuse["_ref"])
+                state.existing_personas.append(contact_persona(str(reuse.get("title") or ""), opp["function_key"]))
+                # Phase 2 audit task 9 fix (2026-09-19): this used to finalize
+                # (terminal 'approved' state) whenever max_contacts == 1 -- correct
+                # for that case, but the SAME unconditional finalize also ran
+                # further down (below) whenever ANY approval existed, regardless
+                # of whether the configured quota (default 3) was met. That is
+                # the measured defect: 86/86 approved opportunities had exactly
+                # one contact, and the terminal state meant no later call could
+                # ever pursue the rest. Finalizing now always goes through
+                # ``state.wants_more_contacts`` instead of a bare max_contacts==1
+                # check, so it is correct for every configured quota.
+                if not state.wants_more_contacts(self.max_contacts):
                     self._finalize_approved(opportunity_id)
                     return QualifyOutcome(
                         opportunity_id, "approved", "reused_verified_person",
                         approval_id, int(reuse["id"]),
-                        details={"approvals_created": 1, "approved_total": 1},
+                        details={"approvals_created": 1, "approved_total": approved_total + 1},
                     )
             elif decision.reason in CONFIGURATION_LEVEL_REFUSALS:
                 return self._wait_for_dependency(
@@ -770,6 +874,9 @@ class OpportunityService:
         try:
             usable, dropped, stats = self._search_candidates(opp, emp, titles, judged | approved_refs)
             candidates = self._rank(usable, titles)
+            for cand in candidates:
+                cand["persona"] = contact_persona(str(cand.get("title") or ""), opp["function_key"])
+                cand["person_key"] = cand["_ref"]
         except ProviderWait as w:
             return QualifyOutcome(opportunity_id, "wait", w.reason, details={"until": w.until.isoformat()})
         except ProviderRetry as r:
@@ -780,10 +887,22 @@ class OpportunityService:
                                      details={"title": p.get("title"), "org": person_organization(p).get("name")})
         if not candidates:
             if approval_ids:
-                self._finalize_approved(opportunity_id)
-                return QualifyOutcome(
-                    opportunity_id, "approved", "approved_available_contacts",
-                    approval_ids[0], approved_person_ids[0],
+                if not state.wants_more_contacts(self.max_contacts):
+                    self._finalize_approved(opportunity_id)
+                    return QualifyOutcome(
+                        opportunity_id, "approved", "approved_available_contacts",
+                        approval_ids[0], approved_person_ids[0],
+                        details={"approvals_created": len(approval_ids),
+                                 "approved_total": approved_total + len(approval_ids)},
+                    )
+                # Task 9: the quota (default 3) is not yet met, but this pass found
+                # no further candidates to search. The opportunity stays 'open' --
+                # never finalized on a partial round -- and is retried later, the
+                # same way ``buyer_search_pending`` already retries a 0-candidate
+                # search (Apollo's index changes over time).
+                return self._wait_for_dependency(
+                    opportunity_id, "buyer_search_pending:contact_quota_partial",
+                    hours=max(24.0, self.retry_hours),
                     details={"approvals_created": len(approval_ids),
                              "approved_total": approved_total + len(approval_ids)},
                 )
@@ -804,11 +923,21 @@ class OpportunityService:
             )
 
         made = 0
-        for cand in candidates:
-            if len(existing_contacts) + len(approval_ids) >= self.max_contacts:
+        remaining = list(candidates)
+        while remaining:
+            if not state.wants_more_contacts(self.max_contacts):
                 break
             if matches_done + made >= max_attempts:
                 break
+            # Task 9: choose the next candidate for role diversity and global
+            # person-uniqueness, not the fixed title-list order ``_rank`` alone
+            # gives every caller (the base ordering ``_rank`` provides still
+            # decides ties WITHIN a persona).
+            cand = select_next_contact(candidates=remaining, existing_person_keys=state.existing_person_keys,
+                                       existing_personas=state.existing_personas)
+            if cand is None:
+                break
+            remaining = [c for c in remaining if c["_ref"] != cand["_ref"]]
             ref = cand["_ref"]
             # R01: judge only what the search carries; LinkedIn/employment/email come with enrichment.
             pre = pre_enrichment_check(person=cand, employer_name=emp["canonical_name"], employer_domains=employer_domains,
@@ -872,17 +1001,30 @@ class OpportunityService:
                 self.conn.rollback()
                 self._record_attempt(opportunity_id, ref, "gate", "fail", "person_already_approved_elsewhere", epoch=epoch, person_id=person_id)
                 continue
-            self._record_attempt(opportunity_id, ref, "gate", "pass", "approved", epoch=epoch, person_id=person_id)
+            self._record_attempt(opportunity_id, ref, "gate", "pass", "approved", epoch=epoch, person_id=person_id,
+                                 details={"persona": cand.get("persona", ""), "rule_version": RULE_VERSION})
             approval_ids.append(approval_id)
             approved_person_ids.append(person_id)
+            state.existing_person_keys.add(ref)
+            if cand.get("persona"):
+                state.existing_personas.append(cand["persona"])
 
         if approval_ids:
-            self._finalize_approved(opportunity_id)
-            return QualifyOutcome(
-                opportunity_id, "approved", "approved",
-                approval_ids[0], approved_person_ids[0], attempts_made=made,
+            if not state.wants_more_contacts(self.max_contacts):
+                self._finalize_approved(opportunity_id)
+                return QualifyOutcome(
+                    opportunity_id, "approved", "approved",
+                    approval_ids[0], approved_person_ids[0], attempts_made=made,
+                    details={"approvals_created": len(approval_ids),
+                             "approved_total": approved_total + len(approval_ids)},
+                )
+            # Task 9: quota not yet met -- stay 'open' and retry for the rest
+            # instead of finalizing on the first approval (the measured defect).
+            return self._wait_for_dependency(
+                opportunity_id, "buyer_search_pending:contact_quota_partial",
+                hours=max(24.0, self.retry_hours),
                 details={"approvals_created": len(approval_ids),
-                         "approved_total": approved_total + len(approval_ids)},
+                         "approved_total": approved_total + len(approval_ids), "attempts_made": made},
             )
 
         if matches_done + made >= max_attempts:

@@ -12,7 +12,12 @@ REQUIRED_VARIABLES = {"open_role", "open_roles", "role_focus", "role_bucket", "c
 
 def test_every_route_produces_one_approved_lead_delivered_to_its_own_campaign(conn, clock):
     sc = build_nine_route_scenario(clock())
-    r = runner(conn, sc, clock)
+    # This scenario seeds exactly one qualifying buyer per employer; it is testing
+    # per-campaign ROUTING, not contact depth (Phase 2 audit task 9), so it pins
+    # the quota at 1 rather than the production default of 3 -- with the task 9
+    # fix, an opportunity with fewer available buyers than its quota correctly
+    # stays open and waits for more instead of finalizing early.
+    r = runner(conn, sc, clock, max_contacts_per_opportunity=1)
     report = r.cycle()
     assert report.stages["resolve_identity"] == {"resolved": 10}
     assert report.stages["classify"] == {"classified": 10}
@@ -60,11 +65,12 @@ def test_a_second_cycle_is_idempotent(conn, clock):
 def test_restart_mid_cycle_resumes_without_duplicates(conn, clock):
     """A crash after acquisition and identity, before classification, loses nothing."""
     sc = build_nine_route_scenario(clock())
-    r = runner(conn, sc, clock)
+    # Pinned to quota 1: see test_every_route_produces_one_approved_lead_... above.
+    r = runner(conn, sc, clock, max_contacts_per_opportunity=1)
     r.acquire()
     r.work("resolve_identity")
     # "restart": a new runner instance on the same database
-    r2 = runner(conn, sc, clock)
+    r2 = runner(conn, sc, clock, max_contacts_per_opportunity=1)
     report = r2.cycle(acquire=True)
     assert report.stages["classify"] == {"classified": 10} and report.stages["qualify_opportunity"] == {"approved": 10}
     assert sql1(conn, "SELECT count(*) FROM postings") == 10 and sql1(conn, "SELECT count(*) FROM approvals") == 10

@@ -12,7 +12,10 @@ from tests_core.helpers import runner, sql1, sqlall
 def test_persisted_refusal_withholds_acquisition_but_processing_continues(conn, clock):
     sc = build_nine_route_scenario(clock())
     sc.apollo.credits = 0                                            # Apollo refuses every paid call
-    r = runner(conn, sc, clock)
+    # This scenario seeds exactly one qualifying buyer per employer; it is testing
+    # provider-refusal recovery, not contact depth (Phase 2 audit task 9), so it
+    # pins the quota at 1 rather than the production default of 3.
+    r = runner(conn, sc, clock, max_contacts_per_opportunity=1)
     first = r.cycle()
     assert len(first.acquisition) > 0 and sql1(conn, "SELECT count(*) FROM postings") == 10
     assert first.stages["qualify_opportunity"] == {"wait": 10, "technical_failure": 10}
