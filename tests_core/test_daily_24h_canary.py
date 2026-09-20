@@ -395,3 +395,45 @@ def test_the_canary_reads_the_declared_band_when_no_headcount_is_present():
 def test_the_canary_still_rejects_an_employer_every_source_agrees_is_out_of_range():
     assert _qualify(headcount=5000, org_linkedin_size="1,001-5,000 employees") == "rejected:employer_too_large"
     assert _qualify(headcount=12, org_linkedin_size="1-10 employees") == "rejected:employer_too_small"
+
+
+# ---------------------------------------------------------------------------
+# Scoped re-review, IMPORTANT 1: after the size predicate was shared, the
+# canary's headline stopped being an upper bound on approvals -- and it is the
+# number a capacity decision gets read off. qualify_row maps
+# firmographic_conflict and unknown_firmographics to `ambiguous:` buckets, and
+# _qualify counts only `qualified_pre_contact`; but the LIVE gate PROCEEDS on
+# both (services/opportunity._size_gate closes only out_of_range, and
+# build_approved_lead refuses unknown only when rule("require_employee_count"),
+# which is False). So the strict count is a LOWER bound on the live proceed set,
+# not an upper bound on approvals. Both numbers are reported, separately.
+# ---------------------------------------------------------------------------
+
+def test_the_canary_reports_the_live_proceed_set_beside_the_strict_qualified_count():
+    feed = Feed24h(jb=[
+        row(1),                                                            # in_range -> qualified
+        row(2, headcount=5000, org_linkedin_size="51-200 employees"),      # conflict -> proceeds live
+        row(3, headcount=None, org_linkedin_size=None),                    # unknown  -> proceeds live
+        row(4, headcount=5000, org_linkedin_size="1,001-5,000 employees"), # out_of_range -> rejected
+    ])
+    q = run(feed, limit=10)["qualification"]
+    assert q["qualified_pre_contact_jobs"] == 1
+    assert q["size_review_jobs"] == 2
+    assert q["proceeds_to_contact_jobs"] == 3, "the live gate proceeds on a conflict and on an unknown"
+    assert q["proceeds_to_contact_opportunities"] == 3
+    assert q["rejected"] == 1
+    # the two figures stay separate: the strict count is not folded into the proceed set
+    assert q["qualified_pre_contact_jobs"] != q["proceeds_to_contact_jobs"]
+
+
+def test_the_canary_definition_names_which_figure_bounds_approvals():
+    """The docstring said `qualified_pre_contact` is "an upper bound on
+    approvals". It no longer is, and post-branch runs are not comparable to
+    pre-branch ones -- neither figure may be readable as the other."""
+    q = run(Feed24h(jb=[row(1)]), limit=10)["qualification"]
+    definition = q["definition"]
+    assert "proceeds_to_contact_jobs" in definition and "qualified_pre_contact_jobs" in definition
+    assert "upper bound" in definition.lower() and "lower bound" in definition.lower()
+    doc = " ".join((canary.qualify_row.__doc__ or "").split())
+    assert "is NOT an upper bound on approvals" in doc, "qualify_row still claims the strict figure bounds approvals"
+    assert "proceeds_to_contact_jobs" in doc, "the corrected docstring must name the figure that does bound them"

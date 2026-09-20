@@ -406,10 +406,29 @@ def _parse_dt(value: Any) -> Optional[datetime]:
     return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
 
 
+#: The two outcomes this canary records for a company size the live gates do NOT
+#: reject: a conflict between the two reliable sources, and nothing usable at
+#: all. Neither is a rejection anywhere in the live pipeline (Decision 2,
+#: 2026-09-19), so both belong in the proceed set even though neither is a
+#: confirmed in-range qualification. Scoped re-review, IMPORTANT 1.
+SIZE_REVIEW_OUTCOMES = ("ambiguous:firmographic_conflict", "ambiguous:company_size_unknown")
+
+
 def qualify_row(row: Mapping[str, Any], *, now: datetime) -> Dict[str, Any]:
     """The current deterministic job + company rules. ``inference=None``: no model is consulted, so
-    a posting the rules cannot place is AMBIGUOUS, never approved. Contact/email/approval stages are
-    not run, so ``qualified_pre_contact`` is an upper bound on approvals."""
+    a posting the rules cannot place is AMBIGUOUS, never approved.
+
+    Scoped re-review, IMPORTANT 1 (2026-09-20): ``qualified_pre_contact`` is NOT
+    an upper bound on approvals and must not be read as one. The live gates
+    PROCEED on a firmographic conflict and on an unknown company size
+    (``services/opportunity._size_gate`` closes only ``out_of_range``, and
+    ``domain/approval.build_approved_lead`` refuses an unknown only when
+    ``rule("require_employee_count")``, which is False), while this function
+    puts both in ``ambiguous:`` buckets. So the strict figure is a LOWER bound
+    on the set the live pipeline carries into contact discovery; the set that
+    actually bounds approvals is that figure PLUS the two size-review buckets
+    (``SIZE_REVIEW_OUTCOMES``), reported as ``proceeds_to_contact_jobs``.
+    Contact/email/approval stages are not run for either figure."""
     org = org_block(dict(row))
     employer_name = str(row.get("organization") or row.get("org_linkedin_name") or "")
     fp, ekey = row_fingerprint(row)
@@ -692,6 +711,8 @@ class Daily24hCanary:
         outcomes: Counter = Counter()
         functions: Counter = Counter()
         opportunities: set = set()
+        proceed_functions: Counter = Counter()
+        proceed_opportunities: set = set()
         details: List[Dict[str, Any]] = []
         for item in self.new_rows:
             r = item["row"]
@@ -700,17 +721,33 @@ class Daily24hCanary:
             if q["outcome"] == "qualified_pre_contact":
                 functions[q["function"]] += 1
                 opportunities.add((q["employer_key"], q["function"]))
+            if q["outcome"] == "qualified_pre_contact" or q["outcome"] in SIZE_REVIEW_OUTCOMES:
+                # IMPORTANT 1: the set the LIVE gates carry forward. A size-review
+                # row still has a function (the size gate runs after classification),
+                # so it opens a real opportunity in the live pipeline too.
+                proceed_functions[q["function"]] += 1
+                proceed_opportunities.add((q["employer_key"], q["function"]))
             details.append({"source": item["source"], "partition": item["partition"], "provider_job_id": str(r.get("id") or ""),
                             "title": str(r.get("title") or "")[:140], "organization": str(r.get("organization") or "")[:100],
                             "url": canonical_url(r.get("url")), "org_linkedin_headcount": r.get("org_linkedin_headcount"),
                             "org_linkedin_industry": r.get("org_linkedin_industry"), "outcome": q["outcome"],
                             "function": q["function"]})
         qualified = outcomes.get("qualified_pre_contact", 0)
+        size_review = sum(outcomes.get(k, 0) for k in SIZE_REVIEW_OUTCOMES)
         return {
-            "definition": "current deterministic job rules (classify_posting, inference=None) + known-fact company gates; "
-                          "no contact, email or approval stage, so this is an UPPER BOUND on approvals",
+            "definition": "current deterministic job rules (classify_posting, inference=None) + known-fact company gates, "
+                          "with no contact, email or approval stage. TWO figures, deliberately not merged: "
+                          "qualified_pre_contact_jobs counts only a CONFIRMED in-range company size and is a LOWER bound "
+                          "on what the live pipeline carries forward, because the live gates also proceed on a "
+                          "firmographic conflict and on an unknown size; proceeds_to_contact_jobs adds those two "
+                          "size-review buckets and is the figure that is an UPPER BOUND on approvals. A run from before "
+                          "the size predicate was shared (2026-09-20) is not comparable to one after it on either figure",
             "reviewed": len(self.new_rows), "qualified_pre_contact_jobs": qualified,
             "qualified_pre_contact_opportunities": len(opportunities),
+            "size_review_jobs": size_review,
+            "proceeds_to_contact_jobs": qualified + size_review,
+            "proceeds_to_contact_opportunities": len(proceed_opportunities),
+            "proceeds_to_contact_by_function": dict(proceed_functions.most_common()),
             "ambiguous": sum(n for k, n in outcomes.items() if k.startswith("ambiguous:")),
             "rejected": sum(n for k, n in outcomes.items() if k.startswith("rejected:")),
             "by_outcome": dict(outcomes.most_common()), "qualified_by_function": dict(functions.most_common()),
