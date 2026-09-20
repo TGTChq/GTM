@@ -17,7 +17,7 @@ BEFORE any second create.
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
 
@@ -76,6 +76,58 @@ def retired_campaign_block_reason(target, allowed_campaign_ids, env=None):
     return "campaign_not_configured"
 
 
+@dataclass
+class CanaryCaps:
+    """A ceiling on the Instantly write portion, enforced in code.
+
+    The bounded production canary is at most ten eligible net-new contacts per
+    Challenger campaign and ninety in total. Putting that in a start command or
+    in an operator's attention is not a cap; this is. Disabled unless at least
+    one limit is configured, so normal production is untouched.
+
+    It is a ceiling, never a quota: nothing here tries to reach ten.
+    """
+    per_campaign: Optional[int] = None
+    total: Optional[int] = None
+    _by_campaign: Dict[str, int] = field(default_factory=dict)
+    _total: int = 0
+
+    @classmethod
+    def from_env(cls, env: Optional[Mapping[str, str]]) -> "CanaryCaps":
+        env = env or {}
+        def _limit(name):
+            raw = str(env.get(name, "") or "").strip()
+            if not raw:
+                return None
+            try:
+                return int(raw)
+            except ValueError:
+                return None
+        return cls(per_campaign=_limit("TGTC_CANARY_MAX_PER_CAMPAIGN"), total=_limit("TGTC_CANARY_MAX_TOTAL"))
+
+    @property
+    def enabled(self) -> bool:
+        return self.per_campaign is not None or self.total is not None
+
+    def exceeded(self, campaign_id: str) -> Optional[str]:
+        """The named reason this write must not happen, or None to proceed."""
+        if not self.enabled:
+            return None
+        if self.total is not None and self._total >= self.total:
+            return "canary_cap_total"
+        if self.per_campaign is not None and self._by_campaign.get(campaign_id, 0) >= self.per_campaign:
+            return "canary_cap_campaign"
+        return None
+
+    def record(self, campaign_id: str) -> None:
+        self._by_campaign[campaign_id] = self._by_campaign.get(campaign_id, 0) + 1
+        self._total += 1
+
+    def summary(self) -> Dict[str, Any]:
+        return {"enabled": self.enabled, "per_campaign": self.per_campaign, "total_limit": self.total,
+                "written_total": self._total, "written_by_campaign": dict(self._by_campaign)}
+
+
 class DeliveryService:
     def __init__(self, conn: psycopg.Connection, *, airtable: Optional[AirtableClient], instantly: Optional[InstantlyClient],
                  lease_seconds: int = 300, backoff_seconds: int = 120, max_attempts: int = 8,
@@ -93,6 +145,7 @@ class DeliveryService:
         self.max_contacts = max(1, min(3, max_contacts_per_opportunity))
         self.allowed_campaign_ids = tuple((campaign_env or {}).values())
         self.env = os.environ if env is None else env
+        self.canary_caps = CanaryCaps.from_env(self.env)
         self.now = now
 
     # --- claim (R06) ----------------------------------------------------------
@@ -332,6 +385,13 @@ class DeliveryService:
         if retired:
             self._set(item, "blocked", blocked_reason=retired)
             return DeliveryOutcome(item.id, "instantly", "blocked", retired)
+        # Bounded canary ceiling. The row is DEFERRED, never blocked or failed:
+        # the cap is about this run's write budget, not about the contact, so a
+        # later run drains it normally once the cap is lifted.
+        capped = self.canary_caps.exceeded(target)
+        if capped:
+            self._set(item, "pending", available_at=self.now() + timedelta(hours=1), error=capped)
+            return DeliveryOutcome(item.id, "instantly", "deferred", capped)
         if self.check_campaign_status:
             camp = self.instantly.get_campaign(target)
             if not camp.ok:
@@ -364,6 +424,9 @@ class DeliveryService:
             if membership != NEWLY_CREATED:
                 membership, campaigns = self.instantly.resolve_membership(email, target)
             if membership == NEWLY_CREATED:
+                # Counted only on a genuinely NEW enrolment acknowledged by
+                # Instantly: a reconciled existing lead is not a canary write.
+                self.canary_caps.record(target)
                 if self._delivered(item, "created", external_id=lead_id, external_campaign=lead_campaign or target, summary={"created_at": created_at}):
                     return DeliveryOutcome(item.id, "instantly", "delivered", "created", lead_id)
                 return DeliveryOutcome(item.id, "instantly", "lease_lost", "created_but_lease_lost", lead_id)
