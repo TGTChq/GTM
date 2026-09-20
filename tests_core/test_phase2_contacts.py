@@ -11,6 +11,13 @@ common variants ("Vice President, X", "SVP X", "Director, X", "Human
 Resources Manager") and over-matches unrelated "Operations Manager" titles
 (warehouse/clinical/IT) via bare substring.
 
+(Phase 4, 2026-09-20, revisits both: the buyer-title matcher moved to
+``domain/title_norm.py`` and gained a token-set rule, and every function key
+gained the third persona this file's task-9 tests could only reach for
+``people_hr``. These tests are unchanged in intent and still pin phase 2's
+behaviour; see ``test_phase4_title_normaliser.py`` and
+``test_phase4_personas.py``.)
+
 Task 9 -- contact depth never exceeds 1: the first approval finalizes the
 opportunity (a terminal state) even when the configured maximum
 (``TGTC_MAX_CONTACTS_PER_OPPORTUNITY``, default 3) is not yet met, and
@@ -388,8 +395,10 @@ def test_founder_tier_rejection_carries_rule_version():
 # max_attempts). But both "no progress" paths -- select_next_contact
 # returning None (I4's hard stop) and a pass finding zero candidates at all
 # -- reach that check with made = 0, making ZERO paid attempts, so the
-# budget never advances. 9 of 10 functions expose exactly 2 reachable
-# personas (only people_hr has a third); at the SHIPPED DEFAULT quota of 3
+# budget never advances. 9 of 10 functions exposed exactly 2 reachable
+# personas (only people_hr had a third, until phase 4 gave every function
+# one -- this scenario still holds, because none of its three candidates is
+# a Talent/People owner); at the SHIPPED DEFAULT quota of 3
 # (config.py's max_contacts_per_opportunity), such an opportunity approves 2
 # contacts and then waits at buyer_search_pending forever, since it can
 # never make the paid attempt that would advance the budget. Termination

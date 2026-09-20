@@ -46,7 +46,8 @@ from ..domain.gates import (
 )
 from ..domain.identity import company_names_compatible, domain_name_consistent, person_ref, safe_employer_domain
 from ..policy.campaigns import (
-    DIRECT_BUYER_TITLES, campaign_route_configured, buyer_titles, is_founder_tier, resolve_campaign_id,
+    DIRECT_BUYER_TITLES, TALENT_PEOPLE_BUYER_TITLES, campaign_route_configured, buyer_titles,
+    is_founder_tier, resolve_campaign_id,
 )
 from ..policy.compliance import DISABLED, person_enrichment_allowed
 from ..policy.requirements import excluded_industry, rule
@@ -114,26 +115,29 @@ PERSONA_EXECUTIVE_LEADER = "executive_leader"
 PERSONA_TA_PEOPLE_LEADER = "ta_people_leader"
 CONTACT_PERSONAS = (PERSONA_FUNCTIONAL_OWNER, PERSONA_EXECUTIVE_LEADER, PERSONA_TA_PEOPLE_LEADER)
 
-#: Within the people_hr buyer hierarchy specifically, a Talent-Acquisition title
-#: is its own persona (distinct from generic HR/People-ops titles): a TA/People
-#: leader is a genuinely different contact from an HR functional owner even
-#: though both are in the SAME buyer hierarchy (task 9 authority, "a TA/People
-#: leader when appropriate").
-_TA_PEOPLE_TITLES = ("Talent Acquisition Director", "Head of Talent Acquisition")
-
-
 def contact_persona(title: str, function_key: str) -> str:
     """Which of the three diversification personas a buyer title represents.
 
-    Shares the SAME title hierarchy ``campaigns.py`` already searches
-    (``DIRECT_BUYER_TITLES`` = the functional hiring owner) and the SAME
-    matcher (``title_matches``) instead of a second title classifier, so this
-    view cannot drift from what was actually searched. Anything not a direct
-    manager (and not a people_hr TA title) is the executive functional leader
-    -- ``buyer_titles()`` only ever returns direct-manager or executive-tier
-    titles (founders last, or never).
+    Reads the SAME three title hierarchies ``campaigns.py`` searches, through
+    the SAME matcher (``title_matches``), instead of a second title
+    classifier, so this view cannot drift from what was actually searched.
+
+    Phase 4 audit (2026-09-20): the TA/People persona used to be a two-title
+    tuple hard-coded HERE and consulted only when ``function_key ==
+    "people_hr"`` -- a persona that existed in the classifier but in no
+    searched list, for one function out of ten. It is now
+    ``campaigns.TALENT_PEOPLE_BUYER_TITLES``, defined for every function key
+    and searched for every function key, which is what makes depth 3 reachable
+    at all outside people_hr.
+
+    The TA list is tested FIRST because in ``people_hr`` -- and only there --
+    the campaign's own hierarchy already contains Talent-Acquisition titles;
+    testing it after the direct list would classify "Talent Acquisition
+    Director" as people_hr's functional owner and collapse that campaign back
+    to two personas. Everything that is none of the three is the executive
+    functional leader, because ``buyer_titles()`` returns nothing else.
     """
-    if function_key == "people_hr" and title_matches(title, _TA_PEOPLE_TITLES):
+    if title_matches(title, TALENT_PEOPLE_BUYER_TITLES.get(function_key, ())):
         return PERSONA_TA_PEOPLE_LEADER
     if title_matches(title, DIRECT_BUYER_TITLES.get(function_key, ())):
         return PERSONA_FUNCTIONAL_OWNER
@@ -985,9 +989,15 @@ class OpportunityService:
         that make NO progress (``select_next_contact`` returns ``None``, or a
         pass finds zero candidates at all) reach this with ``made = 0``,
         making zero paid attempts, so the budget never advances and the
-        opportunity waited forever. 9 of 10 functions expose exactly 2
-        reachable personas (only people_hr has a third), so at the shipped
-        default quota of 3 this was not a corner case. Termination now keys
+        opportunity waited forever. At the time, 9 of 10 functions exposed
+        exactly 2 reachable personas (only people_hr had a third), so at the
+        shipped default quota of 3 this was not a corner case. Phase 4
+        (2026-09-20) gave every function a third persona
+        (``campaigns.TALENT_PEOPLE_BUYER_TITLES``), so the quota is now
+        reachable in principle -- but only when Apollo actually returns a
+        Talent/People owner at that employer, which is an availability
+        question, not a policy one. This branch stays exactly as load-bearing
+        as before. Termination now keys
         PRIMARILY on ``no_further_candidates`` -- there is no further
         role-diverse candidate this pass could select, so persona diversity
         or credits could never advance the quota regardless of how long this

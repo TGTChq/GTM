@@ -170,9 +170,14 @@ DIRECT_BUYER_TITLES: Dict[str, Tuple[str, ...]] = {
     "finance": ("Finance Director", "Director of Finance", "Accounting Director",
                 "Director of Accounting", "Accounting Manager"),
     "operations": ("Operations Director", "Director of Operations", "Operations Manager"),
+    # Phase 4 audit: "Talent Acquisition Director" moved OUT of people_hr's
+    # direct list and into TALENT_PEOPLE_BUYER_TITLES below. It is searched
+    # exactly as before (``buyer_titles`` concatenates all three lists); what
+    # changes is that a TA leader is now people_hr's THIRD persona rather than
+    # a second spelling of its functional owner, which is the difference
+    # between three role-diverse contacts and three people in one role.
     "people_hr": ("HR Director", "Human Resources Director", "Director of Human Resources",
-                  "People Operations Director", "Director of People Operations",
-                  "Talent Acquisition Director", "HR Manager"),
+                  "People Operations Director", "Director of People Operations", "HR Manager"),
     "product": ("Product Director", "Director of Product", "Product Design Director",
                 "Director of Product Design", "Design Director"),
     "ecommerce": ("Ecommerce Director", "E-commerce Director", "Director of Ecommerce"),
@@ -203,12 +208,48 @@ EXECUTIVE_BUYER_TITLES: Dict[str, Tuple[str, ...]] = {
                    "Head of Operations", "Chief of Staff", "Founder", "Co-Founder", "CEO"),
     "people_hr": ("CHRO", "Chief Human Resources Officer", "Chief People Officer", "VP People",
                   "VP of People", "VP Human Resources", "VP of Human Resources", "Head of People",
-                  "Head of Talent Acquisition", "Founder", "Co-Founder", "CEO"),
+                  "Founder", "Co-Founder", "CEO"),   # "Head of Talent Acquisition": see people_hr above
     "product": ("Chief Product Officer", "CPO", "VP Product", "VP of Product", "Head of Product",
                 "Head of Design", "VP Design", "CTO", "Founder", "Co-Founder", "CEO"),
     "ecommerce": ("VP Ecommerce", "VP of Ecommerce", "Head of Ecommerce", "Head of E-commerce",
                   "CMO", "Chief Marketing Officer", "VP Marketing", "COO",
                   "Founder", "Co-Founder", "CEO"),
+}
+
+#: Phase 4 audit (2026-09-20): the THIRD persona, for every function key.
+#:
+#: Measured defect: ``opportunity.contact_persona`` knew a third persona for
+#: ``people_hr`` only, from a two-title tuple hard-coded in that module, so the
+#: shipped default quota of 3 role-diverse contacts was structurally
+#: unreachable for the other eight campaigns whatever Apollo returned --
+#: ``opportunity._finalize_or_wait_partial`` documents exactly that ("9 of 10
+#: functions expose exactly 2 reachable personas").
+#:
+#: Authority for WHO the third person is (SKILL.md, fixed definitions): "the
+#: functional owner, the executive leader, and a TA/People leader when
+#: appropriate". The Talent/People owner owns the requisition for the very job
+#: that created the opportunity, in every campaign, which is what makes them a
+#: buying stakeholder rather than a third name at the same company.
+#:
+#: Kept deliberately short. These titles are OR'd into ``person_titles[]`` on
+#: the live search, so every entry competes for the same two pages of results
+#: as the function's own owners; a long list risks crowding out the people the
+#: campaign is actually about. They are ordered LAST in ``buyer_titles()`` so
+#: ranking spends a paid call on the functional owner first.
+_TALENT_ACQUISITION_TITLES: Tuple[str, ...] = (
+    "Head of Talent Acquisition", "Director of Talent Acquisition",
+    "Talent Acquisition Director", "VP Talent Acquisition",
+)
+#: The People owner, for the eight campaigns where People is not the campaign's
+#: OWN function. Within ``people_hr`` these are the campaign's own executives
+#: (they are listed in ``EXECUTIVE_BUYER_TITLES["people_hr"]``), and folding
+#: them into the TA persona there would collapse people_hr back to two personas.
+_PEOPLE_OWNER_TITLES: Tuple[str, ...] = ("Head of People", "Chief People Officer")
+
+TALENT_PEOPLE_BUYER_TITLES: Dict[str, Tuple[str, ...]] = {
+    fn: _TALENT_ACQUISITION_TITLES if fn == "people_hr"
+    else _TALENT_ACQUISITION_TITLES + _PEOPLE_OWNER_TITLES
+    for fn in FUNCTION_KEYS
 }
 
 FOUNDER_TIER_TITLES = frozenset({"founder", "co-founder", "cofounder", "co founder", "ceo",
@@ -266,10 +307,18 @@ def is_founder_tier(title: str) -> bool:
 
 
 def buyer_titles(function_key: str, *, founder_allowed: bool) -> Tuple[str, ...]:
-    """Ordered buyer titles: direct managers, then executives, founders last or never."""
+    """Ordered buyer titles: direct managers, then executives, then the
+    Talent/People owner, founders last or never.
+
+    The order is the ranking's base order (``opportunity._rank``), so it is
+    also the order a paid call is spent in: the function's own owners before
+    the third persona, and founders only where policy allows them at all.
+    """
     direct = DIRECT_BUYER_TITLES.get(function_key, ())
     execs = EXECUTIVE_BUYER_TITLES.get(function_key, ())
+    talent = TALENT_PEOPLE_BUYER_TITLES.get(function_key, ())
     ordered = list(direct) + [t for t in execs if not is_founder_tier(t)]
+    ordered += [t for t in talent if not is_founder_tier(t)]
     if founder_allowed:
         ordered += [t for t in execs if is_founder_tier(t)]
     seen, out = set(), []
