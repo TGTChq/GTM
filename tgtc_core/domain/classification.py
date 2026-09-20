@@ -190,11 +190,33 @@ GTM_SELLING_PHRASES = frozenset({
 })
 
 
-def _gtm_revenue_scope(hits: List[Tuple[Signal, str]]) -> Tuple[int, int]:
+def _gtm_revenue_scope(hits: Sequence[Tuple[Signal, str]]) -> Tuple[int, int]:
     """(selling score, ops score) from the phrases already matched for gtm_revenue."""
     selling = sum(sig.weight for sig, _ in hits if sig.phrase in GTM_SELLING_PHRASES)
     ops = sum(sig.weight for sig, _ in hits if sig.phrase in GTM_OPS_PHRASES)
     return selling, ops
+
+
+def quota_carrying_sales_exclusion(hits: Sequence[Tuple[Signal, str]]) -> Optional[Dict[str, object]]:
+    """THE GTM Systems scope predicate: the exclusion payload when the posting's
+    own ``gtm_revenue`` evidence is selling rather than RevOps/Sales Ops/GTM
+    systems, else ``None``.
+
+    Final whole-branch review, C1 (CRITICAL, 2026-09-20): this used to be an
+    inline ``if`` on the DETERMINISTIC path only, so ``_apply_semantic`` -- the
+    path tasks 1-2 measurably move rows onto, and which is live in production
+    (``runner.py``'s configured inference port) -- assigned ``gtm_revenue``
+    from a model answer with no scope check at all. Both paths now call THIS
+    function on the SAME ``score_functions`` evidence (the lexicon hits that
+    produced the scores), so the "selling or ops" view cannot drift between
+    them and the exclusion cannot exist on one path only. Reviewers on this
+    branch have twice rejected a copied predicate.
+    """
+    selling, ops = _gtm_revenue_scope(hits)
+    if selling and selling >= ops:
+        return {"code": "quota_carrying_sales", "rule_version": RULE_VERSION,
+                "selling_score": selling, "ops_score": ops}
+    return None
 
 
 @dataclass
@@ -341,16 +363,13 @@ def classify_posting(
     result.scores = dict(scores)
     dominant = _dominant(scores, hits)
     if dominant == "gtm_revenue":
-        selling, ops = _gtm_revenue_scope(hits[dominant])
-        if selling and selling >= ops:
+        role_exclusion = quota_carrying_sales_exclusion(hits[dominant])
+        if role_exclusion is not None:
             result.method = METHOD_DETERMINISTIC
             result.excluded = True
             result.exclusion_reason = "role:quota_carrying_sales"
             result.rule_version = RULE_VERSION
-            result.facts["role_exclusion"] = {
-                "code": "quota_carrying_sales", "rule_version": RULE_VERSION,
-                "selling_score": selling, "ops_score": ops,
-            }
+            result.facts["role_exclusion"] = role_exclusion
             return result
     if dominant:
         result.compatible_functions = [dominant]
@@ -384,11 +403,18 @@ def classify_posting(
         result.notes.append(f"insufficient_evidence:{response.unavailable_reason or 'inference_unavailable'}")
         return result
     result.method = METHOD_SEMANTIC
-    return _apply_semantic(result, response, desc, facts)
+    return _apply_semantic(result, response, desc, facts, hits)
 
 
-def _apply_semantic(result: ClassificationResult, response: InferenceResponse, desc: str, facts: JobFacts) -> ClassificationResult:
-    """Model output is data. Re-validate everything before it can influence a decision."""
+def _apply_semantic(result: ClassificationResult, response: InferenceResponse, desc: str, facts: JobFacts,
+                    hits: Dict[str, List[Tuple[Signal, str]]]) -> ClassificationResult:
+    """Model output is data. Re-validate everything before it can influence a decision.
+
+    ``hits`` is ``score_functions``' own evidence for this description (the
+    deterministic pass that already ran before the port was consulted). It is a
+    REQUIRED argument, with no default: C1 (final whole-branch review) was
+    exactly a scope check that existed on one path and not the other, and a
+    default would let a caller silently skip it again."""
     from .exclusion_evidence import corroborates
 
     claimed_exclusion = (response.seniority == "director_plus" or response.people_management is True
@@ -416,6 +442,23 @@ def _apply_semantic(result: ClassificationResult, response: InferenceResponse, d
     if not grounded_resps:
         result.notes.append("insufficient_evidence:semantic_responsibilities_ungrounded")
         return result
+    # C1 (CRITICAL, final whole-branch review): the SAME scope predicate the
+    # deterministic path applies. The approved exclusion is about the GTM
+    # Systems campaign, and a job counts once under its primary, so only
+    # gtm_revenue is dropped from the assignment; a posting left with no
+    # function at all is excluded exactly as the deterministic path excludes
+    # it (there, gtm_revenue being dominant means it was the only function).
+    if "gtm_revenue" in functions:
+        role_exclusion = quota_carrying_sales_exclusion(hits.get("gtm_revenue", ()))
+        if role_exclusion is not None:
+            functions = [f for f in functions if f != "gtm_revenue"]
+            result.rule_version = RULE_VERSION
+            result.facts["role_exclusion"] = role_exclusion
+            if not functions:
+                result.excluded = True
+                result.exclusion_reason = "role:quota_carrying_sales"
+                return result
+            result.notes.append("dropped_function:gtm_revenue:quota_carrying_sales")
     result.compatible_functions = functions[:2]
     result.campaign_keys = list(dict.fromkeys(CAMPAIGN_BY_FUNCTION[f].key for f in result.compatible_functions))
     result.responsibilities = grounded_resps

@@ -16,6 +16,7 @@ from __future__ import annotations
 
 from tgtc_core.domain.classification import classify_posting
 from tgtc_core.domain.facts import RULE_VERSION
+from tgtc_core.domain.inference import InferenceResponse, ResponsibilityItem
 
 
 def _classify(title: str, description: str):
@@ -108,3 +109,82 @@ def test_ops_primary_with_some_selling_language_still_stays():
     )
     assert result.compatible_functions == ["gtm_revenue"]
     assert not result.excluded
+
+
+# ---------------------------------------------------------------------------
+# Final whole-branch review, C1 (CRITICAL): the scope exclusion existed ONLY on
+# the deterministic path. ``_apply_semantic`` assigned ``gtm_revenue`` straight
+# from the model answer with no scope check at all -- and tasks 1-2 measurably
+# move rows INTO that path (ledger row 1: 192 of 397 changed rows go
+# rejected -> semantic_pending). Inference is live in production
+# (``runner.py:113-116``), so a thin "Account Executive, carry a quota, close
+# new business" posting reached the model, came back ``gtm_revenue``, and was
+# approved into GTM Systems -- the exact defect the deterministic fix above
+# closes. Descriptions here are deliberately BELOW the deterministic dominance
+# bar (score < MIN_DOMINANT_SCORE) so the semantic path is what decides.
+# ---------------------------------------------------------------------------
+
+class _FixedAnswer:
+    """A semantic port that returns one fixed, grounded answer (no network, no model)."""
+
+    model_version = "test-model/1"
+
+    def __init__(self, functions, excerpt: str):
+        self._functions, self._excerpt = list(functions), excerpt
+
+    def classify(self, request):
+        return InferenceResponse(
+            available=True, compatible_functions=list(self._functions),
+            responsibilities=[ResponsibilityItem("owning the sales quota", self._excerpt)],
+            confidence=0.9, model_version=self.model_version,
+        )
+
+
+_THIN_SELLING = (
+    "We are hiring an Account Executive who will carry a quota and close new business "
+    "for our growing team. You will report to the head of sales and work from our New "
+    "York office three days a week. Full-time position with benefits and a comp plan."
+)
+_THIN_OPS = (
+    "You will own our Salesforce administration and CRM hygiene for the go-to-market "
+    "team, keeping records clean and automations working. You will report to the head of "
+    "operations and work from our New York office three days a week. Full-time position."
+)
+
+
+def test_thin_selling_posting_is_not_gtm_systems_on_the_semantic_path():
+    """The whole point of C1: the model says gtm_revenue, the posting's own
+    evidence is selling, and the assignment must be refused exactly as the
+    deterministic path refuses it."""
+    result = classify_posting(title="Account Executive", description=_THIN_SELLING,
+                              inference=_FixedAnswer(["gtm_revenue"], _THIN_SELLING[:80]))
+    assert result.method == "semantic"
+    assert "gtm_revenue" not in result.compatible_functions
+    assert result.campaign_keys == []
+    assert result.excluded and result.exclusion_reason == "role:quota_carrying_sales"
+    assert result.rule_version == RULE_VERSION
+    assert result.facts["role_exclusion"]["code"] == "quota_carrying_sales"
+
+
+def test_thin_ops_posting_still_reaches_gtm_systems_on_the_semantic_path():
+    """The exclusion must not swallow the campaign: a posting whose own
+    evidence is operations, not selling, still routes to GTM Systems when the
+    model says so."""
+    result = classify_posting(title="Revenue Operations Associate", description=_THIN_OPS,
+                              inference=_FixedAnswer(["gtm_revenue"], _THIN_OPS[:80]))
+    assert result.method == "semantic"
+    assert result.compatible_functions == ["gtm_revenue"]
+    assert result.campaign_keys == ["gtm_systems"]
+    assert not result.excluded
+
+
+def test_a_second_semantic_function_survives_the_gtm_scope_exclusion():
+    """The scope rule is about GTM Systems, and a job counts once under its
+    primary: when the model returns a second, unrelated function alongside
+    gtm_revenue, only gtm_revenue is dropped -- the posting is not thrown away."""
+    result = classify_posting(title="Account Executive", description=_THIN_SELLING,
+                              inference=_FixedAnswer(["gtm_revenue", "marketing"], _THIN_SELLING[:80]))
+    assert result.compatible_functions == ["marketing"]
+    assert "gtm_systems" not in result.campaign_keys
+    assert not result.excluded
+    assert result.rule_version == RULE_VERSION

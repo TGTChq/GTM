@@ -3,7 +3,7 @@ import math
 
 import pytest
 
-from tgtc_core.domain.classification import ClassificationResult, _apply_semantic
+from tgtc_core.domain.classification import ClassificationResult, _apply_semantic, score_functions
 from tgtc_core.domain.facts import JobFacts
 from tgtc_core.domain.inference import InferenceResponse, ResponsibilityItem
 
@@ -11,7 +11,11 @@ from tgtc_core.domain.inference import InferenceResponse, ResponsibilityItem
 def decide(description, *, code="", excerpt="", confidence=0.95, **kwargs):
     response = InferenceResponse(available=True, confidence=confidence,
         exclusion_evidence=[{"code": code, "excerpt": excerpt}] if code else [], **kwargs)
-    return _apply_semantic(ClassificationResult(), response, description, JobFacts())
+    # C1 (final whole-branch review): _apply_semantic now requires this
+    # description's own deterministic evidence, so the GTM Systems scope
+    # predicate governs the semantic assignment too. Built with the SAME
+    # score_functions call classify_posting makes, not a stub.
+    return _apply_semantic(ClassificationResult(), response, description, JobFacts(), score_functions(description)[1])
 
 
 @pytest.mark.parametrize("confidence", [0, 0.05, 0.79, -1, 1.1, math.nan, math.inf])
