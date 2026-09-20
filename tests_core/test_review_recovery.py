@@ -12,8 +12,8 @@ from tests_core.seed import apollo_for, good_buyer, seed_opportunity
 def test_org_id_candidate_is_not_delayed_until_a_new_posting_after_bad_domain_match(conn, clock):
     domain, org = "acme.com", "Acme"
     pid, eid, oid = seed_opportunity(conn, clock, headcount=None)       # forces org enrich -> apollo_org_id known
-    judged = good_buyer(domain, org, id="p-judged", email="judged@acme.com", status="extrapolated")
-    fresh = good_buyer(domain, org, id="p-fresh", email="fresh@acme.com")
+    judged = good_buyer(domain, org, id="p-1-judged", email="judged@acme.com", status="extrapolated")
+    fresh = good_buyer(domain, org, id="p-2-fresh", email="fresh@acme.com")
     fake = apollo_for(domain, org, people=[judged])
     fake.people_by_org_id[f"org-{domain}"] = [judged, fresh]            # the org-id selector knows one more person
     out = opportunity_service(conn, fake, clock).process(oid)

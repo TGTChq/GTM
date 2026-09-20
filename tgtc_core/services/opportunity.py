@@ -34,6 +34,7 @@ import psycopg
 
 from ..db.connection import jsonb, transaction
 from ..db import work_queue
+from ..domain.contact_ranking import organization_evidence, rank_candidates
 from ..domain.approval import (
     COMPLIANCE_LEAD_FIELDS, ApprovalRefusal, ApprovedLead, airtable_fields, build_approved_lead,
     instantly_payload, outreach_blocked_reason,
@@ -47,7 +48,7 @@ from ..domain.gates import (
 from ..domain.identity import company_names_compatible, domain_name_consistent, person_ref, safe_employer_domain
 from ..policy.campaigns import (
     DIRECT_BUYER_TITLES, TALENT_PEOPLE_BUYER_TITLES, campaign_route_configured, buyer_titles,
-    is_founder_tier, resolve_campaign_id,
+    resolve_campaign_id,
 )
 from ..policy.compliance import DISABLED, person_enrichment_allowed
 from ..policy.requirements import excluded_industry, rule
@@ -774,14 +775,22 @@ class OpportunityService:
                 stats[key] += value
         return usable, dropped, stats
 
-    def _rank(self, candidates: List[Dict[str, Any]], titles: Sequence[str]) -> List[Dict[str, Any]]:
-        def rank(p: Dict[str, Any]) -> int:
-            t = str(p.get("title") or "")
-            for i, target in enumerate(titles):
-                if title_matches(t, [target]):
-                    return i
-            return len(titles) + (5 if is_founder_tier(t) else 0)
-        return sorted(candidates, key=rank)
+    def _rank(self, candidates: List[Dict[str, Any]], titles: Sequence[str],
+              emp: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+        """Phase 4 audit: the ordering policy is ``domain/contact_ranking.py``'s
+        total order, not a local key. What used to be here keyed on the matched
+        title index alone, so every tie fell through to Apollo's own response
+        order -- and its founder demotion sat in a branch
+        ``pre_enrichment_check`` makes unreachable, letting "Founder & CTO"
+        inherit the CTO's rank and be bought ahead of the real functional
+        owner. ``emp`` is optional only for the legacy ``__new__``-constructed
+        service in a few portability tests; with no employer the two evidence
+        terms simply never fire and the order is still total.
+        """
+        employer = emp or {}
+        employer_domains = {employer["domain"]} if employer.get("domain") else set()
+        return rank_candidates(candidates, buyer_titles=titles, employer_domains=employer_domains,
+                               employer_name=str(employer.get("canonical_name") or ""))
 
     def _excluded_refs(self, opportunity_id: int) -> Tuple[Set[str], Set[str], Set[str]]:
         """(judged for this opportunity, active approvals, suppressed emails).
@@ -1206,10 +1215,14 @@ class OpportunityService:
         # 2) candidate discovery (0-credit search), with the org-id fallback on no USABLE candidate
         try:
             usable, dropped, stats = self._search_candidates(opp, emp, titles, judged | approved_refs)
-            candidates = self._rank(usable, titles)
-            for cand in candidates:
+            candidates = self._rank(usable, titles, emp)
+            for position, cand in enumerate(candidates):
                 cand["persona"] = contact_persona(str(cand.get("title") or ""), opp["function_key"])
                 cand["person_key"] = cand["_ref"]
+                cand["_rank_position"] = position
+                cand["_org_evidence"] = organization_evidence(
+                    cand, employer_domains={emp["domain"]} if emp.get("domain") else set(),
+                    employer_name=str(emp.get("canonical_name") or ""))
         except ProviderWait as w:
             return QualifyOutcome(opportunity_id, "wait", w.reason, details={"until": w.until.isoformat()})
         except ProviderRetry as r:
@@ -1342,7 +1355,14 @@ class OpportunityService:
                 self._record_attempt(opportunity_id, ref, "gate", "fail", "person_already_approved_elsewhere", epoch=epoch, person_id=person_id)
                 continue
             self._record_attempt(opportunity_id, ref, "gate", "pass", "approved", epoch=epoch, person_id=person_id,
-                                 details={"persona": cand.get("persona", ""), "rule_version": RULE_VERSION})
+                                 details={"persona": cand.get("persona", ""),
+                                          # Phase 4: WHY this candidate was believed to be at this
+                                          # employer, saved so a ranking decision can be read back
+                                          # from the artefact rather than re-derived from a search
+                                          # response nobody keeps.
+                                          "organization_evidence": cand.get("_org_evidence", ""),
+                                          "rank": cand.get("_rank_position", -1),
+                                          "rule_version": RULE_VERSION})
             approval_ids.append(approval_id)
             approved_person_ids.append(person_id)
             state.add(ref, cand.get("persona", ""))
@@ -1414,7 +1434,16 @@ class OpportunityService:
             if ref in approved_refs or str(row.get("email") or "").lower() in suppressed:
                 continue
             pending.append({"person_key": ref, "persona": contact_persona(str(row.get("title") or ""), function_key),
+                            "title": row.get("title") or "", "_ref": ref,
+                            "organization_domain": row.get("email_domain") or "",
                             "_row": row, "_reuse_ref": ref})
+        # Phase 4: the free reuse path ordered by ``email_verified_at DESC`` --
+        # "most recently verified" -- while the paid search path ordered by
+        # buyer-title preference. Two paths, two ideas of "the best contact".
+        # They now share the ONE order, so which person this opportunity ends up
+        # with does not depend on which path found them.
+        pending = rank_candidates(pending, buyer_titles=titles, employer_domains=set(employer_domains),
+                                  employer_name=str(emp.get("canonical_name") or ""))
         while pending:
             picked = select_next_contact(candidates=pending, existing_person_keys=state.existing_person_keys,
                                          existing_personas=state.existing_personas)

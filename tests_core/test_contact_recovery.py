@@ -37,12 +37,12 @@ def test_recoverable_search_closure_is_reopened_without_incrementing_evidence_ep
 def test_wrong_company_then_no_email_then_unverified_then_the_valid_one_is_approved(conn, clock, function_key):
     domain, org = "acme.com", "Acme"
     buyer = BUYER_TITLE_BY_FUNCTION[function_key]
-    wrong = make_person(id="p-wrong", first="W", last="Rong", title=buyer, org_name="Other Corp", org_domain="othercorp.com",
+    wrong = make_person(id="p-1-wrong", first="W", last="Rong", title=buyer, org_name="Other Corp", org_domain="othercorp.com",
                         email="w@othercorp.com", email_status="verified")
-    noemail = make_person(id="p-noemail", first="N", last="Oemail", title=buyer, org_name=org, org_domain=domain, email=None, email_status=None)
-    unverified = make_person(id="p-unv", first="U", last="Nverified", title=buyer, org_name=org, org_domain=domain,
+    noemail = make_person(id="p-2-noemail", first="N", last="Oemail", title=buyer, org_name=org, org_domain=domain, email=None, email_status=None)
+    unverified = make_person(id="p-3-unv", first="U", last="Nverified", title=buyer, org_name=org, org_domain=domain,
                              email=f"u.nverified@{domain}", email_status="extrapolated")
-    good = good_buyer(domain, org, function_key, id="p-good")
+    good = good_buyer(domain, org, function_key, id="p-4-good")
     pid, eid, oid = seed_opportunity(conn, clock, function_key=function_key, domain=domain, org_name=org)
     assert oid is not None, f"seed produced no opportunity for {function_key}"
     fake = apollo_for(domain, org, function_key=function_key, people=[wrong, noemail, unverified, good])
@@ -53,11 +53,11 @@ def test_wrong_company_then_no_email_then_unverified_then_the_valid_one_is_appro
     attempts = {(a["candidate_ref"], a["attempt_kind"]): (a["outcome"], a["reason"]) for a in
                 sqlall(conn, "SELECT candidate_ref, attempt_kind, outcome, reason FROM candidate_attempts WHERE opportunity_id = %s", (oid,))}
     # wrong company never costs a paid match: rejected before enrichment
-    assert attempts[("pid:p-wrong", "gate")][0] == "skipped_pre_enrichment"
-    assert ("pid:p-wrong", "match") not in attempts
-    assert attempts[("pid:p-noemail", "gate")] == ("fail", "email:none_returned")
-    assert attempts[("pid:p-unv", "gate")] == ("fail", "email:not_verified:extrapolated")
-    assert attempts[("pid:p-good", "gate")] == ("pass", "approved")
+    assert attempts[("pid:p-1-wrong", "gate")][0] == "skipped_pre_enrichment"
+    assert ("pid:p-1-wrong", "match") not in attempts
+    assert attempts[("pid:p-2-noemail", "gate")] == ("fail", "email:none_returned")
+    assert attempts[("pid:p-3-unv", "gate")] == ("fail", "email:not_verified:extrapolated")
+    assert attempts[("pid:p-4-good", "gate")] == ("pass", "approved")
     # exactly three paid matches (noemail, unverified, good) -- reported as requests, not "credits"
     assert sql1(conn, "SELECT count(*) FROM request_attempts WHERE provider = 'apollo' AND operation = 'person_match'") == 3
     assert fake.served_paid == 3  # 3 matches; Fantastic facts made the org enrich unnecessary; the search is not paid
@@ -65,16 +65,16 @@ def test_wrong_company_then_no_email_then_unverified_then_the_valid_one_is_appro
 
 def test_generic_mailbox_and_wrong_domain_are_rejected_and_the_next_candidate_wins(conn, clock):
     domain, org = "acme.com", "Acme"
-    generic = good_buyer(domain, org, id="p-generic", email=f"info@{domain}")
-    wrong_dom = good_buyer(domain, org, id="p-wrongdom", email="jane@gmail.com")
-    good = good_buyer(domain, org, id="p-good")
+    generic = good_buyer(domain, org, id="p-1-generic", email=f"info@{domain}")
+    wrong_dom = good_buyer(domain, org, id="p-2-wrongdom", email="jane@gmail.com")
+    good = good_buyer(domain, org, id="p-4-good")
     pid, eid, oid = seed_opportunity(conn, clock)
     fake = apollo_for(domain, org, people=[generic, wrong_dom, good])
     out = opportunity_service(conn, fake, clock).process(oid)
     assert out.outcome == "approved"
     reasons = {a["candidate_ref"]: a["reason"] for a in sqlall(conn, "SELECT candidate_ref, reason FROM candidate_attempts WHERE attempt_kind = 'gate'")}
-    assert reasons["pid:p-generic"] == "email:generic_mailbox"
-    assert reasons["pid:p-wrongdom"] == "email:domain_not_employer"
+    assert reasons["pid:p-1-generic"] == "email:generic_mailbox"
+    assert reasons["pid:p-2-wrongdom"] == "email:domain_not_employer"
     assert sql1(conn, "SELECT lead_json->>'email' FROM approvals") == f"good.buyer@{domain}"
 
 

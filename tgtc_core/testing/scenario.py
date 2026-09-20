@@ -88,14 +88,14 @@ def build_nine_route_scenario(now: datetime | None = None) -> Scenario:
         good_email = f"buyer.{fn}@{domain}"
         expected[fn] = good_email
         # Candidate 1: right title, wrong company (Apollo returns them under our domain search but org differs)
-        wrong = make_person(id=f"p-{fn}-wrong", first="Wrong", last="Company", title=buyer, org_name="Other Corp",
+        wrong = make_person(id=f"p-{fn}-1-wrong", first="Wrong", last="Company", title=buyer, org_name="Other Corp",
                             org_domain="othercorp.com", email=f"wrong@othercorp.com", email_status="verified")
         wrong["organization"] = {"id": "org-other", "name": "Other Corp", "primary_domain": domain}  # slips past the domain guard
         # Candidate 2: right company, Apollo will not verify the email
-        unverified = make_person(id=f"p-{fn}-unv", first="Un", last="Verified", title=buyer, org_name=org_name,
+        unverified = make_person(id=f"p-{fn}-2-unv", first="Un", last="Verified", title=buyer, org_name=org_name,
                                  org_domain=domain, email=f"un.verified@{domain}", email_status="extrapolated")
         # Candidate 3: the good one
-        good = make_person(id=f"p-{fn}-good", first="Good", last=fn.replace("_", "").title(), title=buyer, org_name=org_name,
+        good = make_person(id=f"p-{fn}-3-good", first="Good", last=fn.replace("_", "").title(), title=buyer, org_name=org_name,
                            org_domain=domain, email=good_email, email_status="verified")
         apollo.people_by_domain[domain] = [wrong, unverified, good]
     return Scenario(fantastic=fantastic, apollo=apollo, airtable=FakeAirtable(),

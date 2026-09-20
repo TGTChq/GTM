@@ -42,14 +42,14 @@ def test_sparse_search_result_is_enriched_and_then_fully_gated(conn, clock, func
 def test_enrichment_still_rejects_a_candidate_without_linkedin(conn, clock):
     """The LinkedIn requirement is enforced AFTER enrichment, not dropped."""
     pid, eid, oid = seed_opportunity(conn, clock)
-    nolinkedin = good_buyer("acme.com", "Acme", id="p-nolinkedin", email="nolink@acme.com")
+    nolinkedin = good_buyer("acme.com", "Acme", id="p-1-nolinkedin", email="nolink@acme.com")
     nolinkedin["linkedin_url"] = ""
-    good = good_buyer("acme.com", "Acme", id="p-good")
+    good = good_buyer("acme.com", "Acme", id="p-2-good")
     fake = apollo_for("acme.com", "Acme", people=[nolinkedin, good])
     out = opportunity_service(conn, fake, clock).process(oid)
     assert out.outcome == "approved"
     assert sql1(conn, "SELECT lead_json->>'email' FROM approvals") == "good.buyer@acme.com"
-    assert sql1(conn, "SELECT reason FROM candidate_attempts WHERE candidate_ref = 'pid:p-nolinkedin' AND attempt_kind = 'gate'") == "contact:no_linkedin_identity_anchor"
+    assert sql1(conn, "SELECT reason FROM candidate_attempts WHERE candidate_ref = 'pid:p-1-nolinkedin' AND attempt_kind = 'gate'") == "contact:no_linkedin_identity_anchor"
     assert sql1(conn, "SELECT count(*) FROM request_attempts WHERE operation = 'person_match'") == 2   # both were enriched
 
 

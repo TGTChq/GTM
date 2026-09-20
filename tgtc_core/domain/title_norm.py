@@ -58,7 +58,7 @@ questions, one shared base, no duplicated regex.
 from __future__ import annotations
 
 import re
-from typing import Dict, Iterable, List, Sequence, Set, Tuple
+from typing import Iterable, List, Sequence, Set, Tuple
 
 from ..policy.campaigns import split_title_separators
 
@@ -283,26 +283,14 @@ def title_matches(title: str, targets: Iterable[str]) -> bool:
     return False
 
 
-def department_tokens(person: Dict[str, object]) -> Tuple[str, ...]:
-    """Apollo's own ``departments``/``subdepartments`` for a person.
-
-    Corroboration only. It is NEVER read as a title: Apollo puts a department
-    name in the title field often enough that ``is_department_label`` exists,
-    and mixing the two directions is how a department label becomes a fake job
-    title. Used by candidate ranking to break ties, never by a gate.
-    """
-    out: List[str] = []
-    for key in ("departments", "subdepartments"):
-        value = person.get(key)
-        if isinstance(value, str):
-            value = [value]
-        if not isinstance(value, (list, tuple)):
-            continue
-        for item in value:
-            token = " ".join(canonical_title(item).split())
-            if token and token not in out:
-                out.append(token)
-    return tuple(out)
+#: Phase 4, measured and reported rather than coded around: Apollo's free
+#: people-search returns NEITHER ``departments`` NOR ``seniority``. Both are
+#: empty on all 512 candidates Stage 2a saved
+#: (`phase5_apollo_2a/state/search.jsonl`, 0 credits). So the "department versus
+#: job title" question has exactly one reachable half before a paid call --
+#: ``is_department_label`` above, on the title Apollo does return -- and a
+#: helper that read ``person["departments"]`` would be dead code dressed as a
+#: signal. It is deliberately absent.
 
 
 def matched_target_index(title: str, targets: Sequence[str]) -> int:

@@ -43,8 +43,16 @@ def test_every_route_produces_one_approved_lead_delivered_to_its_own_campaign(co
     assert sql1(conn, "SELECT count(*) FROM delivery_receipts WHERE receipt_kind = 'created'") == 20
     # spend is reported as requests + estimates, never as one-call-one-credit facts
     L = report.ledger
-    assert L["apollo_requests_by_operation_status"]["person_match:served"] == 30
-    assert L["apollo_confirmed_credits"] is None and float(L["apollo_estimated_credits"]) == 30.0
+    # Phase 4 (2026-09-20): 20, not 30. Each route offers three people with the
+    # SAME buyer title; the wrong-company one is distinguishable only by its
+    # organization NAME, and deterministic ranking (domain/contact_ranking.py)
+    # now sorts weaker employer evidence last instead of leaving the order to
+    # however Apollo returned them. The good candidate is reached second, the
+    # wrong-company one is never paid for, and the route still delivers exactly
+    # the same lead -- one credit per route saved, which is the point of
+    # ranking before enrichment.
+    assert L["apollo_requests_by_operation_status"]["person_match:served"] == 20
+    assert L["apollo_confirmed_credits"] is None and float(L["apollo_estimated_credits"]) == 20.0
     assert "organization_enrich:served" not in L["apollo_requests_by_operation_status"]   # Fantastic facts sufficed
     assert L["fantastic_rows_confirmed_by_header"] == 10
 
@@ -88,23 +96,26 @@ def test_restart_mid_cycle_resumes_without_duplicates(conn, clock):
 # per-campaign ROUTING, which needs a terminal approved state.
 # ---------------------------------------------------------------------------
 
-def test_at_the_production_contact_quota_every_route_approves_and_waits_for_more(conn, clock):
+def test_at_the_production_contact_quota_every_route_finalizes_when_diversity_runs_out(conn, clock):
     sc = build_nine_route_scenario(clock())
     r = runner(conn, sc, clock)   # no max_contacts override: config.py's shipped default of 3
     assert r.s.max_contacts_per_opportunity == 3
     report = r.cycle()
     assert report.stages["resolve_identity"] == {"resolved": 10}
     assert report.stages["classify"] == {"classified": 10}
-    # One qualifying buyer per employer in this scenario, so each opportunity
-    # approves that contact and stays OPEN waiting for a role-diverse second --
-    # never the terminal 'approved' state, and never a technical failure.
-    assert report.stages["qualify_opportunity"] == {"wait": 10, "deferred_search": 10}
+    # Phase 4 (2026-09-20): every route finalizes at 'approved' with ONE
+    # contact instead of waiting for a second. All three people per route hold
+    # the same buyer title, so once the functional owner is approved there is
+    # no role-diverse candidate left to select -- the documented
+    # `approved_no_further_role_diverse_candidates` rule. It used to reach
+    # `wait` here only because the good candidate happened to be LAST in
+    # Apollo's response, so the list emptied by consumption before persona
+    # exhaustion could be detected. Deterministic ranking removed that
+    # accident; see the report's finding on the consumption path, which still
+    # reaches `wait` for a set the persona rule can never advance.
+    assert report.stages["qualify_opportunity"] == {"approved": 10}
     assert sql1(conn, "SELECT count(*) FROM approvals") == 10
-    assert sql1(conn, "SELECT count(*) FROM opportunities WHERE state = 'open'") == 10
-    waiting = sqlall(conn, "SELECT state, waiting_on FROM work_items WHERE kind = 'qualify_opportunity'")
-    assert len(waiting) == 10
-    assert {w["state"] for w in waiting} == {"waiting"}
-    assert all(str(w["waiting_on"] or "").startswith("buyer_search_pending:") for w in waiting), waiting
+    assert sql1(conn, "SELECT count(*) FROM opportunities WHERE state = 'approved'") == 10
     # The approved leads are still delivered: depth does not hold delivery back.
     assert report.delivery == {"airtable": {"delivered": 10}, "instantly": {"delivered": 10}}
     assert len(sc.instantly.leads) == 10 and len(sc.airtable.records) == 10
