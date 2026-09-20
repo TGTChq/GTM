@@ -29,6 +29,7 @@ from tgtc_core.domain.facts import (
 from tgtc_core.domain import approval as ap
 from tgtc_core.services.opportunity import OpportunityService
 from tests_core.helpers import opportunity_service, sql1, sqlall
+from tgtc_core.testing.fakes import make_person
 from tests_core.seed import apollo_for, seed_opportunity
 from tests_core.test_approval_gate import _inputs
 
@@ -514,3 +515,90 @@ def test_airtable_marks_an_unconfirmed_size_for_review_and_names_the_state(emplo
     assert bundle["company_size_state"] == expected_state
     assert bundle["company_size_sources"] == lead["company_size_sources"]
     assert f"company_size_state={expected_state}" in fields["Job Signal Notes"]
+
+
+# ---------------------------------------------------------------------------
+# Final whole-branch review, I2 (IMPORTANT): the DISPUTED headcount still drove
+# two live decisions after the conflict had been acknowledged --
+# ``founder_allowed = count <= rule("founder_fallback_max_employees")`` and
+# ``resolve_campaign_id(function_key, count, env)``, which uses
+# ``campaigns.size_band(count)`` for the _SMALL/_MID/_LARGE overrides. The
+# dominant conflict direction is headcount-LOW / band-HIGH, so conflicted
+# employers got founder-tier buyer titles and small-company routing on a number
+# just declared unconfirmed -- and the 8 rows this branch moves from
+# employer_too_small to conflict reach that code only because of this branch.
+# ---------------------------------------------------------------------------
+
+_FOUNDER_DESCRIPTION = (
+    "You will own customer onboarding for new accounts and drive product adoption across "
+    "your book of business. Run quarterly business reviews, track health scores and lead "
+    "renewals and expansion for our customers. Full-time, remote within the US."
+)
+
+
+def _founder_scenario(conn, clock, *, headcount, size_band_text, campaigns=None):
+    domain, org = "founderco.example", "Founder Co"
+    _pid, eid, oid = seed_opportunity(
+        conn, clock, function_key="customer_success", domain=domain, org_name=org,
+        description=_FOUNDER_DESCRIPTION, headcount=headcount, size_band=size_band_text,
+    )
+    assert eid is not None and oid is not None
+    founder = make_person(id="p-founder", first="Fay", last="Founder", title="Founder", org_name=org,
+                          org_domain=domain, email="fay@founderco.example", email_status="verified")
+    fake = apollo_for(domain, org, function_key="customer_success", headcount=headcount, people=[founder])
+    over = {"campaign_env": campaigns} if campaigns else {}
+    return oid, opportunity_service(conn, fake, clock, **over).process(oid)
+
+
+def test_a_corroborated_small_employer_still_gets_the_founder_fallback(conn, clock):
+    """The fallback itself is untouched: both sources agree the employer is
+    small and in range, so a Founder is still a legitimate buyer."""
+    _oid, out = _founder_scenario(conn, clock, headcount=60, size_band_text="51-200 employees")
+    assert out.outcome == "approved", out
+    assert sql1(conn, "SELECT p.title FROM approvals a JOIN people p ON p.id = a.person_id") == "Founder"
+
+
+def test_a_conflicted_employer_does_not_get_founder_tier_buyer_titles(conn, clock):
+    """headcount 40 (in range, small) against a declared band of 1,001-5,000:
+    the size is in dispute, so founder-tier privileges may not be granted on
+    that number. The founder is not searched for and no lead is approved."""
+    _oid, out = _founder_scenario(conn, clock, headcount=40, size_band_text="1,001-5,000 employees")
+    assert out.outcome != "approved", out
+    assert sql1(conn, "SELECT count(*) FROM approvals") == 0
+
+
+def test_campaign_routing_falls_back_to_the_unbanded_route_when_size_is_unconfirmed(conn, clock):
+    """A _SMALL override must not be selected on a headcount just declared
+    unconfirmed: the unbanded route is asserted instead of a band."""
+    from tgtc_core.testing.scenario import campaign_env
+
+    env = dict(campaign_env())
+    unbanded = env["INSTANTLY_CAMPAIGN_CUSTOMER_SUCCESS"]
+    env["INSTANTLY_CAMPAIGN_CUSTOMER_SUCCESS_SMALL"] = "cid-small-override"
+    domain, org = "routeco.example", "Route Co"
+    _pid, eid, oid = seed_opportunity(
+        conn, clock, function_key="customer_success", domain=domain, org_name=org,
+        headcount=40, size_band="1,001-5,000 employees",
+    )
+    assert eid is not None and oid is not None
+    fake = apollo_for(domain, org, function_key="customer_success", headcount=40)
+    out = opportunity_service(conn, fake, clock, campaign_env=env).process(oid)
+    assert out.outcome == "approved", out
+    assert sql1(conn, "SELECT campaign_id FROM approvals WHERE opportunity_id = %s", (oid,)) == unbanded
+
+
+def test_campaign_routing_still_uses_the_band_override_when_the_size_is_confirmed(conn, clock):
+    from tgtc_core.testing.scenario import campaign_env
+
+    env = dict(campaign_env())
+    env["INSTANTLY_CAMPAIGN_CUSTOMER_SUCCESS_SMALL"] = "cid-small-override"
+    domain, org = "smallco.example", "Small Co"
+    _pid, eid, oid = seed_opportunity(
+        conn, clock, function_key="customer_success", domain=domain, org_name=org,
+        headcount=60, size_band="51-200 employees",
+    )
+    assert eid is not None and oid is not None
+    fake = apollo_for(domain, org, function_key="customer_success", headcount=60)
+    out = opportunity_service(conn, fake, clock, campaign_env=env).process(oid)
+    assert out.outcome == "approved", out
+    assert sql1(conn, "SELECT campaign_id FROM approvals WHERE opportunity_id = %s", (oid,)) == "cid-small-override"

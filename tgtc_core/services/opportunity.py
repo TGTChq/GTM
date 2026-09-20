@@ -35,7 +35,7 @@ import psycopg
 from ..db.connection import jsonb, transaction
 from ..db import work_queue
 from ..domain.approval import ApprovalRefusal, ApprovedLead, airtable_fields, build_approved_lead, instantly_payload
-from ..domain.facts import RULE_VERSION, resolve_company_size, size_reject_reason
+from ..domain.facts import RULE_VERSION, resolve_company_size, size_corroborated, size_reject_reason
 from ..domain.gates import (
     corroborated_alternate_domains, evaluate_contact, evaluate_email, person_organization, pre_enrichment_check,
     title_matches,
@@ -401,12 +401,8 @@ class OpportunityService:
         ``_record_attempt`` calls already set, embedding it in the jsonb payload
         rather than a dedicated column).
         """
-        min_employees, max_employees = int(rule("min_employees")), int(rule("max_employees"))
-        state, excerpt, effective = resolve_company_size(
-            emp.get("employee_count"), emp.get("size_band"),
-            description=str(posting.get("description_text") or ""),
-            min_employees=min_employees, max_employees=max_employees,
-        )
+        min_employees = int(rule("min_employees"))
+        state, excerpt, effective, _corroborated = self._resolve_size(emp, posting)
         if state == "out_of_range":
             return self._close(opportunity_id, size_reject_reason(effective, min_employees=min_employees))
         if state in ("firmographic_conflict", "unknown_firmographics") and emp.get("id") is not None:
@@ -426,6 +422,45 @@ class OpportunityService:
                 )
             self.conn.commit()
         return None
+
+    def _resolve_size(self, emp: Dict[str, Any], posting: Dict[str, Any]) -> Tuple[str, str, Optional[int], bool]:
+        """``(state, excerpt, effective_headcount, corroborated)`` for this employer.
+
+        The ONE place this service resolves a company size, so ``_size_gate``
+        (does it reject?) and ``_confirmed_size_count`` (may this number drive
+        a decision?) can never disagree about the same employer, and both stay
+        governed by the SAME ``rule()`` bounds ``describe()`` reports.
+        """
+        min_employees, max_employees = int(rule("min_employees")), int(rule("max_employees"))
+        state, excerpt, effective = resolve_company_size(
+            emp.get("employee_count"), emp.get("size_band"),
+            description=str(posting.get("description_text") or ""),
+            min_employees=min_employees, max_employees=max_employees,
+        )
+        corroborated = size_corroborated(emp.get("employee_count"), emp.get("size_band"),
+                                         min_employees=min_employees, max_employees=max_employees)
+        return state, excerpt, effective, corroborated
+
+    def _confirmed_size_count(self, emp: Dict[str, Any], posting: Dict[str, Any]) -> Optional[int]:
+        """The employee count ONLY when the size is a CORROBORATED in_range;
+        otherwise ``None``.
+
+        Final whole-branch review, I2 (IMPORTANT, 2026-09-20): a disputed
+        headcount still drove two live decisions after the conflict had been
+        acknowledged -- founder-tier buyer titles
+        (``founder_fallback_max_employees``) and the _SMALL/_MID/_LARGE campaign
+        override (``resolve_campaign_id`` -> ``campaigns.size_band``). The
+        dominant conflict direction is headcount-LOW / band-HIGH, so conflicted
+        employers were handed founder-tier contacts and small-company routing on
+        a number the pipeline had just declared unconfirmed. ``None`` is not a
+        reject: it means "do not grant a size-based privilege on this number" --
+        ``resolve_campaign_id`` falls back to the unbanded route (``size_band(None)``
+        is "unknown", which matches no override) and ``buyer_titles`` simply omits
+        the founder tier. Both callers ask THIS function, never their own
+        comparison against ``employee_count``.
+        """
+        state, _excerpt, effective, corroborated = self._resolve_size(emp, posting)
+        return effective if (state == "in_range" and corroborated) else None
 
     def _wait_for_dependency(self, opportunity_id: int, reason: str, *, hours: Optional[float] = None,
                              details: Optional[Dict[str, Any]] = None) -> QualifyOutcome:
@@ -735,7 +770,10 @@ class OpportunityService:
     # --- approval ----------------------------------------------------------------
     def _approve(self, opp: Dict[str, Any], emp: Dict[str, Any], posting: Dict[str, Any], classification: Dict[str, Any],
                  person_row: Dict[str, Any]) -> ApprovedLead | ApprovalRefusal:
-        campaign_id = resolve_campaign_id(opp["function_key"], emp.get("employee_count"), self.campaign_env)
+        # I2: the campaign this lead is actually delivered into is resolved HERE,
+        # so it reads the same confirmed count process() gated on -- an
+        # unconfirmed size routes to the unbanded campaign, never a size band.
+        campaign_id = resolve_campaign_id(opp["function_key"], self._confirmed_size_count(emp, posting), self.campaign_env)
         hits = suppression_check(
             self.conn, email=str(person_row.get("email") or ""),
             company_function=company_function_keys(domain=emp.get("domain") or "", name=emp["canonical_name"],
@@ -949,13 +987,16 @@ class OpportunityService:
         size_outcome = self._size_gate(opportunity_id, emp, posting)
         if size_outcome is not None:
             return size_outcome
-        count = emp.get("employee_count")
-        if not resolve_campaign_id(opp["function_key"], count, self.campaign_env):
+        # I2 (final whole-branch review): both size-derived privileges below read
+        # the CONFIRMED count -- None when the size is not a corroborated
+        # in_range -- never emp["employee_count"] directly.
+        confirmed_count = self._confirmed_size_count(emp, posting)
+        if not resolve_campaign_id(opp["function_key"], confirmed_count, self.campaign_env):
             return self._wait_for_dependency(
                 opportunity_id, f"configuration_pending:no_campaign_for_size:{opp['function_key']}"
             )
 
-        founder_allowed = count is not None and count <= int(rule("founder_fallback_max_employees"))
+        founder_allowed = confirmed_count is not None and confirmed_count <= int(rule("founder_fallback_max_employees"))
         titles = buyer_titles(opp["function_key"], founder_allowed=founder_allowed)
         employer_domains = {emp["domain"]} | self._alias_domains(emp["id"])
         # The operational attempt allowance scales with the contact quota; the
