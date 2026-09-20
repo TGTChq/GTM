@@ -320,6 +320,22 @@ def cmd_demo(args) -> int:
     return 0
 
 
+def cmd_canary_24h(args) -> int:
+    """Daily 24h acquisition canary. Off unless FANTASTIC_DAILY_24H_CANARY=1. No database,
+    no enrichment, no delivery: Fantastic pages in, a new evidence directory out."""
+    from .services.daily_24h_canary import cli
+
+    return cli(args, os.environ)
+
+
+def cmd_canary_24h_strategy(args) -> int:
+    """Provider-confirmed 24h strategy canary: zero-credit count matrix first, then bounded records.
+    Off unless FANTASTIC_DAILY_24H_CANARY=1. No database, no enrichment, no delivery."""
+    from .services.daily_24h_canary import strategy_cli
+
+    return strategy_cli(args, os.environ)
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(prog="tgtc_core", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -349,6 +365,34 @@ def main(argv=None) -> int:
             p.add_argument("--anthropic-input-tokens", type=int, required=True)
             p.add_argument("--anthropic-output-tokens", type=int, required=True)
         p.set_defaults(fn=fn)
+    p = sub.add_parser("canary-24h", help="daily 24h acquisition canary; needs FANTASTIC_DAILY_24H_CANARY=1")
+    p.add_argument("--state-dir", required=True, help="NEW evidence directory; never a production path")
+    p.add_argument("--registry", default="", help="read-only JSON export of already-acquired postings")
+    p.add_argument("--size-exclusion-employers", default="", help="read-only JSON employers for exclude_organization_slug")
+    p.add_argument("--limit", type=int, default=100)
+    p.add_argument("--max-records", type=int, default=5000)
+    p.add_argument("--max-requests", type=int, default=25)
+    p.add_argument("--preflight-counts", action="store_true", help="one zero-job-credit count per partition first")
+    p.add_argument("--dry-run", action="store_true", help="render payloads and the offset sequence; no request")
+    p.add_argument("--i-understand-spend", action="store_true")
+    p.set_defaults(fn=cmd_canary_24h)
+    p = sub.add_parser("canary-24h-strategy",
+                       help="provider-confirmed 24h strategy canary; needs FANTASTIC_DAILY_24H_CANARY=1")
+    p.add_argument("--state-dir", required=True, help="NEW evidence directory; never a production path")
+    p.add_argument("--phase", choices=("counts", "records"), default="counts",
+                   help="counts: zero-job-credit count matrix only; records: bounded billed pages per arm")
+    p.add_argument("--registry", default="", help="read-only JSON export of already-acquired postings")
+    p.add_argument("--size-exclusion-employers", default="", help="read-only JSON employers for exclude_organization_slug")
+    p.add_argument("--arms", default="", help="comma list of arm keys (default: all five)")
+    p.add_argument("--max-records", type=int, default=5000)
+    p.add_argument("--max-requests", type=int, default=25)
+    p.add_argument("--max-records-per-arm", type=int, default=1000)
+    for flag in ("--wf-yc-industry", "--wf-yc-agency", "--ats-missing-industry", "--ats-missing-agency"):
+        p.add_argument(flag, choices=("on", "off"), default="on")
+    p.add_argument("--ats-missing-full-time", choices=("on", "off"), default="off")
+    p.add_argument("--dry-run", action="store_true", help="render every arm's payload; no request")
+    p.add_argument("--i-understand-spend", action="store_true")
+    p.set_defaults(fn=cmd_canary_24h_strategy)
     args = parser.parse_args(argv)
     _require_acceptance_command(args)
     return int(args.fn(args))

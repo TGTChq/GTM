@@ -1,0 +1,680 @@
+{
+  "_bundle": "fantastic_support_bundle_20260918",
+  "_redaction": "No descriptions, recruiter/hiring-manager fields, contact names, emails or phone numbers. URLs have query strings removed.",
+  "_provenance": {
+    "cohort": "Read-only export GTM_COHORT_AUDIT_V1 taken 2026-09-16T08:37:35Z: the first 50 postings the current path acquired (one /v1/active-jb page, 2026-09-16 03:00-04:00Z date_created window, limit 50, no industry/agency/employment filters).",
+    "despite_filter_rows": "Read-only SELECT on the production database at 2026-09-18 ~19:51Z; provider_job_id and url were not part of that export."
+  },
+  "passed_or_partially_passed": [
+    {
+      "sample_category": "passed_job_qualification",
+      "provider_job_id": "2365520964",
+      "endpoint_source": "fantastic:active-jb",
+      "url": "https://www.linkedin.com/jobs/view/marketing-analyst-at-courtship-4465921890",
+      "title": "Marketing Analyst",
+      "organization": "Courtship",
+      "organization_linkedin_url": "https://www.linkedin.com/company/courtshiphq",
+      "org_linkedin_slug": "courtshiphq",
+      "org_linkedin_website": "https://courtship.so",
+      "org_linkedin_size": "2-10 employees",
+      "org_linkedin_headcount": null,
+      "org_linkedin_industry": "Technology, Information and Internet",
+      "org_linkedin_recruitment_agency_derived": false,
+      "location_text": "New York, New York, United States",
+      "countries": [
+        "United States"
+      ],
+      "cities_derived": [
+        "New York"
+      ],
+      "regions_derived": [
+        "New York"
+      ],
+      "location_type": "TELECOMMUTE",
+      "date_posted": "2026-09-16T03:45:59+00:00",
+      "date_created (as stored, provider_date_created)": "2026-09-16T03:58:14.208978+00:00",
+      "date_valid_through": "2027-03-15T03:45:59+00:00",
+      "employment_type (raw)": "{FULL_TIME}",
+      "ai_employment_type": [
+        "FULL_TIME"
+      ],
+      "ai_taxonomies_a": [
+        "Marketing",
+        "Data & Analytics",
+        "Technology",
+        "Software",
+        "Consulting"
+      ],
+      "source (provider field)": "linkedin",
+      "source_type": "jobboard",
+      "ats_duplicate": null,
+      "tgtc_outcome_at_export": {
+        "state": "classified",
+        "close_reason": null,
+        "policy": "tgtc-core/1 (2026-09-16T08:37Z)"
+      },
+      "tgtc_note": "Classified as marketing work; the opportunity later closed because no verified buyer contact was found (contact stage, not provider data). Note: org_linkedin_headcount is null while org_linkedin_size says 2-10 employees, so the numeric size check (25-1,000) never applied. location_type=TELECOMMUTE."
+    },
+    {
+      "sample_category": "passed_job_qualification_but_company_excluded",
+      "provider_job_id": "2365515453",
+      "endpoint_source": "fantastic:active-jb",
+      "url": "https://www.linkedin.com/jobs/view/senior-ux-designer-at-hca-healthcare-4467942495",
+      "title": "Senior UX Designer",
+      "organization": "HCA Healthcare",
+      "organization_linkedin_url": "https://www.linkedin.com/company/hca",
+      "org_linkedin_slug": "hca",
+      "org_linkedin_website": "http://www.hcahealthcare.com",
+      "org_linkedin_size": "10,001+ employees",
+      "org_linkedin_headcount": 154889,
+      "org_linkedin_industry": "Hospitals and Health Care",
+      "org_linkedin_recruitment_agency_derived": false,
+      "location_text": "Nashville, Tennessee, United States",
+      "countries": [
+        "United States"
+      ],
+      "cities_derived": [
+        "Nashville"
+      ],
+      "regions_derived": [
+        "Tennessee"
+      ],
+      "location_type": null,
+      "date_posted": "2026-09-16T03:34:07+00:00",
+      "date_created (as stored, provider_date_created)": "2026-09-16T03:55:57.056234+00:00",
+      "date_valid_through": "2026-10-16T03:32:49+00:00",
+      "employment_type (raw)": "{FULL_TIME}",
+      "ai_employment_type": [
+        "FULL_TIME"
+      ],
+      "ai_taxonomies_a": [
+        "Art & Design",
+        "Technology",
+        "Healthcare",
+        "Software",
+        "Engineering"
+      ],
+      "source (provider field)": "linkedin",
+      "source_type": "jobboard",
+      "ats_duplicate": false,
+      "tgtc_outcome_at_export": {
+        "state": "classified",
+        "close_reason": null,
+        "policy": "tgtc-core/1 (2026-09-16T08:37Z)"
+      },
+      "tgtc_note": "Job fits (UX/product design) but the employer's industry (Hospitals and Health Care) is excluded by TGTC policy. This page was requested WITHOUT exclude_organization_industry."
+    },
+    {
+      "sample_category": "provider_organization_field_issue",
+      "provider_job_id": "2365512112",
+      "endpoint_source": "fantastic:active-jb",
+      "url": "https://www.linkedin.com/jobs/view/junior-accountant-accounts-payable-specialist-at-tennessee-valley-public-power-association-inc-4465957151",
+      "title": "Junior Accountant- Accounts Payable Specialist",
+      "organization": "Tennessee Valley Public Power Association, Inc.",
+      "organization_linkedin_url": "https://www.linkedin.com/company/tennessee-valley-public-power-association",
+      "org_linkedin_slug": "tennessee-valley-public-power-association",
+      "org_linkedin_website": "http://tvppa.com",
+      "org_linkedin_size": "11-50 employees",
+      "org_linkedin_headcount": 33,
+      "org_linkedin_industry": "Utilities",
+      "org_linkedin_recruitment_agency_derived": false,
+      "location_text": "Decatur, Tennessee, United States",
+      "countries": [
+        "United States"
+      ],
+      "cities_derived": [
+        "Decatur"
+      ],
+      "regions_derived": [
+        "Tennessee"
+      ],
+      "location_type": null,
+      "date_posted": "2026-09-16T03:37:42+00:00",
+      "date_created (as stored, provider_date_created)": "2026-09-16T03:54:01.028255+00:00",
+      "date_valid_through": "2026-10-15T03:37:35+00:00",
+      "employment_type (raw)": "{FULL_TIME}",
+      "ai_employment_type": [
+        "FULL_TIME"
+      ],
+      "ai_taxonomies_a": [
+        "Finance & Accounting",
+        "Energy",
+        "Administrative"
+      ],
+      "source (provider field)": "linkedin",
+      "source_type": "jobboard",
+      "ats_duplicate": false,
+      "tgtc_outcome_at_export": {
+        "state": "classified",
+        "close_reason": null,
+        "policy": "tgtc-core/1 (2026-09-16T08:37Z)"
+      },
+      "tgtc_note": "Approved by an older TGTC build, later found wrong: the provider organization is the publisher's job board; the description names a different employer (Volunteer Energy Cooperative)."
+    }
+  ],
+  "returned_by_provider_then_rejected_downstream": [
+    {
+      "sample_category": "returned_then_rejected",
+      "provider_job_id": "2365523631",
+      "endpoint_source": "fantastic:active-jb",
+      "url": "https://www.linkedin.com/jobs/view/patient-registrar-at-hca-healthcare-4467952413",
+      "title": "Patient Registrar",
+      "organization": "HCA Healthcare",
+      "organization_linkedin_url": "https://www.linkedin.com/company/hca",
+      "org_linkedin_slug": "hca",
+      "org_linkedin_website": "http://www.hcahealthcare.com",
+      "org_linkedin_size": "10,001+ employees",
+      "org_linkedin_headcount": 154889,
+      "org_linkedin_industry": "Hospitals and Health Care",
+      "org_linkedin_recruitment_agency_derived": false,
+      "location_text": "Chattanooga, Tennessee, United States",
+      "countries": [
+        "United States"
+      ],
+      "cities_derived": [
+        "Chattanooga"
+      ],
+      "regions_derived": [
+        "Tennessee"
+      ],
+      "location_type": null,
+      "date_posted": "2026-09-16T03:57:10+00:00",
+      "date_created (as stored, provider_date_created)": "2026-09-16T03:59:32.250723+00:00",
+      "date_valid_through": "2026-10-16T03:57:10+00:00",
+      "employment_type (raw)": "{FULL_TIME}",
+      "ai_employment_type": [
+        "FULL_TIME"
+      ],
+      "ai_taxonomies_a": [
+        "Healthcare",
+        "Administrative",
+        "Customer Service & Support"
+      ],
+      "source (provider field)": "linkedin",
+      "source_type": "jobboard",
+      "ats_duplicate": false,
+      "tgtc_outcome_at_export": {
+        "state": "closed",
+        "close_reason": "semantic:On-site hospital role requiring bedside patient registration with carts/computers on wheels",
+        "policy": "tgtc-core/1 (2026-09-16T08:37Z)"
+      },
+      "tgtc_note": "Clinical, on-site hospital work; employer industry also excluded. Unfiltered page (no industry filter sent)."
+    },
+    {
+      "sample_category": "returned_then_rejected",
+      "provider_job_id": "2365514117",
+      "endpoint_source": "fantastic:active-jb",
+      "url": "https://www.linkedin.com/jobs/view/director-customer-intelligence-performance-at-moody-s-corporation-4467940564",
+      "title": "Director, Customer Intelligence & Performance",
+      "organization": "Moody's Corporation",
+      "organization_linkedin_url": "https://www.linkedin.com/company/moodys-corporation",
+      "org_linkedin_slug": "moodys-corporation",
+      "org_linkedin_website": "http://www.moodys.com",
+      "org_linkedin_size": "10,001+ employees",
+      "org_linkedin_headcount": 15159,
+      "org_linkedin_industry": "Financial Services",
+      "org_linkedin_recruitment_agency_derived": false,
+      "location_text": "New York, New York, United States",
+      "countries": [
+        "United States"
+      ],
+      "cities_derived": [
+        "New York"
+      ],
+      "regions_derived": [
+        "New York"
+      ],
+      "location_type": null,
+      "date_posted": "2026-09-16T03:52:58+00:00",
+      "date_created (as stored, provider_date_created)": "2026-09-16T03:55:25.565494+00:00",
+      "date_valid_through": "2026-10-16T03:52:58+00:00",
+      "employment_type (raw)": "{FULL_TIME}",
+      "ai_employment_type": [
+        "FULL_TIME"
+      ],
+      "ai_taxonomies_a": [
+        "Data & Analytics",
+        "Management & Leadership",
+        "Finance & Accounting",
+        "Customer Service & Support",
+        "Technology"
+      ],
+      "source (provider field)": "linkedin",
+      "source_type": "jobboard",
+      "ats_duplicate": false,
+      "tgtc_outcome_at_export": {
+        "state": "closed",
+        "close_reason": "seniority:leadership_or_principal",
+        "policy": "tgtc-core/1 (2026-09-16T08:37Z)"
+      },
+      "tgtc_note": "Rejected on title seniority (Director) by the TGTC policy of that date; 15,159 employees also outside 25-1,000."
+    },
+    {
+      "sample_category": "returned_then_rejected",
+      "provider_job_id": "2365512087",
+      "endpoint_source": "fantastic:active-jb",
+      "url": "https://www.linkedin.com/jobs/view/data-visualization-designer-communications-specialist-at-stratascorp-technologies-4466821350",
+      "title": "Data Visualization Designer (Communications Specialist)",
+      "organization": "StratasCorp Technologies",
+      "organization_linkedin_url": "https://www.linkedin.com/company/stratascorp",
+      "org_linkedin_slug": "stratascorp",
+      "org_linkedin_website": "https://www.stratascorp.com",
+      "org_linkedin_size": "201-500 employees",
+      "org_linkedin_headcount": 204,
+      "org_linkedin_industry": "IT Services and IT Consulting",
+      "org_linkedin_recruitment_agency_derived": false,
+      "location_text": "Washington, District of Columbia, United States",
+      "countries": [
+        "United States"
+      ],
+      "cities_derived": [
+        "Washington"
+      ],
+      "regions_derived": [
+        "District of Columbia"
+      ],
+      "location_type": null,
+      "date_posted": "2026-09-16T03:45:40+00:00",
+      "date_created (as stored, provider_date_created)": "2026-09-16T03:54:00.168348+00:00",
+      "date_valid_through": "2026-10-16T03:45:40+00:00",
+      "employment_type (raw)": "{FULL_TIME}",
+      "ai_employment_type": [
+        "FULL_TIME"
+      ],
+      "ai_taxonomies_a": [
+        "Data & Analytics",
+        "Art & Design",
+        "Government & Public Sector",
+        "Creative & Media",
+        "Technology"
+      ],
+      "source (provider field)": "linkedin",
+      "source_type": "jobboard",
+      "ats_duplicate": false,
+      "tgtc_outcome_at_export": {
+        "state": "closed",
+        "close_reason": "deliverability:security_clearance",
+        "policy": "tgtc-core/1 (2026-09-16T08:37Z)"
+      },
+      "tgtc_note": "Rejected: security clearance required (job text)."
+    },
+    {
+      "sample_category": "returned_then_rejected",
+      "provider_job_id": "2365519321",
+      "endpoint_source": "fantastic:active-jb",
+      "url": "https://www.linkedin.com/jobs/view/production-assembler-i-at-general-dynamics-ordnance-and-tactical-systems-4466820364",
+      "title": "Production Assembler I",
+      "organization": "General Dynamics Ordnance and Tactical Systems",
+      "organization_linkedin_url": "https://www.linkedin.com/company/general-dynamics-ordnance-and-tactical-systems",
+      "org_linkedin_slug": "general-dynamics-ordnance-and-tactical-systems",
+      "org_linkedin_website": "http://www.gdots.com",
+      "org_linkedin_size": "5,001-10,000 employees",
+      "org_linkedin_headcount": 2001,
+      "org_linkedin_industry": "Defense and Space Manufacturing",
+      "org_linkedin_recruitment_agency_derived": false,
+      "location_text": "Healdsburg, California, United States",
+      "countries": [
+        "United States"
+      ],
+      "cities_derived": [
+        "Healdsburg"
+      ],
+      "regions_derived": [
+        "California"
+      ],
+      "location_type": null,
+      "date_posted": "2026-09-16T03:45:04+00:00",
+      "date_created (as stored, provider_date_created)": "2026-09-16T03:57:18.614802+00:00",
+      "date_valid_through": "2026-10-16T03:45:04+00:00",
+      "employment_type (raw)": "{FULL_TIME}",
+      "ai_employment_type": [
+        "FULL_TIME"
+      ],
+      "ai_taxonomies_a": [
+        "Manufacturing",
+        "Trades",
+        "Engineering"
+      ],
+      "source (provider field)": "linkedin",
+      "source_type": "jobboard",
+      "ats_duplicate": false,
+      "tgtc_outcome_at_export": {
+        "state": "closed",
+        "close_reason": "deliverability:physical_facility",
+        "policy": "tgtc-core/1 (2026-09-16T08:37Z)"
+      },
+      "tgtc_note": "Rejected: physical assembly work (job text)."
+    },
+    {
+      "sample_category": "returned_then_rejected",
+      "provider_job_id": "2365503542",
+      "endpoint_source": "fantastic:active-jb",
+      "url": "https://www.linkedin.com/jobs/view/kids-club-team-member-at-chuze-fitness-4467953210",
+      "title": "Kids Club Team Member",
+      "organization": "Chuze Fitness",
+      "organization_linkedin_url": "https://www.linkedin.com/company/chuze-fitness",
+      "org_linkedin_slug": "chuze-fitness",
+      "org_linkedin_website": "https://chuzefitness.com/careers",
+      "org_linkedin_size": "1,001-5,000 employees",
+      "org_linkedin_headcount": 969,
+      "org_linkedin_industry": "Wellness and Fitness Services",
+      "org_linkedin_recruitment_agency_derived": false,
+      "location_text": "Jacksonville, Florida, United States",
+      "countries": [
+        "United States"
+      ],
+      "cities_derived": [
+        "Jacksonville"
+      ],
+      "regions_derived": [
+        "Florida"
+      ],
+      "location_type": null,
+      "date_posted": "2026-09-16T03:44:31+00:00",
+      "date_created (as stored, provider_date_created)": "2026-09-16T03:49:09.723396+00:00",
+      "date_valid_through": "2026-10-16T03:44:31+00:00",
+      "employment_type (raw)": "{PART_TIME}",
+      "ai_employment_type": [
+        "PART_TIME"
+      ],
+      "ai_taxonomies_a": [
+        "Sports & Recreation",
+        "Customer Service & Support",
+        "Hospitality",
+        "Education",
+        "Social Services"
+      ],
+      "source (provider field)": "linkedin",
+      "source_type": "jobboard",
+      "ats_duplicate": false,
+      "tgtc_outcome_at_export": {
+        "state": "closed",
+        "close_reason": "employment:part_time",
+        "policy": "tgtc-core/1 (2026-09-16T08:37Z)"
+      },
+      "tgtc_note": "Rejected: part-time (provider label / job text)."
+    },
+    {
+      "sample_category": "returned_then_rejected",
+      "provider_job_id": "2365521647",
+      "endpoint_source": "fantastic:active-jb",
+      "url": "https://www.linkedin.com/jobs/view/product-management-co-op-at-johnson-johnson-medtech-4467938578",
+      "title": "Product Management Co-Op",
+      "organization": "Johnson & Johnson MedTech",
+      "organization_linkedin_url": "https://www.linkedin.com/company/johnson-&-johnson-medtech",
+      "org_linkedin_slug": "johnson-&-johnson-medtech",
+      "org_linkedin_website": "https://thenext.jnjmedtech.com",
+      "org_linkedin_size": "10,001+ employees",
+      "org_linkedin_headcount": 38093,
+      "org_linkedin_industry": "Hospitals and Health Care",
+      "org_linkedin_recruitment_agency_derived": false,
+      "location_text": "Jacksonville, Florida, United States",
+      "countries": [
+        "United States"
+      ],
+      "cities_derived": [
+        "Jacksonville"
+      ],
+      "regions_derived": [
+        "Florida"
+      ],
+      "location_type": null,
+      "date_posted": "2026-09-16T03:39:48+00:00",
+      "date_created (as stored, provider_date_created)": "2026-09-16T03:58:33.469979+00:00",
+      "date_valid_through": "2026-10-16T03:39:47+00:00",
+      "employment_type (raw)": "{FULL_TIME}",
+      "ai_employment_type": [
+        "FULL_TIME"
+      ],
+      "ai_taxonomies_a": [
+        "Logistics",
+        "Healthcare",
+        "Data & Analytics",
+        "Management & Leadership",
+        "Engineering"
+      ],
+      "source (provider field)": "linkedin",
+      "source_type": "jobboard",
+      "ats_duplicate": false,
+      "tgtc_outcome_at_export": {
+        "state": "closed",
+        "close_reason": "program:co_op",
+        "policy": "tgtc-core/1 (2026-09-16T08:37Z)"
+      },
+      "tgtc_note": "Rejected: co-op program (title)."
+    },
+    {
+      "sample_category": "returned_then_rejected",
+      "provider_job_id": "2365522255",
+      "endpoint_source": "fantastic:active-jb",
+      "url": "https://www.linkedin.com/jobs/view/staff-software-engineer-ingestion-platform-at-reddit-inc-4467951457",
+      "title": "Staff Software Engineer - Ingestion Platform",
+      "organization": "Reddit, Inc.",
+      "organization_linkedin_url": "https://www.linkedin.com/company/reddit-com",
+      "org_linkedin_slug": "reddit-com",
+      "org_linkedin_website": "http://redditinc.com",
+      "org_linkedin_size": "1,001-5,000 employees",
+      "org_linkedin_headcount": 5126,
+      "org_linkedin_industry": "Social Networking Platforms",
+      "org_linkedin_recruitment_agency_derived": false,
+      "location_text": "United States",
+      "countries": [
+        "United States"
+      ],
+      "cities_derived": null,
+      "regions_derived": null,
+      "location_type": null,
+      "date_posted": "2026-09-16T03:37:53.162+00:00",
+      "date_created (as stored, provider_date_created)": "2026-09-16T03:58:53.262129+00:00",
+      "date_valid_through": null,
+      "employment_type (raw)": "{FULL_TIME}",
+      "ai_employment_type": [
+        "FULL_TIME"
+      ],
+      "ai_taxonomies_a": [
+        "Software",
+        "Data & Analytics",
+        "Engineering",
+        "Technology",
+        "Management & Leadership"
+      ],
+      "source (provider field)": "linkedin",
+      "source_type": "jobboard",
+      "ats_duplicate": false,
+      "tgtc_outcome_at_export": {
+        "state": "closed",
+        "close_reason": "employment:contract",
+        "policy": "tgtc-core/1 (2026-09-16T08:37Z)"
+      },
+      "tgtc_note": "Older build rejected it as 'contract' from a privacy-notice sentence (TGTC false positive, since fixed); still out on Staff title and 5,126 employees."
+    },
+    {
+      "sample_category": "returned_then_rejected",
+      "provider_job_id": "2365503999",
+      "endpoint_source": "fantastic:active-jb",
+      "url": "https://www.linkedin.com/jobs/view/telephone-triage-virtual-rn-at-hca-healthcare-4467955396",
+      "title": "Telephone Triage Virtual RN",
+      "organization": "HCA Healthcare",
+      "organization_linkedin_url": "https://www.linkedin.com/company/hca",
+      "org_linkedin_slug": "hca",
+      "org_linkedin_website": "http://www.hcahealthcare.com",
+      "org_linkedin_size": "10,001+ employees",
+      "org_linkedin_headcount": 154889,
+      "org_linkedin_industry": "Hospitals and Health Care",
+      "org_linkedin_recruitment_agency_derived": false,
+      "location_text": "Gainesville, Florida, United States",
+      "countries": [
+        "United States"
+      ],
+      "cities_derived": [
+        "Gainesville"
+      ],
+      "regions_derived": [
+        "Florida"
+      ],
+      "location_type": null,
+      "date_posted": "2026-09-16T03:34:04+00:00",
+      "date_created (as stored, provider_date_created)": "2026-09-16T03:49:27.860641+00:00",
+      "date_valid_through": "2026-10-16T03:32:46+00:00",
+      "employment_type (raw)": "{FULL_TIME}",
+      "ai_employment_type": [
+        "FULL_TIME"
+      ],
+      "ai_taxonomies_a": [
+        "Healthcare",
+        "Customer Service & Support"
+      ],
+      "source (provider field)": "linkedin",
+      "source_type": "jobboard",
+      "ats_duplicate": false,
+      "tgtc_outcome_at_export": {
+        "state": "closed",
+        "close_reason": "deliverability:physical_facility",
+        "policy": "tgtc-core/1 (2026-09-16T08:37Z)"
+      },
+      "tgtc_note": "Virtual telephone triage nurse; rejected by the older build on physical-facility wording (TGTC false positive per audit) - still requires a nursing licence and the employer is a hospital group."
+    }
+  ],
+  "returned_despite_relevant_provider_filter_then_rejected": [
+    {
+      "sample_category": "returned_despite_relevant_provider_filter_then_rejected",
+      "provider_job_id": "not_in_saved_export",
+      "url": "not_in_saved_export",
+      "tgtc_posting_id": 1244,
+      "endpoint_source": "fantastic:active-ats",
+      "title": "Meat Cutter",
+      "organization": "FOOD GIANT SUPERMARKETS INC",
+      "org_linkedin_industry": "Retail",
+      "countries": [
+        "United States"
+      ],
+      "location_text": "Scottsboro, Alabama, United States",
+      "location_type": null,
+      "ai_employment_type": [
+        "FULL_TIME",
+        "PART_TIME"
+      ],
+      "tgtc_outcome": {
+        "state": "closed",
+        "close_reason": "employment:part_time",
+        "snapshot": "2026-09-18T19:51Z"
+      },
+      "tgtc_note": "Labelled FULL_TIME plus another type, so an ai_employment_type=FULL_TIME filter admits it; TGTC rejects any explicit non-full-time label."
+    },
+    {
+      "sample_category": "returned_despite_relevant_provider_filter_then_rejected",
+      "provider_job_id": "not_in_saved_export",
+      "url": "not_in_saved_export",
+      "tgtc_posting_id": 1151,
+      "endpoint_source": "fantastic:active-ats",
+      "title": "Intern - Environmental Specialist",
+      "organization": "Ashland Foundry & Machine Works LLC",
+      "org_linkedin_industry": "Oil and Gas",
+      "countries": [
+        "United States"
+      ],
+      "location_text": "Butler Township, Pennsylvania, United States",
+      "location_type": null,
+      "ai_employment_type": [
+        "FULL_TIME",
+        "TEMPORARY",
+        "INTERN"
+      ],
+      "tgtc_outcome": {
+        "state": "closed",
+        "close_reason": "employment:internship",
+        "snapshot": "2026-09-18T19:51Z"
+      },
+      "tgtc_note": "Labelled FULL_TIME plus another type, so an ai_employment_type=FULL_TIME filter admits it; TGTC rejects any explicit non-full-time label."
+    },
+    {
+      "sample_category": "returned_despite_relevant_provider_filter_then_rejected",
+      "provider_job_id": "not_in_saved_export",
+      "url": "not_in_saved_export",
+      "tgtc_posting_id": 1859,
+      "endpoint_source": "fantastic:active-ats",
+      "title": "Key Holder",
+      "organization": "Comoto",
+      "org_linkedin_industry": "Retail",
+      "countries": [
+        "United States"
+      ],
+      "location_text": "Azusa, California, United States",
+      "location_type": null,
+      "ai_employment_type": [
+        "PART_TIME",
+        "FULL_TIME"
+      ],
+      "tgtc_outcome": {
+        "state": "closed",
+        "close_reason": "employment:part_time",
+        "snapshot": "2026-09-18T19:51Z"
+      },
+      "tgtc_note": "Labelled FULL_TIME plus another type, so an ai_employment_type=FULL_TIME filter admits it; TGTC rejects any explicit non-full-time label."
+    },
+    {
+      "sample_category": "returned_despite_relevant_provider_filter_then_rejected",
+      "provider_job_id": "not_in_saved_export",
+      "url": "not_in_saved_export",
+      "tgtc_posting_id": 3532,
+      "endpoint_source": "fantastic:active-ats",
+      "title": "Host / Hostess",
+      "organization": "Thrive Restaurant Group",
+      "org_linkedin_industry": "Restaurants",
+      "countries": [
+        "United States"
+      ],
+      "location_text": "Huntington, West Virginia, United States",
+      "location_type": null,
+      "ai_employment_type": [
+        "FULL_TIME",
+        "PART_TIME"
+      ],
+      "tgtc_outcome": {
+        "state": "closed",
+        "close_reason": "employment:part_time",
+        "snapshot": "2026-09-18T19:51Z"
+      },
+      "tgtc_note": "Labelled FULL_TIME plus another type, so an ai_employment_type=FULL_TIME filter admits it; TGTC rejects any explicit non-full-time label."
+    },
+    {
+      "sample_category": "returned_despite_relevant_provider_filter_then_rejected",
+      "provider_job_id": "not_in_saved_export",
+      "url": "not_in_saved_export",
+      "tgtc_posting_id": 3533,
+      "endpoint_source": "fantastic:active-ats",
+      "title": "Carside",
+      "organization": "Thrive Restaurant Group",
+      "org_linkedin_industry": "Restaurants",
+      "countries": [
+        "United States"
+      ],
+      "location_text": "Huntington, West Virginia, United States",
+      "location_type": null,
+      "ai_employment_type": [
+        "FULL_TIME",
+        "PART_TIME"
+      ],
+      "tgtc_outcome": {
+        "state": "closed",
+        "close_reason": "employment:part_time",
+        "snapshot": "2026-09-18T19:51Z"
+      },
+      "tgtc_note": "Labelled FULL_TIME plus another type, so an ai_employment_type=FULL_TIME filter admits it; TGTC rejects any explicit non-full-time label."
+    }
+  ],
+  "repeated_across_pages": {
+    "status": "RECORD_LEVEL_SAMPLE_NOT_AVAILABLE_IN_SAVED_EVIDENCE",
+    "aggregate_evidence": "Core path: 0 duplicate pages recorded (a duplicate page = identical id set to the previous page). Legacy 2026-09-08: dup_in_run=0 for both Fantastic sources.",
+    "where_ids_live": "Core stores every page's provider ids in page_receipts.row_ids (production database). Not exported for this bundle; no database query was run for it."
+  },
+  "repeated_across_runs_or_queries": {
+    "status": "RECORD_LEVEL_SAMPLE_NOT_AVAILABLE_IN_SAVED_EVIDENCE",
+    "aggregate_evidence": [
+      "Core, through 2026-09-17T09:00Z: discovery_v1 returned 600 rows of which 272 had already been bought by priority_v1 queries over the same windows.",
+      "Core run 20260918T080328: 915 rows returned, 752 first-seen, 163 already held.",
+      "Legacy 2026-09-05: 200/200 rows already acquired; 2026-09-06: 5,218/5,444; 2026-09-07: 172/500; 2026-09-08: 4,505/5,144."
+    ],
+    "where_ids_live": "Legacy runs retained only kept ids (no response-level id list; see acceptance/ACQUISITION_CAPACITY_2026-09-06.md). Core retains them in page_receipts.row_ids."
+  }
+}

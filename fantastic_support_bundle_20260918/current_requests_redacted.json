@@ -1,0 +1,330 @@
+{
+  "_status": "EVIDENCE - redacted. Contains no API key, token or header value.",
+  "_http": {
+    "base_url": "https://data.fantastic.jobs (code default; the Railway service sets FANTASTIC_JOBS_BASE_URL, value not re-read for this bundle)",
+    "headers": {
+      "Authorization": "Bearer <REDACTED>",
+      "Accept": "application/json"
+    },
+    "query_encoding": "requests library params; exclude_organization_industry and ai_taxonomies_a are single comma-joined values"
+  },
+  "current_production_path": {
+    "system": "tgtc_core, commit be3af32 (deployed 2026-09-18)",
+    "representative_run": "20260918T080328.515978Z-807e4ff1, 2026-09-18 08:03:28Z -> 08:47:56Z (10 provider requests, 752 net-new postings)",
+    "exact_per_request_values": "The run's per-request date windows, offsets and slug lists live in the production table request_attempts.params_json and were NOT exported for this bundle. Shapes and constant values below were read back from that table (grouped) on 2026-09-18 and match the deployed code.",
+    "observed_request_shapes_all_core_runs": [
+      {
+        "endpoint": "/v1/active-jb",
+        "time_frame": "7d",
+        "location": "United States",
+        "ai_employment_type": "-",
+        "headcount_gte": "-",
+        "headcount_lt": "-",
+        "ai_taxonomies_a_present": "f",
+        "exclude_industry_present": "f",
+        "organization_agency": "-",
+        "exclude_organization_slug_present": "f",
+        "exclude_ats_duplicate": "true",
+        "any_title_filter": "f",
+        "status": "failed",
+        "requests": "1",
+        "confirmed_job_credits": "0",
+        "first_day": "2026-09-16",
+        "last_day": "2026-09-16"
+      },
+      {
+        "endpoint": "/v1/active-jb",
+        "time_frame": "7d",
+        "location": "United States",
+        "ai_employment_type": "-",
+        "headcount_gte": "-",
+        "headcount_lt": "-",
+        "ai_taxonomies_a_present": "f",
+        "exclude_industry_present": "f",
+        "organization_agency": "-",
+        "exclude_organization_slug_present": "f",
+        "exclude_ats_duplicate": "true",
+        "any_title_filter": "f",
+        "status": "served",
+        "requests": "1",
+        "confirmed_job_credits": "0",
+        "first_day": "2026-09-16",
+        "last_day": "2026-09-16"
+      },
+      {
+        "endpoint": "/v1/active-jb",
+        "time_frame": "7d",
+        "location": "United States",
+        "ai_employment_type": "-",
+        "headcount_gte": "-",
+        "headcount_lt": "-",
+        "ai_taxonomies_a_present": "f",
+        "exclude_industry_present": "t",
+        "organization_agency": "exclude",
+        "exclude_organization_slug_present": "t",
+        "exclude_ats_duplicate": "true",
+        "any_title_filter": "f",
+        "status": "served",
+        "requests": "10",
+        "confirmed_job_credits": "0",
+        "first_day": "2026-09-16",
+        "last_day": "2026-09-16"
+      },
+      {
+        "endpoint": "/v1/active-jb",
+        "time_frame": "7d",
+        "location": "United States",
+        "ai_employment_type": "FULL_TIME",
+        "headcount_gte": "25",
+        "headcount_lt": "1001",
+        "ai_taxonomies_a_present": "t",
+        "exclude_industry_present": "t",
+        "organization_agency": "exclude",
+        "exclude_organization_slug_present": "t",
+        "exclude_ats_duplicate": "true",
+        "any_title_filter": "f",
+        "status": "served",
+        "requests": "16",
+        "confirmed_job_credits": "1513",
+        "first_day": "2026-09-16",
+        "last_day": "2026-09-18"
+      },
+      {
+        "endpoint": "/v1/active-ats",
+        "time_frame": "7d",
+        "location": "United States",
+        "ai_employment_type": "FULL_TIME",
+        "headcount_gte": "25",
+        "headcount_lt": "1001",
+        "ai_taxonomies_a_present": "t",
+        "exclude_industry_present": "t",
+        "organization_agency": "exclude",
+        "exclude_organization_slug_present": "t",
+        "exclude_ats_duplicate": "-",
+        "any_title_filter": "f",
+        "status": "served",
+        "requests": "16",
+        "confirmed_job_credits": "1372",
+        "first_day": "2026-09-16",
+        "last_day": "2026-09-18"
+      },
+      {
+        "endpoint": "/v1/active-jb",
+        "time_frame": "7d",
+        "location": "United States",
+        "ai_employment_type": "-",
+        "headcount_gte": "-",
+        "headcount_lt": "-",
+        "ai_taxonomies_a_present": "f",
+        "exclude_industry_present": "t",
+        "organization_agency": "exclude",
+        "exclude_organization_slug_present": "f",
+        "exclude_ats_duplicate": "true",
+        "any_title_filter": "f",
+        "status": "served",
+        "requests": "4",
+        "confirmed_job_credits": "400",
+        "first_day": "2026-09-16",
+        "last_day": "2026-09-18"
+      },
+      {
+        "endpoint": "/v1/active-ats",
+        "time_frame": "7d",
+        "location": "United States",
+        "ai_employment_type": "-",
+        "headcount_gte": "-",
+        "headcount_lt": "-",
+        "ai_taxonomies_a_present": "f",
+        "exclude_industry_present": "t",
+        "organization_agency": "exclude",
+        "exclude_organization_slug_present": "f",
+        "exclude_ats_duplicate": "-",
+        "any_title_filter": "f",
+        "status": "served",
+        "requests": "4",
+        "confirmed_job_credits": "400",
+        "first_day": "2026-09-16",
+        "last_day": "2026-09-18"
+      }
+    ],
+    "scheduling": {
+      "strategy": "balanced_v1: 10 single-page slots per cycle, alternating active-jb / active-ats; slots 2 and 7 use discovery_v1, the other 8 use priority_v1",
+      "partitions": "Each (endpoint, profile, lane, date_created window) is a partition with its own persisted offset. Fresh lane: 1-hour windows ending at least 3 hours before now. Backfill lane: 24-hour windows walking backwards.",
+      "partition_choice": "priority_v1 picks the newest open window first; discovery_v1 the oldest; every 5th page of a source/profile prefers the backfill lane",
+      "stop_per_slot": "one page per slot; a partition is complete only when a page returns fewer rows than limit",
+      "budget": "run start command reserves 20 requests / 1,000 job credits per 24h; each page reserves limit=100 credits"
+    },
+    "variants": [
+      {
+        "label": "core_priority_v1_active_jb",
+        "method": "GET",
+        "endpoint": "/v1/active-jb",
+        "params": {
+          "time_frame": "7d",
+          "date_created_gte": "<partition window start, UTC, e.g. 2026-09-18T04:00:00Z>",
+          "date_created_lt": "<partition window end, UTC>",
+          "limit": 100,
+          "offset": "<partition next_offset: 0 on the first page, then + rows received>",
+          "description_format": "text",
+          "exclude_ats_duplicate": "true",
+          "location": "United States",
+          "organization_agency": "exclude",
+          "exclude_organization_industry": "Staffing and Recruiting,Government Administration,Non-profit Organization Management,Hospital & Health Care,Hospitals and Health Care,Mental Health Care,Medical Practice,Human Resources Services,Outsourcing/Offshoring,Events Services,Broadcast Media,Online Media,Media Production,Newspapers,Book Publishing,Chemicals",
+          "ai_employment_type": "FULL_TIME",
+          "organization_headcount_gte": 25,
+          "organization_headcount_lt": 1001,
+          "ai_taxonomies_a": "Technology,Software,Data & Analytics,Engineering,Finance & Accounting,Human Resources,Sales,Marketing,Customer Service & Support,Administrative,Creative & Media,Art & Design,Management & Leadership,Consulting,Retail,Logistics",
+          "exclude_organization_slug": "<OPTIONAL: up to 100 LinkedIn company slugs of employers TGTC saw outside 25-1,000 in the last 7 days; values not exported>"
+        },
+        "used_in_run_20260918T080328": "4 requests (slot schedule)",
+        "notes": "8 of 10 slots in a cycle are priority_v1"
+      },
+      {
+        "label": "core_priority_v1_active_ats",
+        "method": "GET",
+        "endpoint": "/v1/active-ats",
+        "params": {
+          "time_frame": "7d",
+          "date_created_gte": "<partition window start, UTC, e.g. 2026-09-18T04:00:00Z>",
+          "date_created_lt": "<partition window end, UTC>",
+          "limit": 100,
+          "offset": "<partition next_offset: 0 on the first page, then + rows received>",
+          "description_format": "text",
+          "include_basic_organization_details": "true",
+          "location": "United States",
+          "organization_agency": "exclude",
+          "exclude_organization_industry": "Staffing and Recruiting,Government Administration,Non-profit Organization Management,Hospital & Health Care,Hospitals and Health Care,Mental Health Care,Medical Practice,Human Resources Services,Outsourcing/Offshoring,Events Services,Broadcast Media,Online Media,Media Production,Newspapers,Book Publishing,Chemicals",
+          "ai_employment_type": "FULL_TIME",
+          "organization_headcount_gte": 25,
+          "organization_headcount_lt": 1001,
+          "ai_taxonomies_a": "Technology,Software,Data & Analytics,Engineering,Finance & Accounting,Human Resources,Sales,Marketing,Customer Service & Support,Administrative,Creative & Media,Art & Design,Management & Leadership,Consulting,Retail,Logistics",
+          "exclude_organization_slug": "<OPTIONAL: up to 100 LinkedIn company slugs of employers TGTC saw outside 25-1,000 in the last 7 days; values not exported>"
+        },
+        "used_in_run_20260918T080328": "4 requests (slot schedule)",
+        "notes": "exclude_ats_duplicate is sent only on active-jb"
+      },
+      {
+        "label": "core_discovery_v1_active_jb",
+        "method": "GET",
+        "endpoint": "/v1/active-jb",
+        "params": {
+          "time_frame": "7d",
+          "date_created_gte": "<partition window start, UTC, e.g. 2026-09-18T04:00:00Z>",
+          "date_created_lt": "<partition window end, UTC>",
+          "limit": 100,
+          "offset": "<partition next_offset: 0 on the first page, then + rows received>",
+          "description_format": "text",
+          "exclude_ats_duplicate": "true",
+          "location": "United States",
+          "organization_agency": "exclude",
+          "exclude_organization_industry": "Staffing and Recruiting,Government Administration,Non-profit Organization Management,Hospital & Health Care,Hospitals and Health Care,Mental Health Care,Medical Practice,Human Resources Services,Outsourcing/Offshoring,Events Services,Broadcast Media,Online Media,Media Production,Newspapers,Book Publishing,Chemicals"
+        },
+        "used_in_run_20260918T080328": "1 request (slot schedule)",
+        "notes": "Broad recall query: no employment/size/taxonomy filters; overlaps priority_v1"
+      },
+      {
+        "label": "core_discovery_v1_active_ats",
+        "method": "GET",
+        "endpoint": "/v1/active-ats",
+        "params": {
+          "time_frame": "7d",
+          "date_created_gte": "<partition window start, UTC, e.g. 2026-09-18T04:00:00Z>",
+          "date_created_lt": "<partition window end, UTC>",
+          "limit": 100,
+          "offset": "<partition next_offset: 0 on the first page, then + rows received>",
+          "description_format": "text",
+          "include_basic_organization_details": "true",
+          "location": "United States",
+          "organization_agency": "exclude",
+          "exclude_organization_industry": "Staffing and Recruiting,Government Administration,Non-profit Organization Management,Hospital & Health Care,Hospitals and Health Care,Mental Health Care,Medical Practice,Human Resources Services,Outsourcing/Offshoring,Events Services,Broadcast Media,Online Media,Media Production,Newspapers,Book Publishing,Chemicals"
+        },
+        "used_in_run_20260918T080328": "1 request (slot schedule)",
+        "notes": "Broad recall query on ATS"
+      }
+    ],
+    "never_sent": [
+      "title / title_advanced / any title filter",
+      "description filters",
+      "order / sort",
+      "cursor",
+      "source",
+      "remote or work-arrangement filters",
+      "time_frame other than 7d (6m is only chosen for a partition whose window no longer fits in 7d; never observed)"
+    ]
+  },
+  "exact_persisted_requests_2026-09-16": [
+    {
+      "request_attempt_id": 1,
+      "status": "failed",
+      "http_status": 400,
+      "params": {
+        "limit": 50,
+        "offset": 0,
+        "endpoint": "/v1/active-jb",
+        "location": "United States",
+        "time_frame": "7d",
+        "date_created_lt": "2026-09-16T02:00:00Z",
+        "date_created_gte": "2026-09-16T01:00:00Z",
+        "description_format": "text",
+        "exclude_ats_duplicate": "true",
+        "include_basic_organization_details": "true"
+      },
+      "response_summary": null
+    },
+    {
+      "request_attempt_id": 5,
+      "status": "served",
+      "http_status": 200,
+      "params": {
+        "limit": 50,
+        "offset": 0,
+        "endpoint": "/v1/active-jb",
+        "location": "United States",
+        "time_frame": "7d",
+        "date_created_lt": "2026-09-16T04:00:00Z",
+        "date_created_gte": "2026-09-16T03:00:00Z",
+        "description_format": "text",
+        "exclude_ats_duplicate": "true"
+      },
+      "response_summary": {
+        "rows": 50,
+        "quota": {
+          "jobs_limit": 100000,
+          "jobs_remaining": 71748,
+          "requests_limit": 50000,
+          "next_billing_date": "2026-10-01T23:39:15.948851Z",
+          "requests_remaining": 49507
+        },
+        "pii_fields_dropped": 250
+      }
+    }
+  ],
+  "exact_persisted_requests_2026-09-16_note": "Verbatim params_json from the first core pages (legacy_v1 profile, limit 50, no ICP filters). Request 1 failed HTTP 400 because include_basic_organization_details was sent to /v1/active-jb.",
+  "previous_production_path_legacy": {
+    "status": "PAUSED since 2026-09-09. Last productive run 20260908T030247Z-e711a350 (commit c30178d).",
+    "time_frame": "7d (effective value recorded in acceptance/ACCEPTANCE_2026-09-06.md; code default was 24h)",
+    "window": "one reused [lower, upper) date_created window per run, lower clamped to now-7d; cut into 6-hour date_created slices, oldest first; offset restarts at 0 in each slice",
+    "active_jb_params_per_source": {
+      "time_frame": "7d",
+      "exclude_ats_duplicate": "true",
+      "source": "linkedin | wellfound | ycombinator (one segment each)",
+      "location": "United States",
+      "organization_headcount_gte": 25,
+      "organization_headcount_lt": "1000 (code default FANTASTIC_JOBS_HEADCOUNT_MAX)",
+      "ai_employment_type": "FULL_TIME",
+      "organization_agency": "exclude",
+      "exclude_organization_industry": "comma-joined labels; code default: Hospitals and Health Care,Home Health Care Services,Government Administration,Non-profit Organizations,Mental Health Care,Medical Practices,Public Relations and Communications Services (Railway override not re-read)",
+      "title_advanced": "<boolean title expression generated from the TGTC role catalog; 4,222 characters on 2026-09-06; not reproduced here>",
+      "date_created_gte / date_created_lt": "<6-hour slice bounds>",
+      "limit": "min(remaining run grant, 100)",
+      "offset": "slice start 0, + rows returned",
+      "wellfound / ycombinator": "headcount and industry parameters are removed for these sources (they are null on those rows and drop 100%)"
+    },
+    "active_ats_params": "same ICP filters and title_advanced, plus include_basic_organization_details=true; no source, no exclude_ats_duplicate",
+    "never_sent": [
+      "order / sort (code comment: no order_by/sort parameter is sent)",
+      "cursor (except a separate, disabled 6m recovery mode)"
+    ],
+    "evidence": "legacy code fantastic_jobs_adapter.py at c30178d (build_jb_params L1110, _jb_filter_params L582, build_ats_params L1729, _fetch_segment L1472); acceptance/ACQUISITION_CAPACITY_2026-09-06.md section 2"
+  }
+}
