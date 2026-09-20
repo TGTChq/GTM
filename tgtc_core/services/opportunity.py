@@ -1264,6 +1264,7 @@ class OpportunityService:
 
         made = 0
         remaining = list(candidates)
+        already_enriched = self._already_enriched(candidates, emp, employer_domains)
         # Fix round 2, CRITICAL (independent review): whether THIS pass hit a
         # structural wall -- real candidates were still in ``remaining``, but
         # none had a persona not already held, so ``select_next_contact``
@@ -1298,33 +1299,45 @@ class OpportunityService:
             if not pre.passed:
                 self._record_attempt(opportunity_id, ref, "gate", "skipped_pre_enrichment", pre.reason, epoch=epoch, details=pre.evidence)
                 continue
-            try:
-                self._guard_provider()
-            except ProviderWait as w:
-                return QualifyOutcome(opportunity_id, "wait", w.reason, attempts_made=made, details={"until": w.until.isoformat()})
-            pid = str(cand.get("id") or cand.get("person_id") or "")
-            attempt_id = self._intent("person_match", opportunity_id=opportunity_id, person_ref_value=ref, params={"id": pid}, estimated_credits=1)
-            result = self.apollo.match_person(pid)
-            self._finish(attempt_id, result, operation="person_match", estimated=1)
-            try:
-                self._handle_global(result, allow_not_found=True)
-            except ProviderWait as w:
-                self._record_attempt(opportunity_id, ref, "match", "refused", w.reason, epoch=epoch, attempt_id=attempt_id)
-                return QualifyOutcome(opportunity_id, "wait", w.reason, attempts_made=made, details={"until": w.until.isoformat()})
-            except ProviderRetry as r:
-                self._record_attempt(opportunity_id, ref, "match", "uncertain", str(r), epoch=epoch, attempt_id=attempt_id)
-                return QualifyOutcome(opportunity_id, "retry", f"apollo_{r}", attempts_made=made)
-            made += 1
-            if not result.served or not (result.data.get("person") or {}):
-                outcome = "not_found" if (result.served or result.status == 404) else result.outcome.value
-                self._record_attempt(opportunity_id, ref, "match", outcome, result.message or "no_person_in_response", epoch=epoch, attempt_id=attempt_id)
-                continue
-            enriched = dict(result.data["person"])
-            enriched.setdefault("id", pid)
-            contact, email = self._gate_enriched(enriched, emp, titles, founder_allowed, employer_domains)
-            person_id = self._upsert_person(enriched, emp, email_alignment=str(email.evidence.get("alignment") or ""),
-                                            employment_verified=contact.passed)
-            self._record_attempt(opportunity_id, ref, "match", "served", "enriched", epoch=epoch, person_id=person_id, attempt_id=attempt_id)
+            stored = already_enriched.get(ref)
+            if stored is not None:
+                # Phase 4: this person has already been paid for, about THIS
+                # employer, inside the evidence TTL. Re-judge the stored record
+                # with the same gates instead of buying the same answer twice --
+                # which can also RECOVER the contact for free when it passes.
+                enriched = self._stored_person_record(stored)
+                person_id = int(stored["id"])
+                contact, email = self._gate_enriched(enriched, emp, titles, founder_allowed, employer_domains)
+                self._record_attempt(opportunity_id, ref, "match", "reused_stored_evidence",
+                                     "person_enriched_within_evidence_ttl", epoch=epoch, person_id=person_id)
+            else:
+                try:
+                    self._guard_provider()
+                except ProviderWait as w:
+                    return QualifyOutcome(opportunity_id, "wait", w.reason, attempts_made=made, details={"until": w.until.isoformat()})
+                pid = str(cand.get("id") or cand.get("person_id") or "")
+                attempt_id = self._intent("person_match", opportunity_id=opportunity_id, person_ref_value=ref, params={"id": pid}, estimated_credits=1)
+                result = self.apollo.match_person(pid)
+                self._finish(attempt_id, result, operation="person_match", estimated=1)
+                try:
+                    self._handle_global(result, allow_not_found=True)
+                except ProviderWait as w:
+                    self._record_attempt(opportunity_id, ref, "match", "refused", w.reason, epoch=epoch, attempt_id=attempt_id)
+                    return QualifyOutcome(opportunity_id, "wait", w.reason, attempts_made=made, details={"until": w.until.isoformat()})
+                except ProviderRetry as r:
+                    self._record_attempt(opportunity_id, ref, "match", "uncertain", str(r), epoch=epoch, attempt_id=attempt_id)
+                    return QualifyOutcome(opportunity_id, "retry", f"apollo_{r}", attempts_made=made)
+                made += 1
+                if not result.served or not (result.data.get("person") or {}):
+                    outcome = "not_found" if (result.served or result.status == 404) else result.outcome.value
+                    self._record_attempt(opportunity_id, ref, "match", outcome, result.message or "no_person_in_response", epoch=epoch, attempt_id=attempt_id)
+                    continue
+                enriched = dict(result.data["person"])
+                enriched.setdefault("id", pid)
+                contact, email = self._gate_enriched(enriched, emp, titles, founder_allowed, employer_domains)
+                person_id = self._upsert_person(enriched, emp, email_alignment=str(email.evidence.get("alignment") or ""),
+                                                employment_verified=contact.passed)
+                self._record_attempt(opportunity_id, ref, "match", "served", "enriched", epoch=epoch, person_id=person_id, attempt_id=attempt_id)
             if not contact.passed:
                 self._record_attempt(opportunity_id, ref, "gate", "fail", contact.reason, epoch=epoch, person_id=person_id, details=contact.evidence)
                 continue
@@ -1394,6 +1407,67 @@ class OpportunityService:
         self.conn.commit()
         return out
 
+    def _stored_person_record(self, row: Dict[str, Any]) -> Dict[str, Any]:
+        """A stored ``people`` row rebuilt into the shape the gates read.
+
+        Phase 4: extracted so the reuse path and the "already enriched, do not
+        buy again" path below judge the SAME reconstruction. They used to be
+        one body in ``_reusable_person``; a second copy is how the two would
+        come to disagree about which stored field wins.
+        """
+        facts = row.get("facts_json") if isinstance(row.get("facts_json"), dict) else {}
+        evidence = dict(facts.get("enriched") or {})
+        return {**evidence, "id": row.get("apollo_person_id"), "first_name": row.get("first_name"),
+                "last_name": row.get("last_name"), "title": row.get("title") or evidence.get("title"),
+                "linkedin_url": row.get("linkedin_url"), "email": row.get("email"),
+                "email_status": row.get("email_status")}
+
+    def _already_enriched(self, candidates: Sequence[Dict[str, Any]], emp: Dict[str, Any],
+                          employer_domains: Set[str]) -> Dict[str, Dict[str, Any]]:
+        """Candidates this pipeline has ALREADY paid to enrich, and whose
+        evidence is still inside ``person_evidence_ttl_days``.
+
+        Phase 4 audit, "duplicate enrichment attempts". The existing guards each
+        covered a neighbouring case and left this one open: ``_excluded_refs``
+        is scoped to ONE opportunity, the approval index covers only people
+        already APPROVED, and ``_reusable_person`` queries
+        ``email_status = 'verified'`` so it only catches purchases that
+        SUCCEEDED. A person bought and then rejected -- no email, an
+        extrapolated email, a territory mismatch -- was covered by none of
+        them, and an opportunity is employer x FUNCTION, so one employer hiring
+        in two campaigns bought that person twice. Phase 4's third persona
+        makes this the normal case rather than a corner one: the Talent/People
+        owner is now searched for all nine campaigns.
+
+        Restricted to evidence about THIS employer (``employer_id`` set by a
+        contact gate that proved the employment, or a stored organization
+        domain that is the employer's). A stored record from the person's
+        PREVIOUS job says nothing about whether they are reachable here, and
+        re-judging it would reject a legitimate candidate rather than save a
+        credit.
+        """
+        pids = [str(c.get("id") or c.get("person_id") or "") for c in candidates]
+        pids = [p for p in pids if p]
+        if not pids:
+            return {}
+        cutoff = self.now() - timedelta(days=int(rule("person_evidence_ttl_days")))
+        domains = sorted(d for d in employer_domains if d)
+        with self.conn.cursor() as cur:
+            cur.execute(
+                "SELECT * FROM people WHERE apollo_person_id = ANY(%s) "
+                "AND (facts_json->>'enriched_at') IS NOT NULL "
+                "AND (facts_json->>'enriched_at')::timestamptz >= %s "
+                "AND (employer_id = %s OR organization_domain = ANY(%s))",
+                (pids, cutoff, emp["id"], domains))
+            rows = [dict(r) for r in cur.fetchall()]
+        self.conn.commit()
+        out: Dict[str, Dict[str, Any]] = {}
+        for row in rows:
+            ref = person_ref(apollo_person_id=row.get("apollo_person_id"), linkedin_url=row.get("linkedin_url"))
+            if ref:
+                out[ref] = row
+        return out
+
     def _person_row(self, person_id: int) -> Dict[str, Any]:
         with self.conn.cursor() as cur:
             cur.execute("SELECT * FROM people WHERE id = %s", (person_id,))
@@ -1451,11 +1525,7 @@ class OpportunityService:
                 return None
             pending = [c for c in pending if c is not picked]
             row, ref = picked["_row"], picked["_reuse_ref"]
-            facts = row.get("facts_json") if isinstance(row.get("facts_json"), dict) else {}
-            evidence = dict(facts.get("enriched") or {})
-            record = {**evidence, "id": row.get("apollo_person_id"), "first_name": row.get("first_name"), "last_name": row.get("last_name"),
-                      "title": row.get("title") or evidence.get("title"), "linkedin_url": row.get("linkedin_url"),
-                      "email": row.get("email"), "email_status": row.get("email_status")}
+            record = self._stored_person_record(row)
             contact, email = self._gate_enriched(record, emp, titles, founder_allowed, employer_domains)
             if not contact.passed or not email.passed:
                 reason = contact.reason if not contact.passed else email.reason
