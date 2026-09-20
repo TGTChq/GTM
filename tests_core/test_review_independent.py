@@ -104,6 +104,11 @@ class OpportunityWithFixtureStorage(OpportunityService):
                 return [{'n': 0}]
             if 'SELECT * FROM people' in sql:
                 return []
+            # Final whole-branch review, I7: the company-size review bucket
+            # supersedes, so the size gate clears the two review facts for an
+            # employer whose size resolved. A write with no result set.
+            if 'evidence' in sql and ('DELETE' in sql or 'INSERT' in sql):
+                return []
             raise AssertionError('Unexpected fixture query: ' + sql)
         super().__init__(FixtureConnection(answer),
                          ApolloClient(fake, base_url='https://api.apollo.io/api/v1', api_key='sim'),

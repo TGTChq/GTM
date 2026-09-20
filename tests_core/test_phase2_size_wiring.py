@@ -104,10 +104,13 @@ def test_size_gate_records_a_conflict_as_evidence_not_a_silent_drop():
     emp = {"id": 42, "employee_count": 5000, "size_band": "51-200 employees"}
     outcome = svc._size_gate(1, emp, {"description_text": ""})
     assert outcome is None
-    (call,) = [c for c in svc.conn.cursor().__enter__().execute.call_args_list]
-    sql, params = call.args
-    assert "INSERT INTO evidence" in sql
-    assert params[0] == 42 and params[1] == "company:firmographic_conflict"
+    calls = list(svc.conn.cursor().__enter__().execute.call_args_list)
+    # Final whole-branch review, I7: the bucket supersedes, so the sibling fact
+    # is deleted in the same pass as the insert -- two statements, not one.
+    (insert,) = [c for c in calls if "INSERT INTO evidence" in c.args[0]]
+    assert insert.args[1][0] == 42 and insert.args[1][1] == "company:firmographic_conflict"
+    (delete,) = [c for c in calls if "DELETE FROM evidence" in c.args[0]]
+    assert delete.args[1] == (42, ["company:unknown_firmographics"])
 
 
 # ---------------------------------------------------------------------------
@@ -602,3 +605,64 @@ def test_campaign_routing_still_uses_the_band_override_when_the_size_is_confirme
     out = opportunity_service(conn, fake, clock, campaign_env=env).process(oid)
     assert out.outcome == "approved", out
     assert sql1(conn, "SELECT campaign_id FROM approvals WHERE opportunity_id = %s", (oid,)) == "cid-small-override"
+
+
+# ---------------------------------------------------------------------------
+# Final whole-branch review, I7 (IMPORTANT): the evidence review bucket was
+# append-only with no supersession. `_size_gate` upserted
+# `company:firmographic_conflict` OR `company:unknown_firmographics` and never
+# removed the sibling, nor either one when the employer resolved. Migration
+# 009's unique index is per-FACT, so ONE employer could hold BOTH rows and a
+# count(*) over the bucket double-counted it; a resolved employer kept a stale
+# review row forever. (The authoritative per-lead bucket is
+# approvals.company_size_state -- see the report; `evidence` is the
+# per-employer view, and it has to be able to shrink.)
+# ---------------------------------------------------------------------------
+
+_REVIEW_FACTS = ("company:firmographic_conflict", "company:unknown_firmographics")
+
+
+def _review_facts(conn, eid):
+    return sorted(r["fact"] for r in sqlall(
+        conn, "SELECT fact FROM evidence WHERE subject_kind = 'employer' AND subject_id = %s AND fact = ANY(%s)",
+        (eid, list(_REVIEW_FACTS))))
+
+
+def test_one_employer_never_holds_both_company_size_review_rows(conn, clock):
+    _pid, eid, oid = seed_opportunity(
+        conn, clock, function_key="customer_success", domain="supersede.example", org_name="Supersede Co",
+        headcount=5000, size_band="51-200 employees",
+    )
+    assert eid is not None and oid is not None
+    svc = opportunity_service(conn, apollo_for("supersede.example", "Supersede Co", headcount=5000), clock)
+    posting = {"description_text": ""}
+
+    svc._size_gate(oid, {"id": eid, "employee_count": 5000, "size_band": "51-200 employees"}, posting)
+    assert _review_facts(conn, eid) == ["company:firmographic_conflict"]
+
+    # the employer's facts change: nothing usable any more -> the OTHER bucket
+    svc._size_gate(oid, {"id": eid, "employee_count": None, "size_band": None}, posting)
+    assert _review_facts(conn, eid) == ["company:unknown_firmographics"], "the superseded sibling must be removed"
+
+    # and back again
+    svc._size_gate(oid, {"id": eid, "employee_count": 5000, "size_band": "51-200 employees"}, posting)
+    assert _review_facts(conn, eid) == ["company:firmographic_conflict"]
+
+
+@pytest.mark.parametrize("employee_count,size_band_text", [
+    (120, "51-200 employees"),          # resolves in_range
+    (5000, "1,001-5,000 employees"),    # resolves out_of_range
+])
+def test_a_resolved_employer_keeps_no_stale_company_size_review_row(conn, clock, employee_count, size_band_text):
+    _pid, eid, oid = seed_opportunity(
+        conn, clock, function_key="customer_success", domain="resolved.example", org_name="Resolved Co",
+        headcount=5000, size_band="51-200 employees",
+    )
+    assert eid is not None and oid is not None
+    svc = opportunity_service(conn, apollo_for("resolved.example", "Resolved Co", headcount=5000), clock)
+    posting = {"description_text": ""}
+    svc._size_gate(oid, {"id": eid, "employee_count": 5000, "size_band": "51-200 employees"}, posting)
+    assert _review_facts(conn, eid) == ["company:firmographic_conflict"]
+
+    svc._size_gate(oid, {"id": eid, "employee_count": employee_count, "size_band": size_band_text}, posting)
+    assert _review_facts(conn, eid) == [], "a resolved employer must not keep a review row forever"

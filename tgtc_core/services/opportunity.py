@@ -79,6 +79,12 @@ RECOVERABLE_OPPORTUNITY_CLOSE_REASONS = frozenset({
 })
 
 #: Stored per person so reuse can run the SAME gates later without a new paid call.
+#: The company-size REVIEW bucket in `evidence`: the two facts migration 009's
+#: unique index covers, and the two `_record_size_review` supersedes against each
+#: other (final whole-branch review, I7). An employer holds at most one of them,
+#: and neither once its size resolves to in_range/out_of_range.
+COMPANY_SIZE_REVIEW_FACTS = ("company:firmographic_conflict", "company:unknown_firmographics")
+
 EVIDENCE_KEYS = ("title", "headline", "linkedin_url", "organization", "employment_history", "city", "state", "country",
                  "seniority", "organization_name", "organization_domain")
 
@@ -400,13 +406,40 @@ class OpportunityService:
         and it now carries ``rule_version`` (the precedent this module's own
         ``_record_attempt`` calls already set, embedding it in the jsonb payload
         rather than a dedicated column).
+
+        Final whole-branch review, I7 (IMPORTANT, 2026-09-20): the bucket is now
+        SUPERSEDING, not append-only -- see ``_record_size_review``.
         """
         min_employees = int(rule("min_employees"))
         state, excerpt, effective, _corroborated = self._resolve_size(emp, posting)
+        self._record_size_review(emp, state, excerpt)
         if state == "out_of_range":
             return self._close(opportunity_id, size_reject_reason(effective, min_employees=min_employees))
-        if state in ("firmographic_conflict", "unknown_firmographics") and emp.get("id") is not None:
-            with self.conn.cursor() as cur:
+        return None
+
+    def _record_size_review(self, emp: Dict[str, Any], state: str, excerpt: str) -> None:
+        """Keep this employer's company-size review bucket equal to its CURRENT
+        state: at most one of the two facts, and neither once the size resolves.
+
+        Final whole-branch review, I7 (IMPORTANT, 2026-09-20): this used to
+        upsert one fact and never remove the other, and never remove either when
+        the employer resolved. Migration 009's unique index is per-FACT, so one
+        employer could hold BOTH rows -- a ``count(*)`` over the bucket
+        double-counted it -- and a resolved employer kept a stale review row
+        forever. The authoritative per-lead bucket is
+        ``approvals.company_size_state`` (+ ``company_size_sources``); this table
+        is the per-EMPLOYER view of the same judgement, so it has to be able to
+        shrink as well as grow.
+        """
+        if emp.get("id") is None:
+            return
+        superseded = [f for f in COMPANY_SIZE_REVIEW_FACTS if f != f"company:{state}"]
+        with self.conn.cursor() as cur:
+            cur.execute(
+                "DELETE FROM evidence WHERE subject_kind = 'employer' AND subject_id = %s AND fact = ANY(%s)",
+                (emp["id"], superseded),
+            )
+            if f"company:{state}" in COMPANY_SIZE_REVIEW_FACTS:
                 cur.execute(
                     """
                     INSERT INTO evidence (subject_kind, subject_id, fact, value, status, source, excerpt)
@@ -420,8 +453,7 @@ class OpportunityService:
                             "rule_version": RULE_VERSION}),
                      excerpt[:300]),
                 )
-            self.conn.commit()
-        return None
+        self.conn.commit()
 
     def _resolve_size(self, emp: Dict[str, Any], posting: Dict[str, Any]) -> Tuple[str, str, Optional[int], bool]:
         """``(state, excerpt, effective_headcount, corroborated)`` for this employer.
