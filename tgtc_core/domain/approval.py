@@ -15,7 +15,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Mapping, Optional, Sequence
 
-from ..policy.campaigns import (CAMPAIGN_BY_FUNCTION, KNOWN_CONTROL_CAMPAIGN_IDS, POLICY_VERSION, size_band)
+from ..policy.campaigns import (CAMPAIGN_BY_FUNCTION, KNOWN_CONTROL_CAMPAIGN_IDS, POLICY_VERSION,
+                               campaign_id_allowed, size_band)
 from ..policy.compliance import (
     COMPLIANCE_RULE_VERSION, ENTITY_UNKNOWN, OPT_OUT_NONE, ComplianceRecord, evaluate,
 )
@@ -105,6 +106,7 @@ def build_approved_lead(
     now: Optional[datetime] = None,
     suppression_hits: Sequence[str] = (),
     outreach_controls: Optional[Mapping[str, Any]] = None,
+    env: Optional[Mapping[str, str]] = None,
 ) -> ApprovedLead | ApprovalRefusal:
     """Every requirement of PRODUCT_CONTRACT §8, checked in order, with a named refusal.
 
@@ -131,7 +133,7 @@ def build_approved_lead(
         return ApprovalRefusal("unknown_function", {"function_key": function_key})
     if not campaign_id:
         return ApprovalRefusal("no_campaign_configured", {"function_key": function_key})
-    if campaign_id not in set(allowed_campaign_ids) and campaign_id not in KNOWN_CONTROL_CAMPAIGN_IDS:
+    if not campaign_id_allowed(campaign_id, allowed_campaign_ids, env):
         return ApprovalRefusal("campaign_id_not_allowed", {"campaign_id": campaign_id})
     if not signing_key:
         return ApprovalRefusal("signing_key_missing")

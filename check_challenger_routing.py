@@ -94,17 +94,34 @@ def prove_mapping(mapping: Dict[str, str]) -> None:
 
 
 def compare_live(mapping: Dict[str, str], env: Mapping[str, str]) -> None:
-    from tgtc_core.adapters.instantly import InstantlyClient  # type: ignore
+    """GET each configured campaign by id. Read-only, no lead is touched."""
+    from tgtc_core.providers.http import RequestsTransport
+    from tgtc_core.providers.instantly import InstantlyClient
 
-    client = InstantlyClient(api_key=env["INSTANTLY_API_KEY"])
-    live = {c["id"]: c.get("name", "") for c in client.list_campaigns()}
-    print(f"live Instantly campaigns visible: {len(live)}")
+    key = str(env.get("INSTANTLY_API_KEY", "") or "").strip()
+    if not key:
+        _fail("INSTANTLY_API_KEY is not present in this environment")
+    client = InstantlyClient(
+        RequestsTransport(),
+        base_url=str(env.get("INSTANTLY_BASE_URL", "") or "https://api.instantly.ai/api/v2"),
+        api_key=key,
+    )
+    seen: Dict[str, str] = {}
     for fn in sorted(mapping):
         cid = mapping[fn]
-        if cid not in live:
-            _fail(f"{fn}: configured campaign {cid} does NOT exist in Instantly")
-        print(f"  {fn:<18} {cid}  live name: {live[cid]!r}")
-    print("OK    every configured Challenger campaign exists live\n")
+        if cid in seen:
+            print(f"  {fn:<18} {cid}  (alias of an already verified campaign: {seen[cid]!r})")
+            continue
+        result = client.get_campaign(cid)
+        if not result.ok:
+            _fail(f"{fn}: campaign {cid} did not resolve live (status={result.status} {result.message})")
+        data = result.data if isinstance(result.data, dict) else {}
+        name = str(data.get("name") or "")
+        status = data.get("status")
+        seen[cid] = name
+        print(f"  {fn:<18} {cid}  live name: {name!r}  status={status}")
+    print(f"OK    {len(seen)} distinct Challenger campaigns resolved live")
+    print()
 
 
 def outbox_report(env: Mapping[str, str]) -> None:

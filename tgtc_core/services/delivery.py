@@ -16,9 +16,10 @@ BEFORE any second create.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
 
 import psycopg
 
@@ -52,10 +53,35 @@ class OutboxItem:
     version_state_before: str
 
 
+def retired_campaign_block_reason(target, allowed_campaign_ids, env=None):
+    """Why this destination must not receive a lead, or None to proceed.
+
+    Eighteen Instantly campaigns exist: nine previous (Control) and nine
+    current (Challenger). An approval signed before the cutover carries a
+    Control id in its stored payload, and `get_campaign` cannot catch that --
+    the Control campaigns are still ACTIVE. The destination is therefore
+    re-validated against the CONFIGURED routes at send time.
+
+    Off unless the exhaustive flag is set, so the rollback path is unchanged.
+    """
+    from ..domain.exhaustive_routing import exhaustive_enabled
+    from ..policy.campaigns import KNOWN_CONTROL_CAMPAIGN_IDS
+    if not exhaustive_enabled(env):
+        return None
+    cid = str(target or "").strip()
+    if cid and cid in set(allowed_campaign_ids or ()):
+        return None
+    if cid in KNOWN_CONTROL_CAMPAIGN_IDS:
+        return "retired_control_campaign"
+    return "campaign_not_configured"
+
+
 class DeliveryService:
     def __init__(self, conn: psycopg.Connection, *, airtable: Optional[AirtableClient], instantly: Optional[InstantlyClient],
                  lease_seconds: int = 300, backoff_seconds: int = 120, max_attempts: int = 8,
                  check_campaign_status: bool = True, max_contacts_per_opportunity: int = 1,
+                 campaign_env: Optional[Mapping[str, str]] = None,
+                 env: Optional[Mapping[str, str]] = None,
                  now: Callable[[], datetime] = lambda: datetime.now(timezone.utc)):
         self.conn = conn
         self.airtable = airtable
@@ -65,6 +91,8 @@ class DeliveryService:
         self.max_attempts = max_attempts
         self.check_campaign_status = check_campaign_status
         self.max_contacts = max(1, min(3, max_contacts_per_opportunity))
+        self.allowed_campaign_ids = tuple((campaign_env or {}).values())
+        self.env = os.environ if env is None else env
         self.now = now
 
     # --- claim (R06) ----------------------------------------------------------
@@ -296,6 +324,14 @@ class DeliveryService:
         payload = item.payload
         target = str(payload["campaign"])
         email = str(payload["email"])
+        # R-cutover: the destination must still be a CONFIGURED route. A stored
+        # payload signed before the Control -> Challenger cutover names a
+        # retired campaign that is nonetheless still active in Instantly, so
+        # the status check below cannot catch it.
+        retired = retired_campaign_block_reason(target, self.allowed_campaign_ids, self.env)
+        if retired:
+            self._set(item, "blocked", blocked_reason=retired)
+            return DeliveryOutcome(item.id, "instantly", "blocked", retired)
         if self.check_campaign_status:
             camp = self.instantly.get_campaign(target)
             if not camp.ok:

@@ -368,7 +368,8 @@ class Runner:
                 channels: tuple[str, ...] = ("airtable", "instantly")) -> Dict[str, Dict[str, int]]:
         svc = DeliveryService(self.conn, airtable=self.airtable, instantly=self.instantly, lease_seconds=self.s.lease_seconds,
                               backoff_seconds=self.s.retry_backoff_seconds,
-                              max_contacts_per_opportunity=self.s.max_contacts_per_opportunity, now=self.now)
+                              max_contacts_per_opportunity=self.s.max_contacts_per_opportunity,
+                              campaign_env=self.s.campaign_env, env=os.environ, now=self.now)
         report: Dict[str, Dict[str, int]] = {}
         unknown = set(channels) - {"airtable", "instantly"}
         if unknown:

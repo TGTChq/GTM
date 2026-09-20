@@ -26,6 +26,8 @@ potentially chargeable request and the outcome after.
 
 from __future__ import annotations
 
+import os
+
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
@@ -893,6 +895,7 @@ class OpportunityService:
             posting=posting, classification=classification, employer=employer_view, person=person_row,
             function_key=opp["function_key"], campaign_id=campaign_id,
             allowed_campaign_ids=list(self.campaign_env.values()), signing_key=self.signing_key, now=self.now(),
+            env=os.environ,
             suppression_hits=hits, outreach_controls=self.outreach_controls,
         )
 

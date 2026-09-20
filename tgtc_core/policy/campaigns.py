@@ -126,6 +126,30 @@ KNOWN_CHALLENGER_CAMPAIGN_IDS = frozenset({
 })
 
 
+def campaign_id_allowed(campaign_id: str, allowed_campaign_ids, env: Optional[Mapping[str, str]] = None) -> bool:
+    """Is this campaign id a legitimate destination?
+
+    A CONFIGURED id always is. Historically an id from the Control set was also
+    accepted outright, as a fallback for a workspace with no configuration.
+
+    Under the exhaustive scope that fallback is a hazard, not a convenience:
+    eighteen campaigns exist, nine previous (Control) and nine current
+    (Challenger), and production holds pending outbox rows whose stored
+    campaign_id is a Control id. Draining those would enrol real people into
+    retired campaigns. With the flag on, only a configured id is accepted --
+    which still allows a Control id that someone deliberately configured.
+    """
+    from ..domain.exhaustive_routing import exhaustive_enabled  # local: avoids a cycle
+    cid = str(campaign_id or "").strip()
+    if not cid:
+        return False
+    if cid in set(allowed_campaign_ids or ()):
+        return True
+    if exhaustive_enabled(env):
+        return False
+    return cid in KNOWN_CONTROL_CAMPAIGN_IDS
+
+
 def campaign_for_function(function_key: str) -> Optional[Campaign]:
     return CAMPAIGN_BY_FUNCTION.get(str(function_key or "").strip().lower())
 
