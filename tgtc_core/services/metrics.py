@@ -63,6 +63,24 @@ def ledger(conn: psycopg.Connection) -> Dict[str, Any]:
         out["approved_distinct"] = _one(cur, "SELECT count(*) FROM approvals WHERE state <> 'revoked'")
         cur.execute("SELECT campaign_key, count(*) AS n FROM approvals WHERE state <> 'revoked' GROUP BY campaign_key")
         out["approved_by_campaign"] = {r["campaign_key"]: int(r["n"]) for r in cur.fetchall()}
+        # Fix round 1, C1 (CRITICAL, independent review, 2026-09-20): a
+        # firmographic_conflict/unknown_firmographics approval (Decision 2,
+        # 2026-09-19 -- proceeds, never discarded merely because two size
+        # sources conflict) was counted identically to a confirmed 25-1,000
+        # match in approved_distinct/approved_by_campaign. company_size_state
+        # IS NULL is treated as "review" (unconfirmed), never as confirmed --
+        # a legacy row from before this column existed was never verified
+        # against both sources either.
+        out["approved_confirmed_size"] = _one(
+            cur, "SELECT count(*) FROM approvals WHERE state <> 'revoked' AND company_size_state = 'in_range'")
+        out["approved_review_size"] = _one(
+            cur, "SELECT count(*) FROM approvals WHERE state <> 'revoked' AND COALESCE(company_size_state, '') <> 'in_range'")
+        cur.execute("SELECT campaign_key, count(*) AS n FROM approvals WHERE state <> 'revoked' AND company_size_state = 'in_range' "
+                    "GROUP BY campaign_key")
+        out["approved_by_campaign_confirmed_size"] = {r["campaign_key"]: int(r["n"]) for r in cur.fetchall()}
+        cur.execute("SELECT campaign_key, count(*) AS n FROM approvals WHERE state <> 'revoked' AND COALESCE(company_size_state, '') <> 'in_range' "
+                    "GROUP BY campaign_key")
+        out["approved_by_campaign_review_size"] = {r["campaign_key"]: int(r["n"]) for r in cur.fetchall()}
         out["airtable_receipts_created"] = _one(cur, "SELECT count(*) FROM delivery_receipts WHERE channel = 'airtable' AND receipt_kind IN ('created','reconciled')")
         out["instantly_receipts_created"] = _one(cur, "SELECT count(*) FROM delivery_receipts WHERE channel = 'instantly' AND receipt_kind IN ('created','reconciled')")
         out["instantly_receipts_existing"] = _one(cur, "SELECT count(*) FROM delivery_receipts WHERE channel = 'instantly' AND receipt_kind = 'existing'")

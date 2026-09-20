@@ -155,12 +155,20 @@ def build_approved_lead(
     # firmographic conflict/unknown was already let through there (never
     # discarded merely because two sources conflict) and is let through here
     # too -- it is never a reject, only out_of_range is.
+    #
+    # Fix round 1, I1 (IMPORTANT, independent review): min_employees/
+    # max_employees are read from rule(), not facts.py's own hardcoded
+    # defaults -- otherwise this gate silently forks from the policy manifest
+    # describe() reports.
+    min_employees, max_employees = int(rule("min_employees")), int(rule("max_employees"))
     count = employer.get("employee_count")
-    state, _size_excerpt, effective = resolve_company_size(
-        count, employer.get("size_band"), description=str(posting.get("description_text") or ""))
-    if state == "out_of_range":
-        return ApprovalRefusal(size_reject_reason(effective), {"employee_count": count, "size_band": employer.get("size_band")})
-    if state == "unknown_firmographics" and rule("require_employee_count"):
+    company_size_state, _size_excerpt, effective = resolve_company_size(
+        count, employer.get("size_band"), description=str(posting.get("description_text") or ""),
+        min_employees=min_employees, max_employees=max_employees)
+    if company_size_state == "out_of_range":
+        return ApprovalRefusal(size_reject_reason(effective, min_employees=min_employees),
+                               {"employee_count": count, "size_band": employer.get("size_band")})
+    if company_size_state == "unknown_firmographics" and rule("require_employee_count"):
         return ApprovalRefusal("insufficient_evidence:employee_count")
     if employer.get("excluded_industry"):
         return ApprovalRefusal("employer_excluded_industry", {"industry": employer.get("industry")})
@@ -204,6 +212,16 @@ def build_approved_lead(
         "employer_domain": employer_domain,
         "employer_linkedin_slug": employer.get("linkedin_slug") or "",
         "employee_count": count,
+        # Fix round 1, C1 (CRITICAL, independent review): the resolved
+        # company-size state travels WITH the lead from here on -- into the
+        # approvals row (_commit_approval), the KPI split (metrics.ledger),
+        # and the delivery payloads below, all reading this ONE field rather
+        # than each re-deciding or silently assuming "in_range". Only
+        # "in_range" means both reliable sources agree the company is
+        # confirmed 25-1,000; "firmographic_conflict"/"unknown_firmographics"
+        # reached here BECAUSE they are not a reject (Decision 2), not
+        # because they are confirmed.
+        "company_size_state": company_size_state,
         "industry": employer.get("industry") or "",
         "function_key": function_key,
         "campaign_key": campaign.key,
@@ -243,9 +261,19 @@ def _iso(value: Any) -> str:
 
 def airtable_fields(lead: Dict[str, Any], fp: str) -> Dict[str, Any]:
     """The production field names. ``Status`` is ALWAYS Approved; ``Validation Version``
-    is the core's policy version so the legacy Approved Sync skips these rows."""
+    is the core's policy version so the legacy Approved Sync skips these rows.
+
+    Fix round 1, C1 (CRITICAL, independent review): ``Employees``/``Size Band``
+    are both DERIVED FROM ``employee_count``, the field Decision 2 (2026-09-19)
+    can leave in dispute (``firmographic_conflict``) -- shipping them
+    unconditionally asserted a confident size label CRM/ops readers (and,
+    for the Instantly twin below, an outbound email TEMPLATE) would trust as
+    fact even when it is not one. Both are omitted (never a wrong or
+    unverified number) unless ``lead["company_size_state"] == "in_range"``.
+    """
     website = f"https://{lead['employer_domain']}"
-    count = lead.get("employee_count")
+    size_confirmed = lead.get("company_size_state") == "in_range"
+    count = lead.get("employee_count") if size_confirmed else None
     evidence = {
         "producer": "tgtc_core",
         "policy_version": lead["policy_version"],
@@ -284,7 +312,7 @@ def airtable_fields(lead: Dict[str, Any], fp: str) -> Dict[str, Any]:
         "Email Source": "apollo",
         "Apollo Email Status": "verified",
         "Employees": count,
-        "Size Band": size_band(count),
+        "Size Band": size_band(count) if size_confirmed else None,
         "Industry": lead.get("industry") or None,
         "Campaign ID": lead["campaign_id"],
         "Job ID": f"{lead.get('posting_source')}:{lead.get('posting_provider_id')}",
@@ -304,8 +332,17 @@ def airtable_fields(lead: Dict[str, Any], fp: str) -> Dict[str, Any]:
 
 
 def instantly_payload(lead: Dict[str, Any], *, skip_if_in_workspace: bool, verify_on_import: bool) -> Dict[str, Any]:
-    """Control-A payload shape with the exact custom-variable names production sends."""
-    count = lead.get("employee_count")
+    """Control-A payload shape with the exact custom-variable names production sends.
+
+    Fix round 1, C1 (CRITICAL, independent review): ``company_size``/
+    ``company_size_band`` are custom variables an outbound email TEMPLATE can
+    interpolate directly into copy a real recipient reads -- omitted (never a
+    disputed or unverified number) unless the size is actually confirmed
+    (see ``airtable_fields``'s own docstring for the full rationale, shared
+    here via the same ``lead["company_size_state"]`` field).
+    """
+    size_confirmed = lead.get("company_size_state") == "in_range"
+    count = lead.get("employee_count") if size_confirmed else None
     variables: Dict[str, Any] = {
         "open_role": lead["open_role"],
         "open_roles": lead["open_role"],
@@ -313,7 +350,7 @@ def instantly_payload(lead: Dict[str, Any], *, skip_if_in_workspace: bool, verif
         "matched_role": lead["open_role"],
         "role_bucket": lead["function_key"],
         "company_size": count,
-        "company_size_band": size_band(count),
+        "company_size_band": size_band(count) if size_confirmed else None,
         "job_posted_at": lead.get("posting_date_posted"),
         "job_source": lead.get("posting_source"),
         "job_url": lead.get("posting_url"),

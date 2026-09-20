@@ -325,6 +325,12 @@ CREATE TABLE IF NOT EXISTS evidence (
     created_at    timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS evidence_subject_idx ON evidence (subject_kind, subject_id);
+-- One row per employer per company-size state (fix round 1, I3): dedupe only
+-- for these two fact values; every other evidence fact keeps its existing
+-- one-row-per-observed-event semantics.
+CREATE UNIQUE INDEX IF NOT EXISTS evidence_employer_company_size_uq
+    ON evidence (subject_kind, subject_id, fact)
+    WHERE subject_kind = 'employer' AND fact IN ('company:firmographic_conflict', 'company:unknown_firmographics');
 
 -- ---------------------------------------------------------------------------
 -- Work, provider state, spend
@@ -402,6 +408,12 @@ CREATE TABLE IF NOT EXISTS approvals (
     fingerprint      text NOT NULL,
     lead_json        jsonb NOT NULL,
     run_id           text NOT NULL DEFAULT 'legacy-unattributed',
+    -- Resolved company-size state at approval time (Decision 2, 2026-09-19;
+    -- fix round 1 C1, 2026-09-20): 'in_range' is the only state confirmed
+    -- 25-1,000 -- 'firmographic_conflict'/'unknown_firmographics' reached
+    -- approval because Decision 2 forbids discarding them, NOT because they
+    -- are confirmed. NULL for a legacy row from before this column existed.
+    company_size_state text,
     state            text NOT NULL DEFAULT 'approved' CHECK (state IN ('approved', 'delivered', 'revoked')),
     revoke_reason    text,
     approved_at      timestamptz NOT NULL DEFAULT now(),

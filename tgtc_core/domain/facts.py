@@ -329,23 +329,36 @@ def parse_size_band(band: Optional[str]) -> Optional[Tuple[int, Optional[int]]]:
     return None
 
 
-def _classify_size_range(lo: int, hi: Optional[int]) -> str:
-    """inside / outside / indeterminate against the 25-1,000 target for ONE
-    source's numeric range. A range that straddles a target boundary (e.g.
-    "501-2,000") is indeterminate, not a vote either way."""
-    if hi is not None and lo >= TARGET_MIN_EMPLOYEES and hi <= TARGET_MAX_EMPLOYEES:
+def _classify_size_range(lo: int, hi: Optional[int], *, min_employees: int = TARGET_MIN_EMPLOYEES,
+                         max_employees: int = TARGET_MAX_EMPLOYEES) -> str:
+    """inside / outside / indeterminate against the [min_employees, max_employees]
+    target for ONE source's numeric range. A range that straddles a target
+    boundary (e.g. "501-2,000") is indeterminate, not a vote either way.
+
+    Fix round 1, I1 (IMPORTANT, independent review): ``min_employees``/
+    ``max_employees`` are keyword-only overrides of the module defaults (25,
+    1,000) precisely so a caller that already reads the SAME two numbers from
+    ``policy.requirements.rule("min_employees"/"max_employees")`` -- the live
+    gates in ``services/opportunity.py`` and ``domain/approval.py`` -- can
+    pass those values through instead of silently forking onto a hardcoded
+    copy `describe()`'s policy manifest does not govern. The defaults keep
+    every caller that has no `rule()` access (this module itself, and the
+    NOT-live ``domain/candidate_qualification.py``) working unchanged.
+    """
+    if hi is not None and lo >= min_employees and hi <= max_employees:
         return "inside"
-    if hi is not None and (hi < TARGET_MIN_EMPLOYEES or lo > TARGET_MAX_EMPLOYEES):
+    if hi is not None and (hi < min_employees or lo > max_employees):
         return "outside"
-    if hi is None and lo > TARGET_MAX_EMPLOYEES:
+    if hi is None and lo > max_employees:
         return "outside"
     return "indeterminate"
 
 
-def size_state(headcount: Optional[int] = None, size_band: Optional[str] = None) -> str:
+def size_state(headcount: Optional[int] = None, size_band: Optional[str] = None, *,
+               min_employees: int = TARGET_MIN_EMPLOYEES, max_employees: int = TARGET_MAX_EMPLOYEES) -> str:
     """Three-state, source-agnostic company-size decision (Decision 2, 2026-09-19):
 
-    - all reliable populated sources agree inside 25-1,000 -> "in_range"
+    - all reliable populated sources agree inside [min_employees, max_employees] -> "in_range"
     - all reliable populated sources agree outside -> "out_of_range"
     - reliable sources conflict across the boundary -> "firmographic_conflict"
     - nothing usable (absent, or the lone source is itself indeterminate) ->
@@ -353,15 +366,18 @@ def size_state(headcount: Optional[int] = None, size_band: Optional[str] = None)
 
     Deliberately takes no job posting -- it is a pure function of whatever
     company-size sources are available, reusable outside `extract_job_facts`
-    (e.g. task 5b's source-accuracy measurement).
+    (e.g. task 5b's source-accuracy measurement). ``min_employees``/
+    ``max_employees`` default to this module's own 25/1,000 constants; a
+    caller with access to ``policy.requirements.rule(...)`` should pass those
+    values explicitly (see ``_classify_size_range``'s docstring, fix round 1 I1).
     """
     votes: List[str] = []
     hc = _to_int(headcount)
     if hc is not None:
-        votes.append(_classify_size_range(hc, hc))
+        votes.append(_classify_size_range(hc, hc, min_employees=min_employees, max_employees=max_employees))
     band_range = parse_size_band(size_band) if size_band not in (None, "") else None
     if band_range is not None:
-        votes.append(_classify_size_range(*band_range))
+        votes.append(_classify_size_range(*band_range, min_employees=min_employees, max_employees=max_employees))
     if not votes:
         return "unknown_firmographics"
     determinate = [v for v in votes if v != "indeterminate"]
@@ -393,6 +409,8 @@ def resolve_company_size(
     *,
     description: str = "",
     company: Optional[Dict[str, object]] = None,
+    min_employees: int = TARGET_MIN_EMPLOYEES,
+    max_employees: int = TARGET_MAX_EMPLOYEES,
 ) -> Tuple[str, str, Optional[int]]:
     """``size_state(headcount, size_band)``, then the SAME free-only resolution
     (Decision 2, 2026-09-19) for a ``firmographic_conflict`` that
@@ -404,9 +422,15 @@ def resolve_company_size(
     Task 5c (2026-09-20, wiring): pulled out of ``extract_job_facts`` into its
     own function so it is THE one resolution path -- ``extract_job_facts``'s
     company block and every live company-size gate that wires the three-state
-    policy in (``services/opportunity.py``, ``domain/approval.py``,
-    ``services/acquisition.py``) call this instead of re-implementing it.
-    Reviewers on this branch have twice rejected a copied predicate.
+    policy in (``services/opportunity.py``, ``domain/approval.py``) call this
+    instead of re-implementing it. Reviewers on this branch have twice
+    rejected a copied predicate.
+
+    ``min_employees``/``max_employees`` (fix round 1, I1): keyword-only,
+    default to this module's own 25/1,000 -- pass ``rule("min_employees")``/
+    ``rule("max_employees")`` explicitly from a caller that has that import,
+    so the live gates stay governed by the SAME policy manifest `describe()`
+    reports instead of a silently-forked hardcoded copy.
 
     Returns ``(state, excerpt, effective_headcount)``. ``effective_headcount``
     is whichever single numeric reading DECIDED a determinate state --
@@ -418,7 +442,7 @@ def resolve_company_size(
     never used to decide the state itself, only to describe one already
     decided by ``size_state``.
     """
-    state = size_state(headcount, size_band)
+    state = size_state(headcount, size_band, min_employees=min_employees, max_employees=max_employees)
     excerpt = f"headcount={headcount!r}; size_band={size_band!r}"
     effective = _to_int(headcount)
     if state == "firmographic_conflict":
@@ -431,14 +455,15 @@ def resolve_company_size(
                 cand = _to_int(value)
                 if cand is None:
                     band = parse_size_band(str(value))
-                    if band is not None and _classify_size_range(*band) != "indeterminate":
+                    if band is not None and _classify_size_range(
+                            *band, min_employees=min_employees, max_employees=max_employees) != "indeterminate":
                         lo, hi = band
                         cand = lo if hi is None else (lo + hi) // 2
                 if cand is not None:
                     resolved, resolved_source = cand, f"provider_field:{key}"
                     break
         if resolved is not None and _plausible_headcount(resolved):
-            resolved_state = size_state(resolved, None)
+            resolved_state = size_state(resolved, None, min_employees=min_employees, max_employees=max_employees)
             if resolved_state in {"in_range", "out_of_range"}:
                 state = resolved_state
                 excerpt += f"; resolved via {resolved_source}={resolved}"
@@ -451,17 +476,21 @@ def resolve_company_size(
     return state, excerpt, effective
 
 
-def size_reject_reason(effective_headcount: Optional[int]) -> str:
+def size_reject_reason(effective_headcount: Optional[int], *, min_employees: int = TARGET_MIN_EMPLOYEES) -> str:
     """The established too_small/too_large vocabulary (``services/opportunity.py``,
     ``domain/approval.py``, ``domain/candidate_qualification.py`` all already used
     these two reason strings before this task) for an ``out_of_range`` verdict,
-    from whichever number decided it. Falls back to a generic reason only when no
-    single number is available to name a side (state was decided by two
+    from whichever number decided it. ``min_employees`` (fix round 1, I1):
+    keyword-only, defaults to this module's own 25 -- pass
+    ``rule("min_employees")`` explicitly so the too_small/too_large boundary
+    named in the reason matches the SAME rule the state itself was decided
+    against. Falls back to a generic reason only when no single number is
+    available to name a side (state was decided by two
     non-conflicting-but-unresolvable-to-a-number votes -- not reachable from
     ``resolve_company_size`` today, kept only so this is total)."""
     if effective_headcount is None:
         return "employer_size_out_of_range"
-    return "employer_too_small" if effective_headcount < TARGET_MIN_EMPLOYEES else "employer_too_large"
+    return "employer_too_small" if effective_headcount < min_employees else "employer_too_large"
 
 
 #: Fix round 1 (2026-09-19, CRITICAL): fields on the `company` mapping that

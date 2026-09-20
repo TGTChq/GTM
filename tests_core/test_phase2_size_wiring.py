@@ -188,3 +188,153 @@ def test_size_reject_reason_names_the_correct_boundary():
     assert size_reject_reason(TARGET_MIN_EMPLOYEES - 1) == "employer_too_small"
     assert size_reject_reason(TARGET_MAX_EMPLOYEES + 1) == "employer_too_large"
     assert size_reject_reason(None) == "employer_size_out_of_range"
+
+
+# ---------------------------------------------------------------------------
+# Fix round 1 (2026-09-20, independent review, Changes Requested)
+# ---------------------------------------------------------------------------
+
+# I1 (IMPORTANT): the live gates must read policy.requirements.rule(...), not
+# facts.py's own hardcoded TARGET_MIN/MAX_EMPLOYEES -- otherwise describe()'s
+# policy manifest silently stops governing the two gates that matter.
+
+def _custom_rule(**overrides):
+    """The real `rule()`, with the given keys overridden -- so a test can move
+    just min_employees/max_employees without breaking every OTHER rule() call
+    the same function makes (require_contact_linkedin, approval_max_age_days...)."""
+    from tgtc_core.policy.requirements import rule as real_rule
+
+    def fake(key):
+        return overrides[key] if key in overrides else real_rule(key)
+    return fake
+
+
+def test_size_gate_uses_rule_min_max_not_hardcoded_constants(monkeypatch):
+    import tgtc_core.services.opportunity as opp_module
+    monkeypatch.setattr(opp_module, "rule", _custom_rule(min_employees=100))
+    svc, closed = _size_gate_svc()
+    # 50 is inside facts.py's own hardcoded default (25-1,000) but OUTSIDE the
+    # policy-manifest min_employees=100 this test injects -- if the gate is
+    # still reading the hardcoded default, this proceeds instead of rejecting.
+    emp = {"id": 1, "employee_count": 50, "size_band": None}
+    outcome = svc._size_gate(1, emp, {"description_text": ""})
+    assert outcome == ("closed", "employer_too_small")
+    assert closed["reason"] == "employer_too_small"
+
+
+def test_approval_gate_uses_rule_min_max_not_hardcoded_constants(monkeypatch):
+    import tgtc_core.domain.approval as approval_module
+    monkeypatch.setattr(approval_module, "rule", _custom_rule(max_employees=40))
+    inputs = _inputs()
+    inputs["employer"].update(employee_count=50)  # inside the default 25-1,000, outside policy max=40
+    out = ap.build_approved_lead(**inputs)
+    assert isinstance(out, ap.ApprovalRefusal) and out.reason == "employer_too_large"
+
+
+# I3 (IMPORTANT): the conflict/unknown evidence bucket must not duplicate a
+# row per pass/call-site, and must carry a rule_version.
+
+def test_size_gate_conflict_evidence_is_deduped_and_carries_rule_version(conn):
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO employers (canonical_name, name_key, domain, employee_count, size_band) "
+            "VALUES ('Acme', 'acme', 'acme.com', 5000, '51-200 employees') RETURNING id"
+        )
+        eid = int(cur.fetchone()["id"])
+    conn.commit()
+    svc = OpportunityService.__new__(OpportunityService)
+    svc.conn = conn
+    emp = {"id": eid, "employee_count": 5000, "size_band": "51-200 employees"}
+    posting = {"description_text": ""}
+    # Mirrors process() calling _size_gate at both the pre- and post-enrichment
+    # points, and a retried/rescheduled pass calling it again later.
+    svc._size_gate(1, emp, posting)
+    svc._size_gate(1, emp, posting)
+    svc._size_gate(2, emp, posting)
+    rows = sqlall(conn, "SELECT fact, value FROM evidence WHERE subject_kind = 'employer' AND subject_id = %s", (eid,))
+    assert len(rows) == 1, "one conflicting employer must not accumulate a row per pass/call-site/retry"
+    assert rows[0]["fact"] == "company:firmographic_conflict"
+    assert rows[0]["value"].get("rule_version")
+
+
+# I4 (IMPORTANT): resolve_company_size's docstring must not claim a caller
+# that does not exist.
+
+def test_resolve_company_size_docstring_names_only_real_callers():
+    import tgtc_core.domain.facts as facts_module
+    doc = facts_module.resolve_company_size.__doc__ or ""
+    assert "services/acquisition.py" not in doc
+
+
+# C1 (CRITICAL): a firmographic_conflict/unknown_firmographics approval must
+# not enter the confirmed-25-1,000 KPI, and must not ship a confident size
+# label to Airtable/Instantly.
+
+def test_approved_lead_marks_a_conflict_as_not_confirmed_in_range():
+    inputs = _inputs()
+    inputs["employer"].update(employee_count=5000, size_band="51-200 employees")
+    out = ap.build_approved_lead(**inputs)
+    assert isinstance(out, ap.ApprovedLead)
+    assert out.lead["company_size_state"] == "firmographic_conflict"
+
+
+def test_approved_lead_marks_a_confirmed_in_range_employer_as_such():
+    out = ap.build_approved_lead(**_inputs())  # default employee_count=120, no size_band -> in_range
+    assert out.lead["company_size_state"] == "in_range"
+
+
+def test_delivery_payloads_suppress_size_fields_when_not_confirmed():
+    inputs = _inputs()
+    inputs["employer"].update(employee_count=5000, size_band="51-200 employees")
+    out = ap.build_approved_lead(**inputs)
+    fields = ap.airtable_fields(out.lead, out.fingerprint)
+    assert "Employees" not in fields and "Size Band" not in fields
+    payload = ap.instantly_payload(out.lead, skip_if_in_workspace=True, verify_on_import=False)
+    variables = payload["custom_variables"]
+    assert "company_size" not in variables and "company_size_band" not in variables
+
+
+def test_delivery_payloads_still_assert_size_when_confirmed_in_range():
+    out = ap.build_approved_lead(**_inputs())
+    fields = ap.airtable_fields(out.lead, out.fingerprint)
+    assert fields["Employees"] == 120 and fields["Size Band"]
+    payload = ap.instantly_payload(out.lead, skip_if_in_workspace=True, verify_on_import=False)
+    variables = payload["custom_variables"]
+    assert variables["company_size"] == 120 and variables["company_size_band"]
+
+
+def test_live_pipeline_approval_persists_company_size_state_and_ledger_splits_confirmed_vs_review(conn, clock):
+    pid, eid, oid = seed_opportunity(
+        conn, clock, function_key="customer_success", domain="conflictledger.example", org_name="Conflict Ledger Co",
+        headcount=5000, size_band="51-200 employees",
+    )
+    assert eid is not None and oid is not None
+    svc = opportunity_service(conn, apollo_for("conflictledger.example", "Conflict Ledger Co", headcount=5000), clock)
+    out = svc.process(oid)
+    assert out.outcome == "approved", out
+
+    state = sql1(conn, "SELECT company_size_state FROM approvals WHERE opportunity_id = %s", (oid,))
+    assert state == "firmographic_conflict"
+
+    from tgtc_core.services.metrics import ledger
+    report = ledger(conn)
+    assert report["approved_distinct"] == 1
+    assert report["approved_confirmed_size"] == 0, "a conflict must not be counted as confirmed 25-1,000"
+    assert report["approved_review_size"] == 1
+
+
+# M2 (MINOR, fix in this round): testing/fakes.py::make_posting_row must not
+# hardcode a size band inconsistent with whatever headcount= it is given --
+# a landmine that silently builds a conflicting fixture for the next task.
+
+def test_make_posting_row_default_size_band_is_consistent_with_headcount():
+    from datetime import datetime, timezone
+
+    from tgtc_core.domain.facts import size_state
+    from tgtc_core.testing.fakes import make_posting_row
+
+    for hc in (5, 12, 30, 150, 800, 2000, 50000):
+        row = make_posting_row(id=f"job-{hc}", title="X", organization="Acme", domain="acme.com",
+                               description="d", date_created=datetime.now(timezone.utc), headcount=hc)
+        state = size_state(row["org_linkedin_headcount"], row["org_linkedin_size"])
+        assert state in ("in_range", "out_of_range"), (hc, row["org_linkedin_size"], state)

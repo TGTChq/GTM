@@ -390,20 +390,38 @@ class OpportunityService:
         Never a paid call: ``resolve_company_size``'s free resolution reads
         only the posting's own description text and already-populated
         employer fields.
+
+        Fix round 1 (independent review): I1 (IMPORTANT) -- ``min_employees``/
+        ``max_employees`` are read from ``rule()``, not ``resolve_company_size``'s
+        own hardcoded defaults, so this gate stays governed by the SAME policy
+        manifest ``describe()`` reports. I3 (IMPORTANT) -- the evidence row is
+        an UPSERT (``evidence_employer_company_size_uq``, migration 009): one
+        row per employer per state, not a new row at every call site/pass/retry,
+        and it now carries ``rule_version`` (the precedent this module's own
+        ``_record_attempt`` calls already set, embedding it in the jsonb payload
+        rather than a dedicated column).
         """
+        min_employees, max_employees = int(rule("min_employees")), int(rule("max_employees"))
         state, excerpt, effective = resolve_company_size(
             emp.get("employee_count"), emp.get("size_band"),
             description=str(posting.get("description_text") or ""),
+            min_employees=min_employees, max_employees=max_employees,
         )
         if state == "out_of_range":
-            return self._close(opportunity_id, size_reject_reason(effective))
+            return self._close(opportunity_id, size_reject_reason(effective, min_employees=min_employees))
         if state in ("firmographic_conflict", "unknown_firmographics") and emp.get("id") is not None:
             with self.conn.cursor() as cur:
                 cur.execute(
-                    "INSERT INTO evidence (subject_kind, subject_id, fact, value, status, source, excerpt) "
-                    "VALUES ('employer', %s, %s, %s, 'recorded', 'tgtc_core', %s)",
+                    """
+                    INSERT INTO evidence (subject_kind, subject_id, fact, value, status, source, excerpt)
+                    VALUES ('employer', %s, %s, %s, 'recorded', 'tgtc_core', %s)
+                    ON CONFLICT (subject_kind, subject_id, fact)
+                    WHERE subject_kind = 'employer' AND fact IN ('company:firmographic_conflict', 'company:unknown_firmographics')
+                    DO UPDATE SET value = EXCLUDED.value, excerpt = EXCLUDED.excerpt, created_at = now()
+                    """,
                     (emp["id"], f"company:{state}",
-                     jsonb({"employee_count": emp.get("employee_count"), "size_band": emp.get("size_band")}),
+                     jsonb({"employee_count": emp.get("employee_count"), "size_band": emp.get("size_band"),
+                            "rule_version": RULE_VERSION}),
                      excerpt[:300]),
                 )
             self.conn.commit()
@@ -760,11 +778,12 @@ class OpportunityService:
                 cur.execute(
                     """
                     INSERT INTO approvals (opportunity_id, person_id, employer_id, campaign_key, function_key, campaign_id, policy_version,
-                                           lead_key, fingerprint, lead_json, run_id)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id
+                                           lead_key, fingerprint, lead_json, run_id, company_size_state)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id
                     """,
                     (opp["id"], person_id, opp["employer_id"], lead["campaign_key"], lead["function_key"], lead["campaign_id"],
-                     lead["policy_version"], approved.lead_key, approved.fingerprint, jsonb(lead), self.run_id),
+                     lead["policy_version"], approved.lead_key, approved.fingerprint, jsonb(lead), self.run_id,
+                     lead.get("company_size_state")),
                 )
                 approval_id = int(cur.fetchone()["id"])
                 cur.execute(

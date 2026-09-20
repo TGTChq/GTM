@@ -45,6 +45,33 @@ def _json(status: int, body: Any, headers: Optional[Dict[str, str]] = None) -> R
 # Fantastic
 # ---------------------------------------------------------------------------
 
+#: Fix round 1, M2 (MINOR, independent review): the declared LinkedIn size
+#: band a fake posting row carries used to be a fixed "51-200" regardless of
+#: whatever `headcount=` a caller passed -- once task 5c wired the live
+#: company-size gate to read BOTH fields, any test overriding headcount out
+#: of that fixed band silently built a firmographic_conflict fixture it never
+#: asked for (one already had to be patched around it: see
+#: tests_core/test_review_r10_evidence_invalidation.py). Real bucket
+#: boundaries, matching bands actually observed in saved provider rows.
+_LINKEDIN_SIZE_BANDS: Tuple[Tuple[int, Optional[int], str], ...] = (
+    (1, 10, "1-10"), (11, 50, "11-50"), (51, 200, "51-200"), (201, 500, "201-500"),
+    (501, 1000, "501-1,000"), (1001, 5000, "1,001-5,000"), (5001, 10000, "5,001-10,000"),
+    (10001, None, "10,001+"),
+)
+
+
+def _consistent_size_band(headcount: Optional[int]) -> str:
+    """The declared LinkedIn size band for a given headcount, so a fake row's
+    two size sources never silently disagree unless a caller asks for that
+    (via `org_linkedin_size=...` in `**extra`, applied after this default)."""
+    if headcount is None:
+        return "51-200"
+    for lo, hi, label in _LINKEDIN_SIZE_BANDS:
+        if headcount >= lo and (hi is None or headcount <= hi):
+            return label
+    return "51-200"
+
+
 def make_posting_row(*, id: str, title: str, organization: str, domain: str, description: str,
                      date_created: datetime, source: str = "linkedin", employment_type: str = "FULL_TIME",
                      countries: Tuple[str, ...] = ("US",), slug: str = "", headcount: Optional[int] = 120,
@@ -56,7 +83,7 @@ def make_posting_row(*, id: str, title: str, organization: str, domain: str, des
         "organization_url": f"https://{domain}" if domain else "", "domain_derived": domain,
         "org_linkedin_name": organization, "org_linkedin_slug": slug or re.sub(r"[^a-z0-9]+", "", organization.lower()),
         "org_linkedin_website": f"https://www.{domain}" if domain else "", "org_linkedin_headcount": headcount,
-        "org_linkedin_size": "51-200", "org_linkedin_industry": industry,
+        "org_linkedin_size": _consistent_size_band(headcount), "org_linkedin_industry": industry,
         "org_linkedin_recruitment_agency_derived": agency,
         "countries_derived": list(countries), "locations_derived": ["United States"], "location_type": location_type,
         "date_created": date_created.strftime("%Y-%m-%dT%H:%M:%SZ"),
