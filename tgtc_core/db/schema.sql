@@ -141,6 +141,16 @@ CREATE TABLE IF NOT EXISTS employers (
     -- two reliable sources (Decision 2, 2026-09-19) can be detected instead
     -- of masked by whichever single field happened to be read (migration 007).
     size_band       text,
+    -- Jurisdiction, STORED and never inferred (migration 011,
+    -- `tgtc-compliance/1`). The EMPLOYER's own country -- not the job's and not
+    -- the contact's -- plus its declared legal form and the corporate-subscriber
+    -- verdict `policy.compliance.classify_corporate_subscriber` returns for that
+    -- form, kept beside each other so the input and the decision are both
+    -- auditable. NULL means never observed, and an unknown entity type is never
+    -- treated as corporate.
+    company_country text,
+    employer_legal_entity_type text,
+    corporate_subscriber_status text,
     industry        text,
     founded_year    integer,
     agency_flag     boolean,
@@ -288,6 +298,12 @@ CREATE TABLE IF NOT EXISTS people (
     email_status         text,
     email_authority      text,
     email_verified_at    timestamptz,
+    -- The PERSON's own jurisdiction (migration 011): the only country field
+    -- that may decide a person gate. A job's location does not determine it.
+    -- NULL = the provider returned no country, which is unknown, which fails
+    -- closed for sending while the record stays counted for capacity.
+    contact_country      text,
+    opt_out_status       text,
     facts_json           jsonb NOT NULL DEFAULT '{}'::jsonb,
     created_at           timestamptz NOT NULL DEFAULT now(),
     updated_at           timestamptz NOT NULL DEFAULT now()
@@ -437,6 +453,29 @@ CREATE TABLE IF NOT EXISTS approvals (
     -- legitimate row meaning "decided, but not corroborated".
     -- NULL for a legacy row from before this column existed: unconfirmed.
     company_size_sources integer,
+    -- Country compliance, `tgtc-compliance/1` (migration 011). The per-lead
+    -- SNAPSHOT of the three jurisdictions -- three separate columns, so no
+    -- reader can reconstruct one from another -- plus the decision made on
+    -- them: which rule version decided, on what lawful basis and evidence,
+    -- when the privacy notice falls due, whether this lead may be sent to and,
+    -- when it may not, the named reason. A lead is delivered from this row, so
+    -- the decision has to be readable from this row.
+    --
+    -- outreach_eligible IS NULL is a lead approved before the gates existed:
+    -- unknown, never "yes". Metrics count it as compliance-blocked and the
+    -- delivery pre-check refuses to send it, exactly as an explicit false.
+    job_country      text,
+    company_country  text,
+    contact_country  text,
+    employer_legal_entity_type text,
+    corporate_subscriber_status text,
+    compliance_rule_version text,
+    legal_basis      text,
+    legal_basis_evidence text,
+    privacy_notice_due_at timestamptz,
+    opt_out_status   text,
+    outreach_eligible boolean,
+    outreach_block_reason text,
     state            text NOT NULL DEFAULT 'approved' CHECK (state IN ('approved', 'delivered', 'revoked')),
     revoke_reason    text,
     approved_at      timestamptz NOT NULL DEFAULT now(),
