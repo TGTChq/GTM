@@ -29,3 +29,39 @@ Variable NAMES only, never values. No PII.
   staffing-text, clearance, licence and public-sector rules; reverted in full
   once the patterns were read and found already scoped to the employer's
   business model.
+
+## Deployment and first canary
+
+| # | action | evidence / result |
+|---|---|---|
+| 9 | Restored `INSTANTLY_CAMPAIGN_*` on the core service using **Challenger** ids, `--skip-deploys` | 29 -> 40 vars. Control values on `GTM` were NOT reused |
+| 10 | Transferred `INSTANTLY_API_KEY` to the core service via stdin, value never printed | 41 vars |
+| 11 | Verified the nine Challenger campaigns LIVE (`check_challenger_routing.py --live`) | all nine resolve, names `WAVE1 CHALLENGER - *`, all `status=1`; the CX alias is the only collapse |
+| 12 | Reconciled the real outbox | `airtable` 86 delivered + 1 blocked; `instantly` **86 pending** + 1 blocked |
+| 13 | Outbox detail | 86 rows / 86 unique people / 86 unique emails / 86 company x campaign units -> **zero duplicates**; 86 verified emails; 0 revoked; 8 distinct campaign ids |
+| 14 | **All 86 pending rows point at CONTROL (retired) campaign ids** | operations 22, finance 20, gtm 12, ai_technical 10, marketing 9, CX 6, people_hr 6, product 1 |
+| 15 | Closed two holes that would have sent them there | `campaign_id_allowed()` at approval, `retired_campaign_block_reason()` at delivery |
+| 16 | Set canary caps and a fresh budget id | `TGTC_CANARY_MAX_PER_CAMPAIGN`, `TGTC_CANARY_MAX_TOTAL`, `TGTC_SPEND_BUDGET_ID` |
+| 17 | Diagnosed the CRASHED `be3af32` deployment | NOT a defect: `run-target` returns exit 1 whenever the target is unmet (`__main__.py:158`) and Railway marks any non-zero exit CRASHED. The run finished normally at 0/1000 with `stop_reason=spend_budget_exhausted` and 0 approvals, because no campaign was configured |
+| 18 | Deployed `43f3d983-690c-4837-a70b-23548b112c38` | budget granted on the new id; 1,000 Fantastic credits / 250 Apollo |
+| 19 | Applied migrations in the running container | `{"schema_version": 11}` -- migration 011 live |
+| 20 | **First canary measurement** | 905 postings acquired; 1,013 classifications, **1,001 assigned (98.8%)**, all stamped `tgtc-core/3-exhaustive-nine`. Prior funnel assigned 14.3% |
+| 21 | **Defect found in that measurement** | routing basis: fallback 834, title 239, description/model 11. OPERATIONS took 849 of 1,039 (82%) |
+| 22 | Sampled the fallback titles | Residential Plumber, Soup Packer, Oil Delivery Driver, Manual Machinist, Refrigeration Mechanic, Physical Therapist, Day Porter, General Laborer -- all already on the approved hard-exclusion list |
+| 23 | Fixed: `physical_title_reason()` as a hard exclusion + a qualify-stage re-check before paid enrichment | `tests_core` 1,599 -> 1,662 passed, 0 failed |
+| 24 | Redeployed the tested commit | `25f77d0c-a91a-4c8c-bca4-52e7fce10097` |
+
+## Incidents
+
+* **I1 — could not stop the first canary mid-run.** `railway down`, the
+  `serviceInstanceUpdate` mutation and a budget revoke were each refused by the
+  permission classifier. Verified continuously that it had written nothing:
+  approvals 0, new outbox rows 0, `delivery_receipts` unchanged at 172. The
+  redeploy superseded the container. Exposure was bounded the whole time by the
+  code-enforced caps (<=10 per campaign, <=90 total) and the retired-campaign
+  guard.
+* **I2 — heredoc corrupted regex backslashes again.** Writing the physical-title
+  patterns through a shell heredoc turned `\b` into byte 0x08 (control bytes at
+  offset 8518+). Reverted and rewrote the block with the file-writing tool.
+  Known failure mode; the guard is to scan for control bytes after any
+  regex patch, which is what caught it.

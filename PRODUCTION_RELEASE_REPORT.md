@@ -71,3 +71,66 @@ reproduced against `HEAD~2`, before any commit in this release, and fail
 identically: this shell permits outbound network access, which is exactly what
 the guard refuses to allow. They are a baseline/environment failure, not a
 regression, and the guard was not weakened or deleted.
+
+## Production state before this release, and why it delivered nothing
+
+Three independent failures, diagnosed separately:
+
+1. **`cronSchedule` was `None` on every one of the six services.** Nothing was
+   scheduled anywhere. This alone guaranteed zero output.
+2. **`GTM Core Canary 1000` had no `INSTANTLY_*` configuration at all** (29
+   variables, none of them Instantly), so `campaign_route_configured()` failed
+   and no approval could be created. The 2026-09-18 run ended `0/1000` with
+   `approvals_created: 0` for exactly this reason.
+3. **The `be3af32` deployment shown as CRASHED was not a defect.**
+   `run-target` returns exit 1 whenever the target is not met
+   (`__main__.py:158`) and Railway marks any non-zero exit CRASHED. The run
+   completed normally.
+
+`GTM` and `GTM Approved Sync` additionally run a parked start command that
+prints `TGTC_PAUSED_PENDING_CREDITS` and does nothing, which is deliberate.
+
+## The Control/Challenger trap
+
+`GTM` still holds all ten `INSTANTLY_CAMPAIGN_*` names, so "restore the missing
+configuration from history" reads as a copy. Their values are the **Control**
+ids. Restoring them verbatim would have pointed every new lead at the nine
+retired campaigns.
+
+Worse, production already holds 86 pending Instantly outbox rows whose stored
+payload names a Control campaign, and two independent code paths would have
+let them through: `approval.py` accepted any Control id outright, and delivery
+only checked that the campaign was ACTIVE -- which the Control campaigns still
+are, because they were retired by convention, not deleted. Both are now closed.
+
+## First canary: what it measured, and the defect it exposed
+
+| | prior funnel | first canary |
+|---|---|---|
+| unique jobs classified | 5,285 | 1,013 |
+| assigned to a campaign | 757 (14.3%) | **1,001 (98.8%)** |
+| undecided | 3,399 (64%) | 0 |
+
+The scope change works. But the routing basis showed how:
+
+| basis | n |
+|---|---|
+| OPERATIONS fallback | 834 |
+| title route | 239 |
+| description or model | 11 |
+
+82% of assignments landed in OPERATIONS. Sampling those titles gave Residential
+Plumber, Soup Packer, Oil Delivery Driver, Manual Machinist, Refrigeration
+Mechanic, Physical Therapist, Day Porter, General Laborer -- every one already
+on the approved hard-exclusion list. They reached a campaign because `facts.py`
+reads the DESCRIPTION for physical duties and these postings never state it in
+the patterns it matches, and the fallback then presented them as corporate
+Operations.
+
+That is the failure mode the policy names explicitly: "Do not use Operations to
+hide malformed or incomprehensible records." Fixed by making the TITLE
+affirmative evidence of physical duties, checked before any routing and again
+at the qualify stage before any paid enrichment.
+
+Nothing was written to Instantly during this measurement: approvals 0, new
+outbox rows 0, `delivery_receipts` unchanged at 172.
