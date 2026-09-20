@@ -16,8 +16,14 @@ from .acquisition_metrics import acquisition_profiles
 #: buckets are exact complements of each other and of this one definition -- the
 #: same rule ``domain.approval.size_confirmed`` applies to the lead payload, which
 #: is where ``company_size_sources`` comes from.
+#: Scoped re-review (MINOR, 2026-09-20): `company_size_state` is COALESCEd, not
+#: compared raw. `NOT (... AND company_size_state = 'in_range' AND ...)` is NULL
+#: -- not true -- for a row whose state IS NULL and whose count is populated, so
+#: such a row fell out of BOTH buckets and the two stopped summing to
+#: approved_distinct. The COALESCE restores the exact-complement guarantee for
+#: every storable row, not just the ones today's writer happens to produce.
 CONFIRMED_SIZE_PREDICATE = (
-    "state <> 'revoked' AND company_size_state = 'in_range' "
+    "state <> 'revoked' AND COALESCE(company_size_state, '') = 'in_range' "
     f"AND COALESCE(company_size_sources, 0) >= {int(MIN_CORROBORATING_SIZE_SOURCES)}"
 )
 CONFIRMED_SIZE_COUNT_SQL = f"SELECT count(*) FROM approvals WHERE {CONFIRMED_SIZE_PREDICATE}"

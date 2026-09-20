@@ -12,7 +12,14 @@
 -- How many reliable populated sources DETERMINATELY backed the state, from
 -- domain.facts.size_sources_agreeing: 2 = corroborated, 1 = accepted on one
 -- source (proceeds, never a reject -- Decision 2 -- but never "confirmed"),
--- 0 = the sources clash or none is determinate.
+-- 0 = no two determinate sources agree. That covers three storable cases, and
+-- 0 is correct for all three: nothing populated; the lone source indeterminate;
+-- and -- note, since it pairs 0 with an in_range state -- the two primary
+-- sources CLASHED and the verdict was then settled another way
+-- (resolve_company_size' free resolution from the employer's own stated
+-- headcount). A resolved clash is a decision, not corroboration, so
+-- (company_size_state = 'in_range', company_size_sources = 0) is a legitimate
+-- row and means exactly that.
 --
 -- NULL for every existing row: a real later re-resolution, never invented. A
 -- NULL count is treated as unconfirmed everywhere, exactly as a NULL

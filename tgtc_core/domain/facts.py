@@ -388,6 +388,11 @@ def size_sources_agreeing(headcount: Optional[object] = None, size_band: Optiona
     ``size_state`` returned for the same inputs; 0 when they clash or when none
     is determinate.
 
+    0 is therefore compatible with an ``in_range`` STATE: ``resolve_company_size``
+    can settle a clash from the employer's own stated headcount, and a settled
+    clash is a decision, not corroboration. Migration 010 documents the same
+    thing for the stored column.
+
     Final whole-branch review, C3 (CRITICAL, 2026-09-20): ``size_state`` answers
     a range question ("do the sources put this employer inside 25-1,000?") and
     answers it correctly from one source. It was being read as if it answered a

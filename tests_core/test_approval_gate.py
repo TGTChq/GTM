@@ -92,6 +92,12 @@ def test_airtable_payload_is_approved_only_and_carries_the_core_validation_versi
     for internal in ("Pending", "NEEDS_CHECK", "UNVERIFIED", "REROUTE", "ready", "waiting", "retry"):
         assert internal not in {str(v) for v in fields.values()}
     assert {"Outbound Company", "Outbound Role", "Role Focus", "Email", "Hiring Manager", "HM Title"} <= set(fields)
+    # Scoped re-review (MINOR): pinning the banned tokens only for a CONFIRMED
+    # lead let the UNCONFIRMED one stop being checked at all. NEEDS_CHECK is the
+    # single deliberate exception there; every other token must still be absent.
+    unconfirmed = ap.airtable_fields(ap.build_approved_lead(**_inputs()).lead, "fp")
+    for internal in ("Pending", "UNVERIFIED", "REROUTE", "ready", "waiting", "retry"):
+        assert internal not in {str(v) for v in unconfirmed.values()}, internal
 
 
 def test_instantly_payload_uses_documented_fields_and_the_control_variable_names():

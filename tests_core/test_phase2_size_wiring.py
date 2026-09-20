@@ -666,3 +666,38 @@ def test_a_resolved_employer_keeps_no_stale_company_size_review_row(conn, clock,
 
     svc._size_gate(oid, {"id": eid, "employee_count": employee_count, "size_band": size_band_text}, posting)
     assert _review_facts(conn, eid) == [], "a resolved employer must not keep a review row forever"
+
+
+# --- Scoped re-review, MINOR: the confirmed/review split lost NULL-safety.
+# `NOT (company_size_state = 'in_range' AND ...)` is NULL, not true, for a
+# legacy row whose company_size_state IS NULL -- so such a row was counted in
+# NEITHER bucket, and the two stopped being exact complements of
+# approved_distinct. The COALESCE the rewrite replaced is what guaranteed it.
+
+@pytest.mark.parametrize("legacy_sources", [None, 2])
+def test_the_confirmed_and_review_buckets_are_exact_complements_including_legacy_nulls(conn, clock, legacy_sources):
+    """Both storable shapes of a NULL state. With sources NULL the third
+    conjunct is FALSE and three-valued logic still yields FALSE, so the row
+    lands in review by luck; with a populated count the conjunction is NULL,
+    `NOT NULL` is NULL, and the row falls out of BOTH buckets -- the guarantee
+    the COALESCE this rewrite dropped used to provide unconditionally."""
+    from tgtc_core.services.metrics import ledger
+
+    _pid, eid, oid = seed_opportunity(
+        conn, clock, function_key="customer_success", domain="nullstate.example", org_name="Null State Co",
+        headcount=120, size_band="51-200 employees",
+    )
+    assert eid is not None and oid is not None
+    svc = opportunity_service(conn, apollo_for("nullstate.example", "Null State Co", headcount=120), clock)
+    assert svc.process(oid).outcome == "approved"
+    # A row from before migration 008/010 existed: both columns NULL.
+    with conn.cursor() as cur:
+        cur.execute("UPDATE approvals SET company_size_state = NULL, company_size_sources = %s "
+                    "WHERE opportunity_id = %s", (legacy_sources, oid))
+    conn.commit()
+
+    report = ledger(conn)
+    assert report["approved_distinct"] == 1
+    assert report["approved_confirmed_size"] == 0, "a row that was never checked is not confirmed"
+    assert report["approved_review_size"] == 1, "a NULL state must land in the review bucket, not vanish"
+    assert report["approved_confirmed_size"] + report["approved_review_size"] == report["approved_distinct"]
