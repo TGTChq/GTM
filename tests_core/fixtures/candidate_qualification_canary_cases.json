@@ -183,7 +183,7 @@
     "org_linkedin_slug": "canary-employer-04",
     "org_linkedin_website": "https://canary-employer-04.example"
    },
-   "current_outcome": "rejected:people_management",
+   "current_outcome": "qualified_pre_contact",
    "candidate_outcome": "qualified_pre_contact",
    "candidate_group": "gtm_revops_salesops",
    "candidate_flags": [

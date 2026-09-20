@@ -394,10 +394,16 @@ def extract_job_facts(
         jf.facts["role_level"] = Fact("role_level", "leadership_or_principal", TEXT, level_excerpt, RULE_VERSION)
     else:
         jf.facts["role_level"] = Fact("role_level", "ic_or_manager_unstated", TEXT if title else UNKNOWN, title, RULE_VERSION)
+    # Phase 2 audit task 2 (2026-09-19, Luis): managing people, owning direct reports,
+    # or a bare "Supervisory Responsibilities" heading is a FACT for later
+    # decision-maker mapping, never on its own a reason to reject the job -- measured
+    # 374 decisive rejects on this alone (57 on a bare heading, 16 of those explicitly
+    # negated), FN rate 21.4%, ~80 valid jobs lost per pool. `has_people_authority`
+    # (the clause-scoped extractor) is unchanged; only the automatic exclusion below is
+    # removed. As with task 1, this module has no policy switch, so the pre-audit
+    # behaviour is only replayable from git history or the counterfactual harness.
     authority = has_people_authority(desc)
-    jf.facts["people_management"] = Fact("people_management", bool(authority), TEXT if authority else UNKNOWN, authority or "")
-    if authority:
-        jf.exclusions.append(Exclusion("people_management", authority, TEXT))
+    jf.facts["people_management"] = Fact("people_management", bool(authority), TEXT if authority else UNKNOWN, authority or "", RULE_VERSION)
 
     # programmes / government
     head = desc[:2500]

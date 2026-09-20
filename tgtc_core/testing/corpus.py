@@ -123,9 +123,14 @@ CORPUS: List[Example] = [
             "Operate a forklift and pallet jack in the warehouse, must work in the warehouse daily, lift up to 50 lbs, "
             "and manage product listings for inventory counts. Full-time.", None, expected_excluded=True,
             note="attractive title, physical work"),
+    # Phase 2 audit task 1+2 (2026-09-19, Luis): this was a hard negative labelled
+    # excluded for "leadership" (title) and, once task 1 landed, for managing direct
+    # reports (people_management). Neither is a valid rejection reason on its own any
+    # more -- this is real finance leadership work and now scores as finance, not
+    # excluded, matching the corrected deterministic layer.
     Example("neg2", "Director of Finance",
             "Lead a team of accountants, own month-end close, financial reporting and FP&A, manage 4 direct reports and "
-            "present to the board. Full-time, remote in the US.", None, expected_excluded=True, note="leadership"),
+            "present to the board. Full-time, remote in the US.", "finance", note="leadership + people management, no longer excluded"),
     Example("neg3", "Customer Success Manager (Contract)",
             "This is a 6-month contract role. Own customer onboarding, product adoption and renewals for a portfolio of "
             "accounts, run quarterly business reviews. Remote within the US.", None, expected_excluded=True, note="contract"),
@@ -140,7 +145,13 @@ CORPUS: List[Example] = [
             "Full-time, on-site.", None, expected_excluded=True, note="clearance"),
     Example("neg7", "Operations Associate",
             "Great opportunity. Apply now.", None, expected_excluded=False, note="no evidence -> insufficient, never approved"),
+    # Phase 2 audit task 2 (2026-09-19, Luis): people management is a fact, never on
+    # its own a reason to reject. This is not excluded any more, but the deterministic
+    # lexicon has no concrete support-task signal here (only management/strategy
+    # language), so it stays ambiguous -- awaiting semantic classification in
+    # production, not "must not be compatible with any function".
     Example("neg8", "Head of Customer Support",
             "Manage and lead a team of 12 support specialists, conduct performance reviews, own hiring and coaching, "
-            "and set the support strategy. Full-time, US remote.", None, expected_excluded=True, note="people management"),
+            "and set the support strategy. Full-time, US remote.", None, expected_excluded=False,
+            note="people management alone no longer excludes; ambiguous pending semantic pass"),
 ]

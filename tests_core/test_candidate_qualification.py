@@ -80,7 +80,10 @@ def test_director_vp_head_title_is_not_an_automatic_rejection(case):
 
 @pytest.mark.parametrize("case", by_requirement("people_management_not_rejected"), ids=lambda c: c["case"])
 def test_people_management_is_not_an_automatic_rejection(case):
-    assert case["current_outcome"] == "rejected:people_management"
+    # Phase 2 audit task 2 (2026-09-19, Luis): facts.py itself no longer rejects on
+    # people management alone, so "current" and "candidate" policy now agree here.
+    # Before the audit, qualify_row returned "rejected:people_management".
+    assert case["current_outcome"] != "rejected:people_management"
     result = candidate(case["row"])
     assert result["outcome"] == "qualified_pre_contact"
     assert "people_management" in result["flags"]
