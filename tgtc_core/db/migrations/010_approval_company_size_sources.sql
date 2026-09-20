@@ -1,0 +1,21 @@
+-- Final whole-branch review, C3 (CRITICAL, 2026-09-20): company_size_state
+-- (migration 008) answers a RANGE question and answers it correctly from a
+-- single source -- but it was being read as if it answered a CONFIDENCE
+-- question. `in_range` from one source is the shape of nearly every live row
+-- (migration 007 adds employers.size_band with no backfill, and
+-- services/acquisition.py freezes it once enriched_at is set, so Apollo never
+-- writes one), and this branch's own size_source_accuracy.md measured the lone
+-- org_linkedin_headcount field at 19.2% agreement (5/26) with the employer's
+-- own stated headcount. Those approvals were counted in approved_confirmed_size
+-- and shipped that number as fact into Airtable fields and outbound email copy.
+--
+-- How many reliable populated sources DETERMINATELY backed the state, from
+-- domain.facts.size_sources_agreeing: 2 = corroborated, 1 = accepted on one
+-- source (proceeds, never a reject -- Decision 2 -- but never "confirmed"),
+-- 0 = the sources clash or none is determinate.
+--
+-- NULL for every existing row: a real later re-resolution, never invented. A
+-- NULL count is treated as unconfirmed everywhere, exactly as a NULL
+-- company_size_state already is -- a legacy row was never checked against two
+-- sources either.
+ALTER TABLE approvals ADD COLUMN IF NOT EXISTS company_size_sources integer;

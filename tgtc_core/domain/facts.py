@@ -354,6 +354,72 @@ def _classify_size_range(lo: int, hi: Optional[int], *, min_employees: int = TAR
     return "indeterminate"
 
 
+def _size_votes(headcount: Optional[object] = None, size_band: Optional[str] = None, *,
+                min_employees: int = TARGET_MIN_EMPLOYEES, max_employees: int = TARGET_MAX_EMPLOYEES) -> List[str]:
+    """One inside/outside/indeterminate vote per POPULATED reliable source, in a
+    fixed order (headcount, then declared size band).
+
+    Extracted so ``size_state`` (what the sources say) and
+    ``size_sources_agreeing`` (how many of them say it) read the SAME votes --
+    final whole-branch review C3 asked for a corroboration count, and a second
+    vote-building loop beside this one is exactly the copied predicate
+    reviewers have rejected twice on this branch.
+    """
+    votes: List[str] = []
+    hc = _to_int(headcount)
+    if hc is not None:
+        votes.append(_classify_size_range(hc, hc, min_employees=min_employees, max_employees=max_employees))
+    band_range = parse_size_band(size_band) if size_band not in (None, "") else None
+    if band_range is not None:
+        votes.append(_classify_size_range(*band_range, min_employees=min_employees, max_employees=max_employees))
+    return votes
+
+
+#: How many independent, populated, DETERMINATE company-size sources must agree
+#: before a size may be called confirmed -- reported in the ``approved_confirmed_size``
+#: KPI, and asserted as fact in an Airtable field or an outbound email variable.
+MIN_CORROBORATING_SIZE_SOURCES = 2
+
+
+def size_sources_agreeing(headcount: Optional[object] = None, size_band: Optional[str] = None, *,
+                          min_employees: int = TARGET_MIN_EMPLOYEES,
+                          max_employees: int = TARGET_MAX_EMPLOYEES) -> int:
+    """How many reliable populated sources DETERMINATELY back the verdict
+    ``size_state`` returned for the same inputs; 0 when they clash or when none
+    is determinate.
+
+    Final whole-branch review, C3 (CRITICAL, 2026-09-20): ``size_state`` answers
+    a range question ("do the sources put this employer inside 25-1,000?") and
+    answers it correctly from one source. It was being read as if it answered a
+    CONFIDENCE question, so ``size_state(400, None) == "in_range"`` -- the shape
+    of nearly every live row, since migration 007 backfills no ``size_band`` and
+    ``services/acquisition.py`` freezes it once ``enriched_at`` is set -- was
+    counted as a confirmed 25-1,000 match and shipped as fact into CRM fields
+    and outbound copy. This is the orthogonal second question, kept separate on
+    purpose: a single-source ``in_range`` still PROCEEDS (Decision 2: never
+    discard a potentially eligible company), it is simply not corroborated.
+    """
+    votes = _size_votes(headcount, size_band, min_employees=min_employees, max_employees=max_employees)
+    determinate = [v for v in votes if v != "indeterminate"]
+    if not determinate:
+        return 0
+    if "inside" in determinate and "outside" in determinate:
+        return 0
+    return len(determinate)
+
+
+def size_corroborated(headcount: Optional[object] = None, size_band: Optional[str] = None, *,
+                      min_employees: int = TARGET_MIN_EMPLOYEES, max_employees: int = TARGET_MAX_EMPLOYEES) -> bool:
+    """THE "may this size be asserted as fact" predicate (C3): at least
+    ``MIN_CORROBORATING_SIZE_SOURCES`` reliable populated sources determinately
+    agree. Every caller that reports a size as confirmed -- the approvals KPI
+    split, the Airtable/Instantly size fields, the founder-tier and
+    campaign-size decisions in ``services/opportunity.py`` -- asks THIS
+    function, never its own ``>= 2`` arithmetic."""
+    return size_sources_agreeing(headcount, size_band, min_employees=min_employees,
+                                 max_employees=max_employees) >= MIN_CORROBORATING_SIZE_SOURCES
+
+
 def size_state(headcount: Optional[int] = None, size_band: Optional[str] = None, *,
                min_employees: int = TARGET_MIN_EMPLOYEES, max_employees: int = TARGET_MAX_EMPLOYEES) -> str:
     """Three-state, source-agnostic company-size decision (Decision 2, 2026-09-19):
@@ -371,13 +437,7 @@ def size_state(headcount: Optional[int] = None, size_band: Optional[str] = None,
     caller with access to ``policy.requirements.rule(...)`` should pass those
     values explicitly (see ``_classify_size_range``'s docstring, fix round 1 I1).
     """
-    votes: List[str] = []
-    hc = _to_int(headcount)
-    if hc is not None:
-        votes.append(_classify_size_range(hc, hc, min_employees=min_employees, max_employees=max_employees))
-    band_range = parse_size_band(size_band) if size_band not in (None, "") else None
-    if band_range is not None:
-        votes.append(_classify_size_range(*band_range, min_employees=min_employees, max_employees=max_employees))
+    votes = _size_votes(headcount, size_band, min_employees=min_employees, max_employees=max_employees)
     if not votes:
         return "unknown_firmographics"
     determinate = [v for v in votes if v != "indeterminate"]

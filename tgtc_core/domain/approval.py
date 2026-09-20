@@ -17,7 +17,7 @@ from typing import Any, Dict, Optional, Sequence
 
 from ..policy.campaigns import (CAMPAIGN_BY_FUNCTION, KNOWN_CONTROL_CAMPAIGN_IDS, POLICY_VERSION, size_band)
 from ..policy.requirements import rule
-from .facts import resolve_company_size, size_reject_reason
+from .facts import MIN_CORROBORATING_SIZE_SOURCES, resolve_company_size, size_reject_reason, size_sources_agreeing
 from .identity import lead_key as make_lead_key
 from .employer_attribution import employer_attribution_conflict
 
@@ -165,6 +165,12 @@ def build_approved_lead(
     company_size_state, _size_excerpt, effective = resolve_company_size(
         count, employer.get("size_band"), description=str(posting.get("description_text") or ""),
         min_employees=min_employees, max_employees=max_employees)
+    # Final whole-branch review, C3 (CRITICAL): how many sources back that
+    # verdict travels with the lead beside the verdict itself. An in_range read
+    # from ONE source is still not a reject (below) -- it is simply not
+    # CONFIRMED, and must not be counted or asserted as if it were.
+    company_size_sources = size_sources_agreeing(count, employer.get("size_band"),
+                                                 min_employees=min_employees, max_employees=max_employees)
     if company_size_state == "out_of_range":
         return ApprovalRefusal(size_reject_reason(effective, min_employees=min_employees),
                                {"employee_count": count, "size_band": employer.get("size_band")})
@@ -222,6 +228,11 @@ def build_approved_lead(
         # reached here BECAUSE they are not a reject (Decision 2), not
         # because they are confirmed.
         "company_size_state": company_size_state,
+        #: C3: the corroboration count behind that state (0-2). "in_range" on
+        #: ONE source is the shape of nearly every live row (migration 007
+        #: backfills no size_band) and is NOT confirmation; ``size_confirmed``
+        #: below is the one place that judgement is made.
+        "company_size_sources": company_size_sources,
         "industry": employer.get("industry") or "",
         "function_key": function_key,
         "campaign_key": campaign.key,
@@ -259,6 +270,22 @@ def _iso(value: Any) -> str:
 # Delivery payloads
 # ---------------------------------------------------------------------------
 
+def size_confirmed(lead: Dict[str, Any]) -> bool:
+    """May this lead's company size be asserted as fact?
+
+    Final whole-branch review, C3 (CRITICAL): ``airtable_fields`` and
+    ``instantly_payload`` each carried their own ``lead.get("company_size_state")
+    == "in_range"`` line -- two copies of one judgement, and both of them wrong
+    for a single-source read. The judgement lives here once: the range verdict
+    must be ``in_range`` AND at least ``MIN_CORROBORATING_SIZE_SOURCES``
+    sources must have backed it (``domain.facts.size_sources_agreeing``,
+    recorded on the lead at approval time). A lead written before that field
+    existed carries no count and is treated as unconfirmed, never as confirmed.
+    """
+    return (lead.get("company_size_state") == "in_range"
+            and int(lead.get("company_size_sources") or 0) >= MIN_CORROBORATING_SIZE_SOURCES)
+
+
 def airtable_fields(lead: Dict[str, Any], fp: str) -> Dict[str, Any]:
     """The production field names. ``Status`` is ALWAYS Approved; ``Validation Version``
     is the core's policy version so the legacy Approved Sync skips these rows.
@@ -272,8 +299,8 @@ def airtable_fields(lead: Dict[str, Any], fp: str) -> Dict[str, Any]:
     unverified number) unless ``lead["company_size_state"] == "in_range"``.
     """
     website = f"https://{lead['employer_domain']}"
-    size_confirmed = lead.get("company_size_state") == "in_range"
-    count = lead.get("employee_count") if size_confirmed else None
+    confirmed = size_confirmed(lead)
+    count = lead.get("employee_count") if confirmed else None
     evidence = {
         "producer": "tgtc_core",
         "policy_version": lead["policy_version"],
@@ -312,7 +339,7 @@ def airtable_fields(lead: Dict[str, Any], fp: str) -> Dict[str, Any]:
         "Email Source": "apollo",
         "Apollo Email Status": "verified",
         "Employees": count,
-        "Size Band": size_band(count) if size_confirmed else None,
+        "Size Band": size_band(count) if confirmed else None,
         "Industry": lead.get("industry") or None,
         "Campaign ID": lead["campaign_id"],
         "Job ID": f"{lead.get('posting_source')}:{lead.get('posting_provider_id')}",
@@ -341,8 +368,8 @@ def instantly_payload(lead: Dict[str, Any], *, skip_if_in_workspace: bool, verif
     (see ``airtable_fields``'s own docstring for the full rationale, shared
     here via the same ``lead["company_size_state"]`` field).
     """
-    size_confirmed = lead.get("company_size_state") == "in_range"
-    count = lead.get("employee_count") if size_confirmed else None
+    confirmed = size_confirmed(lead)
+    count = lead.get("employee_count") if confirmed else None
     variables: Dict[str, Any] = {
         "open_role": lead["open_role"],
         "open_roles": lead["open_role"],
@@ -350,7 +377,7 @@ def instantly_payload(lead: Dict[str, Any], *, skip_if_in_workspace: bool, verif
         "matched_role": lead["open_role"],
         "role_bucket": lead["function_key"],
         "company_size": count,
-        "company_size_band": size_band(count) if size_confirmed else None,
+        "company_size_band": size_band(count) if confirmed else None,
         "job_posted_at": lead.get("posting_date_posted"),
         "job_source": lead.get("posting_source"),
         "job_url": lead.get("posting_url"),

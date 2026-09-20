@@ -87,7 +87,14 @@ def test_airtable_payload_is_approved_only_and_carries_the_core_validation_versi
 
 
 def test_instantly_payload_uses_documented_fields_and_the_control_variable_names():
-    out = ap.build_approved_lead(**_inputs())
+    # Final whole-branch review, C3: this test is about the documented FIELD
+    # NAMES, so the employer carries both size sources (headcount and the
+    # declared LinkedIn band, agreeing) -- a corroborated size is the case
+    # where company_size/company_size_band are sent at all. Whether they are
+    # sent for an uncorroborated size is tested in test_phase2_size_wiring.py.
+    inputs = _inputs()
+    inputs["employer"].update(size_band="51-200 employees")
+    out = ap.build_approved_lead(**inputs)
     payload = ap.instantly_payload(out.lead, skip_if_in_workspace=True, verify_on_import=False)
     assert set(payload) == {"campaign", "email", "first_name", "last_name", "company_name", "job_title", "website",
                             "skip_if_in_workspace", "skip_if_in_campaign", "verify_leads_on_import", "custom_variables"}

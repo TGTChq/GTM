@@ -428,6 +428,12 @@ CREATE TABLE IF NOT EXISTS approvals (
     -- approval because Decision 2 forbids discarding them, NOT because they
     -- are confirmed. NULL for a legacy row from before this column existed.
     company_size_state text,
+    -- How many reliable populated sources determinately backed that state
+    -- (final whole-branch review C3, 2026-09-20; domain.facts.size_sources_agreeing):
+    -- 2 = corroborated and confirmable, 1 = accepted on one source (it proceeds,
+    -- it is never a reject, but it is NOT confirmed), 0 = clash/indeterminate.
+    -- NULL for a legacy row from before this column existed: unconfirmed.
+    company_size_sources integer,
     state            text NOT NULL DEFAULT 'approved' CHECK (state IN ('approved', 'delivered', 'revoked')),
     revoke_reason    text,
     approved_at      timestamptz NOT NULL DEFAULT now(),

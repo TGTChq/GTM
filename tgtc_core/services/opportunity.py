@@ -778,12 +778,12 @@ class OpportunityService:
                 cur.execute(
                     """
                     INSERT INTO approvals (opportunity_id, person_id, employer_id, campaign_key, function_key, campaign_id, policy_version,
-                                           lead_key, fingerprint, lead_json, run_id, company_size_state)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id
+                                           lead_key, fingerprint, lead_json, run_id, company_size_state, company_size_sources)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id
                     """,
                     (opp["id"], person_id, opp["employer_id"], lead["campaign_key"], lead["function_key"], lead["campaign_id"],
                      lead["policy_version"], approved.lead_key, approved.fingerprint, jsonb(lead), self.run_id,
-                     lead.get("company_size_state")),
+                     lead.get("company_size_state"), lead.get("company_size_sources")),
                 )
                 approval_id = int(cur.fetchone()["id"])
                 cur.execute(

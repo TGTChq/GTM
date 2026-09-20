@@ -7,7 +7,21 @@ from __future__ import annotations
 from typing import Any, Dict
 
 import psycopg
+from ..domain.facts import MIN_CORROBORATING_SIZE_SOURCES
 from .acquisition_metrics import acquisition_profiles
+
+#: An approval whose company size is CONFIRMED: the range verdict is in_range AND
+#: enough reliable sources determinately backed it (final whole-branch review C3).
+#: Written once, as SQL, and used by every confirmed/review split below so the two
+#: buckets are exact complements of each other and of this one definition -- the
+#: same rule ``domain.approval.size_confirmed`` applies to the lead payload, which
+#: is where ``company_size_sources`` comes from.
+CONFIRMED_SIZE_PREDICATE = (
+    "state <> 'revoked' AND company_size_state = 'in_range' "
+    f"AND COALESCE(company_size_sources, 0) >= {int(MIN_CORROBORATING_SIZE_SOURCES)}"
+)
+CONFIRMED_SIZE_COUNT_SQL = f"SELECT count(*) FROM approvals WHERE {CONFIRMED_SIZE_PREDICATE}"
+REVIEW_SIZE_COUNT_SQL = f"SELECT count(*) FROM approvals WHERE NOT ({CONFIRMED_SIZE_PREDICATE}) AND state <> 'revoked'"
 
 
 def _one(cur, sql: str, params=()) -> Any:
@@ -71,15 +85,20 @@ def ledger(conn: psycopg.Connection) -> Dict[str, Any]:
         # IS NULL is treated as "review" (unconfirmed), never as confirmed --
         # a legacy row from before this column existed was never verified
         # against both sources either.
-        out["approved_confirmed_size"] = _one(
-            cur, "SELECT count(*) FROM approvals WHERE state <> 'revoked' AND company_size_state = 'in_range'")
-        out["approved_review_size"] = _one(
-            cur, "SELECT count(*) FROM approvals WHERE state <> 'revoked' AND COALESCE(company_size_state, '') <> 'in_range'")
-        cur.execute("SELECT campaign_key, count(*) AS n FROM approvals WHERE state <> 'revoked' AND company_size_state = 'in_range' "
-                    "GROUP BY campaign_key")
+        # Final whole-branch review, C3 (CRITICAL, 2026-09-20): "in_range" is a
+        # RANGE verdict and a single source produces it -- the shape of nearly
+        # every live row, since migration 007 backfills no employers.size_band.
+        # Confirmed now also requires corroboration (migration 010's
+        # company_size_sources, from domain.facts.size_sources_agreeing); a
+        # single-source row is reported in the REVIEW bucket, where it can be
+        # seen, rather than in the confirmed-25-1,000 KPI. NULL (a legacy row,
+        # or one approved before that column existed) is unconfirmed.
+        out["approved_confirmed_size"] = _one(cur, CONFIRMED_SIZE_COUNT_SQL)
+        out["approved_review_size"] = _one(cur, REVIEW_SIZE_COUNT_SQL)
+        cur.execute(f"SELECT campaign_key, count(*) AS n FROM approvals WHERE {CONFIRMED_SIZE_PREDICATE} GROUP BY campaign_key")
         out["approved_by_campaign_confirmed_size"] = {r["campaign_key"]: int(r["n"]) for r in cur.fetchall()}
-        cur.execute("SELECT campaign_key, count(*) AS n FROM approvals WHERE state <> 'revoked' AND COALESCE(company_size_state, '') <> 'in_range' "
-                    "GROUP BY campaign_key")
+        cur.execute(f"SELECT campaign_key, count(*) AS n FROM approvals WHERE NOT ({CONFIRMED_SIZE_PREDICATE}) "
+                    "AND state <> 'revoked' GROUP BY campaign_key")
         out["approved_by_campaign_review_size"] = {r["campaign_key"]: int(r["n"]) for r in cur.fetchall()}
         out["airtable_receipts_created"] = _one(cur, "SELECT count(*) FROM delivery_receipts WHERE channel = 'airtable' AND receipt_kind IN ('created','reconciled')")
         out["instantly_receipts_created"] = _one(cur, "SELECT count(*) FROM delivery_receipts WHERE channel = 'instantly' AND receipt_kind IN ('created','reconciled')")

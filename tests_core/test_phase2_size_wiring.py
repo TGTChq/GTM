@@ -297,7 +297,14 @@ def test_delivery_payloads_suppress_size_fields_when_not_confirmed():
 
 
 def test_delivery_payloads_still_assert_size_when_confirmed_in_range():
-    out = ap.build_approved_lead(**_inputs())
+    """Final whole-branch review, C3: this test's INTENT is unchanged -- a
+    confirmed size must still be asserted -- but "confirmed" now means
+    corroborated, so the employer carries both sources (headcount AND the
+    declared LinkedIn band, agreeing) instead of the single headcount that used
+    to be enough. The single-source case has its own test below."""
+    inputs = _inputs()
+    inputs["employer"].update(employee_count=120, size_band="51-200 employees")
+    out = ap.build_approved_lead(**inputs)
     fields = ap.airtable_fields(out.lead, out.fingerprint)
     assert fields["Employees"] == 120 and fields["Size Band"]
     payload = ap.instantly_payload(out.lead, skip_if_in_workspace=True, verify_on_import=False)
@@ -398,3 +405,69 @@ def test_make_posting_row_default_size_band_is_consistent_with_headcount():
                                description="d", date_created=datetime.now(timezone.utc), headcount=hc)
         state = size_state(row["org_linkedin_headcount"], row["org_linkedin_size"])
         assert state in ("in_range", "out_of_range"), (hc, row["org_linkedin_size"], state)
+
+
+# ---------------------------------------------------------------------------
+# Final whole-branch review, C3 (CRITICAL): "in_range" from ONE source was
+# reported as CONFIRMED -- and live that is nearly every row. Migration 007
+# adds employers.size_band with no backfill and services/acquisition.py freezes
+# it once enriched_at is set (Apollo never writes a band), so for the existing
+# employer population the two-source check degenerates to the old single-field
+# read of org_linkedin_headcount -- which this branch's own
+# size_source_accuracy.md measured at 19.2% agreement (5/26) against the
+# employer's own stated headcount. Those leads were counted in
+# approved_confirmed_size and shipped that number as fact into Airtable and
+# outbound email copy. Ledger row 17's 86.7%/13.3% came from a replay where
+# BOTH fields were present; that is not what the live gate produces.
+#
+# The fix distinguishes "accepted on one source" from "corroborated": the range
+# verdict (size_state) is unchanged -- a single-source in_range still proceeds,
+# it is never a reject -- but only a corroborated in_range is CONFIRMED.
+# ---------------------------------------------------------------------------
+
+def test_size_sources_agreeing_counts_the_determinate_sources_behind_the_verdict():
+    from tgtc_core.domain.facts import size_corroborated, size_sources_agreeing
+
+    assert size_sources_agreeing(400, "201-500 employees") == 2 and size_corroborated(400, "201-500 employees")
+    assert size_sources_agreeing(400, None) == 1 and not size_corroborated(400, None)
+    assert size_sources_agreeing(None, "201-500 employees") == 1 and not size_corroborated(None, "201-500 employees")
+    # a band that straddles the boundary is not a vote either way, so it cannot corroborate
+    assert size_sources_agreeing(400, "501-2,000 employees") == 1 and not size_corroborated(400, "501-2,000 employees")
+    # sources that clash corroborate nothing at all
+    assert size_sources_agreeing(400, "1,001-5,000 employees") == 0
+    assert size_sources_agreeing(None, None) == 0
+    # out_of_range corroborates the same way
+    assert size_sources_agreeing(5000, "1,001-5,000 employees") == 2
+
+
+def test_a_single_source_in_range_is_not_confirmed_and_asserts_no_size():
+    """The live shape: employee_count present, size_band never backfilled."""
+    out = ap.build_approved_lead(**_inputs())   # employee_count=120, no size_band
+    assert isinstance(out, ap.ApprovedLead)
+    assert out.lead["company_size_state"] == "in_range", "a single source is still not a reject"
+    assert out.lead["company_size_sources"] == 1
+    fields = ap.airtable_fields(out.lead, out.fingerprint)
+    assert "Employees" not in fields and "Size Band" not in fields
+    variables = ap.instantly_payload(out.lead, skip_if_in_workspace=True, verify_on_import=False)["custom_variables"]
+    assert "company_size" not in variables and "company_size_band" not in variables
+
+
+def test_live_pipeline_ledger_does_not_count_a_single_source_approval_as_confirmed(conn, clock):
+    """End to end through the real tables: the employer has a headcount and no
+    declared band -- the population migration 007 left unbackfilled -- and the
+    approval must land in the REVIEW bucket, not the confirmed-25-1,000 KPI."""
+    _pid, eid, oid = seed_opportunity(
+        conn, clock, function_key="customer_success", domain="singlesource.example", org_name="Single Source Co",
+        headcount=120, size_band="",
+    )
+    assert eid is not None and oid is not None
+    assert sql1(conn, "SELECT size_band FROM employers WHERE id = %s", (eid,)) in (None, "")
+    svc = opportunity_service(conn, apollo_for("singlesource.example", "Single Source Co", headcount=120), clock)
+    assert svc.process(oid).outcome == "approved"
+
+    from tgtc_core.services.metrics import ledger
+    report = ledger(conn)
+    assert report["approved_distinct"] == 1
+    assert report["approved_confirmed_size"] == 0, "one source is not corroboration"
+    assert report["approved_review_size"] == 1
+    assert sql1(conn, "SELECT company_size_sources FROM approvals WHERE opportunity_id = %s", (oid,)) == 1
