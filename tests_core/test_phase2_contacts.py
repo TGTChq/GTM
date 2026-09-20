@@ -496,3 +496,52 @@ def test_the_reuse_path_still_adds_a_contact_in_a_persona_not_yet_held(conn, clo
         conn, "SELECT p.title FROM approvals a JOIN people p ON p.id = a.person_id WHERE a.state <> 'revoked'")}
     assert titles == {"Marketing Director", "VP Marketing"}
     assert fake.served_paid == paid_before, "reuse must cost no paid call"
+
+
+# --- Final whole-branch review, I5 (IMPORTANT): task 7 fixed the FALSE-POSITIVE
+# half of founder detection ("Vice President" is not a founder) and left the
+# false-negative half. is_founder_tier never normalized punctuation, so a title
+# that jams two roles together -- "Founder/CTO", "CEO/Founder", "Co-Founder/CEO",
+# the commonest way a founder writes their own title -- was NOT founder-tier,
+# while title_matches() accepted it against the ordinary executive list. Such a
+# person passed both pre_enrichment_check and evaluate_contact at an employer far
+# above the 99-employee founder limit. contact_mapping.is_small_company_executive
+# escaped only because it runs normalize_title first -- the two views of "is this
+# a founder" disagreed on the same string.
+
+@pytest.mark.parametrize("title", ["Founder/CTO", "CEO/Founder", "Co-Founder/CEO", "Founder & CEO",
+                                   "CEO | Founder", "Owner/Operator", "Founder, CEO"])
+def test_a_founder_title_jammed_against_another_role_is_still_founder_tier(title):
+    assert is_founder_tier(title), title
+
+
+@pytest.mark.parametrize("title", ["VP/Marketing", "Vice President, Sales", "SVP/Engineering",
+                                   "Senior Vice President | People"])
+def test_punctuation_normalization_does_not_widen_the_vice_president_carve_out(title):
+    assert not is_founder_tier(title), title
+
+
+def test_the_buyer_title_gate_and_the_founder_check_agree_on_a_slashed_title():
+    """The two callers must agree on the SAME string: the buyer-title matcher
+    accepts "Founder/CTO" against engineering's executive list, so the founder
+    check has to catch it -- otherwise a founder is approved at an employer
+    above the founder-fallback limit."""
+    from tgtc_core.domain.gates import evaluate_contact
+    from tgtc_core.policy.campaigns import buyer_titles
+
+    titles = buyer_titles("engineering", founder_allowed=False)
+    assert title_matches("Founder/CTO", titles), "precondition: the gate's matcher accepts it"
+    person = make_person(id="p-founder", first="Fay", last="Founder", title="Founder/CTO", org_name="Acme",
+                         org_domain="acme.com", email="fay@acme.com", email_status="verified")
+    result = evaluate_contact(person=person, employer_name="Acme", employer_domains={"acme.com"},
+                              buyer_titles=titles, founder_allowed=False)
+    assert not result.passed and result.reason == "contact:founder_tier_not_allowed_for_size"
+
+
+def test_the_two_founder_views_agree_after_normalization():
+    """contact_mapping normalizes first and campaigns did not: the same string
+    must now read the same way through both doors."""
+    from tgtc_core.domain.contact_mapping import normalize_title
+
+    for title in ("Founder/CTO", "CEO/Founder", "Co-Founder/CEO", "VP/Marketing", "Vice President, Sales"):
+        assert is_founder_tier(title) == is_founder_tier(normalize_title(title)), title

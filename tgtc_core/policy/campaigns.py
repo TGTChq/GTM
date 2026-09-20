@@ -226,9 +226,30 @@ FOUNDER_TIER_TITLES = frozenset({"founder", "co-founder", "cofounder", "co found
 #: narrower carve-out of its own.
 _CHIEF_EXECUTIVE_OFFICER_PHRASE = re.compile(r"\bchief executive officer\b")
 
+#: Punctuation that separates two roles jammed into one title string --
+#: "Founder/CTO", "CEO | Founder", "Co-Founder, CEO", "Founder & CEO".
+#:
+#: Final whole-branch review, I5 (IMPORTANT, 2026-09-20): ``is_founder_tier``
+#: normalized only the hyphen, so its token test saw ONE token "founder/cto"
+#: and answered False for the commonest way a founder writes their own title,
+#: while ``title_matches`` happily accepted the same string against the
+#: ordinary executive list -- a founder passing both contact gates at an
+#: employer far above the 99-employee founder limit.
+#: ``domain.contact_mapping.normalize_title`` (which imports this module, so
+#: the dependency can only run this way) applies the SAME class as its first
+#: step: one definition of "what separates two titles", not two that can
+#: drift apart -- which is exactly how these two views of "is this a founder"
+#: came to disagree on the same string.
+TITLE_SEPARATORS = re.compile(r"[/\-,|().:;+]")
+
+
+def split_title_separators(title: str) -> str:
+    """Lower-cased title with role separators (and ``&``) turned into spaces."""
+    return TITLE_SEPARATORS.sub(" ", str(title or "").lower().replace("&", " and "))
+
 
 def is_founder_tier(title: str) -> bool:
-    lowered = " ".join(str(title or "").lower().replace("-", " ").split())
+    lowered = " ".join(split_title_separators(title).split())
     if lowered in FOUNDER_TIER_TITLES or lowered.replace(" ", "") in {"cofounder", "ceo"}:
         return True
     if any(token in lowered.split() for token in ("founder", "ceo", "owner")):
