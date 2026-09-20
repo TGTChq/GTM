@@ -417,3 +417,82 @@ def test_two_persona_function_finalizes_instead_of_waiting_forever_at_default_qu
     assert out.details["approved_total"] == 2
     state = sqlall(conn, "SELECT state FROM opportunities WHERE id = %s", (opp,))[0]["state"]
     assert state == "approved", "a two-persona function must finalize once diversity is exhausted, not wait forever"
+
+
+# --- Final whole-branch review, C2 (CRITICAL): role diversity was enforced on
+# only ONE of the two approval paths. `select_next_contact`'s hard stop guards
+# the SEARCH loop; `_reusable_person` -- the FREE path, which runs FIRST in
+# every call -- filtered on approved_refs and the per-person gates only and
+# never consulted `state.existing_personas`. Because task 9 deliberately keeps
+# an opportunity open across calls, call N+1's reuse path could approve a
+# second (and a third) stored person in a persona this opportunity already
+# holds, and the opportunity would finalize `approved` with 2-3 same-role
+# contacts counted toward the "2-3 role-diverse" target. Existing coverage
+# could not see it: test_review_r04_reuse_gates.py runs at the constructor
+# default quota of 1 (where no persona is ever held), and the task 9 tests
+# above never exercise reuse.
+
+def _store_reusable_person(svc, conn, eid: int, *, person, email: str):
+    """Persist a stored, employment-verified, verified-email person at this
+    employer through the SAME writer the live enrichment path uses
+    (`_upsert_person`) -- the state a prior opportunity's enrichment leaves
+    behind at an employer between two qualification calls."""
+    enriched = dict(person)
+    enriched.pop("_email", None), enriched.pop("_email_status", None)
+    enriched.update(email=email, email_status="verified")
+    emp = sqlall(conn, "SELECT * FROM employers WHERE id = %s", (eid,))[0]
+    return svc._upsert_person(enriched, emp, email_alignment="employer_domain", employment_verified=True)
+
+
+def test_the_reuse_path_never_adds_a_second_contact_in_a_persona_already_held(conn, clock):
+    domain, org = "acme.com", "Acme"
+    owner = make_person(id="p-owner", first="Owner", last="Person", title="Marketing Director",
+                        org_name=org, org_domain=domain, email="owner@acme.com", email_status="verified")
+    _, eid, opp = seed_opportunity(conn, clock, function_key="marketing", domain=domain, org_name=org)
+    fake = apollo_for(domain, org, function_key="marketing", people=[owner])
+    svc = opportunity_service(conn, fake, clock, max_contacts_per_opportunity=3)
+    first = svc.process(opp)
+    assert first.outcome == "wait" and first.reason.startswith("buyer_search_pending:")
+    assert sqlall(conn, "SELECT count(*) AS n FROM approvals")[0]["n"] == 1
+
+    # Between the two calls, a SECOND person is stored at this employer, in the
+    # SAME persona as the contact already approved (both are marketing's
+    # functional hiring owner). "Three people in the same role are not
+    # diversification" -- and neither are two.
+    twin = make_person(id="p-twin", first="Twin", last="Person", title="Director of Marketing",
+                       org_name=org, org_domain=domain, email="twin@acme.com", email_status="verified")
+    _store_reusable_person(svc, conn, eid, person=twin, email="twin@acme.com")
+    assert contact_persona("Director of Marketing", "marketing") == contact_persona("Marketing Director", "marketing")
+
+    second = opportunity_service(conn, fake, clock, max_contacts_per_opportunity=3).process(opp)
+    assert second.details.get("approvals_created", 0) == 0, second
+    titles = [r["title"] for r in sqlall(
+        conn, "SELECT p.title FROM approvals a JOIN people p ON p.id = a.person_id WHERE a.state <> 'revoked'")]
+    assert titles == ["Marketing Director"], "the reuse path approved a duplicate persona"
+    personas = {contact_persona(t, "marketing") for t in titles}
+    assert len(personas) == len(titles), "2-3 contacts must be role-DIVERSE on the reuse path too"
+
+
+def test_the_reuse_path_still_adds_a_contact_in_a_persona_not_yet_held(conn, clock):
+    """The other direction: reuse is valuable and must keep working -- a stored
+    person in a persona this opportunity does NOT hold is still approved, with
+    no paid call."""
+    domain, org = "acme.com", "Acme"
+    owner = make_person(id="p-owner", first="Owner", last="Person", title="Marketing Director",
+                        org_name=org, org_domain=domain, email="owner@acme.com", email_status="verified")
+    _, eid, opp = seed_opportunity(conn, clock, function_key="marketing", domain=domain, org_name=org)
+    fake = apollo_for(domain, org, function_key="marketing", people=[owner])
+    svc = opportunity_service(conn, fake, clock, max_contacts_per_opportunity=3)
+    assert svc.process(opp).outcome == "wait"
+
+    executive = make_person(id="p-exec", first="Exec", last="Person", title="VP Marketing",
+                            org_name=org, org_domain=domain, email="exec@acme.com", email_status="verified")
+    _store_reusable_person(svc, conn, eid, person=executive, email="exec@acme.com")
+    paid_before = fake.served_paid
+
+    second = opportunity_service(conn, fake, clock, max_contacts_per_opportunity=3).process(opp)
+    assert second.details.get("approvals_created", 0) == 1, second
+    titles = {r["title"] for r in sqlall(
+        conn, "SELECT p.title FROM approvals a JOIN people p ON p.id = a.person_id WHERE a.state <> 'revoked'")}
+    assert titles == {"Marketing Director", "VP Marketing"}
+    assert fake.served_paid == paid_before, "reuse must cost no paid call"

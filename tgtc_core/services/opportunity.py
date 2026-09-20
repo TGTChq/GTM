@@ -1000,7 +1000,8 @@ class OpportunityService:
         approved_person_ids: List[int] = []
 
         # 1) reuse a person already verified at this employer within TTL -- through the SAME gates (R04)
-        reuse = self._reusable_person(emp, titles, founder_allowed, approved_refs, suppressed_emails, employer_domains, opportunity_id, epoch)
+        reuse = self._reusable_person(emp, titles, founder_allowed, approved_refs, suppressed_emails, employer_domains,
+                                      opportunity_id, epoch, state, opp["function_key"])
         if reuse is not None:
             decision = self._approve(opp, emp, posting, classification, reuse)
             if isinstance(decision, ApprovedLead):
@@ -1214,20 +1215,46 @@ class OpportunityService:
         return row
 
     def _reusable_person(self, emp: Dict[str, Any], titles: Sequence[str], founder_allowed: bool, approved_refs: Set[str],
-                         suppressed: Set[str], employer_domains: Set[str], opportunity_id: int, epoch: int) -> Optional[Dict[str, Any]]:
+                         suppressed: Set[str], employer_domains: Set[str], opportunity_id: int, epoch: int,
+                         state: "ContactState", function_key: str) -> Optional[Dict[str, Any]]:
         """A stored, employment-verified person with a verified email inside the TTL is a
         candidate for reuse -- and is judged by the SAME gates as a fresh enrichment,
-        from the evidence stored with them (R04). A rejection is recorded like any other."""
+        from the evidence stored with them (R04). A rejection is recorded like any other.
+
+        Final whole-branch review, C2 (CRITICAL, 2026-09-20): role diversity was
+        enforced on the SEARCH path only. This -- the FREE path, which runs
+        FIRST in every call -- filtered on ``approved_refs`` and the per-person
+        gates and never consulted the personas this opportunity already holds,
+        so call N+1 could approve a second and a third stored person in a
+        persona already held and finalize ``approved`` with 2-3 same-role
+        contacts counted toward the "2-3 role-diverse" target. The order of
+        consideration and the two eligibility rules (never a person already
+        held, never a persona already held) now come from ``select_next_contact``
+        -- the SAME function the search loop decides with, not a second copy of
+        its rule. A candidate it declines is not judged and gets no
+        ``candidate_attempts`` row: nothing about the PERSON was decided, and a
+        gate 'fail' would wrongly bar them from this opportunity forever.
+        """
         ttl = timedelta(days=int(rule("person_evidence_ttl_days")))
         with self.conn.cursor() as cur:
             cur.execute("SELECT * FROM people WHERE employer_id = %s AND email_status = 'verified' AND email_verified_at >= %s ORDER BY email_verified_at DESC",
                         (emp["id"], self.now() - ttl))
             rows = [dict(r) for r in cur.fetchall()]
         self.conn.commit()
+        pending: List[Dict[str, Any]] = []
         for row in rows:
             ref = person_ref(apollo_person_id=row.get("apollo_person_id"), linkedin_url=row.get("linkedin_url"))
             if ref in approved_refs or str(row.get("email") or "").lower() in suppressed:
                 continue
+            pending.append({"person_key": ref, "persona": contact_persona(str(row.get("title") or ""), function_key),
+                            "_row": row, "_reuse_ref": ref})
+        while pending:
+            picked = select_next_contact(candidates=pending, existing_person_keys=state.existing_person_keys,
+                                         existing_personas=state.existing_personas)
+            if picked is None:
+                return None
+            pending = [c for c in pending if c is not picked]
+            row, ref = picked["_row"], picked["_reuse_ref"]
             facts = row.get("facts_json") if isinstance(row.get("facts_json"), dict) else {}
             evidence = dict(facts.get("enriched") or {})
             record = {**evidence, "id": row.get("apollo_person_id"), "first_name": row.get("first_name"), "last_name": row.get("last_name"),

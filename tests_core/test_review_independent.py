@@ -27,7 +27,7 @@ from tgtc_core.providers.http import Response, TransportError, TransportTimeout
 from tgtc_core.providers.fantastic import FantasticClient, ENDPOINT_ATS, ENDPOINT_JOB_BOARDS
 from tgtc_core.services.acquisition import AcquisitionService, SOURCE_ATS, SOURCE_JOB_BOARDS, posting_content_hash
 from tgtc_core.services.classification_service import classify_one
-from tgtc_core.services.opportunity import OpportunityService, QualifyOutcome
+from tgtc_core.services.opportunity import ContactState, OpportunityService, QualifyOutcome
 from tgtc_core.testing.fakes import FakeApollo, make_person
 from tgtc_core.testing.scenario import campaign_env
 from tests_core.test_approval_gate import _inputs
@@ -266,7 +266,13 @@ def test_cached_person_does_not_bypass_territory_gate():
         return [person]
     svc = OpportunityService(FixtureConnection(answer), None, campaign_env=campaign_env(),
                              signing_key='test-key', now=lambda: NOW)
-    reused = svc._reusable_person({'id': 1, 'canonical_name': 'Acme'}, ['VP Product'], False, set(), set(), {'acme.com'}, 1, 1)
+    # Final review C2: the reuse path now decides its order and eligibility
+    # through select_next_contact, so it takes this opportunity's ContactState
+    # and function key. An EMPTY state (nothing held yet) is what makes this
+    # test's assertion meaningful: the person is refused by the territory gate,
+    # not by role diversity.
+    reused = svc._reusable_person({'id': 1, 'canonical_name': 'Acme'}, ['VP Product'], False, set(), set(), {'acme.com'}, 1, 1,
+                                  ContactState(), 'product')
     assert reused is None, {'prior_rejection': full_check.reason, 'reused_contact_gate': reused.get('contact_gate_passed')}
 
 
