@@ -13,6 +13,7 @@ One hypothesis per commit:
 """
 from __future__ import annotations
 
+from tgtc_core.domain.exclusion_evidence import corroborates
 from tgtc_core.domain.facts import RULE_VERSION, extract_job_facts
 from tgtc_core.policy.requirements import EXCLUDED_INDUSTRIES, excluded_industry
 
@@ -112,3 +113,93 @@ def test_the_clearance_decision_path_carries_the_audit_rule_version():
     exclusion = next(e for e in facts.exclusions if e.reason == "deliverability:security_clearance")
     assert exclusion.rule_version == RULE_VERSION
     assert facts.facts["security_clearance"].rule_version == RULE_VERSION
+
+
+# --- C: a physical-DEMANDS clause is a fact, not an exclusion ---------------
+# The frozen rubric §4.F names this verbatim under "Not sufficient": "lifting or
+# physical-demands boilerplate ('may lift up to 25 lbs', 'sitting for long periods')",
+# and asks for it to be recorded as `physical_duties = incidental` instead. Phase 2
+# (task 3) narrowed the lift pattern only when the sentence ALSO carried ADA
+# boilerplate ("occasionally", "as needed", "with reasonable accommodation").
+#
+# Measured on the two frozen corpora (7,349 net-new rows): **320 rows (4.35%)** are still
+# excluded on a lift/lifting-pounds span that is the posting's ONLY facility evidence,
+# and **none of those 320** carries the ADA qualifier phase 2 looks for -- the carve-out
+# does not reach them. A labelled example: "Sr. Construction Project Engineer", labelled
+# `qualified` / `operations` with `physical_duties = incidental`, excluded on the single
+# span "Ability to lift up to 25 lbs."
+#
+# So the pattern is deleted rather than carved out a third time: a stated weight is a
+# measure of physical DEMANDS, and the approved exclusion is about physical DUTIES. The
+# clause is kept as a FACT (`physical_demands_statement`) so the evidence is not lost.
+# Every other FACILITY span -- forklift/pallet jack, must work in a lab/warehouse/plant,
+# physical presence required, front-desk greeting, patient care -- is untouched and still
+# excludes on its own.
+
+_LIFT_ONLY = (
+    "Ability to lift up to 25 lbs.",
+    "Physical demands: must be able to lift 50 pounds.",
+    "The role requires lifting up to 30 lbs and sitting for long periods.",
+)
+
+_REAL_PHYSICAL_DUTY = (
+    "Operate a forklift for the duration of the shift and palletize orders on the floor.",
+    "Must work in the warehouse alongside the shift team.",
+    "Physical presence is required for this position.",
+)
+
+
+def test_a_lifting_clause_alone_no_longer_excludes():
+    for text in _LIFT_ONLY:
+        facts = extract_job_facts(title="Project Engineer", description=text + " " + _FILLER)
+        assert not any("physical" in e.reason for e in facts.exclusions), text
+
+
+def test_the_lifting_clause_is_still_recorded_as_a_fact():
+    facts = extract_job_facts(title="Project Engineer", description=_LIFT_ONLY[0] + " " + _FILLER)
+    statement = facts.facts["physical_demands_statement"]
+    assert statement.value == "stated"
+    assert "lift up to 25 lbs" in statement.excerpt
+    assert statement.rule_version == RULE_VERSION
+
+
+def test_no_physical_demands_statement_when_the_posting_has_none():
+    facts = extract_job_facts(title="Analyst", description=_FILLER)
+    assert facts.facts["physical_demands_statement"].value is None
+
+
+def test_a_real_physical_duty_still_excludes():
+    for text in _REAL_PHYSICAL_DUTY:
+        facts = extract_job_facts(title="Warehouse Associate", description=text + " " + _FILLER)
+        assert any("physical" in e.reason for e in facts.exclusions), text
+
+
+def test_a_lifting_clause_beside_a_real_physical_duty_still_excludes():
+    facts = extract_job_facts(
+        title="Warehouse Associate",
+        description="Lift up to 50 pounds while operating a forklift on the floor. " + _FILLER)
+    assert any("physical" in e.reason for e in facts.exclusions)
+
+
+def test_the_model_cannot_exclude_on_a_lifting_clause_either():
+    """`exclusion_evidence.corroborates` is the semantic twin of the FACILITY gate: it
+    decides whether a model-claimed hard exclusion is supported. It carried its OWN copy
+    of the lift regex, so dropping the pattern from FACILITY alone would have left the
+    classifier able to reject on exactly the evidence the deterministic path no longer
+    accepts."""
+    for excerpt in ("Ability to lift up to 25 lbs.",
+                    "Physical demands: must be able to lift 50 pounds.",
+                    "The role requires lifting up to 30 lbs."):
+        assert not corroborates("physical_work", excerpt, excerpt), excerpt
+
+
+def test_the_model_can_still_exclude_on_a_real_physical_duty():
+    for excerpt in ("Operate a forklift and assemble equipment on the floor.",
+                    "Cleaning restrooms and sanitizing floors each shift.",
+                    "Patrolling the premises overnight."):
+        assert corroborates("physical_work", excerpt, excerpt), excerpt
+
+
+def test_a_lifting_clause_beside_a_real_duty_still_corroborates():
+    excerpt = "Lift up to 50 pounds while operating machinery on the floor."
+    assert corroborates("physical_work", excerpt, excerpt)

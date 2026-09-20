@@ -31,7 +31,8 @@ from typing import Any, Dict, FrozenSet, Iterable, List, Mapping, Optional, Sequ
 from .classification import LEXICON, _dominant, score_functions
 from .employer_attribution import employer_attribution_conflict
 from .facts import (
-    EMPLOYMENT_NEGATIVES, FACILITY, NON_ACTIVE, OUTSOURCING_TEXT, PROGRAM_PATTERNS, STAFFING_TEXT, TRAVEL_HARD,
+    EMPLOYMENT_NEGATIVES, FACILITY, NON_ACTIVE, OUTSOURCING_TEXT, PHYSICAL_DEMANDS_STATEMENT,
+    PROGRAM_PATTERNS, STAFFING_TEXT, TRAVEL_HARD,
     extract_job_facts, resolve_company_size, sentences, size_reject_reason,
 )
 from .identity import employer_anchors, employer_key, name_key, normalize_company_name, posting_canonical_key
@@ -346,9 +347,15 @@ def _physical_facility(sents: Sequence[str], precision: bool) -> Tuple[str, List
     if not precision:
         return "", []
     flags: List[str] = []
-    lifting = [p for p in FACILITY if "(?:lift|lifting)" in p]
-    duties = [p for p in FACILITY if p not in lifting and "forklift" not in p]
-    if _any_first(sents, lifting):
+    # Phase 3 (2026-09-20): the lift/lifting-pounds pattern left FACILITY, because a stated
+    # weight measures physical DEMANDS and the approved exclusion is about physical DUTIES
+    # (rubric §4.F, "Not sufficient"). This function used to rediscover that pattern by
+    # STRING-MATCHING the regex source inside FACILITY -- a third copy of the predicate,
+    # and one that silently produced an empty `lifting` list the moment the pattern moved.
+    # It now shares `facts.PHYSICAL_DEMANDS_STATEMENT`, the one definition of "a stated
+    # weight", so the boilerplate flag keeps its meaning wherever that pattern lives.
+    duties = [p for p in FACILITY if "forklift" not in p]
+    if any(PHYSICAL_DEMANDS_STATEMENT.search(s) for s in sents):
         flags.append("physical_demands_boilerplate")
     hit = _any_first(sents, duties, skip=INCIDENTAL)
     return hit or location_bound_evidence(sents), flags

@@ -104,8 +104,13 @@ def test_inherently_physical_work_remains_rejected(case):
 
 
 def test_lifting_boilerplate_does_not_reject_a_remote_capable_job():
+    """Phase 3 (2026-09-20): the production qualifier no longer rejects this case either.
+    The lift/lifting-pounds pattern left `facts.FACILITY`, so production now sends it to the
+    semantic route instead of rejecting it, and the candidate qualifier -- which already read
+    the clause as boilerplate -- still qualifies it outright and still raises the flag."""
     (case,) = by_requirement("incidental_lifting_not_rejected")
-    assert case["current_outcome"] == "rejected:deliverability:physical_facility"
+    assert case["current_outcome"] == "ambiguous:needs_semantic_classifier"
+    assert not case["current_outcome"].startswith("rejected:")
     result = candidate(case["row"])
     assert result["outcome"] == "qualified_pre_contact"
     assert "physical_demands_boilerplate" in result["flags"]

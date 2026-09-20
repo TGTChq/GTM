@@ -405,7 +405,7 @@
     "org_linkedin_slug": "canary-employer-09",
     "org_linkedin_website": "https://canary-employer-09.example"
    },
-   "current_outcome": "rejected:deliverability:physical_facility",
+   "current_outcome": "ambiguous:needs_semantic_classifier",
    "candidate_outcome": "rejected:deliverability:location_bound_duty",
    "candidate_group": "",
    "candidate_flags": [
@@ -451,7 +451,7 @@
     "org_linkedin_slug": "canary-employer-10",
     "org_linkedin_website": "https://canary-employer-10.example"
    },
-   "current_outcome": "rejected:deliverability:physical_facility",
+   "current_outcome": "ambiguous:needs_semantic_classifier",
    "candidate_outcome": "qualified_pre_contact",
    "candidate_group": "customer_success_support",
    "candidate_flags": [
@@ -1662,5 +1662,8 @@
    "candidate_group": "",
    "candidate_flags": []
   }
+ ],
+ "policy_notes": [
+  "2026-09-20 phase-3 audit: the lift/lifting-pounds pattern left facts.FACILITY (a stated weight measures physical DEMANDS, not a physical DUTY; frozen rubric 4.F 'Not sufficient'). current_outcome was re-derived for the two cases that pattern alone was deciding: canary_09: rejected:deliverability:physical_facility -> ambiguous:needs_semantic_classifier; canary_10: rejected:deliverability:physical_facility -> ambiguous:needs_semantic_classifier. candidate_outcome is unchanged for both - the candidate qualifier already read the lift clause as boilerplate and still rejects canary_09 on its own location_bound_duty evidence."
  ]
 }

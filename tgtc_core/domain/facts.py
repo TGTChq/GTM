@@ -185,23 +185,34 @@ LICENSE = [
     r"\blicensure (?:is )?required\b",
     r"\bmust (?:be able to )?(?:acquire|obtain|maintain)(?: and maintain)? (?:a |an )?(?:gaming|nursing|medical|professional|state) license\b",
 ]
+#: Evidence that the JOB'S OWN DUTIES require being somewhere physical. Every span here
+#: describes something the person does, not a weight they must be able to handle.
 FACILITY = [
     r"^(?:you will |duties include )?(?:provide|provides|providing) front desk support by greeting visitors\b",
     r"\bmust (?:work|operate) in (?:a|the) (?:laboratory|lab|warehouse|plant|factory|clinic|hospital)\b",
     r"\bphysical presence (?:is )?required\b",
-    r"\b(?:lift|lifting)\s+(?:up to\s+)?\d{2,3}\s*(?:lbs|pounds)\b",
     r"\b(?:forklift|pallet jack)\b",
     r"\b(?:patient care|bedside)\b[^.]{0,80}\b(?:required|responsibilit)",
 ]
-#: Phase 2 audit task 3 (2026-09-19, Luis): ADA-boilerplate lifting language is not
-#: evidence the JOB is physical. Measured: of 541 decisive physical_facility rejects,
-#: the matched spans were lift/lifting NN lbs 390, forklift/pallet jack 150, and one real
-#: clinical duty; FN rate 7.7%, ~42 valid jobs lost per pool. This narrows the
-#: lift/lifting pattern only -- forklift/pallet jack and the other FACILITY spans are
-#: untouched, so a genuine physical core duty still excludes.
-FACILITY_LIFT_INCIDENTAL = re.compile(
-    r"\b(?:occasionally|occasional|as needed|from time to time|infrequently|rarely|"
-    r"with (?:or without )?(?:reasonable )?accommodations?)\b", re.I)
+
+#: Phase 3 audit (2026-09-20): a stated weight is a measure of physical DEMANDS; the
+#: approved exclusion is about physical DUTIES. The frozen rubric §4.F names this
+#: verbatim under "Not sufficient" -- "lifting or physical-demands boilerplate ('may lift
+#: up to 25 lbs', 'sitting for long periods')" -- and asks for `physical_duties =
+#: incidental` to be RECORDED instead.
+#:
+#: Phase 2 task 3 narrowed the same pattern, but only when the sentence also carried ADA
+#: boilerplate ("occasionally", "as needed", "with reasonable accommodation"). Measured on
+#: the two frozen corpora (7,349 rows): 320 rows (4.35%) are still excluded on a
+#: lift/lifting-pounds span that is the posting's ONLY facility evidence, and NONE of
+#: those 320 carries the ADA qualifier -- the carve-out never reaches them.
+#:
+#: So the pattern leaves FACILITY rather than being carved out a third time, and the
+#: clause is kept as a Fact. `FACILITY_LIFT_INCIDENTAL` and the `light lifting` filter
+#: existed only to narrow this pattern and are gone with it; a dead regex is worse than
+#: no regex.
+PHYSICAL_DEMANDS_STATEMENT = re.compile(
+    r"\b(?:lift|lifting)\s+(?:up to\s+)?\d{1,3}\s*(?:lbs|pounds)\b", re.I)
 
 # --- role level (job_quality.py) ---------------------------------------------
 
@@ -754,22 +765,11 @@ def extract_job_facts(
     ):
         hits = _matching(sents, patterns)
         if name == "physical_facility":
+            # "Experience with patient care" is a qualification a candidate brings, not a
+            # duty this job performs. Kept from phase 2, unchanged.
             hits = [s for s in hits if not (
                 re.search(r"\bexperience (?:in |with )?(?:bedside|patient care)\b", s, re.I)
                 and not any(re.search(p, s, re.I) for p in FACILITY[:-1]))]
-            # Incidental office lifting is not evidence that the role itself is
-            # physical. Keep independent duties such as reception or machinery.
-            hits = [s for s in hits if not (
-                re.search(r"\blight lifting\s+(?:up to\s+)?(?:1\d|20)\s*(?:lbs|pounds)\b", s, re.I)
-                and not any(re.search(p, s, re.I) for p in FACILITY if "(?:lift|lifting)" not in p))]
-            # Task 3 (2026-09-19): ADA-boilerplate ("occasionally", "as needed", "with or
-            # without reasonable accommodation") on a lift/lifting clause is incidental
-            # boilerplate, not a physical core duty. Narrows the rule, does not delete
-            # it -- forklift/pallet jack and the other FACILITY spans below still
-            # exclude on their own.
-            hits = [s for s in hits if not (
-                re.search(FACILITY[3], s, re.I) and FACILITY_LIFT_INCIDENTAL.search(s)
-                and not any(re.search(p, s, re.I) for p in FACILITY if p != FACILITY[3]))]
         # Changed decision paths carry the audit rule version on BOTH the Fact and the
         # Exclusion: physical_facility (phase 2 task 3) and security_clearance (phase 3,
         # Luis D5 -- a Public Trust determination is not a clearance).
@@ -871,6 +871,15 @@ def extract_job_facts(
             # Its own reported review/unknown bucket -- never a reject, never
             # counted as a confirmed 25-1,000 company (Decision 2).
             jf.review_reasons.append(f"company:{state}")
+
+    # Phase 3: a stated weight measures physical DEMANDS; the approved exclusion is about
+    # physical DUTIES (rubric §4.F "Not sufficient"). It no longer excludes, and is
+    # recorded here so the evidence is not simply dropped and a later policy variant can
+    # read it without re-reading the description.
+    demands = next((s for s in sents if PHYSICAL_DEMANDS_STATEMENT.search(s)), "")
+    jf.facts["physical_demands_statement"] = Fact(
+        "physical_demands_statement", "stated" if demands else None,
+        TEXT if demands else UNKNOWN, demands[:300], RULE_VERSION)
 
     jf.facts["description_present"] = Fact("description_present", len(desc.strip()) >= 200, TEXT if desc.strip() else UNKNOWN, f"{len(desc.strip())} chars")
     return jf
