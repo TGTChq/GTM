@@ -179,8 +179,16 @@ def _build_contact_state(existing_contacts: Set[str], approved_rows: Sequence[Di
     legacy quota-only baseline (see ``ContactState`` docstring); ``approved_rows``
     are THIS opportunity's own current approvals, each carrying the real Apollo
     identity (``apollo_person_id``/``linkedin_url``) a search candidate's
-    ``person_key`` is directly comparable to via the SAME ``person_ref()`` call
-    ``_search_candidates`` uses to build ``cand["_ref"]``."""
+    ``person_key`` is directly comparable to.
+
+    Fix round 2 (Minor, independent review): comparable via the SAME
+    precedence-ordered ``person_ref()`` FUNCTION ``_search_candidates`` calls
+    to build ``cand["_ref"]`` -- not literally identical keyword arguments
+    (``_search_candidates`` also passes ``name``/``employer_key`` as a
+    fallback for a candidate with no id, which Apollo search results always
+    carry in practice, so ``apollo_person_id`` alone decides both calls'
+    output; the two calls are not byte-identical, but their governing
+    precedence rule and, for every real candidate, their result, are)."""
     person_keys = {
         person_ref(apollo_person_id=row.get("apollo_person_id"), linkedin_url=row.get("linkedin_url"))
         for row in approved_rows
@@ -747,21 +755,47 @@ class OpportunityService:
 
     def _finalize_or_wait_partial(self, opportunity_id: int, *, state: "ContactState", approval_ids: List[int],
                                   approved_person_ids: List[int], approved_total: int, matches_done: int, made: int,
-                                  max_attempts: int, reason_if_quota_met: str, wait_reason: str) -> QualifyOutcome:
+                                  max_attempts: int, no_further_candidates: bool, reason_if_quota_met: str,
+                                  wait_reason: str) -> QualifyOutcome:
         """One decision point for "we hold at least one contact for this
         opportunity, but not yet the full quota": finalize (the quota is now
-        met), give up and finalize with what we have (fix round 1, I5 --
-        Luis's ruling: a partially filled opportunity must not requeue at
-        buyer_search_pending forever, corrupting ``opportunities.state =
-        'approved'`` into a near-unreachable state; once this evidence
-        epoch's own paid-attempt budget is exhausted, take what was found),
-        or wait and retry -- the same idiom ``buyer_search_pending`` already
-        uses elsewhere for "absence is not proven yet"."""
+        met), give up and finalize with what we have, or wait and retry --
+        the same idiom ``buyer_search_pending`` already uses elsewhere for
+        "absence is not proven yet".
+
+        Fix round 1, I5 (Luis's ruling): a partially filled opportunity must
+        not requeue at ``buyer_search_pending`` forever, corrupting
+        ``opportunities.state = 'approved'`` into a near-unreachable state.
+
+        Fix round 2, CRITICAL (independent review): round 1's give-up
+        condition keyed on the paid-attempt BUDGET
+        (``matches_done + made >= max_attempts``) alone -- but the two paths
+        that make NO progress (``select_next_contact`` returns ``None``, or a
+        pass finds zero candidates at all) reach this with ``made = 0``,
+        making zero paid attempts, so the budget never advances and the
+        opportunity waited forever. 9 of 10 functions expose exactly 2
+        reachable personas (only people_hr has a third), so at the shipped
+        default quota of 3 this was not a corner case. Termination now keys
+        PRIMARILY on ``no_further_candidates`` -- there is no further
+        role-diverse candidate this pass could select, so persona diversity
+        or credits could never advance the quota regardless of how long this
+        waited -- with the attempt-budget check kept only as a secondary,
+        genuinely distinct case: real untried candidates still exist, but
+        this epoch's spend cap was reached trying others first.
+        """
         details = {"approvals_created": len(approval_ids), "approved_total": approved_total + len(approval_ids)}
         if not state.wants_more_contacts(self.max_contacts):
             self._finalize_approved(opportunity_id)
             return QualifyOutcome(
                 opportunity_id, "approved", reason_if_quota_met,
+                approval_ids[0] if approval_ids else None, approved_person_ids[0] if approved_person_ids else None,
+                attempts_made=made, details=details,
+            )
+        if no_further_candidates:
+            self._finalize_approved(opportunity_id)
+            details["contact_quota_target"] = self.max_contacts
+            return QualifyOutcome(
+                opportunity_id, "approved", "approved_no_further_role_diverse_candidates",
                 approval_ids[0] if approval_ids else None, approved_person_ids[0] if approved_person_ids else None,
                 attempts_made=made, details=details,
             )
@@ -960,13 +994,17 @@ class OpportunityService:
                                      details={"title": p.get("title"), "org": person_organization(p).get("name")})
         if not candidates:
             if approval_ids or approved_total:
-                # Task 9 / fix round 1, I5: at least one contact exists for this
-                # opportunity (from this call, a prior one, or both) and this pass
-                # found no further candidates to search -- finalize, give up once
-                # the epoch's attempt budget is exhausted, or wait and retry.
+                # Task 9 / fix round 1, I5 / fix round 2: at least one contact
+                # exists for this opportunity (from this call, a prior one, or
+                # both), and this pass found ZERO candidates at all -- that is
+                # itself "no further candidates" (fix round 2: give-up must key
+                # on no progress, not on a paid-attempt budget that a candidate-
+                # less pass never advances), so finalize with what was found
+                # rather than waiting on a search that just came back empty.
                 return self._finalize_or_wait_partial(
                     opportunity_id, state=state, approval_ids=approval_ids, approved_person_ids=approved_person_ids,
                     approved_total=approved_total, matches_done=matches_done, made=0, max_attempts=max_attempts,
+                    no_further_candidates=True,
                     reason_if_quota_met="approved_available_contacts", wait_reason="buyer_search_pending:contact_quota_partial",
                 )
             if stats["returned"] == 0:
@@ -987,6 +1025,18 @@ class OpportunityService:
 
         made = 0
         remaining = list(candidates)
+        # Fix round 2, CRITICAL (independent review): whether THIS pass hit a
+        # structural wall -- real candidates were still in ``remaining``, but
+        # none had a persona not already held, so ``select_next_contact``
+        # (I4's hard stop) returned ``None``. Set ONLY there: a pass that
+        # simply runs out of candidates because it successfully used them all
+        # up (``remaining`` empties via consumption, no ``break``) is not the
+        # same signal -- real paid attempts were made, so ``matches_done``
+        # keeps advancing across repeated calls, and a later search may still
+        # find a genuinely new person. The quota-met break and the
+        # attempt-budget break are different, unrelated reasons to stop and
+        # also do not set this.
+        no_further_candidates = False
         while remaining:
             if not state.wants_more_contacts(self.max_contacts):
                 break
@@ -999,6 +1049,7 @@ class OpportunityService:
             cand = select_next_contact(candidates=remaining, existing_person_keys=state.existing_person_keys,
                                        existing_personas=state.existing_personas)
             if cand is None:
+                no_further_candidates = True
                 break
             remaining = [c for c in remaining if c["_ref"] != cand["_ref"]]
             ref = cand["_ref"]
@@ -1071,12 +1122,14 @@ class OpportunityService:
             state.add(ref, cand.get("persona", ""))
 
         if approval_ids or approved_total:
-            # Task 9 / fix round 1, I5: finalize (quota met, or the epoch's
-            # attempt budget is exhausted so a partial fill gives up rather
-            # than requeuing forever), or wait and retry.
+            # Task 9 / fix round 1, I5 / fix round 2: finalize (quota met, no
+            # further role-diverse candidate could be selected, or the
+            # epoch's attempt budget is exhausted with real candidates still
+            # untried), or wait and retry.
             return self._finalize_or_wait_partial(
                 opportunity_id, state=state, approval_ids=approval_ids, approved_person_ids=approved_person_ids,
                 approved_total=approved_total, matches_done=matches_done, made=made, max_attempts=max_attempts,
+                no_further_candidates=no_further_candidates,
                 reason_if_quota_met="approved", wait_reason="buyer_search_pending:contact_quota_partial",
             )
 

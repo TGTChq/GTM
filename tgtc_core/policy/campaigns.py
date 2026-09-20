@@ -215,11 +215,25 @@ FOUNDER_TIER_TITLES = frozenset({"founder", "co-founder", "cofounder", "co found
                                  "chief executive officer", "owner", "president"})
 
 
+#: Fix round 2, IMPORTANT (independent review): FOUNDER_TIER_TITLES/the token
+#: check above only recognize "chief executive officer" as an EXACT whole
+#: title or the bare "ceo" token -- a QUALIFIED phrasing ("Interim Chief
+#: Executive Officer", "Chief Executive Officer of Acme") fell through
+#: silently. The local regex this delegates to (I2, fix round 1) matched the
+#: phrase ANYWHERE in the title; restoring that as a phrase search here (not
+#: just an exact-title/token match) is what "share the predicate" requires --
+#: both callers benefit, instead of contact_mapping.py growing a second,
+#: narrower carve-out of its own.
+_CHIEF_EXECUTIVE_OFFICER_PHRASE = re.compile(r"\bchief executive officer\b")
+
+
 def is_founder_tier(title: str) -> bool:
     lowered = " ".join(str(title or "").lower().replace("-", " ").split())
     if lowered in FOUNDER_TIER_TITLES or lowered.replace(" ", "") in {"cofounder", "ceo"}:
         return True
     if any(token in lowered.split() for token in ("founder", "ceo", "owner")):
+        return True
+    if _CHIEF_EXECUTIVE_OFFICER_PHRASE.search(lowered):
         return True
     # Phase 2 audit task 7 (2026-09-19, Luis): a C-level job opening is not the
     # same thing as a founder contact. Bare "president" (token membership, above)

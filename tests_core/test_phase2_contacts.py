@@ -43,6 +43,30 @@ def test_real_founder_titles_are_still_founder_tier():
         assert is_founder_tier(title), title
 
 
+# --- Fix round 2, IMPORTANT (independent review): "Chief Executive Officer"
+# as a qualified PHRASE (not the whole title) must still be founder-tier --
+# is_founder_tier's own token/exact-match check only recognizes it as an
+# exact whole-string match or the bare "ceo" token, so a qualified spelling
+# fell through silently. This is the exact class of defect as C1 (a "no
+# behaviour change" refactor quietly dropping matches): the deleted local
+# copy in contact_mapping.py matched this phrase anywhere in the title, and
+# I2's delegation (fix round 1) narrowed that without a test to catch it.
+
+def test_qualified_chief_executive_officer_phrasing_is_still_founder_tier():
+    for title in ("Interim Chief Executive Officer", "Acting Chief Executive Officer",
+                  "Deputy Chief Executive Officer", "Group Chief Executive Officer",
+                  "Chief Executive Officer of Acme"):
+        assert is_founder_tier(title), title
+
+
+def test_vice_president_still_excluded_after_the_ceo_phrase_widening():
+    """The widening above must not also widen the OTHER direction: every
+    Vice President spelling stays excluded."""
+    for title in ("Vice President of Sales", "VP, Marketing", "SVP Finance",
+                  "Senior Vice President, People", "EVP Operations", "Vice President Engineering"):
+        assert not is_founder_tier(title), title
+
+
 # --- Task 8 --------------------------------------------------------------
 
 def test_common_title_variants_match_the_buyer_list():
@@ -278,14 +302,24 @@ def test_a_single_available_buyer_does_not_finalize_below_quota(conn, clock):
 # of waiting again.
 
 def test_partial_opportunity_finalizes_once_the_epoch_attempt_budget_is_exhausted(conn, clock):
+    """Fix round 2 note: this must exercise the BUDGET-exhaustion path
+    specifically (real untried candidates remain, but the epoch's paid-attempt
+    cap is spent) -- not the (higher-priority) no-further-candidates path
+    fix round 2 added, which fires whenever the candidate pool is fully
+    consumed regardless of budget. A SECOND candidate is left untried when
+    the budget cap breaks the loop, so this stays a distinct, meaningful
+    scenario from test_two_persona_function_finalizes_instead_of_waiting_forever_at_default_quota."""
     domain, org = "acme.com", "Acme"
     owner = make_person(id="p-owner", first="Owner", last="Person", title="Marketing Director",
                         org_name=org, org_domain=domain, email="owner@acme.com", email_status="verified")
+    executive = make_person(id="p-exec", first="Exec", last="Person", title="VP Marketing",
+                            org_name=org, org_domain=domain, email="exec@acme.com", email_status="verified")
     _, eid, opp = seed_opportunity(conn, clock, function_key="marketing", domain=domain, org_name=org)
     # max_contacts=2 -> max_attempts = 3 (max_match_attempts_per_evidence_epoch) * 2 = 6.
     # Pre-seed 5 already-spent match attempts this epoch (a prior call's own
-    # paid attempts), so THIS call's one remaining attempt (approving the only
-    # available buyer) exactly exhausts the budget: 5 + 1 = 6 >= 6.
+    # paid attempts), so THIS call's one remaining attempt (approving "owner",
+    # the first-ranked candidate) exactly exhausts the budget: 5 + 1 = 6 >= 6,
+    # breaking the loop with "executive" still untried in `remaining`.
     with conn.cursor() as cur:
         for i in range(5):
             cur.execute(
@@ -294,7 +328,7 @@ def test_partial_opportunity_finalizes_once_the_epoch_attempt_budget_is_exhauste
                 (opp, f"pid:seed-{i}"),
             )
     conn.commit()
-    fake = apollo_for(domain, org, function_key="marketing", people=[owner])
+    fake = apollo_for(domain, org, function_key="marketing", people=[owner, executive])
     out = opportunity_service(conn, fake, clock, max_contacts_per_opportunity=2).process(opp)
     assert out.outcome == "approved" and out.reason == "approved_partial_quota_epoch_exhausted"
     assert out.details["approved_total"] == 1
@@ -347,3 +381,39 @@ def test_founder_tier_rejection_carries_rule_version():
     )
     assert not result.passed and result.reason == "contact:founder_tier_not_allowed_for_size"
     assert result.evidence.get("rule_version") == RULE_VERSION
+
+
+# --- Fix round 2, CRITICAL (independent review): round 1's give-up rule
+# (I5) keyed termination on the paid-attempt BUDGET (matches_done + made >=
+# max_attempts). But both "no progress" paths -- select_next_contact
+# returning None (I4's hard stop) and a pass finding zero candidates at all
+# -- reach that check with made = 0, making ZERO paid attempts, so the
+# budget never advances. 9 of 10 functions expose exactly 2 reachable
+# personas (only people_hr has a third); at the SHIPPED DEFAULT quota of 3
+# (config.py's max_contacts_per_opportunity), such an opportunity approves 2
+# contacts and then waits at buyer_search_pending forever, since it can
+# never make the paid attempt that would advance the budget. Termination
+# must key on NO PROGRESS (no further role-diverse candidate selectable),
+# not on spend.
+
+def test_two_persona_function_finalizes_instead_of_waiting_forever_at_default_quota(conn, clock):
+    domain, org = "acme.com", "Acme"
+    owner = make_person(id="p-owner", first="Owner", last="Person", title="Marketing Director",
+                        org_name=org, org_domain=domain, email="owner@acme.com", email_status="verified")
+    executive = make_person(id="p-exec", first="Exec", last="Person", title="VP Marketing",
+                            org_name=org, org_domain=domain, email="exec@acme.com", email_status="verified")
+    # A THIRD candidate, but marketing has only two personas -- this one is
+    # necessarily a repeat of whichever persona is already held (functional_owner,
+    # since "Growth Director" is also a DIRECT_BUYER_TITLES entry), so it can
+    # never be selected once both personas are represented.
+    third = make_person(id="p-third", first="Third", last="Person", title="Growth Director",
+                        org_name=org, org_domain=domain, email="third@acme.com", email_status="verified")
+    _, eid, opp = seed_opportunity(conn, clock, function_key="marketing", domain=domain, org_name=org)
+    fake = apollo_for(domain, org, function_key="marketing", people=[owner, executive, third])
+    # The SHIPPED DEFAULT quota (config.py's Settings.max_contacts_per_opportunity),
+    # not the OpportunityService constructor's own lower bare default of 1.
+    out = opportunity_service(conn, fake, clock, max_contacts_per_opportunity=3).process(opp)
+    assert out.outcome == "approved" and out.reason == "approved_no_further_role_diverse_candidates"
+    assert out.details["approved_total"] == 2
+    state = sqlall(conn, "SELECT state FROM opportunities WHERE id = %s", (opp,))[0]["state"]
+    assert state == "approved", "a two-persona function must finalize once diversity is exhausted, not wait forever"
