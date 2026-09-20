@@ -65,3 +65,18 @@ Variable NAMES only, never values. No PII.
   offset 8518+). Reverted and rewrote the block with the file-writing tool.
   Known failure mode; the guard is to scan for control bytes after any
   regex patch, which is what caught it.
+
+## Second and third canary
+
+| # | action | evidence / result |
+|---|---|---|
+| 25 | Second canary, after the physical-title fix | excluded classifications rose 12 -> 340; OPERATIONS share of assignments fell 82% -> 38% |
+| 26 | Sampled the remaining fallback | STILL frontline: Usher, Ramp Agent, Car Wash Associate, Bartender, Teller, Diesel Technician, CDL-A Dump Truck Driver, Prepared Foods Cook |
+| 27 | **Root cause corrected** | removing `ai_taxonomies_a` did not widen the knowledge-work universe, it imported the frontline labour market. The measured loss was only ever the two FIRMOGRAPHIC gates (null headcount / null employment type, which drop 100% of Wellfound and YC rows) |
+| 28 | Acquisition redesigned | EXHAUSTIVE keeps the professional taxonomies and drops only the firmographic gates; slots split 3 widened / 1 UNFILTERED discovery / 1 narrow control, so a null-taxonomy row stays reachable |
+| 29 | Third deployment | `tests_core` 1,664 passed, 0 failed |
+| 30 | **Approvals produced under the new policy** | 178 approvals, every `campaign_id` a CHALLENGER id, **zero Control ids** |
+| 31 | Jurisdiction storage verified live | 96 of 115 sampled approvals `outreach_eligible = true` with `contact_country = US`; 16 fail closed on an absent contact country; 1 DE, 1 UK correctly blocked |
+| 32 | Compliance gates verified live | blocked reasons observed: `compliance:unknown_jurisdiction:absent` (16), `compliance:cold_email_not_permitted:DE` (1), `compliance:uk:not_a_verified_corporate_subscriber` (1), `employer_attribution_conflict` (1) |
+| 33 | Campaign spread | 8 of 9 campaigns received eligible approvals: operations 59, finance 21, gtm 18, ai_technical 9, CX 10, people_hr 9, product 7, marketing 3 |
+| 34 | Provider consumption | Fantastic 10 requests / 1,000 credits (budget exhausted); Anthropic 279 requests, 1.73M input + 199k output tokens; **Apollo 0 credits** -- contacts came from already-paid stored records, as required |
