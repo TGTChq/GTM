@@ -13,7 +13,11 @@ One hypothesis per commit:
 """
 from __future__ import annotations
 
+from tgtc_core.domain.classification import (
+    SEMANTIC_MIN_DETERMINISTIC_HITS, classify_posting, score_functions,
+)
 from tgtc_core.domain.exclusion_evidence import corroborates
+from tgtc_core.domain.inference import InferenceResponse, ResponsibilityItem
 from tgtc_core.domain.facts import RULE_VERSION, extract_job_facts
 from tgtc_core.policy.requirements import EXCLUDED_INDUSTRIES, excluded_industry
 
@@ -259,3 +263,125 @@ def test_the_travel_decision_path_carries_the_audit_rule_version():
     exclusion = next(e for e in facts.exclusions if e.reason == "deliverability:travel")
     assert exclusion.rule_version == RULE_VERSION
     assert facts.facts["work_arrangement"].rule_version == RULE_VERSION
+
+
+# --- D: a semantic campaign assignment needs deterministic support, per campaign ----
+# Brief (phase 3): the classifier "must not approve on confidence or a copied quote
+# alone". The branch already refuses a `gtm_revenue` assignment backed by ZERO
+# deterministic evidence (scoped re-review, IMPORTANT 2). This generalises that ONE
+# predicate into a per-campaign table instead of copying it per function.
+#
+# The table is measured, not assumed. On the CALIBRATION stratum only (holdout not
+# read), replaying the 129 already-bought answers through score_functions --
+# `qualification_recovery/route_evidence.py`, 109 assignments over 70 items -- requiring
+# >= 1 distinct deterministic hit for the assigned function withholds:
+#
+#   function          withheld right / wrong     precision of that function
+#   customer_success        0 / 3                 0.200 -> 0.500
+#   engineering             0 / 2                 0.444 -> 0.571
+#   people_hr               0 / 2                 0.286 -> 0.400
+#   ecommerce               0 / 2                 0.200 -> 0.333
+#   finance                 0 / 1                 0.429 -> 0.500
+#   ---- not enrolled: ----
+#   operations              4 / 8                 0.364 -> 0.400   (costs 4 right)
+#   product                 1 / 2                 0.467 -> 0.500   (costs 1 right)
+#   customer_support        1 / 1                 0.300 -> 0.250   (costs 1, gains none)
+#   marketing               0 / 0                 no measured effect either way
+#
+# Only the five that withhold ZERO labelled-right assignments are enrolled, plus
+# gtm_revenue which was already enrolled. `marketing` is left out deliberately: a
+# change with no measured effect is not evidence, and the brief says not to generalise
+# this shape blind.
+#
+# Withholding is never a rejection: the function is dropped, the posting keeps any
+# other function, and with none left it closes as `insufficient_evidence:*`, which
+# classification_service's reopen query re-enters when a new model version appears.
+
+_CS_NO_EVIDENCE = (
+    "You will be the main point of contact for a set of enterprise logos after they sign, "
+    "keeping them happy, running their business cadence with us, and making sure they see value "
+    "from what they bought. You will coordinate internally and escalate where needed.")
+_CS_WITH_EVIDENCE = (
+    "You will run customer onboarding for new accounts, drive product adoption across your "
+    "portfolio of customers, and own renewals and retention for the book. Quarterly business "
+    "reviews and health scores are part of the cadence.")
+_OPS_NO_EVIDENCE = (
+    "You will keep the wheels turning day to day, chase down whatever is blocking the team, and "
+    "bring order to how work moves through the business. A generalist role with a wide remit.")
+
+
+class _FixedAnswerD:
+    """A port that returns exactly the functions asked for, grounded and confident."""
+
+    def __init__(self, functions, excerpt):
+        self._functions, self._excerpt = list(functions), excerpt
+
+    def classify(self, request):
+        return InferenceResponse(
+            available=True, compatible_functions=list(self._functions),
+            responsibilities=[ResponsibilityItem("the work described", self._excerpt)],
+            seniority="unknown", people_management=None, incompatible_reasons=[],
+            exclusion_evidence=[], confidence=0.95, model_version="test:fixed/1")
+
+
+def test_the_enrolled_fixtures_really_carry_the_evidence_they_claim():
+    """Precondition, so the tests below cannot silently stop testing what they say."""
+    assert score_functions(_CS_NO_EVIDENCE)[1].get("customer_success") in (None, [])
+    assert score_functions(_CS_WITH_EVIDENCE)[1].get("customer_success")
+    assert score_functions(_OPS_NO_EVIDENCE)[1].get("operations") in (None, [])
+
+
+def test_an_enrolled_campaign_with_no_deterministic_evidence_is_withheld():
+    for function in ("customer_success", "finance", "engineering", "people_hr", "ecommerce"):
+        result = classify_posting(title="Specialist", description=_CS_NO_EVIDENCE,
+                                  inference=_FixedAnswerD([function], _CS_NO_EVIDENCE[:80]))
+        assert result.method == "semantic", function
+        assert function not in result.compatible_functions, function
+        assert result.campaign_keys == [], function
+        assert not result.excluded, "an unqualified guess is review, never a reject"
+        assert any(n == f"insufficient_evidence:{function}_unsupported_by_deterministic_evidence"
+                   for n in result.notes), (function, result.notes)
+        assert result.rule_version == RULE_VERSION, function
+
+
+def test_an_enrolled_campaign_with_deterministic_evidence_still_routes():
+    result = classify_posting(title="Customer Success Manager", description=_CS_WITH_EVIDENCE,
+                              inference=_FixedAnswerD(["customer_success"], _CS_WITH_EVIDENCE[:80]))
+    assert result.compatible_functions == ["customer_success"]
+    assert result.campaign_keys == ["customer_experience"]
+    assert not result.excluded
+
+
+def test_a_campaign_that_is_not_enrolled_is_not_affected():
+    """operations, product, marketing and customer_support are deliberately NOT enrolled:
+    on calibration the requirement costs them labelled-right assignments."""
+    for function in ("operations", "product", "marketing", "customer_support"):
+        result = classify_posting(title="Associate", description=_OPS_NO_EVIDENCE,
+                                  inference=_FixedAnswerD([function], _OPS_NO_EVIDENCE[:80]))
+        assert result.compatible_functions == [function], function
+        assert not result.excluded, function
+
+
+def test_a_second_function_survives_when_only_the_enrolled_one_is_unsupported():
+    result = classify_posting(title="Associate", description=_OPS_NO_EVIDENCE,
+                              inference=_FixedAnswerD(["finance", "operations"], _OPS_NO_EVIDENCE[:80]))
+    assert result.compatible_functions == ["operations"]
+    assert result.campaign_keys == ["operations"]
+    assert not result.excluded
+    assert [w["function"] for w in result.facts["withheld_functions"]] == ["finance"]
+
+
+def test_every_withheld_function_is_recorded_with_its_rule_version():
+    result = classify_posting(title="Associate", description=_OPS_NO_EVIDENCE,
+                              inference=_FixedAnswerD(["finance", "ecommerce"], _OPS_NO_EVIDENCE[:80]))
+    withheld = result.facts["withheld_functions"]
+    assert [w["function"] for w in withheld] == ["finance", "ecommerce"]
+    assert all(w["code"] == "no_deterministic_function_evidence" for w in withheld)
+    assert all(w["rule_version"] == RULE_VERSION for w in withheld)
+    assert not result.excluded and result.compatible_functions == []
+
+
+def test_the_enrolment_table_matches_what_was_measured():
+    assert set(SEMANTIC_MIN_DETERMINISTIC_HITS) == {
+        "gtm_revenue", "customer_success", "engineering", "people_hr", "ecommerce", "finance"}
+    assert all(v == 1 for v in SEMANTIC_MIN_DETERMINISTIC_HITS.values())

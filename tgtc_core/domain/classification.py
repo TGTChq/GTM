@@ -40,6 +40,51 @@ MIN_DOMINANT_SCORE = 6
 MIN_DISTINCT_SIGNALS = 2
 MIN_MARGIN = 3
 
+#: Phase 3 audit (2026-09-20). Per-CAMPAIGN minimum deterministic corroboration for a
+#: SEMANTIC function assignment: the model may not put a posting into one of these
+#: campaigns unless the posting's own wording matches at least this many distinct signals
+#: in that campaign's lexicon. A function absent from this table is not subject to the
+#: requirement at all -- the nine campaigns are measured separately and enrolled
+#: separately, which is the point.
+#:
+#: ``gtm_revenue`` was already enrolled at 1, hard-coded, by the scoped re-review
+#: (IMPORTANT 2). This turns that single hard-coded case into the table it always was, so
+#: the five campaigns added here SHARE its predicate instead of each copying it.
+#:
+#: Measured on the CALIBRATION stratum only (the holdout is not read), replaying the 327
+#: answers already bought in phase 4 through ``score_functions`` --
+#: ``qualification_recovery/route_evidence.py``, 109 assignments over 70 items. Requiring
+#: >= 1 distinct deterministic hit for the assigned function would withhold:
+#:
+#:     function          withheld right / wrong   that function's precision
+#:     customer_success        0 / 3               0.200 -> 0.500
+#:     engineering             0 / 2               0.444 -> 0.571
+#:     people_hr               0 / 2               0.286 -> 0.400
+#:     ecommerce               0 / 2               0.200 -> 0.333
+#:     finance                 0 / 1               0.429 -> 0.500
+#:     --- deliberately NOT enrolled: ---
+#:     operations              4 / 8               costs 4 labelled-right assignments
+#:     product                 1 / 2               costs 1
+#:     customer_support        1 / 1               costs 1, gains nothing
+#:     marketing               0 / 0               no measured effect either way
+#:
+#: Only the five that withhold ZERO labelled-right assignments are enrolled. ``marketing``
+#: is left out on purpose: a change with no measured effect is not evidence, and the brief
+#: is explicit that this shape must not be generalised blind. For the route as a whole the
+#: requirement WOULD cost right assignments, which is exactly why it is per campaign.
+#:
+#: Withholding is never a rejection. The function is dropped, any other function survives,
+#: and a posting left with none closes as ``insufficient_evidence:*`` -- which
+#: ``classification_service``'s reopen query re-enters when a new model version appears.
+SEMANTIC_MIN_DETERMINISTIC_HITS: Dict[str, int] = {
+    "gtm_revenue": 1,
+    "customer_success": 1,
+    "engineering": 1,
+    "people_hr": 1,
+    "ecommerce": 1,
+    "finance": 1,
+}
+
 
 @dataclass(frozen=True)
 class Signal:
@@ -448,30 +493,39 @@ def _apply_semantic(result: ClassificationResult, response: InferenceResponse, d
     # gtm_revenue is dropped from the assignment; a posting left with no
     # function at all is excluded exactly as the deterministic path excludes
     # it (there, gtm_revenue being dominant means it was the only function).
+    # Scoped re-review, IMPORTANT 2 (2026-09-20), generalised per campaign by the phase-3
+    # audit: the scope predicate is EVIDENCE-conditional -- on an empty hit list it sees
+    # selling=0 and excludes nothing. Only the description is scored, so a quota-carrying
+    # posting whose wording matches no gtm_revenue signal ("own a book of new logos ...
+    # measured on the number you bring in") reached GTM Systems on the model's word alone,
+    # and the semantic path is exactly the population where that happens.
+    #
+    # A model assignment with ZERO deterministic evidence for the campaign it names is an
+    # unqualified guess; "unknown is never approved", so the assignment is WITHHELD and the
+    # posting goes to review (no function, reopened by classification_service when a new
+    # model version appears), never rejected and never approved. The lexicon is
+    # deliberately NOT widened to paper over this.
+    #
+    # Which campaigns this applies to is a MEASURED table, not a blanket rule
+    # (SEMANTIC_MIN_DETERMINISTIC_HITS). One loop, one predicate: gtm_revenue keeps
+    # precisely the behaviour it had, and the five campaigns enrolled beside it share this
+    # code rather than each growing a carve-out of their own.
+    withheld: List[Dict[str, object]] = []
+    for function in list(functions):
+        minimum = SEMANTIC_MIN_DETERMINISTIC_HITS.get(function)
+        if minimum is None or len(hits.get(function, ())) >= minimum:
+            continue
+        functions = [f for f in functions if f != function]
+        withheld.append({"function": function, "code": "no_deterministic_function_evidence",
+                         "rule_version": RULE_VERSION})
+        result.notes.append(f"insufficient_evidence:{function}_unsupported_by_deterministic_evidence")
+    if withheld:
+        result.rule_version = RULE_VERSION
+        result.facts["withheld_functions"] = withheld
+        if not functions:
+            return result
     if "gtm_revenue" in functions:
         gtm_hits = hits.get("gtm_revenue", ())
-        # Scoped re-review, IMPORTANT 2 (2026-09-20): the scope predicate is
-        # EVIDENCE-conditional -- on an empty hit list it sees selling=0 and
-        # excludes nothing. Only the description is scored, so a quota-carrying
-        # posting whose wording matches no gtm_revenue signal ("own a book of new
-        # logos ... measured on the number you bring in") reached GTM Systems on
-        # the model's word alone, and the semantic path is exactly the population
-        # where that happens. A gtm_revenue assignment with ZERO deterministic
-        # evidence is an unqualified guess; "unknown is never approved", so the
-        # assignment is WITHHELD and the posting goes to review (no function,
-        # reopened by classification_service when a new model version appears),
-        # never rejected and never approved. The lexicon is deliberately NOT
-        # widened to paper over this.
-        if not gtm_hits:
-            functions = [f for f in functions if f != "gtm_revenue"]
-            result.rule_version = RULE_VERSION
-            result.facts["withheld_function"] = {
-                "function": "gtm_revenue", "code": "no_deterministic_function_evidence",
-                "rule_version": RULE_VERSION,
-            }
-            result.notes.append("insufficient_evidence:gtm_revenue_unsupported_by_deterministic_evidence")
-            if not functions:
-                return result
         role_exclusion = quota_carrying_sales_exclusion(gtm_hits)
         if role_exclusion is not None:
             functions = [f for f in functions if f != "gtm_revenue"]
