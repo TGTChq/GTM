@@ -21,7 +21,8 @@ from .identity import (
     _GENERIC_NAME_TOKENS, email_domain, is_intermediary_host, is_placeholder_company_name, linkedin_slug,
     normalize_company_domain, normalize_company_name,
 )
-from ..policy.campaigns import is_founder_tier, split_title_separators
+from .title_norm import NON_DECISION_MAKER_PHRASES, base_normalize
+from ..policy.campaigns import is_founder_tier
 
 CONTACT_MAPPER_VERSION = "tgtc-contact/1"
 SMALL_COMPANY_MAX = 99      # policy founder_fallback_max_employees
@@ -30,14 +31,15 @@ GROUPS = ("ai_engineering_automation", "gtm_revops_salesops", "marketing_creativ
 
 
 def normalize_title(title: Optional[str]) -> str:
-    # Final whole-branch review, I5: the separator class is campaigns.py's
-    # (imported below as is_founder_tier's own first step), not a second copy
-    # here -- the two views of "is this a founder" disagreed on "Founder/CTO"
-    # precisely because each owned its own idea of a separator.
-    t = split_title_separators(title)
-    t = re.sub(r"[^a-z0-9 ]+", "", t)
-    t = re.sub(r"\bsr\b", "senior", t)
-    return " ".join(t.split())
+    """Phase 4 audit (2026-09-20): this body moved verbatim to
+    ``title_norm.base_normalize`` and is delegated to, so the base
+    normalisation has one definition. What this module deliberately does NOT
+    adopt is ``title_norm.canonical_title``: ``seniority()`` below has to keep
+    SVP and EVP distinct from VP to rank a buyer against the opening
+    (``LEVEL_RANK``), and canonicalisation collapses exactly that distinction.
+    Two questions, one shared base -- not two regex tables.
+    """
+    return base_normalize(title)
 
 
 def _any(phrases: Iterable[str], text: str) -> bool:
@@ -127,8 +129,9 @@ FAMILY_NEGATIVES: Dict[str, Tuple[str, ...]] = {
 OTHER_FUNCTION = ("finance", "financial", "accounting", "controller", "legal", "counsel", "human resources", "hr",
                   "people", "talent", "recruiting", "recruitment", "procurement", "purchasing", "supply chain",
                   "facilities", "real estate", "compliance", "investor relations", "tax", "treasury", "payroll")
-EXCLUDED_TOKENS = ("assistant", "intern", "advisor", "adviser", "board member", "board of", "investor", "former",
-                   "retired", "consultant", "contractor", "fractional", "student", "volunteer", "recruiter")
+#: Phase 4 audit: ONE list, ``title_norm.NON_DECISION_MAKER_PHRASES``, now that
+#: the buyer-title matcher needs the same predicate to guard its token rule.
+EXCLUDED_TOKENS = NON_DECISION_MAKER_PHRASES
 REGIONAL_SCOPE = ("regional", "region", "area", "territory", "district", "zone")   # cal#38 Regional Sales Director
 ASIA = r"\basia\b"                                                                     # cal#40 "…, Asia"
 

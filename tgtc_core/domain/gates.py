@@ -17,6 +17,7 @@ from .identity import (
     company_names_compatible, email_domain, email_on_domains, is_generic_mailbox,
     safe_employer_domain,
 )
+from .title_norm import is_department_label, not_an_employee_in_role, title_matches as _title_matches
 from ..policy.campaigns import is_founder_tier
 
 FOREIGN_TERRITORY = {
@@ -38,100 +39,14 @@ class GateResult:
     evidence: Dict[str, Any] = field(default_factory=dict)
 
 
-def _norm(text: str) -> str:
-    return " ".join(re.sub(r"[^a-z0-9]+", " ", str(text or "").lower()).split())
-
-
-#: Phase 2 audit task 8 (2026-09-19): the buyer-title gate is an exact-phrase
-#: substring match, so it misses common real-world spellings of the SAME titles
-#: ``campaigns.py``'s own buyer hierarchies already list ("Vice President, X" for
-#: "VP X"; "SVP X"/"EVP X" for "VP X"; "Human Resources Manager" for "HR
-#: Manager"). These collapse a title's own seniority wording to the same short
-#: form the buyer-title lists are written in, rather than adding a second title
-#: list -- ``buyer_titles()`` in campaigns.py is unchanged.
-_ABBREVIATION_COLLAPSE: Tuple[Tuple[str, str], ...] = (
-    (r"\bsenior vice president\b", "vp"),
-    (r"\bexecutive vice president\b", "vp"),
-    (r"\bvice president\b", "vp"),
-    (r"\bsvp\b", "vp"),
-    (r"\bevp\b", "vp"),
-    (r"\bhuman resources\b", "hr"),
-)
-
-#: 494 candidates were dropped by the old exact-phrase gate; widening the match
-#: must not ALSO widen it into over-matching (Q21: 10/22 "Operations" approvals
-#: were warehouse/IT/clinical "Operations Manager" -- a different domain's use of
-#: the same generic English word). A qualifier naming one of those other domains,
-#: immediately before the matched buyer-title phrase, means this is not that
-#: buyer hierarchy's title even though the phrase is a literal substring.
-#:
-#: Fix round 1, C1 (CRITICAL, independent review): this guard must be SCOPED to
-#: the specific phrases Q21 measured, not applied globally. "Operations
-#: Manager"/"Operations Director"/"Director of Operations" are the only phrases
-#: this ambiguous -- they are generic English words that name a business
-#: function ("running operations") which unrelated domains also use for their
-#: OWN, unrelated kind of work. Every other function's buyer-title phrase
-#: ("Engineering Manager", "Marketing Manager", "Support Manager", "Controller"
-#: ...) already names ITS OWN function, so a qualifier in front of one
-#: ("Security Engineering Manager", "Field Marketing Manager", "IT Support
-#: Manager", "Plant Controller") is normal, legitimate variation within that
-#: function, not a different domain borrowing the word -- applying the guard
-#: there silently dropped 9 measured regressions. The qualifier list itself is
-#: also trimmed back to exactly what Q21 measured (warehouse/clinical/IT);
-#: "retail"/"field" (speculative additions beyond that evidence) blocked
-#: genuine operations titles ("Retail Operations Manager", "Field Operations
-#: Manager") and are removed.
-_OPERATIONS_AMBIGUOUS_PHRASES = frozenset({"operations manager", "operations director", "director of operations"})
-_UNRELATED_TITLE_QUALIFIERS: Tuple[str, ...] = ("warehouse", "clinical", "it")
-
-
-def _canonicalize(text: str) -> str:
-    t = _norm(text)
-    for pattern, replacement in _ABBREVIATION_COLLAPSE:
-        t = re.sub(pattern, replacement, t)
-    return " ".join(t.split())
-
-
-def _title_variants(title: str) -> List[str]:
-    """The title's canonical form, plus -- for a leading "<Seniority>, <Function>"
-    shape ("Director, Customer Success", "Vice President, Revenue Operations") --
-    the "<Function> <Seniority>" and "<Seniority> of <Function>" forms
-    ``DIRECT_BUYER_TITLES``/``EXECUTIVE_BUYER_TITLES`` are themselves written in.
-    A comma-led title is otherwise word-order-incompatible with those lists even
-    after abbreviation collapse."""
-    variants = [_canonicalize(title)]
-    m = re.match(r"^([A-Za-z .&/-]+?),\s*(.+)$", str(title or "").strip())
-    if m:
-        lead, rest = _canonicalize(m.group(1)), _canonicalize(m.group(2))
-        if lead and rest:
-            variants.append(f"{rest} {lead}")
-            variants.append(f"{lead} of {rest}")
-    return variants
-
-
-def _has_unrelated_qualifier(prefix: str) -> bool:
-    prefix = prefix.strip()
-    if not prefix:
-        return False
-    return any(prefix == q or prefix.endswith(" " + q) for q in _UNRELATED_TITLE_QUALIFIERS)
-
-
-def title_matches(title: str, targets: Iterable[str]) -> bool:
-    variants = _title_variants(title)
-    for t in targets:
-        c = _canonicalize(t)
-        if not c:
-            continue
-        for v in variants:
-            if v == c:
-                return True
-            m = re.search(r"\b" + re.escape(c) + r"\b", v)
-            if not m:
-                continue
-            if c in _OPERATIONS_AMBIGUOUS_PHRASES and _has_unrelated_qualifier(v[:m.start()]):
-                continue
-            return True
-    return False
+#: Phase 4 audit (2026-09-20): the buyer-title predicate now lives in ONE place,
+#: ``domain/title_norm.py``, because three callers need it (this gate, the
+#: post-enrichment gate, and candidate ranking) and phase 2's version was already
+#: being read by a fourth (``services/opportunity.contact_persona``). It is
+#: imported, not re-implemented; the abbreviation/variant tables that used to sit
+#: here moved there with it. See that module for what changed and why the change
+#: is strictly additive.
+title_matches = _title_matches
 
 
 def person_organization(person: Dict[str, Any]) -> Dict[str, Any]:
@@ -286,6 +201,15 @@ def pre_enrichment_check(*, person: Dict[str, Any], employer_name: str, employer
         return GateResult(False, "contact:no_person_identity")
     title = str(person.get("title") or "").strip()
     if not title_matches(title, buyer_titles):
+        # Phase 4: "the person's title is a department name" and "the person's
+        # title is a different job" are two different losses. Both were counted
+        # as ``function_or_authority_mismatch``, which made the loss table say
+        # "wrong function" for a record that carries no function evidence at
+        # all. Same outcome, separate reason, so the accounting stops lying.
+        if not_an_employee_in_role(title):
+            return GateResult(False, "contact:title_not_current_employee_in_role", {"title": title, "rule_version": RULE_VERSION})
+        if is_department_label(title):
+            return GateResult(False, "contact:title_is_department_not_role", {"title": title, "rule_version": RULE_VERSION})
         return GateResult(False, "contact:function_or_authority_mismatch", {"title": title, "rule_version": RULE_VERSION})
     if is_founder_tier(title) and not founder_allowed:
         return GateResult(False, "contact:founder_tier_not_allowed_for_size", {"title": title, "rule_version": RULE_VERSION})
