@@ -80,3 +80,25 @@ Variable NAMES only, never values. No PII.
 | 32 | Compliance gates verified live | blocked reasons observed: `compliance:unknown_jurisdiction:absent` (16), `compliance:cold_email_not_permitted:DE` (1), `compliance:uk:not_a_verified_corporate_subscriber` (1), `employer_attribution_conflict` (1) |
 | 33 | Campaign spread | 8 of 9 campaigns received eligible approvals: operations 59, finance 21, gtm 18, ai_technical 9, CX 10, people_hr 9, product 7, marketing 3 |
 | 34 | Provider consumption | Fantastic 10 requests / 1,000 credits (budget exhausted); Anthropic 279 requests, 1.73M input + 199k output tokens; **Apollo 0 credits** -- contacts came from already-paid stored records, as required |
+
+## The fourth cause
+
+| # | action | evidence / result |
+|---|---|---|
+| 35 | Airtable delivered 60 new rows; Instantly delivered **zero** | 252 Instantly rows at `attempts = 0`, `last_error` null -- never claimed |
+| 36 | **Root cause** | `Runner.run_to_target` passed `delivery_channels=("airtable",)`, hardcoded. The Instantly channel was never delivered by the target run at all |
+| 37 | Why it stayed hidden | in the legacy split, Instantly delivery lived in `GTM Approved Sync` (`run_approved.py`), and that service now runs a parked start command that prints and exits. Nothing delivered to Instantly anywhere in the system |
+| 38 | Fixed | `TARGET_DELIVERY_CHANNELS = ("airtable", "instantly")`. `test_target_delivery_is_airtable_only` rewritten, not deleted, carrying the reason it was retired |
+| 39 | Prepared `railway.core.json` (not yet activated) | adds `migrate` before the run, `restartPolicyType: NEVER`, and `cronSchedule: 0 3 * * *`; activated per-service by `RAILWAY_CONFIG_FILE`, so the other five services are untouched |
+| 40 | Redeployed | `tests_core` 1,667 passed, 0 failed |
+
+### Four causes of zero delivery, none sharing a fix
+
+1. `cronSchedule` was `None` on every one of the six services.
+2. The core service had no `INSTANTLY_*` configuration.
+3. Every pending approval pointed at a retired **Control** campaign, and two
+   code paths would have sent them there.
+4. `run-target` only ever delivered the Airtable channel.
+
+The instruction to "not assume these all have the same cause" was correct: they
+had four different fixes, in three different layers.
