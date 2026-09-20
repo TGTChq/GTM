@@ -15,6 +15,8 @@ See .superpowers/sdd/phase2/task-5c-brief.md and task-5c-report.md.
 """
 from __future__ import annotations
 
+import json
+
 from unittest.mock import MagicMock
 
 import pytest
@@ -471,3 +473,44 @@ def test_live_pipeline_ledger_does_not_count_a_single_source_approval_as_confirm
     assert report["approved_confirmed_size"] == 0, "one source is not corroboration"
     assert report["approved_review_size"] == 1
     assert sql1(conn, "SELECT company_size_sources FROM approvals WHERE opportunity_id = %s", (oid,)) == 1
+
+
+# ---------------------------------------------------------------------------
+# Final whole-branch review, I1 (IMPORTANT): the Airtable row still asserted
+# "Firmographics Status": "PASS" unconditionally. A firmographic_conflict lead
+# landed in the CRM claiming firmographics passed, with the size fields merely
+# ABSENT and no field anywhere carrying company_size_state -- the review bucket
+# existed in the database and in ledger(), but not in the artifact a human
+# actually reads. NEEDS_CHECK is the established legacy vocabulary for these
+# gate-state fields (airtable_client.py's send-safety accepts PASS and
+# NEEDS_CHECK and blocks only an explicit REJECT), so this stays reviewable.
+# ---------------------------------------------------------------------------
+
+def _airtable_for(**employer_over):
+    inputs = _inputs()
+    inputs["employer"].update(**employer_over)
+    out = ap.build_approved_lead(**inputs)
+    assert isinstance(out, ap.ApprovedLead), out
+    return ap.airtable_fields(out.lead, out.fingerprint), out.lead
+
+
+def test_airtable_asserts_firmographics_passed_only_for_a_corroborated_size():
+    fields, lead = _airtable_for(employee_count=120, size_band="51-200 employees")
+    assert lead["company_size_state"] == "in_range" and lead["company_size_sources"] == 2
+    assert fields["Firmographics Status"] == "PASS"
+    assert json.loads(fields["Evidence Bundle"])["company_size_state"] == "in_range"
+
+
+@pytest.mark.parametrize("employer_over,expected_state", [
+    ({"employee_count": 5000, "size_band": "51-200 employees"}, "firmographic_conflict"),
+    ({"employee_count": None, "size_band": None}, "unknown_firmographics"),
+    ({"employee_count": 120, "size_band": None}, "in_range"),          # accepted on ONE source (C3)
+])
+def test_airtable_marks_an_unconfirmed_size_for_review_and_names_the_state(employer_over, expected_state):
+    fields, lead = _airtable_for(**employer_over)
+    assert lead["company_size_state"] == expected_state
+    assert fields["Firmographics Status"] == "NEEDS_CHECK", "an unconfirmed size must not assert PASS"
+    bundle = json.loads(fields["Evidence Bundle"])
+    assert bundle["company_size_state"] == expected_state
+    assert bundle["company_size_sources"] == lead["company_size_sources"]
+    assert f"company_size_state={expected_state}" in fields["Job Signal Notes"]

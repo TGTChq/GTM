@@ -296,11 +296,26 @@ def airtable_fields(lead: Dict[str, Any], fp: str) -> Dict[str, Any]:
     unconditionally asserted a confident size label CRM/ops readers (and,
     for the Instantly twin below, an outbound email TEMPLATE) would trust as
     fact even when it is not one. Both are omitted (never a wrong or
-    unverified number) unless ``lead["company_size_state"] == "in_range"``.
+    unverified number) unless ``size_confirmed(lead)``.
+
+    Final whole-branch review, I1 (IMPORTANT, 2026-09-20): omitting the two
+    size fields was not enough. The row still asserted ``"Firmographics
+    Status": "PASS"`` unconditionally, so a firmographic_conflict lead landed
+    in the CRM claiming firmographics passed, with the size merely ABSENT and
+    no field anywhere naming ``company_size_state`` -- the review bucket
+    existed in the database and in ``ledger()``, but not in the artifact a
+    human reads. The gate field now says NEEDS_CHECK (the established legacy
+    vocabulary: ``airtable_client.py``'s send-safety accepts PASS and
+    NEEDS_CHECK and blocks only an explicit REJECT, so the row stays
+    reviewable and deliverable), and the state and its corroboration count
+    travel in two fields this producer already writes -- no new Airtable
+    field name is invented, which an unprepared base would reject.
     """
     website = f"https://{lead['employer_domain']}"
     confirmed = size_confirmed(lead)
     count = lead.get("employee_count") if confirmed else None
+    company_size_state = str(lead.get("company_size_state") or "unknown_firmographics")
+    company_size_sources = int(lead.get("company_size_sources") or 0)
     evidence = {
         "producer": "tgtc_core",
         "policy_version": lead["policy_version"],
@@ -309,6 +324,8 @@ def airtable_fields(lead: Dict[str, Any], fp: str) -> Dict[str, Any]:
         "responsibility_excerpts": lead.get("responsibility_excerpts"),
         "email_alignment": lead.get("email_alignment"),
         "posting_first_seen_at": lead.get("posting_first_seen_at"),
+        "company_size_state": company_size_state,
+        "company_size_sources": company_size_sources,
     }
     fields = {
         "Lead Key": lead["lead_key"],
@@ -330,7 +347,8 @@ def airtable_fields(lead: Dict[str, Any], fp: str) -> Dict[str, Any]:
         "Job Age Days": lead.get("posting_age_days"),
         "Job URL Status": "provider_active",
         "Job URL Source": lead.get("posting_source"),
-        "Job Signal Notes": "producer=tgtc_core",
+        "Job Signal Notes": f"producer=tgtc_core | company_size_state={company_size_state} "
+                            f"({company_size_sources} corroborating source(s))",
         "Hiring Manager": f"{lead['first_name']} {lead['last_name']}",
         "HM Title": lead["buyer_title"],
         "LinkedIn": lead.get("linkedin_url") or None,
@@ -346,7 +364,7 @@ def airtable_fields(lead: Dict[str, Any], fp: str) -> Dict[str, Any]:
         "Final Decision": "FINAL_PASS",
         "Decision Reason": "APPROVED_BY_TGTC_CORE",
         "Evidence Status": "PASS",
-        "Firmographics Status": "PASS",
+        "Firmographics Status": "PASS" if confirmed else "NEEDS_CHECK",
         "Contact Alignment": "PASS",
         "Email Validation": "PASS",
         "Validation Version": VALIDATION_VERSION,

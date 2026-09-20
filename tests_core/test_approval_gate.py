@@ -75,7 +75,15 @@ def test_email_gate_never_promotes_non_verified_statuses():
 
 
 def test_airtable_payload_is_approved_only_and_carries_the_core_validation_version():
-    out = ap.build_approved_lead(**_inputs())
+    # Final whole-branch review, I1: this test's subject is that NO legacy
+    # half-state vocabulary leaks into a row this producer writes. A fully
+    # confirmed employer (both size sources agreeing) is that case. The one
+    # deliberate exception -- "Firmographics Status": "NEEDS_CHECK" for a size
+    # that is NOT confirmed, so the review bucket is visible in the CRM row
+    # itself -- is asserted in test_phase2_size_wiring.py.
+    inputs = _inputs()
+    inputs["employer"].update(size_band="51-200 employees")
+    out = ap.build_approved_lead(**inputs)
     fields = ap.airtable_fields(out.lead, out.fingerprint)
     assert fields["Status"] == "Approved"
     assert fields["Validation Version"] == POLICY_VERSION
