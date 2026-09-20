@@ -14,7 +14,7 @@ is what's under test.
 """
 from __future__ import annotations
 
-from tgtc_core.domain.classification import classify_posting
+from tgtc_core.domain.classification import classify_posting, score_functions
 from tgtc_core.domain.facts import RULE_VERSION
 from tgtc_core.domain.inference import InferenceResponse, ResponsibilityItem
 
@@ -188,3 +188,54 @@ def test_a_second_semantic_function_survives_the_gtm_scope_exclusion():
     assert "gtm_systems" not in result.campaign_keys
     assert not result.excluded
     assert result.rule_version == RULE_VERSION
+
+
+# ---------------------------------------------------------------------------
+# Scoped re-review, IMPORTANT 2: C1 left a residual escape. The shared scope
+# predicate is EVIDENCE-CONDITIONAL -- `hits.get("gtm_revenue", ())` on an empty
+# hit list gives selling=0, so it returns None and nothing is excluded. Only the
+# DESCRIPTION is scored (classify_posting passes `desc` alone), so an "Account
+# Executive" title contributes nothing either. The semantic path exists
+# precisely for postings the lexicon cannot read, which makes that the one
+# population where the scope check can never fire: a quota-carrying AE whose
+# wording matches no gtm_revenue signal was model-assigned gtm_revenue and
+# routed to GTM Systems with excluded=False.
+#
+# A model assignment of gtm_revenue with ZERO deterministic gtm evidence is an
+# unqualified guess, and "unknown is never approved" is a fixed rule. It is
+# routed to review (no function, reopenable), NOT rejected -- and the lexicon is
+# deliberately NOT widened to paper over it.
+# ---------------------------------------------------------------------------
+
+_THIN_NO_GTM_EVIDENCE = (
+    "You will own a book of new logos in your patch and be measured on the number you bring in "
+    "each quarter. You will negotiate pricing with economic buyers, run discovery conversations, "
+    "and partner with our solutions team to win competitive evaluations against incumbents."
+)
+
+
+def test_the_escape_posting_really_has_no_deterministic_gtm_evidence():
+    """Precondition, so the test below cannot silently stop testing what it says:
+    this wording matches no gtm_revenue lexicon signal at all."""
+    scores, hits = score_functions(_THIN_NO_GTM_EVIDENCE)
+    assert scores.get("gtm_revenue", 0) == 0 and not hits.get("gtm_revenue")
+
+
+def test_a_model_gtm_assignment_with_no_deterministic_evidence_is_not_gtm_systems():
+    result = classify_posting(title="Account Executive", description=_THIN_NO_GTM_EVIDENCE,
+                              inference=_FixedAnswer(["gtm_revenue"], _THIN_NO_GTM_EVIDENCE[:80]))
+    assert result.method == "semantic"
+    assert "gtm_revenue" not in result.compatible_functions
+    assert result.campaign_keys == []
+    assert not result.excluded, "an unqualified guess is review, never a reject"
+    assert any(n.startswith("insufficient_evidence:gtm_revenue") for n in result.notes), result.notes
+
+
+def test_a_second_function_survives_when_only_gtm_revenue_is_unsupported():
+    """The rule is scoped to GTM Systems: it removes the unsupported assignment,
+    it does not throw the posting away."""
+    result = classify_posting(title="Account Executive", description=_THIN_NO_GTM_EVIDENCE,
+                              inference=_FixedAnswer(["gtm_revenue", "marketing"], _THIN_NO_GTM_EVIDENCE[:80]))
+    assert result.compatible_functions == ["marketing"]
+    assert "gtm_systems" not in result.campaign_keys
+    assert not result.excluded

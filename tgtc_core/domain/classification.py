@@ -449,7 +449,30 @@ def _apply_semantic(result: ClassificationResult, response: InferenceResponse, d
     # function at all is excluded exactly as the deterministic path excludes
     # it (there, gtm_revenue being dominant means it was the only function).
     if "gtm_revenue" in functions:
-        role_exclusion = quota_carrying_sales_exclusion(hits.get("gtm_revenue", ()))
+        gtm_hits = hits.get("gtm_revenue", ())
+        # Scoped re-review, IMPORTANT 2 (2026-09-20): the scope predicate is
+        # EVIDENCE-conditional -- on an empty hit list it sees selling=0 and
+        # excludes nothing. Only the description is scored, so a quota-carrying
+        # posting whose wording matches no gtm_revenue signal ("own a book of new
+        # logos ... measured on the number you bring in") reached GTM Systems on
+        # the model's word alone, and the semantic path is exactly the population
+        # where that happens. A gtm_revenue assignment with ZERO deterministic
+        # evidence is an unqualified guess; "unknown is never approved", so the
+        # assignment is WITHHELD and the posting goes to review (no function,
+        # reopened by classification_service when a new model version appears),
+        # never rejected and never approved. The lexicon is deliberately NOT
+        # widened to paper over this.
+        if not gtm_hits:
+            functions = [f for f in functions if f != "gtm_revenue"]
+            result.rule_version = RULE_VERSION
+            result.facts["withheld_function"] = {
+                "function": "gtm_revenue", "code": "no_deterministic_function_evidence",
+                "rule_version": RULE_VERSION,
+            }
+            result.notes.append("insufficient_evidence:gtm_revenue_unsupported_by_deterministic_evidence")
+            if not functions:
+                return result
+        role_exclusion = quota_carrying_sales_exclusion(gtm_hits)
         if role_exclusion is not None:
             functions = [f for f in functions if f != "gtm_revenue"]
             result.rule_version = RULE_VERSION
