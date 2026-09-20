@@ -19,6 +19,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from tgtc_core.db import apply_schema
+from tgtc_core.db.connection import jsonb
 from tgtc_core.domain.facts import (
     TARGET_MAX_EMPLOYEES, TARGET_MIN_EMPLOYEES, resolve_company_size, size_reject_reason, size_state,
 )
@@ -326,6 +328,64 @@ def test_live_pipeline_approval_persists_company_size_state_and_ledger_splits_co
 # M2 (MINOR, fix in this round): testing/fakes.py::make_posting_row must not
 # hardcode a size band inconsistent with whatever headcount= it is given --
 # a landmine that silently builds a conflicting fixture for the next task.
+
+# ---------------------------------------------------------------------------
+# Fix round 2 (2026-09-20, independent review, Changes Requested)
+# ---------------------------------------------------------------------------
+
+# I3 (IMPORTANT, partially addressed in round 1): migration 009's
+# `CREATE UNIQUE INDEX` has no pre-dedup step. A database where the pre-fix-
+# round-1 code (commit db79e4f: a plain INSERT, no constraint, at both call
+# sites) already ran holds duplicate (employer, fact) rows for the two
+# company-size facts -- apply_schema() must dedupe them first, not hard-fail
+# with "could not create unique index ... is duplicated" and permanently
+# wedge every future apply_schema() call against that database.
+
+def test_apply_schema_dedupes_preexisting_duplicate_company_size_evidence_before_indexing(conn):
+    with conn.cursor() as cur:
+        # Simulate a database that already ran the pre-fix-round-1 code, on
+        # an OLDER schema snapshot that predates this migration's index (the
+        # fixture's own reset_schema() already created it; drop it first so
+        # this test genuinely exercises "the index does not exist yet").
+        cur.execute("DROP INDEX IF EXISTS evidence_employer_company_size_uq")
+        cur.execute(
+            "INSERT INTO employers (canonical_name, name_key, domain, employee_count, size_band) "
+            "VALUES ('Acme', 'acme-dup', 'acmedup.com', 5000, '51-200 employees') RETURNING id"
+        )
+        eid = int(cur.fetchone()["id"])
+        # Exactly what the plain, unconstrained INSERT in db79e4f produced:
+        # one row per call site/pass, no ON CONFLICT.
+        for _ in range(3):
+            cur.execute(
+                "INSERT INTO evidence (subject_kind, subject_id, fact, value, status, source, excerpt) "
+                "VALUES ('employer', %s, 'company:firmographic_conflict', %s, 'recorded', 'tgtc_core', 'dup')",
+                (eid, jsonb({"employee_count": 5000, "size_band": "51-200 employees"})),
+            )
+        # A second employer with only ONE row -- must survive untouched, not
+        # be collapsed by an over-eager dedupe.
+        cur.execute(
+            "INSERT INTO employers (canonical_name, name_key, domain, employee_count, size_band) "
+            "VALUES ('Widgets', 'widgets-solo', 'widgetssolo.com', 5000, '51-200 employees') RETURNING id"
+        )
+        eid_solo = int(cur.fetchone()["id"])
+        cur.execute(
+            "INSERT INTO evidence (subject_kind, subject_id, fact, value, status, source, excerpt) "
+            "VALUES ('employer', %s, 'company:firmographic_conflict', %s, 'recorded', 'tgtc_core', 'solo')",
+            (eid_solo, jsonb({"employee_count": 5000, "size_band": "51-200 employees"})),
+        )
+    conn.commit()
+
+    apply_schema(conn)  # must not raise "could not create unique index ... is duplicated"
+
+    rows = sqlall(conn, "SELECT id FROM evidence WHERE subject_kind = 'employer' AND subject_id = %s "
+                        "AND fact = 'company:firmographic_conflict'", (eid,))
+    assert len(rows) == 1, "duplicates must be collapsed to exactly one row per (employer, fact)"
+    solo_rows = sqlall(conn, "SELECT id FROM evidence WHERE subject_kind = 'employer' AND subject_id = %s "
+                             "AND fact = 'company:firmographic_conflict'", (eid_solo,))
+    assert len(solo_rows) == 1, "a non-duplicated row must survive untouched"
+    # Applying again (the constraint now exists and holds) must still be a no-op.
+    apply_schema(conn)
+
 
 def test_make_posting_row_default_size_band_is_consistent_with_headcount():
     from datetime import datetime, timezone

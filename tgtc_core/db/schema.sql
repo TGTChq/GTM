@@ -328,6 +328,20 @@ CREATE INDEX IF NOT EXISTS evidence_subject_idx ON evidence (subject_kind, subje
 -- One row per employer per company-size state (fix round 1, I3): dedupe only
 -- for these two fact values; every other evidence fact keeps its existing
 -- one-row-per-observed-event semantics.
+--
+-- Fix round 2, I3 (IMPORTANT): apply_schema() runs this file, unconditionally,
+-- on EVERY call -- including against an existing database, before any
+-- migration runs. A database where the pre-fix-round-1 code (a plain INSERT,
+-- no constraint, at both call sites) already ran holds duplicate
+-- (subject_kind, subject_id, fact) rows for these two facts; CREATE UNIQUE
+-- INDEX would hard-fail on those rows and wedge every future apply_schema()
+-- call. Dedupe first (keep the newest row per group), matching migration
+-- 009's own copy of this same statement pair.
+DELETE FROM evidence dup
+USING evidence newer
+WHERE dup.subject_kind = 'employer' AND dup.fact IN ('company:firmographic_conflict', 'company:unknown_firmographics')
+  AND newer.subject_kind = dup.subject_kind AND newer.subject_id = dup.subject_id AND newer.fact = dup.fact
+  AND newer.id > dup.id;
 CREATE UNIQUE INDEX IF NOT EXISTS evidence_employer_company_size_uq
     ON evidence (subject_kind, subject_id, fact)
     WHERE subject_kind = 'employer' AND fact IN ('company:firmographic_conflict', 'company:unknown_firmographics');
