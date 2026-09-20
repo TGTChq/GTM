@@ -136,6 +136,11 @@ CREATE TABLE IF NOT EXISTS employers (
     linkedin_slug   text,
     apollo_org_id   text,
     employee_count  integer,
+    -- Declared LinkedIn size BAND (e.g. "201-500 employees"), alongside the
+    -- single-field employee_count above, so a genuine conflict between the
+    -- two reliable sources (Decision 2, 2026-09-19) can be detected instead
+    -- of masked by whichever single field happened to be read (migration 007).
+    size_band       text,
     industry        text,
     founded_year    integer,
     agency_flag     boolean,

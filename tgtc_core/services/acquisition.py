@@ -172,19 +172,28 @@ def _bool(value: Any) -> Optional[bool]:
 
 
 def refresh_employer_facts(cur, employer_id: int, org: Dict[str, Any]) -> None:
-    """Provider organization facts changed (R10): keep the latest observation. Headcount
-    and industry from Apollo stay authoritative once an enrichment exists; the agency
-    flag is always the latest provider value."""
+    """Provider organization facts changed (R10): keep the latest observation. Headcount,
+    the declared LinkedIn size band, and industry from Apollo stay authoritative once an
+    enrichment exists; the agency flag is always the latest provider value.
+
+    ``size_band`` (task 5c, 2026-09-20): the SAME "authoritative once enriched"
+    rule as employee_count/industry -- Apollo's own organization_enrich never
+    writes a size band (it has none), so once ``enriched_at`` is set this
+    column is frozen at whatever Fantastic last observed, exactly like the
+    other two provider-derived columns on this row.
+    """
     cur.execute(
         """
         UPDATE employers SET
             employee_count = CASE WHEN enriched_at IS NULL THEN COALESCE(%s, employee_count) ELSE employee_count END,
+            size_band = CASE WHEN enriched_at IS NULL THEN COALESCE(%s, size_band) ELSE size_band END,
             industry = CASE WHEN enriched_at IS NULL THEN COALESCE(%s, industry) ELSE industry END,
             agency_flag = COALESCE(%s, agency_flag),
             facts_json = facts_json || %s, updated_at = now()
         WHERE id = %s
         """,
-        (_int(org.get("org_linkedin_headcount")), org.get("org_linkedin_industry") or None,
+        (_int(org.get("org_linkedin_headcount")), org.get("org_linkedin_size") or None,
+         org.get("org_linkedin_industry") or None,
          _bool(org.get("org_linkedin_recruitment_agency_derived")), jsonb({"fantastic": org}), employer_id),
     )
 

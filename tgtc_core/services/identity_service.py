@@ -86,11 +86,12 @@ def resolve_employer(conn: psycopg.Connection, *, org: Dict[str, Any], employer_
                 with conn.transaction():
                     cur.execute(
                         """
-                        INSERT INTO employers (canonical_name, name_key, domain, linkedin_slug, employee_count, industry, agency_flag, facts_json)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s) RETURNING id
+                        INSERT INTO employers (canonical_name, name_key, domain, linkedin_slug, employee_count, size_band, industry, agency_flag, facts_json)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id
                         """,
                         (name or nk or domain or slug, nk or name.lower(), domain or None, slug or None,
-                         _int(org.get("org_linkedin_headcount")), org.get("org_linkedin_industry") or None,
+                         _int(org.get("org_linkedin_headcount")), org.get("org_linkedin_size") or None,
+                         org.get("org_linkedin_industry") or None,
                          _bool(org.get("org_linkedin_recruitment_agency_derived")), jsonb({"source": source, "org": org})),
                     )
                     eid = int(cur.fetchone()["id"])
@@ -127,9 +128,12 @@ def resolve_employer(conn: psycopg.Connection, *, org: Dict[str, Any], employer_
         if nk:
             _add_alias(cur, eid, "name_key", nk, {"source": source, "basis": f"matched_via_{via}"})
         headcount = _int(org.get("org_linkedin_headcount"))
-        if headcount is not None:
-            cur.execute("UPDATE employers SET employee_count = COALESCE(employee_count, %s), industry = COALESCE(industry, %s), updated_at = now() WHERE id = %s",
-                        (headcount, org.get("org_linkedin_industry") or None, eid))
+        size_band_value = org.get("org_linkedin_size") or None
+        if headcount is not None or size_band_value is not None:
+            cur.execute(
+                "UPDATE employers SET employee_count = COALESCE(employee_count, %s), "
+                "size_band = COALESCE(size_band, %s), industry = COALESCE(industry, %s), updated_at = now() WHERE id = %s",
+                (headcount, size_band_value, org.get("org_linkedin_industry") or None, eid))
         return eid, key, f"employer_{via}"
 
 
