@@ -75,3 +75,67 @@ def test_lift_with_only_the_ada_qualifier_as_evidence_does_not_exclude():
     facts = extract_job_facts(title="Customer Success Manager",
                               description="Physical demands: must be able to lift up to 25 pounds occasionally.")
     assert not any("physical" in e.reason for e in facts.exclusions)
+
+
+# --- Task 4: employment type, three states (2026-09-19, Luis) ----------------
+# Decision 1: keep excluding part-time/contractor/temporary/freelance/internship/
+# unpaid/volunteer/commission-only/equity-only; full-time stays in scope. An
+# explicit employer statement beats a provider tag; a provider tag that
+# CONTRADICTS an explicit statement produces unknown + a review reason, never an
+# automatic rejection. An explicitly excluded type still excludes. An incidental
+# occurrence of an excluded word in unrelated prose never decides employment
+# type. Brief's test bodies use `provider_employment_type=`, which is not a real
+# parameter of `extract_job_facts`; adapted to `ai_employment_type=`, the real
+# structured provider-tag parameter this rule already reads (facts.py:277). The
+# brief's pseudocode also treats `e` (an `Exclusion`) as a string; adapted to
+# `e.reason`, following the same adaptation tasks 1-3 made (task-1-3-report.md).
+
+def test_incidental_contract_word_keeps_full_time():
+    facts = extract_job_facts(title="Customer Success Manager",
+                              description="Full-time. You will own contract renewals for existing accounts.",
+                              ai_employment_type="FULL_TIME")
+    assert facts.employment == "full_time"
+    assert not any(e.reason.startswith("employment") for e in facts.exclusions)
+
+
+def test_provider_tag_conflicting_with_explicit_statement_is_unknown_not_rejected():
+    facts = extract_job_facts(title="Finance Analyst",
+                              description="This is a full-time, permanent position.",
+                              ai_employment_type="PART_TIME")
+    assert facts.employment == "unknown"
+    assert not any(e.reason.startswith("employment") for e in facts.exclusions)
+    assert any("employment" in r for r in facts.review_reasons)
+
+
+def test_explicit_part_time_still_excludes():
+    facts = extract_job_facts(title="Bookkeeper", description="Part-time, 20 hours per week.",
+                              ai_employment_type="PART_TIME")
+    assert any(e.reason.startswith("employment") for e in facts.exclusions)
+
+
+def test_commission_only_and_equity_only_still_exclude():
+    for text in ("This is a commission-only position.", "Equity-only compensation, no salary."):
+        facts = extract_job_facts(title="Sales Associate", description=text, ai_employment_type="FULL_TIME")
+        assert any(e.reason.startswith("employment") for e in facts.exclusions), text
+
+
+def test_incidental_fixed_term_clause_keeps_full_time():
+    """Not in the brief's four test bodies, but required by its own 'Measured defect'
+    text verbatim: "an at-will 'fixed term' clause... trips the employment rule
+    today." An at-will/introductory-period qualifier on a bare 'fixed term' mention
+    is incidental (mirrors task 3's FACILITY_LIFT_INCIDENTAL narrowing); the explicit
+    N-month contract/term phrasing is untouched and still excludes on its own."""
+    facts = extract_job_facts(
+        title="Customer Success Manager",
+        description=("This is a full-time position. Note: an at-will fixed term "
+                      "introductory period applies to new hires per company policy."),
+        ai_employment_type="FULL_TIME")
+    assert facts.employment == "full_time"
+    assert not any(e.reason.startswith("employment") for e in facts.exclusions)
+
+
+def test_genuine_fixed_term_contract_still_excludes():
+    facts = extract_job_facts(title="Program Manager",
+                              description="This is a 6-month fixed term contract with possible extension.",
+                              ai_employment_type="FULL_TIME")
+    assert any(e.reason.startswith("employment:fixed_term") for e in facts.exclusions)

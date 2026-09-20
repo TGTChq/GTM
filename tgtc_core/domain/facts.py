@@ -55,6 +55,12 @@ class Exclusion:
 class JobFacts:
     facts: Dict[str, Fact] = field(default_factory=dict)
     exclusions: List[Exclusion] = field(default_factory=list)
+    #: Phase 2 audit tasks 4-5 (2026-09-19, Luis): a record can need human/paid-step
+    #: review WITHOUT being excluded -- contradictory employment evidence, or a
+    #: company-size conflict between reliable sources. Each entry is a
+    #: "<stage>:<code>" string (mirrors Exclusion.reason's own convention), empty by
+    #: default. Never read to decide exclusion; it is its own reported bucket.
+    review_reasons: List[str] = field(default_factory=list)
 
     def get(self, name: str) -> Fact:
         return self.facts.get(name, Fact(name, None, UNKNOWN))
@@ -63,12 +69,24 @@ class JobFacts:
     def excluded(self) -> bool:
         return bool(self.exclusions)
 
+    @property
+    def employment(self) -> str:
+        """The employment_type Fact's value, or "unknown" -- convenience accessor
+        matching the vocabulary `size_state()` also uses (a plain string, not a
+        `Fact`), since contradictory evidence deliberately leaves this Fact's
+        value at None (see extract_job_facts's employment block)."""
+        fact = self.facts.get("employment_type")
+        if fact is None or fact.value is None:
+            return "unknown"
+        return str(fact.value)
+
     def to_dict(self) -> Dict[str, object]:
         return {
             "facts": {k: {"value": v.value, "status": v.status, "excerpt": v.excerpt[:300], "rule_version": v.rule_version}
                      for k, v in self.facts.items()},
             "exclusions": [{"reason": e.reason, "excerpt": e.excerpt[:300], "source": e.source, "rule_version": e.rule_version}
                           for e in self.exclusions],
+            "review_reasons": list(self.review_reasons),
         }
 
 
@@ -119,6 +137,14 @@ EMPLOYMENT_NEGATIVES: List[Tuple[str, List[str]]] = [
     ]),
     ("unpaid", [r"\b(?:this|the) (?:is|role is|position is)\b[^.]{0,70}\bunpaid\b", r"\bequity[- ]only\b", r"\bcommission[- ]only\b", r"\bno financial compensation\b"]),
 ]
+#: Phase 2 audit task 4 (2026-09-19, Luis): measured defect -- a bare "fixed term"
+#: mention that only qualifies an at-will/introductory/probationary CLAUSE (not the
+#: position's own employment type) trips the employment rule today. Mirrors task
+#: 3's FACILITY_LIFT_INCIDENTAL narrowing: the explicit "N-month contract/term"
+#: phrasing (EMPLOYMENT_NEGATIVES's other fixed_term pattern) is untouched and
+#: still excludes on its own.
+FIXED_TERM_INCIDENTAL = re.compile(
+    r"\bat[- ]will\b|\b(?:introductory|probationary|trial|onboarding)\s+period\b", re.I)
 FULL_TIME = [r"\bfull[- ]time\b", r"\bregular employee\b", r"\bpermanent (?:role|position|employee)\b"]
 REMOTE = [r"\bfully remote\b", r"\b100% remote\b", r"\bremote (?:role|position|job)\b", r"\bwork from home\b", r"\bhome[- ]based\b", r"\btelecommute\b"]
 HYBRID = [r"\bhybrid (?:role|position|schedule|work model)\b", r"\b(?:one|two|three|four|five|[1-5]) days? (?:a|per) week[^.]{0,80}\boffice\b", r"\bin[- ]office requirement\b"]
@@ -298,36 +324,61 @@ def extract_job_facts(
     else:
         jf.facts["active_status"] = Fact("active_status", True, PROVIDER, "provider_active_feed")
 
-    # employment
-    emp_value, emp_excerpt, emp_status = None, "", UNKNOWN
+    # employment (Phase 2 audit task 4, 2026-09-19): the employer's own explicit
+    # statement about the position and a provider's structured tag are two
+    # independent signals. Measured: the deployed full-time filter removed 16.8%
+    # of US LinkedIn / 21.2% of US ATS postings (almost none missing values), and
+    # an incidental "fixed term" mention on an at-will/introductory clause tripped
+    # the rule on an otherwise full-time posting (see FIXED_TERM_INCIDENTAL).
+    # Luis's decision: an explicit statement of an EXCLUDED type (either source)
+    # still excludes, unconditionally; a provider tag that CONTRADICTS an
+    # explicit FULL-TIME statement produces unknown + a review reason, never an
+    # automatic rejection.
+    text_negative_value, text_negative_excerpt = None, ""
     for value, patterns in EMPLOYMENT_NEGATIVES:
         hits = _matching(sents, patterns)
+        if value == "fixed_term":
+            hits = [s for s in hits if not (
+                re.search(r"\bfixed[- ]term\b", s, re.I) and FIXED_TERM_INCIDENTAL.search(s)
+                and not re.search(r"\b\d{1,2}[- ]month\s+(?:contract|term)\b", s, re.I))]
         if hits:
-            emp_value, emp_excerpt, emp_status = value, hits[0], TEXT
+            text_negative_value, text_negative_excerpt = value, hits[0]
             break
-    if not emp_value:
-        provider_values = list(dict.fromkeys(
-            _norm_emp_values(ai_employment_type) + _norm_emp_values(employment_type)
-        ))
-        negative_values = {
-            "parttime": "part_time", "contractor": "contract", "contract": "contract",
-            "fixedterm": "fixed_term", "temporary": "temporary", "temp": "temporary",
-            "freelance": "freelance", "seasonal": "seasonal", "intern": "internship",
-            "internship": "internship", "volunteer": "volunteer", "unpaid": "unpaid",
-            "fractional": "fractional", "other": "other",
-        }
-        # Provider filters are inclusion filters: a posting may be tagged both
-        # FULL_TIME and CONTRACTOR.  Any explicit incompatible label wins.
-        provider_negative = next((negative_values[v] for v in provider_values if v in negative_values), "")
-        provider_excerpt = f"provider employment_type={ai_employment_type!r}; raw_employment_type={employment_type!r}"
-        if provider_negative:
-            emp_value, emp_excerpt, emp_status = provider_negative, provider_excerpt, PROVIDER
-        elif "fulltime" in provider_values:
+    text_full_time_hits = _matching(sents, FULL_TIME)
+    provider_values = list(dict.fromkeys(
+        _norm_emp_values(ai_employment_type) + _norm_emp_values(employment_type)
+    ))
+    negative_values = {
+        "parttime": "part_time", "contractor": "contract", "contract": "contract",
+        "fixedterm": "fixed_term", "temporary": "temporary", "temp": "temporary",
+        "freelance": "freelance", "seasonal": "seasonal", "intern": "internship",
+        "internship": "internship", "volunteer": "volunteer", "unpaid": "unpaid",
+        "fractional": "fractional", "other": "other",
+    }
+    # Provider filters are inclusion filters: a posting may be tagged both
+    # FULL_TIME and CONTRACTOR. Any explicit incompatible label wins.
+    provider_negative = next((negative_values[v] for v in provider_values if v in negative_values), "")
+    provider_full_time = "fulltime" in provider_values
+    provider_excerpt = f"provider employment_type={ai_employment_type!r}; raw_employment_type={employment_type!r}"
+
+    emp_value, emp_excerpt, emp_status = None, "", UNKNOWN
+    if text_negative_value:
+        # An explicit employer statement of an excluded type always excludes,
+        # independent of any provider tag ("an explicitly excluded type still
+        # excludes").
+        emp_value, emp_excerpt, emp_status = text_negative_value, text_negative_excerpt, TEXT
+    elif text_full_time_hits and provider_negative:
+        # Explicit full-time statement contradicted by a provider tag naming an
+        # excluded type: contradictory evidence becomes unknown/review, never an
+        # automatic rejection. Resolved in neither direction here.
+        jf.review_reasons.append("role:employment:conflicting_provider_tag")
+    elif provider_negative:
+        emp_value, emp_excerpt, emp_status = provider_negative, provider_excerpt, PROVIDER
+    elif provider_full_time or text_full_time_hits:
+        if text_full_time_hits:
+            emp_value, emp_excerpt, emp_status = "full_time", text_full_time_hits[0], TEXT
+        else:
             emp_value, emp_excerpt, emp_status = "full_time", provider_excerpt, PROVIDER
-    if not emp_value:
-        hits = _matching(sents, FULL_TIME)
-        if hits:
-            emp_value, emp_excerpt, emp_status = "full_time", hits[0], TEXT
     jf.facts["employment_type"] = Fact("employment_type", emp_value, emp_status if emp_value else UNKNOWN, emp_excerpt)
     if emp_value and emp_value != "full_time":
         jf.exclusions.append(Exclusion(f"employment:{emp_value}", emp_excerpt, emp_status))
