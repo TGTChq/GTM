@@ -11,6 +11,7 @@ PostgreSQL.
 from __future__ import annotations
 
 import logging
+import os
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -22,7 +23,8 @@ from .config import Settings
 from .db import work_queue
 from .db.connection import jsonb, transaction
 from .domain.inference import BudgetedInference, CachedInference, InferencePort, NullAdapter
-from .domain.acquisition_query import PRIORITY_PROFILE, DISCOVERY_PROFILE, balanced_slots
+from .domain.acquisition_query import EXHAUSTIVE_PROFILE, PRIORITY_PROFILE, DISCOVERY_PROFILE, balanced_slots
+from .domain.exhaustive_routing import exhaustive_enabled
 from .providers.airtable import AirtableClient
 from .providers.apollo import ApolloClient
 from .providers.fantastic import FantasticClient
@@ -211,11 +213,15 @@ class Runner:
         selected = tuple(sources or svc.sources)
         if any(source not in SOURCE_SPECS for source in selected):
             raise ValueError("unknown_fantastic_source")
-        slots = list(balanced_slots(selected, self.s.fantastic_cycle_page_slots))
+        slots = list(balanced_slots(selected, self.s.fantastic_cycle_page_slots, env=os.environ))
+        # A slot whose profile has no open partition is skipped outright, so the
+        # profiles planned here must match the ones the slots ask for.
+        planned_profiles = ((EXHAUSTIVE_PROFILE, PRIORITY_PROFILE) if exhaustive_enabled(os.environ)
+                            else (PRIORITY_PROFILE, DISCOVERY_PROFILE))
         svc.sources = selected  # don't exclude ATS duplicates when only JB is scheduled
         for source in selected:
             svc.recover_partitions(source)
-            for profile in (PRIORITY_PROFILE, DISCOVERY_PROFILE):
+            for profile in planned_profiles:
                 if fresh_partitions:
                     svc.plan_fresh_partitions(source, max_new=fresh_partitions, profile=profile)
                 for _ in range(backfill_partitions):

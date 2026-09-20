@@ -33,7 +33,15 @@ def policy_filters() -> dict:
 LEGACY_PROFILE = "legacy_v1"
 PRIORITY_PROFILE = "priority_v1"
 DISCOVERY_PROFILE = "discovery_v1"
-QUERY_PROFILES = (LEGACY_PROFILE, PRIORITY_PROFILE, DISCOVERY_PROFILE)
+#: Exhaustive nine-campaign scope (2026-09-20). Affirmative employer exclusions
+#: only -- no positive gate that a null provider field would fail. PRIORITY
+#: sends ai_employment_type, organization_headcount_* and ai_taxonomies_a, and a
+#: row missing any of those fields is dropped by the provider before we ever see
+#: it (Wellfound and YC rows carry no firmographics at all, so those gates drop
+#: 100% of them). Measured: 3,399 of 5,285 unique jobs ended UNDECIDED, against
+#: 1,088 hard rejects -- the undecided majority is what this profile reaches.
+EXHAUSTIVE_PROFILE = "exhaustive_v1"
+QUERY_PROFILES = (LEGACY_PROFILE, PRIORITY_PROFILE, DISCOVERY_PROFILE, EXHAUSTIVE_PROFILE)
 # Retrieval priorities, NOT an eligibility taxonomy. Product/operations/ecommerce
 # can appear under Management, Retail or Logistics. Match ANY assigned category,
 # not just the primary one. Do not infer physical work from an industry/category.
@@ -86,7 +94,7 @@ def count_query(endpoint: str, params: dict) -> tuple[str, dict]:
     return endpoint + "-count", {k: v for k, v in params.items() if k not in strip}
 
 
-def balanced_slots(sources: tuple[str, ...], pages: int):
+def balanced_slots(sources: tuple[str, ...], pages: int, env=None):
     """80/20 REQUEST SLOTS (not a dollar/row percentage), round-robin feeds.
 
     A discovery slot arrives third so small budgets can observe both paths. Empty
@@ -94,6 +102,14 @@ def balanced_slots(sources: tuple[str, ...], pages: int):
     """
     if not sources or len(set(sources)) != len(sources) or not 5 * len(sources) <= pages <= 100:
         raise ValueError("balanced_acquisition_requires_5_slots_per_source_up_to_100")
+    from .exhaustive_routing import exhaustive_enabled
+    if exhaustive_enabled(env):
+        # Four slots in five buy the widened universe; the fifth keeps the
+        # narrow arm alive so the run itself measures whether widening paid --
+        # qualified units per record, arm against arm, with no separate probe.
+        for slot in range(pages):
+            yield sources[slot % len(sources)], (PRIORITY_PROFILE if slot % 5 == 2 else EXHAUSTIVE_PROFILE)
+        return
     for slot in range(pages):
         yield sources[slot % len(sources)], (DISCOVERY_PROFILE if slot % 5 == 2 else PRIORITY_PROFILE)
 
