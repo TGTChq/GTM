@@ -28,7 +28,7 @@ from typing import Any, Callable, Dict, List, Optional, Protocol
 import psycopg
 
 from ..db.connection import jsonb, transaction
-from ..policy.campaigns import FUNCTION_KEYS, POLICY_VERSION
+from ..policy.campaigns import FUNCTION_KEYS, POLICY_VERSION, POLICY_VERSION_FALLBACKS
 from ..services.spend_budget import BudgetExceeded, SpendBudget
 
 # Exclusions now require grounded evidence. A new cache namespace prevents old,
@@ -445,15 +445,21 @@ class CachedInference:
             cur.execute("SELECT response_json FROM inference_cache WHERE content_hash = %s AND policy_version = %s AND model_version = %s",
                         (request.content_hash, self.policy_version, self.model_version))
             row = cur.fetchone()
-            # v2 changes local validation, not the prompt/schema. Reuse the raw
-            # v1 model answer and validate it under v2 instead of paying to ask
-            # the model the same question again for the existing backlog.
-            if row is None and self.policy_version == "tgtc-core/2":
-                cur.execute(
-                    "SELECT response_json FROM inference_cache WHERE content_hash = %s AND policy_version = %s AND model_version = %s",
-                    (request.content_hash, "tgtc-core/1", self.model_version),
-                )
-                row = cur.fetchone()
+            # Later policy versions change local validation and business scope,
+            # not the prompt or the schema. Reuse the raw model answer from an
+            # older generation and validate it under the current one instead of
+            # paying to ask the model the same question again for the backlog.
+            # This is what keeps the v3 business-scope change free: without it a
+            # POLICY_VERSION bump would invalidate the whole cache.
+            if row is None:
+                for older in POLICY_VERSION_FALLBACKS.get(self.policy_version, ()):
+                    cur.execute(
+                        "SELECT response_json FROM inference_cache WHERE content_hash = %s AND policy_version = %s AND model_version = %s",
+                        (request.content_hash, older, self.model_version),
+                    )
+                    row = cur.fetchone()
+                    if row is not None:
+                        break
         self.conn.commit()
         if row:
             self.hits += 1

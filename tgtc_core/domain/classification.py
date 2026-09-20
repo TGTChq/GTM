@@ -21,9 +21,15 @@ from __future__ import annotations
 import re
 import math
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Dict, List, Mapping, Optional, Sequence, Tuple
 
-from ..policy.campaigns import CAMPAIGN_BY_FUNCTION, FUNCTION_KEYS, POLICY_VERSION
+from ..policy.campaigns import (
+    CAMPAIGN_BY_FUNCTION, FUNCTION_KEYS, POLICY_VERSION, POLICY_VERSION_EXHAUSTIVE,
+)
+from .exhaustive_routing import (
+    RULE_VERSION as EXHAUSTIVE_RULE_VERSION,
+    TitleRoute, exhaustive_enabled, fallback_route, route_by_title,
+)
 from .facts import RULE_VERSION, JobFacts, extract_job_facts, sentences
 from .inference import (
     UNAVAILABLE_ANSWER, UNAVAILABLE_CONFIG, UNAVAILABLE_TRANSIENT,
@@ -381,7 +387,9 @@ def classify_posting(
     org_industry: Optional[str] = None,
     content_hash: str = "",
     inference: Optional[InferencePort] = None,
+    env: Optional[Mapping[str, str]] = None,
 ) -> ClassificationResult:
+    exhaustive = exhaustive_enabled(env)
     facts = extract_job_facts(
         title=title, description=description, employment_type=employment_type,
         ai_employment_type=ai_employment_type, location_type=location_type, countries=countries,
@@ -389,8 +397,11 @@ def classify_posting(
         org_industry=org_industry,
     )
     result = ClassificationResult(facts=facts.to_dict())
+    if exhaustive:
+        result.policy_version = POLICY_VERSION_EXHAUSTIVE
 
-    # 1) hard incompatibility: no model call, ever.
+    # 1) hard incompatibility: no model call, ever. Campaign scope NEVER
+    # overrides an eligibility gate, so this runs before any routing.
     if facts.excluded:
         result.excluded = True
         result.exclusion_reason = facts.exclusions[0].reason
@@ -399,6 +410,13 @@ def classify_posting(
 
     desc = str(description or "")
     if len(desc.strip()) < 120:
+        # Too little description to score. Under the exhaustive scope a usable
+        # title is still deterministic evidence, so the job routes instead of
+        # being dropped for content it never had.
+        if exhaustive:
+            route = route_by_title(title)
+            if route is not None:
+                return _apply_route(result, route)
         result.method = METHOD_DETERMINISTIC
         result.notes.append("insufficient_evidence:description_too_short")
         return result
@@ -409,6 +427,20 @@ def classify_posting(
     dominant = _dominant(scores, hits)
     if dominant == "gtm_revenue":
         role_exclusion = quota_carrying_sales_exclusion(hits[dominant])
+        if role_exclusion is not None and exhaustive:
+            # Business-scope change 2026-09-20. Quota-carrying sales is not one
+            # of the twelve approved hard exclusions, and GTM Systems now
+            # explicitly covers "sales, business development, partnerships".
+            # The Phase 2 exclusion therefore becomes a routing decision. It is
+            # recorded, not silently dropped: the old verdict stays queryable.
+            result.facts["role_exclusion_waived"] = role_exclusion
+            result.notes.append("exhaustive_scope:quota_carrying_sales_routed")
+            result.compatible_functions = [dominant]
+            result.campaign_keys = [CAMPAIGN_BY_FUNCTION[dominant].key]
+            result.responsibilities = _responsibilities_from_hits(hits[dominant])
+            result.method = METHOD_DETERMINISTIC
+            result.rule_version = EXHAUSTIVE_RULE_VERSION
+            return result
         if role_exclusion is not None:
             result.method = METHOD_DETERMINISTIC
             result.excluded = True
@@ -423,8 +455,18 @@ def classify_posting(
         result.method = METHOD_DETERMINISTIC
         return result
 
-    # 3) semantic port
+    # 3) deterministic title evidence, BEFORE the model: the instruction is
+    # "deterministic matching first, the classifier only for unresolved ties".
+    # Description dominance already had its chance above and outranks this.
+    if exhaustive:
+        route = route_by_title(title)
+        if route is not None:
+            return _apply_route(result, route)
+
+    # 4) semantic port
     if inference is None:
+        if exhaustive:
+            return _apply_route(result, fallback_route(title))
         result.method = METHOD_UNAVAILABLE
         result.unavailable_kind = UNAVAILABLE_CONFIG
         result.unavailable_reason = "no_inference_configured"
@@ -439,6 +481,10 @@ def classify_posting(
     )
     response: InferenceResponse = inference.classify(request)
     result.model_version = response.model_version
+    if not response.available and exhaustive:
+        # A provider outage is not evidence against the job, and under the
+        # exhaustive scope it is not a reason to leave it unrouted either.
+        return _apply_route(result, fallback_route(title))
     if not response.available:
         result.method = METHOD_UNAVAILABLE
         result.unavailable_kind = (response.unavailable_kind if response.unavailable_kind in
@@ -448,7 +494,30 @@ def classify_posting(
         result.notes.append(f"insufficient_evidence:{response.unavailable_reason or 'inference_unavailable'}")
         return result
     result.method = METHOD_SEMANTIC
-    return _apply_semantic(result, response, desc, facts, hits)
+    decided = _apply_semantic(result, response, desc, facts, hits)
+    if exhaustive and not decided.excluded and not decided.compatible_functions:
+        # The model declined to place it. That is a tie, not a rejection.
+        return _apply_route(decided, fallback_route(title))
+    return decided
+
+
+def _apply_route(result: ClassificationResult, route: TitleRoute) -> ClassificationResult:
+    """Stamp a deterministic routing decision onto a result.
+
+    The cited evidence is the title the route matched and nothing else, so a
+    posting whose description is pure benefits/EEO boilerplate can never have
+    that boilerplate recorded as its campaign evidence. ``approval.py`` refuses
+    on ``no_responsibility_evidence``, so this record is what lets a
+    title-routed job reach approval at all.
+    """
+    result.compatible_functions = [route.function_key]
+    result.campaign_keys = [CAMPAIGN_BY_FUNCTION[route.function_key].key]
+    result.responsibilities = [Responsibility(route.phrase, route.excerpt)]
+    result.method = METHOD_DETERMINISTIC
+    result.rule_version = EXHAUSTIVE_RULE_VERSION
+    result.policy_version = POLICY_VERSION_EXHAUSTIVE
+    result.notes.append(f"exhaustive_scope:{route.basis}")
+    return result
 
 
 def _apply_semantic(result: ClassificationResult, response: InferenceResponse, desc: str, facts: JobFacts,

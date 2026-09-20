@@ -17,9 +17,10 @@ next evidence epoch (recovery finding b); its attempt history is preserved.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Mapping, Optional
 
 import psycopg
 
@@ -27,7 +28,8 @@ from ..db.connection import jsonb, transaction
 from ..db import work_queue
 from ..domain.classification import ClassificationResult, classify_posting
 from ..domain.inference import UNAVAILABLE_ANSWER, UNAVAILABLE_CONFIG, UNAVAILABLE_TRANSIENT, InferencePort
-from ..policy.campaigns import CAMPAIGN_BY_FUNCTION, POLICY_VERSION
+from ..domain.exhaustive_routing import exhaustive_enabled
+from ..policy.campaigns import CAMPAIGN_BY_FUNCTION, POLICY_VERSION, effective_policy_version
 
 
 @dataclass
@@ -42,8 +44,11 @@ class ClassifyOutcome:
 
 def classify_one(conn: psycopg.Connection, posting_id: int, *, inference: Optional[InferencePort],
                  now: Optional[datetime] = None, transient_backoff_minutes: int = 15,
-                 work_item: Optional[work_queue.WorkItem] = None) -> ClassifyOutcome:
+                 work_item: Optional[work_queue.WorkItem] = None,
+                 env: Optional[Mapping[str, str]] = None) -> ClassifyOutcome:
     moment = now or datetime.now(timezone.utc)
+    env = os.environ if env is None else env
+    policy_version = effective_policy_version(env)
     with conn.cursor() as cur:
         cur.execute("SELECT * FROM postings WHERE id = %s", (posting_id,))
         posting = cur.fetchone()
@@ -64,6 +69,7 @@ def classify_one(conn: psycopg.Connection, posting_id: int, *, inference: Option
         location_text=posting["location_text"], employer_name=posting["employer_name"],
         agency_flag=_bool(org.get("org_linkedin_recruitment_agency_derived")),
         org_industry=org.get("org_linkedin_industry"), content_hash=posting["content_hash"], inference=inference,
+        env=env,
     )
     model_version = result.model_version or (getattr(inference, "model_version", "") if inference else "")
     if result.method == "unavailable":
@@ -92,7 +98,7 @@ def classify_one(conn: psycopg.Connection, posting_id: int, *, inference: Option
                         "INSERT INTO classifications (posting_id, policy_version, model_version, method, compatible_functions, excluded, result_json) "
                         "VALUES (%s, %s, %s, %s, %s, false, %s) "
                         "ON CONFLICT (posting_id, policy_version, model_version) DO UPDATE SET result_json = EXCLUDED.result_json",
-                        (posting_id, POLICY_VERSION, model_version, result.method, [], jsonb({**result.to_dict(), "input_content_hash": posting["content_hash"]})),
+                        (posting_id, policy_version, model_version, result.method, [], jsonb({**result.to_dict(), "input_content_hash": posting["content_hash"]})),
                     )
         return ClassifyOutcome(posting_id, "closed", reason, [], result.method)
 
@@ -111,7 +117,7 @@ def classify_one(conn: psycopg.Connection, posting_id: int, *, inference: Option
                     result_json = EXCLUDED.result_json, created_at = now()
                 RETURNING id
                 """,
-                (posting_id, POLICY_VERSION, model_version or "", result.method, result.compatible_functions,
+                (posting_id, policy_version, model_version or "", result.method, result.compatible_functions,
                  result.excluded, result.exclusion_reason or None, jsonb({**result.to_dict(), "input_content_hash": posting["content_hash"]})),
             )
             classification_id = int(cur.fetchone()["id"])
@@ -122,6 +128,20 @@ def classify_one(conn: psycopg.Connection, posting_id: int, *, inference: Option
                 return ClassifyOutcome(posting_id, "closed", result.exclusion_reason, [], result.method)
             if not result.compatible_functions:
                 reason = next((n for n in result.notes if n.startswith("insufficient_evidence")), "insufficient_evidence")
+                if exhaustive_enabled(env):
+                    # Business-scope change 2026-09-20: "no campaign fit" is no
+                    # longer a terminal reason. Under the exhaustive scope the
+                    # only way to arrive here is missing essential job content
+                    # (no usable title AND no usable description), which the
+                    # instruction routes to retry/review, never to rejection.
+                    # The posting is left OPEN and the receipt records why; the
+                    # work queue's own max_attempts bounds the retries, so a
+                    # permanently contentless posting still terminates -- as a
+                    # content problem, not as a scope rejection.
+                    return ClassifyOutcome(
+                        posting_id, "wait", f"review:{reason}", [], result.method,
+                        retry_after=moment + timedelta(minutes=transient_backoff_minutes),
+                    )
                 cur.execute("UPDATE postings SET state = 'closed', close_reason = %s, updated_at = now() WHERE id = %s",
                             (reason[:200], posting_id))
                 _detach_from_open_opportunities(cur, posting_id, moment)
@@ -186,29 +206,56 @@ def _detach_from_open_opportunities(cur, posting_id: int, moment: datetime) -> N
 
 
 def reopen_for_inference(conn: psycopg.Connection, *, model_version: str, now: Optional[datetime] = None,
-                         limit: int = 5000) -> int:
+                         limit: int = 5000, env: Optional[Mapping[str, str]] = None) -> int:
     """Postings closed because inference was unavailable or gave no answer are re-entered
     when no receipt exists for the configured model/policy (including the same
     model after a technical failure). No re-acquisition, no modification:
-    the same posting id goes back to the classify queue."""
+    the same posting id goes back to the classify queue.
+
+    Under the exhaustive nine-campaign scope this is ALSO the reprocessing path
+    the business-scope change requires. Bumping to ``tgtc-core/3`` means no
+    receipt exists for the new version, so the whole backlog closed for role
+    scope, campaign ambiguity or insufficient campaign evidence is re-entered
+    automatically. Two closure families are added to the sweep because the new
+    scope can now route them, and only because of that:
+
+    * ``insufficient_evidence:description_too_short`` -- a usable title is
+      deterministic evidence now, so a short description is no longer terminal;
+    * ``role:quota_carrying_sales`` -- GTM Systems explicitly covers sales,
+      business development and partnerships under the new scope.
+
+    Nothing else is reopened. A posting closed by an approved hard exclusion
+    stays closed, because scope never overrides an eligibility gate.
+    """
     if not model_version:
         return 0
     moment = now or datetime.now(timezone.utc)
+    policy_version = effective_policy_version(env if env is not None else os.environ)
+    exhaustive = exhaustive_enabled(env if env is not None else os.environ)
+    if exhaustive:
+        scope_clause = """
+                  AND (p.close_reason LIKE 'inference_unavailable:%%'
+                       OR p.close_reason LIKE 'insufficient_evidence:%%'
+                       OR p.close_reason = 'role:quota_carrying_sales')
+        """
+    else:
+        scope_clause = """
+                  AND (p.close_reason LIKE 'inference_unavailable:%%' OR p.close_reason LIKE 'insufficient_evidence:%%')
+                  AND p.close_reason NOT LIKE 'insufficient_evidence:description_too_short%%'
+        """
     with transaction(conn):
         with conn.cursor() as cur:
             cur.execute(
-                """
-                SELECT p.id, p.lane FROM postings p
-                WHERE p.state = 'closed'
-                  AND (p.close_reason LIKE 'inference_unavailable:%%' OR p.close_reason LIKE 'insufficient_evidence:%%')
-                  AND p.close_reason NOT LIKE 'insufficient_evidence:description_too_short%%'
+                "SELECT p.id, p.lane FROM postings p WHERE p.state = 'closed'"
+                + scope_clause
+                + """
                   AND p.employer_id IS NOT NULL
                   AND (p.date_valid_through IS NULL OR p.date_valid_through >= %s)
                   AND NOT EXISTS (SELECT 1 FROM classifications c WHERE c.posting_id = p.id AND c.model_version = %s
                                   AND c.policy_version = %s)
                 ORDER BY p.commercial_age_anchor DESC LIMIT %s
                 """,
-                (moment, model_version, POLICY_VERSION, limit),
+                (moment, model_version, policy_version, limit),
             )
             rows = [dict(r) for r in cur.fetchall()]
             for r in rows:

@@ -19,6 +19,28 @@ from typing import Dict, Mapping, Optional, Tuple
 
 POLICY_VERSION = "tgtc-core/2"
 
+#: Authoritative business-scope change, 2026-09-20: the nine campaigns became
+#: collectively exhaustive for every job that passes the hard eligibility gates.
+#: A SEPARATE version, so the frozen ``tgtc-core/2`` labels, holdout and reports
+#: stay readable as the historical evidence they are and are never rewritten.
+#: The classifier's prompt and schema did NOT change, which is why
+#: ``CachedInference`` reads v2 (and v1) answers under v3 instead of paying to
+#: ask the model the same question again -- see ``POLICY_VERSION_FALLBACKS``.
+POLICY_VERSION_EXHAUSTIVE = "tgtc-core/3-exhaustive-nine"
+
+#: Older cache generations a policy version may reuse raw model answers from,
+#: nearest first. Only ever extended when the prompt/schema is unchanged.
+POLICY_VERSION_FALLBACKS: Dict[str, Tuple[str, ...]] = {
+    "tgtc-core/2": ("tgtc-core/1",),
+    "tgtc-core/3-exhaustive-nine": ("tgtc-core/2", "tgtc-core/1"),
+}
+
+
+def effective_policy_version(env: Optional[Mapping[str, str]] = None) -> str:
+    """The policy version in force for this environment."""
+    from ..domain.exhaustive_routing import exhaustive_enabled  # local: avoids a cycle
+    return POLICY_VERSION_EXHAUSTIVE if exhaustive_enabled(env) else POLICY_VERSION
+
 
 @dataclass(frozen=True)
 class Campaign:
@@ -83,6 +105,24 @@ KNOWN_CONTROL_CAMPAIGN_IDS = frozenset({
     "165c9e87-c3e7-4e9c-9ccb-a8dbf5779726",  # MARKETING & CREATIVE
     "917973f3-c282-4a84-8da4-525a7a91819b",  # GTM SYSTEMS
     "04670c6a-828b-42cd-9dad-904592a63d9b",  # AI & TECHNICAL
+})
+
+
+#: Live Wave 1 CHALLENGER campaign ids -- the nine campaigns currently in use.
+#: Read from ``OUTBOUND_WAVE1_CHALLENGER_CAMPAIGNS_JSON`` on GTM Approved Sync,
+#: 2026-09-20. Disjoint from the Control set above: eighteen campaigns exist in
+#: the workspace, nine previous (Control) and nine current (Challenger), and a
+#: contact must never be routed to a retired one. Not secrets; an allow-list.
+KNOWN_CHALLENGER_CAMPAIGN_IDS = frozenset({
+    "7b9aa5f3-fe46-49fa-b2ac-fee1da346ed0",  # PRODUCT
+    "69def27c-7799-41a2-9ba8-205e54ab071b",  # OPERATIONS
+    "7b319c7a-cc55-4e08-8a47-7058c345d8ae",  # FINANCE
+    "d2326028-e312-405b-9e16-526bd309d4dd",  # PEOPLE & HR
+    "c3e81c21-db44-40f5-addc-d9945a78394b",  # ECOMMERCE
+    "269cd138-00b1-48c3-9093-16c36120a20e",  # CUSTOMER EXPERIENCE (success + support)
+    "1feb6344-6065-49d7-9764-d125985fb9c9",  # MARKETING & CREATIVE
+    "8f25abd5-568a-4e88-b310-9acf85161c6c",  # GTM SYSTEMS
+    "8bfa0769-4b9a-4346-8e93-17ac8b726dce",  # AI & TECHNICAL
 })
 
 
