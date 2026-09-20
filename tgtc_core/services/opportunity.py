@@ -327,6 +327,22 @@ def reopen_recoverable_opportunities(
     return reopened
 
 
+
+def physical_posting_block(posting, env=None):
+    """Named reason a posting's TITLE disqualifies it, or None.
+
+    Re-checked here, before any paid enrichment, because a classification
+    receipt written before this rule existed is never revisited: the row keeps
+    its policy version, so `classify_one` will not run again on it. Without this
+    the first canary's ~1,600 stale OPERATIONS rows would each buy an Apollo
+    contact for a plumber's employer.
+    """
+    from ..domain.exhaustive_routing import exhaustive_enabled, physical_title_reason
+    if not posting or not exhaustive_enabled(env):
+        return None
+    return physical_title_reason(posting.get("title"))
+
+
 class OpportunityService:
     def __init__(self, conn: psycopg.Connection, apollo: ApolloClient, *, campaign_env: Dict[str, str],
                  signing_key: str, retry_hours: float = 6.0, people_search_max_pages: int = 2,
@@ -1068,6 +1084,9 @@ class OpportunityService:
             return QualifyOutcome(opportunity_id, "closed", f"already_{opp['state']}")
         if not posting:
             return self._close(opportunity_id, "no_active_compatible_posting")
+        physical = physical_posting_block(posting, os.environ)
+        if physical:
+            return self._close(opportunity_id, physical)
         if employer_attribution_conflict(posting.get("description_text"),
                                          employer_name=emp["canonical_name"], employer_domain=emp.get("domain") or ""):
             return self._close(opportunity_id, "employer_attribution_conflict")
