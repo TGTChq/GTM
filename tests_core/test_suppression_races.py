@@ -69,7 +69,13 @@ def test_three_contact_quota_counts_existing_airtable_history(conn, clock):
     second = import_airtable_rows(conn, [row])
     assert first.inserted == 1 and second.already_present == 1
     _, _, oid = seed_opportunity(conn, clock)
+    # Phase 2 audit task 9 (2026-09-19): "three people in the same role are NOT
+    # diversification" -- role-diverse titles (functional owner + executive
+    # leader; customer_success has no third, TA/People-leader persona), so
+    # both remaining quota slots are actually reachable rather than one being
+    # skipped as a same-persona repeat.
     people = [good_buyer("acme.com", "Acme", id=f"new-{i}", email=f"new{i}@acme.com") for i in range(3)]
+    people[0]["title"] = "Customer Success Director"
     out = opportunity_service(
         conn, apollo_for("acme.com", "Acme", people=people), clock,
         max_contacts_per_opportunity=3,

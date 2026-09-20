@@ -21,6 +21,7 @@ from .identity import (
     _GENERIC_NAME_TOKENS, email_domain, is_intermediary_host, is_placeholder_company_name, linkedin_slug,
     normalize_company_domain, normalize_company_name,
 )
+from ..policy.campaigns import is_founder_tier
 
 CONTACT_MAPPER_VERSION = "tgtc-contact/1"
 SMALL_COMPANY_MAX = 99      # policy founder_fallback_max_employees
@@ -72,12 +73,24 @@ def seniority(title: Optional[str]) -> Optional[str]:
 
 
 def is_small_company_executive(title: Optional[str]) -> bool:
-    """Founder/CEO/COO/owner/president. 'Vice President …' is NEVER founder tier (instruction; production's
-    ``is_founder_tier('Vice President of Sales')`` returns True)."""
+    """Founder/CEO/COO/owner/president. 'Vice President …' is NEVER founder tier
+    (instruction).
+
+    Fix round 1, I2 (IMPORTANT, independent review): this used to be a second,
+    independently-written copy of the exact same "vice-aware president" regex
+    ``campaigns.is_founder_tier`` implements (task 7's fix) -- the precise kind
+    of drift this batch's own brief warned against, sharing a predicate rather
+    than copying it. Now delegates to it directly; COO/Chief Operating Officer
+    is ORed on top, since a small-company COO also qualifies here, outside
+    ``is_founder_tier``'s own narrower production vocabulary (it has no COO
+    concept at all). ``normalize_title`` runs first because it converts
+    slash/pipe-joined titles ("Owner/CEO") to space-separated tokens
+    ``is_founder_tier`` (only hyphen-aware) would otherwise miss.
+    """
     t = normalize_title(title)
-    if re.search(r"\b(?:founder|cofounder|co founder|ceo|chief executive officer|owner|coo|chief operating officer)\b", t):
+    if re.search(r"\b(?:coo|chief operating officer)\b", t):
         return True
-    return bool(re.search(r"(?<!vice )\bpresident\b", t))
+    return is_founder_tier(t)
 
 
 # --- functional phrases (complete phrases; four mappings kept separate) ------------------------------------------

@@ -15,6 +15,7 @@ is what's under test.
 from __future__ import annotations
 
 from tgtc_core.domain.classification import classify_posting
+from tgtc_core.domain.facts import RULE_VERSION
 
 
 def _classify(title: str, description: str):
@@ -72,6 +73,24 @@ def test_sales_operations_analyst_stays_gtm_systems():
     assert result.compatible_functions == ["gtm_revenue"]
     assert result.campaign_keys == ["gtm_systems"]
     assert not result.excluded
+
+
+# --- fix round 1, I3 (IMPORTANT, independent review): the exclusion's rule_version
+# was buried inside an ad-hoc result.facts["role_exclusion"] dict rather than a
+# discoverable, queryable top-level field -- an auditor querying exclusions by
+# rule version would not see it. ClassificationResult now carries its own
+# top-level rule_version, set whenever an exclusion changed this batch fires,
+# and serialized by to_dict() the same way every other top-level field is.
+
+def test_quota_carrying_sales_exclusion_carries_a_top_level_rule_version():
+    result = _classify(
+        "Account Executive",
+        "You will own a full sales quota, run point on the entire sales cycle from "
+        "qualification to close, and prospect into new accounts through outbound cold "
+        "calls to build pipeline and hit your numbers every quarter.",
+    )
+    assert result.excluded and result.rule_version == RULE_VERSION
+    assert result.to_dict()["rule_version"] == RULE_VERSION
 
 
 # --- mixed evidence: the LARGER share decides, not mere presence -------------

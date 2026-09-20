@@ -21,7 +21,8 @@ from __future__ import annotations
 import pytest
 
 from tgtc_core.policy.campaigns import is_founder_tier
-from tgtc_core.domain.gates import title_matches
+from tgtc_core.domain.gates import pre_enrichment_check, title_matches
+from tgtc_core.domain.facts import RULE_VERSION
 from tgtc_core.services.opportunity import ContactState, contact_persona, select_next_contact
 from tgtc_core.testing.fakes import make_person
 from tests_core.helpers import opportunity_service, sqlall
@@ -77,10 +78,54 @@ def test_buyer_titles_from_campaigns_module_still_resolve_with_the_widened_match
             assert title_matches(t, titles), (fn, t)
 
 
+# --- Fix round 1, C1 (CRITICAL, independent review): the over-match deny-list
+# was applied globally, so ordinary modifier words in OTHER functions' real
+# titles ("Field Marketing Manager", "Security Engineering Manager", "IT
+# Support Manager", "Plant Controller" ...) were silently dropped -- an
+# uncounted new drop class, in a task whose entire purpose is to stop dropping
+# candidates. Q21's finding was operations-only; the deny-list must be scoped
+# there, not applied to every function's matches. Pinned in BOTH directions:
+# still blocked within operations (below), no longer blocked elsewhere (here).
+
+def test_qualifier_words_do_not_block_matches_outside_operations():
+    """Every one of these regressed (old=True, new=False) under the unscoped
+    deny-list; the same qualifier words are ordinary, legitimate modifiers in
+    their own function and must not be blocked there."""
+    cases = [
+        ("Field Marketing Manager", "marketing", ("Marketing Manager",)),
+        ("Security Engineering Manager", "engineering", ("Engineering Manager",)),
+        ("Network Engineering Manager", "engineering", ("Engineering Manager",)),
+        ("Production Engineering Manager", "engineering", ("Engineering Manager",)),
+        ("IT Support Manager", "customer_support", ("Support Manager",)),
+        ("Production Support Manager", "customer_support", ("Support Manager",)),
+        ("Plant Controller", "finance", ("Controller",)),
+    ]
+    for title, fn, targets in cases:
+        assert title_matches(title, targets), (title, fn)
+
+
+def test_retail_and_field_operations_managers_are_not_unrelated_domains():
+    """"Retail Operations Manager" and "Field Operations Manager" are plausible
+    genuine business-operations titles, not the warehouse/clinical/IT pattern
+    Q21 actually measured; the deny-list must not have been widened past the
+    evidence that justified it."""
+    operations_targets = ("Operations Director", "Director of Operations", "Operations Manager")
+    for title in ("Retail Operations Manager", "Field Operations Manager"):
+        assert title_matches(title, operations_targets), title
+
+
+def test_unrelated_operations_titles_still_blocked_within_operations():
+    """The other direction of the same pin: the deny-list, now scoped, must
+    still block the exact Q21-measured pattern inside operations."""
+    operations_targets = ("Operations Director", "Director of Operations", "Operations Manager")
+    for title in ("Warehouse Operations Manager", "Clinical Operations Manager", "IT Operations Manager"):
+        assert not title_matches(title, operations_targets), title
+
+
 # --- Task 9 ----------------------------------------------------------------
 
 def opportunity_with_contacts(count: int) -> ContactState:
-    return ContactState(existing_person_keys={f"p{i}" for i in range(count)},
+    return ContactState(existing_count=count, existing_person_keys={f"p{i}" for i in range(count)},
                         existing_personas=["functional_owner"] * count)
 
 
@@ -138,6 +183,45 @@ def test_contact_persona_classifies_the_three_tiers(function_key, title, expecte
     assert contact_persona(title, function_key) == expected
 
 
+# --- Fix round 1, I4 (Luis's ruling overrides the original acceptance test):
+# "Three people in the same role are NOT diversification" is a fixed business
+# rule, not a preference. select_next_contact must STOP (return None) once
+# every persona present among the candidates is already held, rather than
+# falling back to a same-persona pick.
+
+def test_no_unheld_persona_left_stops_instead_of_repeating_a_persona():
+    candidates = [
+        {"person_key": "p4", "title": "Sales Director", "persona": "functional_owner"},
+        {"person_key": "p5", "title": "VP Sales", "persona": "executive_leader"},
+    ]
+    chosen = select_next_contact(existing_personas=["functional_owner", "executive_leader"], candidates=candidates)
+    assert chosen is None
+
+
+# --- Fix round 1, C3 (CRITICAL, independent review): existing_person_keys and
+# a search candidate's person_key must be the SAME identity namespace
+# (person_ref()'s pid:/li: format), or the "never re-select a held person"
+# check is comparing two sets that essentially never intersect -- dead code in
+# the live path. This tests the extraction that makes the seeding provably
+# correct: _build_contact_state must derive existing_person_keys from each
+# approved row's OWN apollo_person_id/linkedin_url via person_ref(), not from
+# the legacy suppression-tracking keys (email:<addr> / an imported
+# contact_key) used only for the existing_count quota baseline.
+
+def test_existing_person_keys_are_derived_via_person_ref_not_suppression_keys():
+    from tgtc_core.domain.identity import person_ref
+    from tgtc_core.services.opportunity import _build_contact_state
+
+    existing_contacts = {"email:someone@acme.com"}   # legacy suppression-tracking key: a different namespace
+    approved_rows = [{"apollo_person_id": "p-owner", "linkedin_url": None, "title": "Marketing Director"}]
+    state = _build_contact_state(existing_contacts, approved_rows, "marketing")
+    assert state.existing_person_keys == {person_ref(apollo_person_id="p-owner")}
+    assert state.existing_count == len(existing_contacts)
+    # the derived ref must be directly comparable to what a search candidate carries
+    candidate = {"person_key": person_ref(apollo_person_id="p-owner"), "title": "Marketing Director", "persona": "functional_owner"}
+    assert select_next_contact(candidates=[candidate], existing_person_keys=state.existing_person_keys) is None
+
+
 # --- Task 9, end to end: proves the fix is reachable by the live approval flow,
 # not just the pure functions above. SIMULATED Apollo only (tgtc_core.testing.fakes)
 # -- no paid provider call occurs anywhere in this test.
@@ -183,3 +267,83 @@ def test_a_single_available_buyer_does_not_finalize_below_quota(conn, clock):
     assert sqlall(conn, "SELECT count(*) AS n FROM approvals")[0]["n"] == 1
     state = sqlall(conn, "SELECT state FROM opportunities WHERE id = %s", (opp,))[0]["state"]
     assert state == "open", "opportunity finalized below its configured contact quota"
+
+
+# --- Fix round 1, I5 (Luis's ruling: fix in this round): a partially filled
+# opportunity requeued at buyer_search_pending forever, with no give-up rule,
+# so opportunities.state = 'approved' became near-unreachable below the
+# configured quota. Once this evidence epoch's own paid-attempt budget
+# (max_match_attempts_per_evidence_epoch * max_contacts) is exhausted, a
+# partial opportunity must finalize with the contacts it already has instead
+# of waiting again.
+
+def test_partial_opportunity_finalizes_once_the_epoch_attempt_budget_is_exhausted(conn, clock):
+    domain, org = "acme.com", "Acme"
+    owner = make_person(id="p-owner", first="Owner", last="Person", title="Marketing Director",
+                        org_name=org, org_domain=domain, email="owner@acme.com", email_status="verified")
+    _, eid, opp = seed_opportunity(conn, clock, function_key="marketing", domain=domain, org_name=org)
+    # max_contacts=2 -> max_attempts = 3 (max_match_attempts_per_evidence_epoch) * 2 = 6.
+    # Pre-seed 5 already-spent match attempts this epoch (a prior call's own
+    # paid attempts), so THIS call's one remaining attempt (approving the only
+    # available buyer) exactly exhausts the budget: 5 + 1 = 6 >= 6.
+    with conn.cursor() as cur:
+        for i in range(5):
+            cur.execute(
+                "INSERT INTO candidate_attempts (opportunity_id, candidate_ref, attempt_kind, outcome, reason, epoch) "
+                "VALUES (%s, %s, 'match', 'not_found', 'test_seed', 1)",
+                (opp, f"pid:seed-{i}"),
+            )
+    conn.commit()
+    fake = apollo_for(domain, org, function_key="marketing", people=[owner])
+    out = opportunity_service(conn, fake, clock, max_contacts_per_opportunity=2).process(opp)
+    assert out.outcome == "approved" and out.reason == "approved_partial_quota_epoch_exhausted"
+    assert out.details["approved_total"] == 1
+    state = sqlall(conn, "SELECT state FROM opportunities WHERE id = %s", (opp,))[0]["state"]
+    assert state == "approved", "a partial opportunity with its epoch budget exhausted must finalize, not requeue forever"
+
+
+# --- Fix round 1, I2 (IMPORTANT, independent review): campaigns.is_founder_tier
+# (task 7's fix) and contact_mapping.is_small_company_executive held two
+# independently-written copies of the exact same "vice-aware president" regex
+# -- contact_mapping's own docstring even names the bug task 7 fixed. Ruling:
+# share within tgtc_core (contact_mapping is not deployed, but both modules
+# are). This proves genuine delegation, not just coincidentally-matching
+# behaviour: it fails if is_small_company_executive stops calling through to
+# the shared predicate.
+
+def test_is_small_company_executive_shares_campaigns_is_founder_tier(monkeypatch):
+    import tgtc_core.domain.contact_mapping as cm
+
+    calls = []
+
+    def spy(title):
+        calls.append(title)
+        return False
+
+    monkeypatch.setattr(cm, "is_founder_tier", spy)
+    cm.is_small_company_executive("Vice President of Sales")
+    assert calls, "is_small_company_executive never called the shared is_founder_tier predicate"
+
+
+# --- Fix round 1, I3 (IMPORTANT, independent review): tasks 7 and 8 stamped
+# rule_version nowhere, though both decisions flow into GateResult.evidence,
+# which IS persisted (candidate_attempts.details). Pin both changed decision
+# points in ONE matcher/predicate each: the title-match rejection (task 8) and
+# the founder-tier rejection (task 7).
+
+def test_title_mismatch_rejection_carries_rule_version():
+    result = pre_enrichment_check(
+        person={"id": "p1", "title": "Warehouse Associate"}, employer_name="Acme",
+        employer_domains={"acme.com"}, buyer_titles=("VP Marketing", "Marketing Director"), founder_allowed=False,
+    )
+    assert not result.passed and result.reason == "contact:function_or_authority_mismatch"
+    assert result.evidence.get("rule_version") == RULE_VERSION
+
+
+def test_founder_tier_rejection_carries_rule_version():
+    result = pre_enrichment_check(
+        person={"id": "p1", "title": "Founder", "organization": {"name": "Acme"}}, employer_name="Acme",
+        employer_domains={"acme.com"}, buyer_titles=("Founder", "CEO"), founder_allowed=False,
+    )
+    assert not result.passed and result.reason == "contact:founder_tier_not_allowed_for_size"
+    assert result.evidence.get("rule_version") == RULE_VERSION

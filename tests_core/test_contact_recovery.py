@@ -79,11 +79,21 @@ def test_generic_mailbox_and_wrong_domain_are_rejected_and_the_next_candidate_wi
 
 
 def test_one_opportunity_can_create_three_distinct_fully_gated_buyers(conn, clock):
+    """Phase 2 audit task 9 (2026-09-19): "three people in the same role are
+    NOT diversification" -- the three good buyers now carry three genuinely
+    distinct personas (functional owner, executive leader, TA/People leader)
+    so this still proves three distinct people can be fully gated and
+    approved in one opportunity under the new persona-diversity rule.
+    people_hr is used because it is the one buyer hierarchy with all three
+    personas; customer_success (the original function) tops out at two."""
     domain, org = "acme.com", "Acme"
-    bad = good_buyer(domain, org, id="p-bad", email=f"bad@{domain}", status="extrapolated")
-    good = [good_buyer(domain, org, id=f"p-good-{i}", email=f"buyer{i}@{domain}") for i in range(3)]
-    _, _, oid = seed_opportunity(conn, clock)
-    fake = apollo_for(domain, org, people=[bad, *good])
+    bad = good_buyer(domain, org, "people_hr", id="p-bad", email=f"bad@{domain}", status="extrapolated")
+    good = [good_buyer(domain, org, "people_hr", id=f"p-good-{i}", email=f"buyer{i}@{domain}") for i in range(3)]
+    good[0]["title"] = "HR Director"                    # functional_owner
+    good[1]["title"] = "VP People"                       # executive_leader
+    good[2]["title"] = "Head of Talent Acquisition"      # ta_people_leader
+    _, _, oid = seed_opportunity(conn, clock, function_key="people_hr")
+    fake = apollo_for(domain, org, function_key="people_hr", people=[bad, *good])
     out = opportunity_service(
         conn, fake, clock,
         max_contacts_per_opportunity=3,

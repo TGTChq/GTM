@@ -219,6 +219,15 @@ class ClassificationResult:
     notes: List[str] = field(default_factory=list)
     unavailable_kind: str = ""
     unavailable_reason: str = ""
+    #: Fix round 1, I3 (IMPORTANT, independent review): a changed decision
+    #: path's rule_version belongs at the top level, queryable directly
+    #: (``result_json->>'rule_version'``), the same way ``facts.py``'s
+    #: ``Fact``/``Exclusion.rule_version`` are -- not buried inside an ad-hoc
+    #: dict under ``facts`` where an auditor querying exclusions by rule
+    #: version would not see it. Set only on a changed decision path (empty
+    #: otherwise); ``ClassificationResult`` has no per-field Fact/Exclusion
+    #: structure of its own to stamp instead.
+    rule_version: str = ""
 
     @property
     def primary_function(self) -> str:
@@ -244,6 +253,7 @@ class ClassificationResult:
             "notes": list(self.notes),
             "unavailable_kind": self.unavailable_kind,
             "unavailable_reason": self.unavailable_reason,
+            "rule_version": self.rule_version,
         }
 
 
@@ -336,6 +346,7 @@ def classify_posting(
             result.method = METHOD_DETERMINISTIC
             result.excluded = True
             result.exclusion_reason = "role:quota_carrying_sales"
+            result.rule_version = RULE_VERSION
             result.facts["role_exclusion"] = {
                 "code": "quota_carrying_sales", "rule_version": RULE_VERSION,
                 "selling_score": selling, "ops_score": ops,

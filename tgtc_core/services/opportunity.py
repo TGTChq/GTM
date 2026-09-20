@@ -131,20 +131,63 @@ def contact_persona(title: str, function_key: str) -> str:
 
 @dataclass
 class ContactState:
-    """How many independently-approved contacts an opportunity already holds,
-    and which people/personas they are -- what ``wants_more_contacts`` and
-    ``select_next_contact`` decide against."""
+    """How many independently-approved contacts an opportunity already holds
+    (``existing_count`` -- the quota baseline; may include legacy/company-wide
+    contact records that carry no comparable Apollo identity, so it is a COUNT
+    only, never compared to a candidate for identity), which of THOSE contacts
+    have a known Apollo identity (``existing_person_keys``, in the SAME
+    ``person_ref()`` format a search candidate's ``person_key`` uses -- the
+    identity ``select_next_contact`` actually compares), and which personas
+    they are.
+
+    Fix round 1, C3 (CRITICAL, independent review): ``existing_person_keys``
+    used to be seeded from ``existing_contacts`` -- ``email:<addr>`` or a
+    legacy imported ``contact_key`` (``suppression.py``'s
+    ``company_function_contact_keys``) -- a namespace a search candidate's
+    ``pid:``/``li:`` ref (``identity.person_ref``) essentially never
+    intersects, so the "never re-select a held person" check was comparing two
+    disjoint key spaces: dead code in the live path (the actual global
+    uniqueness guarantee comes from ``approvals_person_active_uq`` and
+    ``_excluded_refs``, which already exclude an approved person from ever
+    reaching the candidate list in the first place). ``existing_count`` and
+    ``existing_person_keys`` are now two separate fields precisely so the
+    quota arithmetic (which legitimately needs the broader legacy count) and
+    the identity comparison (which needs an apples-to-apples format) cannot be
+    conflated again. See ``_build_contact_state`` below for the seeding.
+    """
+    existing_count: int = 0
     existing_person_keys: Set[str] = field(default_factory=set)
     existing_personas: List[str] = field(default_factory=list)
 
-    @property
-    def count(self) -> int:
-        return len(self.existing_person_keys)
+    def add(self, ref: str, persona: str = "") -> None:
+        """Record one new approval made during this call."""
+        self.existing_count += 1
+        if ref:
+            self.existing_person_keys.add(ref)
+        if persona:
+            self.existing_personas.append(persona)
 
     def wants_more_contacts(self, max_contacts: int) -> bool:
         """Never raises the configured maximum: clamped to [1, 3] here too, the
         same clamp ``OpportunityService.__init__`` applies to its own setting."""
-        return self.count < max(1, min(3, max_contacts))
+        return self.existing_count < max(1, min(3, max_contacts))
+
+
+def _build_contact_state(existing_contacts: Set[str], approved_rows: Sequence[Dict[str, Any]],
+                         function_key: str) -> "ContactState":
+    """The ``ContactState`` for one opportunity: ``existing_contacts`` is the
+    legacy quota-only baseline (see ``ContactState`` docstring); ``approved_rows``
+    are THIS opportunity's own current approvals, each carrying the real Apollo
+    identity (``apollo_person_id``/``linkedin_url``) a search candidate's
+    ``person_key`` is directly comparable to via the SAME ``person_ref()`` call
+    ``_search_candidates`` uses to build ``cand["_ref"]``."""
+    person_keys = {
+        person_ref(apollo_person_id=row.get("apollo_person_id"), linkedin_url=row.get("linkedin_url"))
+        for row in approved_rows
+    }
+    person_keys.discard("")
+    personas = [contact_persona(str(row.get("title") or ""), function_key) for row in approved_rows if row.get("title")]
+    return ContactState(existing_count=len(existing_contacts), existing_person_keys=person_keys, existing_personas=personas)
 
 
 def select_next_contact(
@@ -153,16 +196,20 @@ def select_next_contact(
     existing_personas: Sequence[str] = (),
 ) -> Optional[Dict[str, Any]]:
     """The next candidate worth pursuing: never a person already held (globally
-    unique), and a persona not yet represented preferred over one already held
-    ("three people in the same role are NOT diversification"). Falls back to
-    the first still-eligible candidate, in the order given, once every persona
-    present is already represented (or candidates carry no persona)."""
+    unique), and only one whose persona is not already represented.
+
+    Fix round 1, I4 (Luis's ruling): "three people in the same role are NOT
+    diversification" is a fixed business rule, not a preference the acceptance
+    test merely illustrated -- once every persona present among the eligible
+    candidates is already held, this returns ``None`` (stop at the current
+    depth) rather than falling back to a same-persona pick.
+    """
     held_personas = set(existing_personas)
     unheld = [c for c in candidates if c.get("person_key") not in existing_person_keys]
     for cand in unheld:
         if cand.get("persona") and cand["persona"] not in held_personas:
             return cand
-    return unheld[0] if unheld else None
+    return None
 
 
 @dataclass
@@ -698,6 +745,36 @@ class OpportunityService:
                     (opportunity_id, opportunity_id),
                 )
 
+    def _finalize_or_wait_partial(self, opportunity_id: int, *, state: "ContactState", approval_ids: List[int],
+                                  approved_person_ids: List[int], approved_total: int, matches_done: int, made: int,
+                                  max_attempts: int, reason_if_quota_met: str, wait_reason: str) -> QualifyOutcome:
+        """One decision point for "we hold at least one contact for this
+        opportunity, but not yet the full quota": finalize (the quota is now
+        met), give up and finalize with what we have (fix round 1, I5 --
+        Luis's ruling: a partially filled opportunity must not requeue at
+        buyer_search_pending forever, corrupting ``opportunities.state =
+        'approved'`` into a near-unreachable state; once this evidence
+        epoch's own paid-attempt budget is exhausted, take what was found),
+        or wait and retry -- the same idiom ``buyer_search_pending`` already
+        uses elsewhere for "absence is not proven yet"."""
+        details = {"approvals_created": len(approval_ids), "approved_total": approved_total + len(approval_ids)}
+        if not state.wants_more_contacts(self.max_contacts):
+            self._finalize_approved(opportunity_id)
+            return QualifyOutcome(
+                opportunity_id, "approved", reason_if_quota_met,
+                approval_ids[0] if approval_ids else None, approved_person_ids[0] if approved_person_ids else None,
+                attempts_made=made, details=details,
+            )
+        if matches_done + made >= max_attempts:
+            self._finalize_approved(opportunity_id)
+            details["contact_quota_target"] = self.max_contacts
+            return QualifyOutcome(
+                opportunity_id, "approved", "approved_partial_quota_epoch_exhausted",
+                approval_ids[0] if approval_ids else None, approved_person_ids[0] if approved_person_ids else None,
+                attempts_made=made, details=details,
+            )
+        return self._wait_for_dependency(opportunity_id, wait_reason, hours=max(24.0, self.retry_hours), details=details)
+
     def _gate_enriched(self, enriched: Dict[str, Any], emp: Dict[str, Any], titles: Sequence[str], founder_allowed: bool,
                        employer_domains: Set[str]):
         """The complete final checks on an enriched (or stored) record: identity, current
@@ -800,7 +877,8 @@ class OpportunityService:
             approved_rows: List[Dict[str, Any]] = []
             if self.max_contacts > 1:
                 cur.execute(
-                    "SELECT a.id, lower(p.email) AS email, p.title FROM approvals a JOIN people p ON p.id = a.person_id "
+                    "SELECT a.id, lower(p.email) AS email, p.title, p.apollo_person_id, p.linkedin_url "
+                    "FROM approvals a JOIN people p ON p.id = a.person_id "
                     "WHERE a.opportunity_id = %s AND a.state <> 'revoked'",
                     (opportunity_id,),
                 )
@@ -818,11 +896,7 @@ class OpportunityService:
         # Task 9: how many contacts (and which personas) this opportunity already
         # holds -- the single source of truth ``wants_more_contacts`` and
         # ``select_next_contact`` decide against for the rest of this call.
-        state = ContactState(
-            existing_person_keys=set(existing_contacts),
-            existing_personas=[contact_persona(str(row.get("title") or ""), opp["function_key"])
-                              for row in approved_rows if row.get("title")],
-        )
+        state = _build_contact_state(existing_contacts, approved_rows, opp["function_key"])
         if not state.wants_more_contacts(self.max_contacts):
             self._finalize_approved(opportunity_id)
             return QualifyOutcome(
@@ -844,8 +918,7 @@ class OpportunityService:
                 approval_ids.append(approval_id)
                 approved_person_ids.append(int(reuse["id"]))
                 approved_refs.add(reuse["_ref"])
-                state.existing_person_keys.add(reuse["_ref"])
-                state.existing_personas.append(contact_persona(str(reuse.get("title") or ""), opp["function_key"]))
+                state.add(reuse["_ref"], contact_persona(str(reuse.get("title") or ""), opp["function_key"]))
                 # Phase 2 audit task 9 fix (2026-09-19): this used to finalize
                 # (terminal 'approved' state) whenever max_contacts == 1 -- correct
                 # for that case, but the SAME unconditional finalize also ran
@@ -886,25 +959,15 @@ class OpportunityService:
                 self._record_attempt(opportunity_id, p["_ref"], "gate", "skipped_pre_enrichment", p["_drop_reason"], epoch=epoch,
                                      details={"title": p.get("title"), "org": person_organization(p).get("name")})
         if not candidates:
-            if approval_ids:
-                if not state.wants_more_contacts(self.max_contacts):
-                    self._finalize_approved(opportunity_id)
-                    return QualifyOutcome(
-                        opportunity_id, "approved", "approved_available_contacts",
-                        approval_ids[0], approved_person_ids[0],
-                        details={"approvals_created": len(approval_ids),
-                                 "approved_total": approved_total + len(approval_ids)},
-                    )
-                # Task 9: the quota (default 3) is not yet met, but this pass found
-                # no further candidates to search. The opportunity stays 'open' --
-                # never finalized on a partial round -- and is retried later, the
-                # same way ``buyer_search_pending`` already retries a 0-candidate
-                # search (Apollo's index changes over time).
-                return self._wait_for_dependency(
-                    opportunity_id, "buyer_search_pending:contact_quota_partial",
-                    hours=max(24.0, self.retry_hours),
-                    details={"approvals_created": len(approval_ids),
-                             "approved_total": approved_total + len(approval_ids)},
+            if approval_ids or approved_total:
+                # Task 9 / fix round 1, I5: at least one contact exists for this
+                # opportunity (from this call, a prior one, or both) and this pass
+                # found no further candidates to search -- finalize, give up once
+                # the epoch's attempt budget is exhausted, or wait and retry.
+                return self._finalize_or_wait_partial(
+                    opportunity_id, state=state, approval_ids=approval_ids, approved_person_ids=approved_person_ids,
+                    approved_total=approved_total, matches_done=matches_done, made=0, max_attempts=max_attempts,
+                    reason_if_quota_met="approved_available_contacts", wait_reason="buyer_search_pending:contact_quota_partial",
                 )
             if stats["returned"] == 0:
                 reason = "no_candidates_found"
@@ -1005,26 +1068,16 @@ class OpportunityService:
                                  details={"persona": cand.get("persona", ""), "rule_version": RULE_VERSION})
             approval_ids.append(approval_id)
             approved_person_ids.append(person_id)
-            state.existing_person_keys.add(ref)
-            if cand.get("persona"):
-                state.existing_personas.append(cand["persona"])
+            state.add(ref, cand.get("persona", ""))
 
-        if approval_ids:
-            if not state.wants_more_contacts(self.max_contacts):
-                self._finalize_approved(opportunity_id)
-                return QualifyOutcome(
-                    opportunity_id, "approved", "approved",
-                    approval_ids[0], approved_person_ids[0], attempts_made=made,
-                    details={"approvals_created": len(approval_ids),
-                             "approved_total": approved_total + len(approval_ids)},
-                )
-            # Task 9: quota not yet met -- stay 'open' and retry for the rest
-            # instead of finalizing on the first approval (the measured defect).
-            return self._wait_for_dependency(
-                opportunity_id, "buyer_search_pending:contact_quota_partial",
-                hours=max(24.0, self.retry_hours),
-                details={"approvals_created": len(approval_ids),
-                         "approved_total": approved_total + len(approval_ids), "attempts_made": made},
+        if approval_ids or approved_total:
+            # Task 9 / fix round 1, I5: finalize (quota met, or the epoch's
+            # attempt budget is exhausted so a partial fill gives up rather
+            # than requeuing forever), or wait and retry.
+            return self._finalize_or_wait_partial(
+                opportunity_id, state=state, approval_ids=approval_ids, approved_person_ids=approved_person_ids,
+                approved_total=approved_total, matches_done=matches_done, made=made, max_attempts=max_attempts,
+                reason_if_quota_met="approved", wait_reason="buyer_search_pending:contact_quota_partial",
             )
 
         if matches_done + made >= max_attempts:

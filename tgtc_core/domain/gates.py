@@ -10,8 +10,9 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Set
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
+from .facts import RULE_VERSION
 from .identity import (
     company_names_compatible, email_domain, email_on_domains, is_generic_mailbox,
     safe_employer_domain,
@@ -63,11 +64,25 @@ _ABBREVIATION_COLLAPSE: Tuple[Tuple[str, str], ...] = (
 #: the same generic English word). A qualifier naming one of those other domains,
 #: immediately before the matched buyer-title phrase, means this is not that
 #: buyer hierarchy's title even though the phrase is a literal substring.
-_UNRELATED_TITLE_QUALIFIERS: Tuple[str, ...] = (
-    "warehouse", "clinical", "it", "supply chain", "manufacturing", "plant", "distribution",
-    "logistics", "network", "retail", "flight", "laboratory", "lab", "field", "production",
-    "fleet", "security", "hospital", "pharmacy", "call center", "contact center",
-)
+#:
+#: Fix round 1, C1 (CRITICAL, independent review): this guard must be SCOPED to
+#: the specific phrases Q21 measured, not applied globally. "Operations
+#: Manager"/"Operations Director"/"Director of Operations" are the only phrases
+#: this ambiguous -- they are generic English words that name a business
+#: function ("running operations") which unrelated domains also use for their
+#: OWN, unrelated kind of work. Every other function's buyer-title phrase
+#: ("Engineering Manager", "Marketing Manager", "Support Manager", "Controller"
+#: ...) already names ITS OWN function, so a qualifier in front of one
+#: ("Security Engineering Manager", "Field Marketing Manager", "IT Support
+#: Manager", "Plant Controller") is normal, legitimate variation within that
+#: function, not a different domain borrowing the word -- applying the guard
+#: there silently dropped 9 measured regressions. The qualifier list itself is
+#: also trimmed back to exactly what Q21 measured (warehouse/clinical/IT);
+#: "retail"/"field" (speculative additions beyond that evidence) blocked
+#: genuine operations titles ("Retail Operations Manager", "Field Operations
+#: Manager") and are removed.
+_OPERATIONS_AMBIGUOUS_PHRASES = frozenset({"operations manager", "operations director", "director of operations"})
+_UNRELATED_TITLE_QUALIFIERS: Tuple[str, ...] = ("warehouse", "clinical", "it")
 
 
 def _canonicalize(text: str) -> str:
@@ -111,8 +126,11 @@ def title_matches(title: str, targets: Iterable[str]) -> bool:
             if v == c:
                 return True
             m = re.search(r"\b" + re.escape(c) + r"\b", v)
-            if m and not _has_unrelated_qualifier(v[:m.start()]):
-                return True
+            if not m:
+                continue
+            if c in _OPERATIONS_AMBIGUOUS_PHRASES and _has_unrelated_qualifier(v[:m.start()]):
+                continue
+            return True
     return False
 
 
@@ -178,9 +196,9 @@ def evaluate_contact(
         return GateResult(False, "contact:no_person_identity")
     title = str(person.get("title") or "").strip()
     if not title_matches(title, buyer_titles):
-        return GateResult(False, "contact:function_or_authority_mismatch", {"title": title})
+        return GateResult(False, "contact:function_or_authority_mismatch", {"title": title, "rule_version": RULE_VERSION})
     if is_founder_tier(title) and not founder_allowed:
-        return GateResult(False, "contact:founder_tier_not_allowed_for_size", {"title": title})
+        return GateResult(False, "contact:founder_tier_not_allowed_for_size", {"title": title, "rule_version": RULE_VERSION})
     if require_linkedin and not str(person.get("linkedin_url") or "").strip():
         return GateResult(False, "contact:no_linkedin_identity_anchor")
     org = person_organization(person)
@@ -268,9 +286,9 @@ def pre_enrichment_check(*, person: Dict[str, Any], employer_name: str, employer
         return GateResult(False, "contact:no_person_identity")
     title = str(person.get("title") or "").strip()
     if not title_matches(title, buyer_titles):
-        return GateResult(False, "contact:function_or_authority_mismatch", {"title": title})
+        return GateResult(False, "contact:function_or_authority_mismatch", {"title": title, "rule_version": RULE_VERSION})
     if is_founder_tier(title) and not founder_allowed:
-        return GateResult(False, "contact:founder_tier_not_allowed_for_size", {"title": title})
+        return GateResult(False, "contact:founder_tier_not_allowed_for_size", {"title": title, "rule_version": RULE_VERSION})
     org = person_organization(person)
     org_name = str(org.get("name") or person.get("organization_name") or "")
     org_domain = _org_domain(org) or safe_employer_domain(person.get("organization_domain"))
