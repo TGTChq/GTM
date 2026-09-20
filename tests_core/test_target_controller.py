@@ -77,7 +77,20 @@ def test_budget_boundary_is_visible_non_success():
     assert out.airtable_created == 87
 
 
-def test_target_delivery_is_airtable_only():
+def test_target_delivery_drains_both_channels():
+    """Retired assertion: this used to require ``("airtable",)`` alone.
+
+    The target metric is still run-attributed Airtable creations -- that is what
+    the module docstring above means, and it is unchanged. Measuring Airtable is
+    not a reason to leave the Instantly outbox undrained.
+
+    In the legacy split, Instantly delivery lived in `GTM Approved Sync`
+    (`run_approved.py`). That service now runs a parked start command that
+    prints and exits, so with this hardcoded to Airtable NOTHING delivered to
+    Instantly at all. Measured in the production canary, 2026-09-20: 252
+    Instantly outbox rows sat at ``attempts = 0`` with no error, never claimed,
+    while Airtable delivered normally in the same run.
+    """
     calls = []
     report = CycleReport(run_id="target-test", delivery={"airtable": {}})
     runner = _runner(
@@ -94,4 +107,4 @@ def test_target_delivery_is_airtable_only():
 
     runner.cycle = cycle
     runner.run_to_target(target=1)
-    assert calls[0]["delivery_channels"] == ("airtable",)
+    assert set(calls[0]["delivery_channels"]) == {"airtable", "instantly"}

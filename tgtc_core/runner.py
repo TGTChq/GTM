@@ -25,6 +25,13 @@ from .db.connection import jsonb, transaction
 from .domain.inference import BudgetedInference, CachedInference, InferencePort, NullAdapter
 from .domain.acquisition_query import EXHAUSTIVE_PROFILE, PRIORITY_PROFILE, DISCOVERY_PROFILE, balanced_slots
 from .domain.exhaustive_routing import exhaustive_enabled
+
+#: `run-target` counts AIRTABLE leads, which is a reason to measure Airtable,
+#: never a reason to leave the Instantly outbox undrained. Measured in the
+#: production canary: 252 Instantly rows sat at attempts = 0, never claimed,
+#: while Airtable delivered in the same run, because this was hardcoded to
+#: ("airtable",). That is an independent cause of production sending zero.
+TARGET_DELIVERY_CHANNELS: tuple[str, ...] = ("airtable", "instantly")
 from .providers.airtable import AirtableClient
 from .providers.apollo import ApolloClient
 from .providers.fantastic import FantasticClient
@@ -466,7 +473,7 @@ class Runner:
         for round_number in range(1, rounds_limit + 1):
             before = self._target_counts()
             report = self.cycle(acquire=acquire, deliver=deliver, max_items=max_items,
-                                delivery_channels=("airtable",))
+                                delivery_channels=TARGET_DELIVERY_CHANNELS)
             after = self._target_counts()
             activity = self._round_activity(report)
             gained = after["airtable_created"] - before["airtable_created"]
