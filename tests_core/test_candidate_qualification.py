@@ -368,13 +368,15 @@ def test_provider_contract_label_blocks_but_conflicting_labels_are_flagged():
 
 def test_unknown_company_size_and_missing_profile_are_flagged_not_rejected():
     row = _qualified_row()
-    for key in ("org_linkedin_headcount", "org_linkedin_industry", "org_linkedin_slug", "org_linkedin_website"):
+    for key in ("org_linkedin_headcount", "org_linkedin_size", "org_linkedin_industry", "org_linkedin_slug", "org_linkedin_website"):
         row[key] = None
-    # without the role-mapping step the current behaviour holds the job as ambiguous
-    assert candidate(row, steps=(cq.SENIORITY_MANAGEMENT,))["outcome"] == "ambiguous:company_size_unknown"
+    # without the role-mapping step the current behaviour holds the job as ambiguous.
+    # Task 5c: the single "company_size_unknown" bucket is now the size_state-driven
+    # "unknown_firmographics" state specifically (distinct from a firmographic_conflict).
+    assert candidate(row, steps=(cq.SENIORITY_MANAGEMENT,))["outcome"] == "ambiguous:company_size_unknown_firmographics"
     result = candidate(row)
     assert result["outcome"] == "qualified_pre_contact"
-    assert {"company_size_unknown", "company_profile_missing"} <= set(result["flags"])
+    assert {"company_size_unknown_firmographics", "company_profile_missing"} <= set(result["flags"])
 
 
 def test_missing_employment_type_is_flagged_not_rejected():

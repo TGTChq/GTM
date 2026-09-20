@@ -32,7 +32,7 @@ from .classification import LEXICON, _dominant, score_functions
 from .employer_attribution import employer_attribution_conflict
 from .facts import (
     EMPLOYMENT_NEGATIVES, FACILITY, NON_ACTIVE, OUTSOURCING_TEXT, PROGRAM_PATTERNS, STAFFING_TEXT, TRAVEL_HARD,
-    extract_job_facts, sentences,
+    extract_job_facts, resolve_company_size, sentences, size_reject_reason,
 )
 from .identity import employer_anchors, employer_key, name_key, normalize_company_name, posting_canonical_key
 from ..policy.requirements import excluded_industry, rule
@@ -868,12 +868,22 @@ def qualify_candidate(row: Mapping[str, Any], *, now: datetime, steps: Iterable[
             return done("rejected:employer_is_agency", "company", "org_linkedin_recruitment_agency_derived=true")
 
     # 2) job facts: production extraction, then each enabled step re-decides only its own rule
+    #
+    # Task 5c (2026-09-20, wiring): `org` (built above at line 826, the SAME
+    # `_org_block(row)` company gates below already used for
+    # org_linkedin_headcount/org_linkedin_size) is passed as `company=` so the
+    # three-state size policy (facts.py tasks 4-5) actually computes a
+    # `company_size` Fact -- no production caller passed `company=` before
+    # this task, so the policy changed nothing even here. `company_size` is
+    # read from `facts` in the company-gates section below (not decided here);
+    # the "company:size:" exclusion this can add is skipped in the loop just
+    # below for that same reason.
     facts = extract_job_facts(
         title=title, description=desc, employment_type=row.get("employment_type"),
         ai_employment_type=row.get("ai_employment_type"), location_type=row.get("location_type"),
         countries=[str(c) for c in (row.get("countries_derived") or []) if c], location_text=location_text,
         employer_name=employer_name, agency_flag=_bool(row.get("org_linkedin_recruitment_agency_derived")),
-        org_industry=row.get("org_linkedin_industry"),
+        org_industry=row.get("org_linkedin_industry"), company=org,
     )
     sents = sentences(f"{title}. {location_text}. {desc}")
     body_sents = sentences(desc)
@@ -921,6 +931,15 @@ def qualify_candidate(row: Mapping[str, Any], *, now: datetime, steps: Iterable[
                 if reason != "deliverability:security_clearance":
                     flags.append(reason.split(":", 1)[-1] + "_required" if reason.startswith("deliverability") else reason)
                 continue   # clearance is re-decided below: required federal clearance rejects, a mention does not
+        elif reason.startswith("company:size:"):
+            # Task 5c: company size stays decided in the company-gates section
+            # below (after role/campaign fit, alongside the other company
+            # gates -- its historical position), from the SAME `facts` object,
+            # not here. Always skipped, unconditionally: unlike the branches
+            # above this one is not re-decided only when a precision step is
+            # on -- there is no step flag for company size, and the old
+            # unconditional headcount-only gate this replaces always ran.
+            continue
         hard.append((reason, e.excerpt))
     if EMPLOYMENT_PRECISION in on:
         reason, excerpt, emp_flags = _employment_decision(title, sents, row)
@@ -1015,16 +1034,27 @@ def qualify_candidate(row: Mapping[str, Any], *, now: datetime, steps: Iterable[
         industry = excluded_industry(str(row.get("org_linkedin_industry") or ""))
         if industry:
             return done(f"rejected:employer_excluded_industry:{industry}", "company", str(row.get("org_linkedin_industry")))
-    headcount = _int(row.get("org_linkedin_headcount"))
-    if headcount is None:
+    # Task 5c (2026-09-20, wiring): the old gate read org_linkedin_headcount
+    # alone -- exactly the single-field read Decision 2 (2026-09-19) forbids,
+    # measured to mask 1,436 rows where headcount and the declared LinkedIn
+    # size band disagree across the 25-1,000 boundary (71 the other way),
+    # plus 216 too_large rejects from that single field. `facts.get(
+    # "company_size")` is the SAME Fact `extract_job_facts(company=org)`
+    # already computed above via `size_state`/`resolve_company_size` -- reused
+    # here, not recomputed with a second predicate.
+    size_fact = facts.get("company_size")
+    size_state_value = size_fact.value if size_fact.known else "unknown_firmographics"
+    if size_state_value == "out_of_range":
+        _, _, effective = resolve_company_size(org.get("org_linkedin_headcount"), org.get("org_linkedin_size"),
+                                                description=desc, company=org)
+        return done(f"rejected:{size_reject_reason(effective)}", "company", size_fact.excerpt)
+    if size_state_value in {"firmographic_conflict", "unknown_firmographics"}:
+        # Its own reported review/unknown bucket (Decision 2): never a reject,
+        # never silently counted as a confirmed 25-1,000 company.
         if ROLE_MAPPING in on:
-            flags.append("company_size_unknown")
+            flags.append(f"company_size_{size_state_value}")
         else:
-            return done("ambiguous:company_size_unknown", "company")
-    elif headcount < int(rule("min_employees")):
-        return done("rejected:employer_too_small", "company", str(headcount))
-    elif headcount > int(rule("max_employees")):
-        return done("rejected:employer_too_large", "company", str(headcount))
+            return done(f"ambiguous:company_size_{size_state_value}", "company", size_fact.excerpt)
     return done("qualified_pre_contact", "qualified")
 
 
