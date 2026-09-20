@@ -13,6 +13,7 @@ Challenger.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Dict, Mapping, Optional, Tuple
 
@@ -218,7 +219,15 @@ def is_founder_tier(title: str) -> bool:
     lowered = " ".join(str(title or "").lower().replace("-", " ").split())
     if lowered in FOUNDER_TIER_TITLES or lowered.replace(" ", "") in {"cofounder", "ceo"}:
         return True
-    return any(token in lowered.split() for token in ("founder", "ceo", "owner", "president"))
+    if any(token in lowered.split() for token in ("founder", "ceo", "owner")):
+        return True
+    # Phase 2 audit task 7 (2026-09-19, Luis): a C-level job opening is not the
+    # same thing as a founder contact. Bare "president" (token membership, above)
+    # let "Vice President of Sales" through as founder-tier. "President" alone
+    # stays founder-tier; "Vice President" -- VP, SVP, EVP, spelled out or
+    # abbreviated -- does not, since "vice" always precedes "president" in every
+    # one of its spellings once hyphens are normalized to spaces.
+    return bool(re.search(r"(?<!vice )\bpresident\b", lowered))
 
 
 def buyer_titles(function_key: str, *, founder_allowed: bool) -> Tuple[str, ...]:
