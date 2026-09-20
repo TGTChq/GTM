@@ -158,10 +158,26 @@ FOREIGN_ONLY = [
     r"\bmust be (?:based|located|resident) in (?:emea|apac|europe|canada|the uk|australia|india|the philippines|latam)\b",
     r"\bopen only to candidates (?:based|located) in (?:emea|apac|europe|canada|the uk|australia|india|the philippines|latam)\b",
 ]
+#: Phase 3 audit (2026-09-20, Luis D5): "Only an actual security clearance
+#: (Secret/TS/SCI) or an explicitly stated federal clearance requirement excludes. A
+#: Public Trust determination, a Tier 1 investigation, an HSPD-12 PIV card and ordinary
+#: background checks do NOT." The approved exclusion is "required federal clearance",
+#: and a Public Trust determination is a suitability finding, not a clearance.
+#:
+#: The bare ``\bpublic trust(?: clearance)?\b`` pattern that used to sit here is
+#: therefore gone. It was also the rule's one pure substring match: the frozen rubric
+#: §4.H names "the phrase 'public trust' used in a non-clearance sense ('building
+#: public trust')" as explicitly NOT sufficient, and the corpora contain exactly that
+#: (a Public Information Officer "building public trust and community engagement").
+#: Measured on the two frozen corpora (7,349 rows): 46 rows are excluded on that
+#: substring with NO other clearance evidence anywhere in the posting; another 20
+#: mention public trust beside a real clearance and still exclude on the real one.
+#:
+#: Narrowing only. A posting that states Secret/Top Secret/TS/SCI, or an explicit
+#: requirement to hold or obtain a security clearance, is untouched.
 CLEARANCE = [
     r"\b(?:active |current )?(?:secret|top secret|ts/sci|security) clearance (?:is )?(?:required|mandatory|needed)\b",
     r"\b(?:ability|eligible|required|must(?: be able)?|willing) to\b[^.;]{0,160}\b(?:obtain|maintain)\b[^.;]{0,120}\b(?:secret|top secret|ts/sci|security) clearance\b",
-    r"\bpublic trust(?: clearance)?\b",
     r"\b(?:top secret|ts/sci|ts sci)\b",
 ]
 LICENSE = [
@@ -754,7 +770,10 @@ def extract_job_facts(
             hits = [s for s in hits if not (
                 re.search(FACILITY[3], s, re.I) and FACILITY_LIFT_INCIDENTAL.search(s)
                 and not any(re.search(p, s, re.I) for p in FACILITY if p != FACILITY[3]))]
-        rv = RULE_VERSION if name == "physical_facility" else ""
+        # Changed decision paths carry the audit rule version on BOTH the Fact and the
+        # Exclusion: physical_facility (phase 2 task 3) and security_clearance (phase 3,
+        # Luis D5 -- a Public Trust determination is not a clearance).
+        rv = RULE_VERSION if name in {"physical_facility", "security_clearance"} else ""
         jf.facts[name] = Fact(name, "required" if hits else None, TEXT if hits else UNKNOWN, hits[0] if hits else "", rv)
         if hits:
             jf.exclusions.append(Exclusion(reason, hits[0], TEXT, rv))
