@@ -387,6 +387,83 @@ def _extract_stated_headcount(text: str) -> Optional[int]:
     return None
 
 
+def resolve_company_size(
+    headcount: Optional[object] = None,
+    size_band: Optional[str] = None,
+    *,
+    description: str = "",
+    company: Optional[Dict[str, object]] = None,
+) -> Tuple[str, str, Optional[int]]:
+    """``size_state(headcount, size_band)``, then the SAME free-only resolution
+    (Decision 2, 2026-09-19) for a ``firmographic_conflict`` that
+    ``extract_job_facts``'s own company block used to inline: (1) an employee
+    count the employer states about itself in a posting description, (2) any
+    other already-populated allow-listed field on ``company``
+    (``COMPANY_SIZE_SURROGATE_FIELDS``). Never a paid call.
+
+    Task 5c (2026-09-20, wiring): pulled out of ``extract_job_facts`` into its
+    own function so it is THE one resolution path -- ``extract_job_facts``'s
+    company block and every live company-size gate that wires the three-state
+    policy in (``services/opportunity.py``, ``domain/approval.py``,
+    ``services/acquisition.py``) call this instead of re-implementing it.
+    Reviewers on this branch have twice rejected a copied predicate.
+
+    Returns ``(state, excerpt, effective_headcount)``. ``effective_headcount``
+    is whichever single numeric reading DECIDED a determinate state --
+    ``headcount`` itself when it alone (or together with a non-conflicting
+    band) was enough, the free-resolved value when a conflict was resolved,
+    or a size-band bound/midpoint when only the band was populated and
+    determinate on its own. It is for a caller that wants to report WHICH
+    boundary an ``out_of_range`` verdict crossed (small vs large); it is
+    never used to decide the state itself, only to describe one already
+    decided by ``size_state``.
+    """
+    state = size_state(headcount, size_band)
+    excerpt = f"headcount={headcount!r}; size_band={size_band!r}"
+    effective = _to_int(headcount)
+    if state == "firmographic_conflict":
+        resolved, resolved_source = _extract_stated_headcount(description), "description_stated_headcount"
+        if resolved is None and company:
+            for key in COMPANY_SIZE_SURROGATE_FIELDS:
+                value = company.get(key)
+                if value in (None, ""):
+                    continue
+                cand = _to_int(value)
+                if cand is None:
+                    band = parse_size_band(str(value))
+                    if band is not None and _classify_size_range(*band) != "indeterminate":
+                        lo, hi = band
+                        cand = lo if hi is None else (lo + hi) // 2
+                if cand is not None:
+                    resolved, resolved_source = cand, f"provider_field:{key}"
+                    break
+        if resolved is not None and _plausible_headcount(resolved):
+            resolved_state = size_state(resolved, None)
+            if resolved_state in {"in_range", "out_of_range"}:
+                state = resolved_state
+                excerpt += f"; resolved via {resolved_source}={resolved}"
+                effective = resolved
+    elif state == "out_of_range" and effective is None:
+        band_range = parse_size_band(size_band) if size_band not in (None, "") else None
+        if band_range is not None:
+            lo, hi = band_range
+            effective = lo if hi is None else (lo + hi) // 2
+    return state, excerpt, effective
+
+
+def size_reject_reason(effective_headcount: Optional[int]) -> str:
+    """The established too_small/too_large vocabulary (``services/opportunity.py``,
+    ``domain/approval.py``, ``domain/candidate_qualification.py`` all already used
+    these two reason strings before this task) for an ``out_of_range`` verdict,
+    from whichever number decided it. Falls back to a generic reason only when no
+    single number is available to name a side (state was decided by two
+    non-conflicting-but-unresolvable-to-a-number votes -- not reachable from
+    ``resolve_company_size`` today, kept only so this is total)."""
+    if effective_headcount is None:
+        return "employer_size_out_of_range"
+    return "employer_too_small" if effective_headcount < TARGET_MIN_EMPLOYEES else "employer_too_large"
+
+
 #: Fix round 1 (2026-09-19, CRITICAL): fields on the `company` mapping that
 #: plausibly denote an employee count, for free-resolution step 2 (an
 #: already-populated PROVIDER field, not the employer's own text statement --
@@ -397,7 +474,19 @@ def _extract_stated_headcount(text: str) -> Optional[int]:
 #: out_of_range reject -- exactly what Decision 2 forbids ("never discard a
 #: potentially eligible company just because two sources conflict"). A tuple,
 #: not a set, so the resolution order among surrogate fields is deterministic.
-COMPANY_SIZE_SURROGATE_FIELDS = ("employee_count", "headcount_estimate", "staff_count", "num_employees")
+#:
+#: Task 5c (2026-09-20, wiring): this tuple was invented -- ``employee_count``,
+#: ``headcount_estimate``, ``staff_count``, ``num_employees`` -- and no real
+#: Fantastic payload carries any of them (checked against
+#: ``C:\TGTC\tgtc_canary_evidence\run_20260919T061752Z\net_new_rows.jsonl.gz``
+#: and every ``phase3_paid\records\*.jsonl.gz`` file: the only two size-shaped
+#: keys present anywhere are ``org_linkedin_headcount`` and
+#: ``org_linkedin_size``, already read as the PRIMARY two sources below, not
+#: surrogates). The allow-list is deliberately left empty rather than
+#: re-populated with a guess -- add a real field name here only once a
+#: payload is observed to carry a genuine third size-bearing field distinct
+#: from the two primary sources.
+COMPANY_SIZE_SURROGATE_FIELDS: Tuple[str, ...] = ()
 
 #: A plausible employee-count value, applied to the resolved candidate
 #: regardless of which step produced it (an allow-listed field can still hold a
@@ -649,45 +738,19 @@ def extract_job_facts(
     if industry in {"staffing and recruiting", "staffing & recruiting", "human resources services", "outsourcing/offshoring", "outsourcing and offshoring consulting"}:
         jf.exclusions.append(Exclusion("agency:provider_industry", industry, PROVIDER))
 
-    # company size (Phase 2 audit task 5, 2026-09-19): only computed when the
-    # caller supplies `company` -- every caller before this task omits it, so
-    # this stays fully backward compatible (no Fact/Exclusion/review_reason).
+    # company size (Phase 2 audit task 5, 2026-09-19; wired live, task 5c,
+    # 2026-09-20): only computed when the caller supplies `company` -- every
+    # caller before task 5c omitted it, so an absent/empty `company` stays
+    # fully backward compatible (no Fact/Exclusion/review_reason). The real
+    # Fantastic field names are `org_linkedin_headcount` (int) and
+    # `org_linkedin_size` (a band string like "201-500 employees") -- verified
+    # against saved provider rows; see COMPANY_SIZE_SURROGATE_FIELDS's own
+    # comment. A caller can pass either the raw provider org block (its own
+    # field names) or a pre-mapped dict with the same two keys.
     if company:
-        headcount = company.get("headcount")
-        size_band = company.get("size_band")
-        state = size_state(headcount, size_band)
-        excerpt = f"headcount={headcount!r}; size_band={size_band!r}"
-        if state == "firmographic_conflict":
-            # Cheapest resolution first, and it must be free (Decision 2): (1) an
-            # employee count stated in the description text, (2) any other
-            # already-populated provider field on the row. Never a paid call. If
-            # nothing resolves it, it stays `firmographic_conflict`.
-            resolved, resolved_source = _extract_stated_headcount(desc), "description_stated_headcount"
-            if resolved is None:
-                # CRITICAL fix round 1: only an explicit allow-list of fields
-                # that actually denote employee count, never any
-                # numeric-parseable field on `company`.
-                for key in COMPANY_SIZE_SURROGATE_FIELDS:
-                    value = company.get(key)
-                    if value in (None, ""):
-                        continue
-                    cand = _to_int(value)
-                    if cand is None:
-                        band = parse_size_band(str(value))
-                        if band is not None and _classify_size_range(*band) != "indeterminate":
-                            lo, hi = band
-                            cand = lo if hi is None else (lo + hi) // 2
-                    if cand is not None:
-                        resolved, resolved_source = cand, f"provider_field:{key}"
-                        break
-            # Refuse an implausible resolved value regardless of which step
-            # produced it -- an allow-listed field can still hold a garbage
-            # number (CRITICAL fix round 1).
-            if resolved is not None and _plausible_headcount(resolved):
-                resolved_state = size_state(resolved, None)
-                if resolved_state in {"in_range", "out_of_range"}:
-                    state = resolved_state
-                    excerpt += f"; resolved via {resolved_source}={resolved}"
+        headcount = company.get("org_linkedin_headcount")
+        size_band = company.get("org_linkedin_size")
+        state, excerpt, _effective = resolve_company_size(headcount, size_band, description=desc, company=company)
         jf.facts["company_size"] = Fact("company_size", state, PROVIDER, excerpt, RULE_VERSION)
         if state == "out_of_range":
             jf.exclusions.append(Exclusion("company:size:out_of_range", excerpt, PROVIDER, RULE_VERSION))

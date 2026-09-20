@@ -10,6 +10,7 @@ physical-duty boilerplate (Task 3). See .superpowers/sdd/phase2/task-1-3-brief.m
 """
 from __future__ import annotations
 
+from tgtc_core.domain import facts as facts_module
 from tgtc_core.domain.facts import RULE_VERSION, extract_job_facts, size_state
 
 
@@ -176,14 +177,14 @@ def test_a_band_straddling_the_boundary_is_not_a_conflict_by_itself():
 
 def test_conflict_is_never_an_exclusion():
     facts = extract_job_facts(title="Controller", description="Remote finance role.",
-                              company={"headcount": 400, "size_band": "1,001-5,000"})
+                              company={"org_linkedin_headcount": 400, "org_linkedin_size": "1,001-5,000"})
     assert not any(e.reason.startswith("company:size") for e in facts.exclusions)
     assert any("firmographic_conflict" in r for r in facts.review_reasons)
 
 
 def test_company_size_out_of_range_excludes():
     facts = extract_job_facts(title="Controller", description="Remote finance role.",
-                              company={"headcount": 5000, "size_band": "1,001-5,000"})
+                              company={"org_linkedin_headcount": 5000, "org_linkedin_size": "1,001-5,000"})
     assert any(e.reason.startswith("company:size") for e in facts.exclusions)
     assert not facts.review_reasons
 
@@ -195,7 +196,7 @@ def test_company_size_conflict_resolved_by_description_stated_headcount():
     facts = extract_job_facts(
         title="Controller",
         description="Remote finance role at a company of about 3,000 employees worldwide.",
-        company={"headcount": 400, "size_band": "1,001-5,000"})
+        company={"org_linkedin_headcount": 400, "org_linkedin_size": "1,001-5,000"})
     assert any(e.reason == "company:size:out_of_range" for e in facts.exclusions)
     assert not facts.review_reasons
 
@@ -240,24 +241,45 @@ def test_full_time_employment_fact_carries_rule_version_even_without_an_exclusio
 def test_conflict_not_resolved_by_an_unrelated_numeric_field():
     facts = extract_job_facts(
         title="Controller", description="Remote finance role.",
-        company={"headcount": 400, "size_band": "1,001-5,000", "founded_year": 1998})
+        company={"org_linkedin_headcount": 400, "org_linkedin_size": "1,001-5,000", "founded_year": 1998})
     assert not any(e.reason.startswith("company:size") for e in facts.exclusions)
     assert any("firmographic_conflict" in r for r in facts.review_reasons)
 
 
-def test_conflict_resolved_by_an_allow_listed_employee_count_field():
+# Task 5c (2026-09-20, wiring): COMPANY_SIZE_SURROGATE_FIELDS was reconciled to
+# reality and is now empty -- no real Fantastic payload carries a third
+# size-bearing field distinct from org_linkedin_headcount/org_linkedin_size
+# (checked against saved provider rows; see the tuple's own comment in
+# facts.py). The allow-list MECHANISM (restrict step 2 to a named field,
+# refuse an implausible resolved value) is still real code with real callers
+# once a field is ever added there, so these two tests keep covering it via a
+# temporary monkeypatched entry rather than asserting behaviour no live field
+# name can currently trigger.
+
+def test_conflict_resolved_by_an_allow_listed_surrogate_field(monkeypatch):
+    monkeypatch.setattr(facts_module, "COMPANY_SIZE_SURROGATE_FIELDS", ("some_provider_headcount_field",))
     facts = extract_job_facts(
         title="Controller", description="Remote finance role.",
-        company={"headcount": 400, "size_band": "1,001-5,000", "employee_count": 3000})
+        company={"org_linkedin_headcount": 400, "org_linkedin_size": "1,001-5,000",
+                 "some_provider_headcount_field": 3000})
     assert any(e.reason == "company:size:out_of_range" for e in facts.exclusions)
     assert not facts.review_reasons
 
 
-def test_conflict_not_resolved_by_an_implausible_employee_count_value():
+def test_conflict_not_resolved_by_an_implausible_allow_listed_value(monkeypatch):
     """Mirrors the review's own example: a phone-number fragment stored (by data
     error) in an otherwise allow-listed field must not be treated as a headcount."""
+    monkeypatch.setattr(facts_module, "COMPANY_SIZE_SURROGATE_FIELDS", ("some_provider_headcount_field",))
     facts = extract_job_facts(
         title="Controller", description="Remote finance role.",
-        company={"headcount": 400, "size_band": "1,001-5,000", "employee_count": 4155551234})
+        company={"org_linkedin_headcount": 400, "org_linkedin_size": "1,001-5,000",
+                 "some_provider_headcount_field": 4155551234})
     assert not any(e.reason.startswith("company:size") for e in facts.exclusions)
     assert any("firmographic_conflict" in r for r in facts.review_reasons)
+
+
+def test_company_size_surrogate_fields_is_reconciled_to_real_payload_names():
+    """No real Fantastic payload carries employee_count/headcount_estimate/
+    staff_count/num_employees -- the tuple was invented (task 5) and is now
+    empty rather than re-populated with another guess (task 5c)."""
+    assert facts_module.COMPANY_SIZE_SURROGATE_FIELDS == ()
