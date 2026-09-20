@@ -5,6 +5,8 @@
     "dockerfilePath": "Dockerfile.core"
   },
   "deploy": {
+    "startCommand": "sh -ec 'python -u -m tgtc_core migrate && python -u -m tgtc_core budget --budget-id \"$TGTC_SPEND_BUDGET_ID\" --expires-hours 24 --fantastic-requests 20 --fantastic-credits 1000 --apollo-requests 1000 --apollo-credits 250 --anthropic-requests 1000 --anthropic-input-tokens 35000000 --anthropic-output-tokens 1024000 && python -u -m tgtc_core run-target --target 1000 --max-rounds 100 --max-items 10000 --i-understand-spend'",
+    "cronSchedule": "0 3 * * *",
     "restartPolicyType": "NEVER",
     "numReplicas": 1
   }
