@@ -8,7 +8,8 @@ normal qualify stage re-judges the STORED record (the reuse path never pays for
 the same person twice).
 
 Only ``buyer_search_pending:*`` waits are touched, only when a stored person at
-the unit's employer passes the rule now, and never twice within six hours.
+the unit's employer passes the rule now, and never twice within six hours
+(by this pass's own release stamp).
 """
 from __future__ import annotations
 
@@ -22,6 +23,11 @@ from ..db.connection import transaction
 from ..domain.gates import MAIL_DOMAIN_FLAG_ENV, corroborated_mail_domain
 
 RELEASE_GUARD = timedelta(hours=6)
+#: This pass's OWN release stamp, kept in last_error (which the normal re-wait
+#: does not clear). The guard throttles re-releases by this pass; it must not
+#: key on updated_at, which ordinary processing also sets -- that blocked the
+#: first release for six hours after any normal re-wait.
+RELEASE_MARKER = "mail_domain_released@"
 
 
 def _enabled(env: Optional[Mapping[str, str]]) -> bool:
@@ -40,9 +46,13 @@ def release_mail_domain_recoverable(conn: psycopg.Connection, *, now: Optional[d
             "FROM work_items w JOIN opportunities o ON o.id = w.subject_id "
             "JOIN employers e ON e.id = o.employer_id "
             "WHERE w.kind = 'qualify_opportunity' AND w.state = 'waiting' "
-            "AND w.waiting_on LIKE 'buyer_search_pending:%%' AND w.available_at > %s AND w.updated_at < %s "
+            "AND w.waiting_on LIKE 'buyer_search_pending:%%' AND w.available_at > %s "
+            # CASE, not AND: Postgres does not short-circuit, and a normal error
+            # text in last_error must never reach the timestamptz cast.
+            "AND COALESCE(CASE WHEN w.last_error LIKE %s THEN substring(w.last_error from %s)::timestamptz END, "
+            "'-infinity'::timestamptz) <= %s "
             "ORDER BY w.id LIMIT %s",
-            (moment, moment - RELEASE_GUARD, limit),
+            (moment, RELEASE_MARKER + "%", len(RELEASE_MARKER) + 1, moment - RELEASE_GUARD, limit),
         )
         units = [dict(r) for r in cur.fetchall()]
     conn.commit()
@@ -75,8 +85,9 @@ def release_mail_domain_recoverable(conn: psycopg.Connection, *, now: Optional[d
             continue
         with transaction(conn):
             with conn.cursor() as cur:
-                cur.execute("UPDATE work_items SET available_at = %s, updated_at = %s WHERE id = %s AND state = 'waiting'",
-                            (moment, moment, unit["work_id"]))
+                cur.execute("UPDATE work_items SET available_at = %s, updated_at = %s, last_error = %s "
+                            "WHERE id = %s AND state = 'waiting'",
+                            (moment, moment, RELEASE_MARKER + moment.isoformat(), unit["work_id"]))
                 released += cur.rowcount
     return released
 

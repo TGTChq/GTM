@@ -70,9 +70,35 @@ def test_a_wait_on_another_dependency_is_not_released(conn, clock):
     assert release_mail_domain_recoverable(conn, now=clock(), env=ON) == 0
 
 
-def test_a_unit_released_recently_is_not_released_again(conn, clock):
+def test_a_unit_released_recently_by_this_pass_is_not_released_again(conn, clock):
+    oid = _unit(conn, clock, candidate_domain="acmemail.com", sibling_domains=["acmemail.com", "acmemail.com"])
+    assert release_mail_domain_recoverable(conn, now=clock(), env=ON) == 1
+    # processed, then re-waited by the normal stage (which keeps last_error)
+    with conn.cursor() as cur:
+        cur.execute("UPDATE work_items SET available_at = %s, updated_at = %s WHERE subject_id = %s",
+                    (clock() + timedelta(hours=20), clock(), oid))
+    conn.commit()
+    assert release_mail_domain_recoverable(conn, now=clock() + timedelta(hours=1), env=ON) == 0
+    assert release_mail_domain_recoverable(conn, now=clock() + timedelta(hours=7), env=ON) == 1
+
+
+def test_a_unit_touched_recently_by_NORMAL_processing_is_still_released(conn, clock):
+    """Found trying to run the canary: the guard keyed on updated_at, which the
+    ordinary qualify stage also sets, so the FIRST release was blocked for six
+    hours after any normal re-wait. The guard is about this pass's own
+    releases, not about any update."""
     oid = _unit(conn, clock, candidate_domain="acmemail.com", sibling_domains=["acmemail.com", "acmemail.com"])
     with conn.cursor() as cur:
-        cur.execute("UPDATE work_items SET updated_at = %s WHERE subject_id = %s", (clock() - timedelta(hours=1), oid))
+        cur.execute("UPDATE work_items SET updated_at = %s WHERE subject_id = %s", (clock() - timedelta(minutes=5), oid))
     conn.commit()
-    assert release_mail_domain_recoverable(conn, now=clock(), env=ON) == 0
+    assert release_mail_domain_recoverable(conn, now=clock(), env=ON) == 1
+
+
+def test_an_ordinary_error_text_in_last_error_never_breaks_the_pass(conn, clock):
+    """Production rows carry last_error values like 'apollo_server'; the marker
+    parse must not be attempted on them."""
+    oid = _unit(conn, clock, candidate_domain="acmemail.com", sibling_domains=["acmemail.com", "acmemail.com"])
+    with conn.cursor() as cur:
+        cur.execute("UPDATE work_items SET last_error = 'apollo_server' WHERE subject_id = %s", (oid,))
+    conn.commit()
+    assert release_mail_domain_recoverable(conn, now=clock(), env=ON) == 1
