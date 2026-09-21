@@ -58,7 +58,7 @@ from .services.lifecycle import expire_postings
 from .services.metrics import ledger
 from .services.opportunity import OpportunityService, reopen_recoverable_opportunities
 from .services.scheduler import FairShare
-from .services.spend_budget import BudgetExceeded, SpendBudget
+from .services.spend_budget import BudgetExceeded, SpendBudget, release_budget_waits
 
 log = logging.getLogger("tgtc_core.runner")
 
@@ -203,6 +203,10 @@ class Runner:
         out: Dict[str, Any] = dict(expire_postings(self.conn, now=self.now()))
         if self.inference_configured:
             out["reopened_for_inference"] = reopen_for_inference(self.conn, model_version=self.inference.model_version, now=self.now())
+        if self.spend_budget is not None:
+            # Work deferred on an EARLIER budget's exhaustion resumes as soon as
+            # the active budget has headroom for that provider.
+            out["released_budget_waits"] = release_budget_waits(self.conn, self.spend_budget.budget_id, now=self.now())
         if exhaustive_enabled(os.environ):
             # Re-decide unknown contact jurisdictions from the person's own
             # stored Apollo evidence, before delivery drains. Zero paid calls.
@@ -504,11 +508,17 @@ class Runner:
         return {"approvals_created": approvals, "airtable_created": airtable}
 
     @staticmethod
-    def _budget_stopped(report: CycleReport) -> bool:
-        if any(str(item.get("stop_reason") or "").startswith("spend_budget_exhausted:")
-               for item in report.acquisition):
-            return True
+    def _acquisition_budget_stopped(report: CycleReport) -> bool:
+        return any(str(item.get("stop_reason") or "").startswith("spend_budget_exhausted:")
+                   for item in report.acquisition)
+
+    @staticmethod
+    def _processing_budget_stopped(report: CycleReport) -> bool:
         return any(int(counts.get("budget_exhausted") or 0) > 0 for counts in report.stages.values())
+
+    @classmethod
+    def _budget_stopped(cls, report: CycleReport) -> bool:
+        return cls._acquisition_budget_stopped(report) or cls._processing_budget_stopped(report)
 
     @staticmethod
     def _round_activity(report: CycleReport) -> int:
@@ -537,6 +547,7 @@ class Runner:
             raise ValueError("target, max_rounds and max_items must be positive")
         out = TargetRunReport(run_id=self.run_id, target=wanted)
         stalled = 0
+        acquisition_spent = False
         self._log("target", "start", {"target": wanted, "max_rounds": rounds_limit,
                                         "max_items": max_items, "deliver": deliver})
         for round_number in range(1, rounds_limit + 1):
@@ -567,12 +578,20 @@ class Runner:
             if not deliver and out.approvals_created >= wanted:
                 out.stop_reason = "approval_target_reached_without_airtable_delivery"
                 break
-            if self._budget_stopped(report):
+            if self._processing_budget_stopped(report):
                 out.stop_reason = "spend_budget_exhausted"
                 break
+            if acquire and self._acquisition_budget_stopped(report):
+                # The ACQUISITION budget is spent; the inventory it bought is
+                # not. Stop buying and keep qualifying and delivering what is
+                # already paid for. Measured 2026-09-21: the run stopped here
+                # with Apollo at 485 of 1,000 credits and bought work queued.
+                acquire = False
+                acquisition_spent = True
             stalled = stalled + 1 if activity == 0 else 0
             if stalled >= self.s.target_stall_rounds:
-                out.stop_reason = "no_progress"
+                out.stop_reason = ("acquisition_budget_exhausted_backlog_drained" if acquisition_spent
+                                   else "no_progress")
                 break
         if not out.stop_reason:
             out.stop_reason = "max_rounds_reached"

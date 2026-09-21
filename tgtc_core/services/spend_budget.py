@@ -121,6 +121,54 @@ def budget_status(conn: psycopg.Connection, budget_id: str) -> Dict[str, Any]:
     }
 
 
+_BUDGETED_PROVIDERS = ("apollo", "anthropic", "fantastic")
+
+
+def release_budget_waits(conn: psycopg.Connection, budget_id: str, *,
+                         now: Optional[datetime] = None) -> Dict[str, int]:
+    """Resume work deferred on an exhausted budget, per provider, when the
+    ACTIVE budget has headroom for that provider again.
+
+    `reserve_attempt` defers refused work to the refusing budget's
+    ``expires_at + 1s``. That is right for the budget that refused and wrong for
+    the next one: a new daily budget is exactly the event the work was waiting
+    for. Measured, production 2026-09-21: 977 bought opportunities waited for a
+    spent canary budget to expire while the day's budget had 515 Apollo credits
+    unused.
+
+    Only ``spend_budget_exhausted:<provider>:*`` waits are touched; a wait on any
+    other dependency keeps its schedule. Returns released counts by provider.
+    """
+    moment = now or datetime.now(timezone.utc)
+    try:
+        status = budget_status(conn, budget_id)
+    except LookupError:
+        return {}
+    if status["state"] != "active" or datetime.fromisoformat(status["expires_at"]) <= moment:
+        return {}
+    limits, used = status["limits"], status["used"]
+    released: Dict[str, int] = {}
+    for provider in _BUDGETED_PROVIDERS:
+        spent = used.get(provider, {})
+        requests_left = int(limits.get(f"{provider}_requests", 0)) - int(spent.get("requests", 0))
+        if provider == "anthropic":
+            headroom = requests_left > 0 and int(limits.get("anthropic_input_tokens", 0)) > int(spent.get("input_tokens", 0))
+        else:
+            headroom = requests_left > 0 and int(limits.get(f"{provider}_credits", 0)) > float(spent.get("credits", 0))
+        if not headroom:
+            continue
+        with transaction(conn):
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE work_items SET available_at = %s, updated_at = now() "
+                    "WHERE state = 'waiting' AND waiting_on LIKE %s AND available_at > %s",
+                    (moment, f"spend_budget_exhausted:{provider}:%", moment),
+                )
+                if cur.rowcount:
+                    released[provider] = int(cur.rowcount)
+    return released
+
+
 class SpendBudget:
     def __init__(self, conn: psycopg.Connection, budget_id: str,
                  *, now: Callable[[], datetime] = lambda: datetime.now(timezone.utc)):

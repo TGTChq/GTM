@@ -125,6 +125,13 @@ class CanaryCaps:
             return "canary_cap_campaign"
         return None
 
+    def seed(self, by_campaign: Mapping[str, int]) -> None:
+        """Start from writes already made today, so the ceiling is per UTC day
+        and survives new rounds, processes and restarts."""
+        for campaign_id, n in (by_campaign or {}).items():
+            self._by_campaign[campaign_id] = self._by_campaign.get(campaign_id, 0) + int(n)
+            self._total += int(n)
+
     def record(self, campaign_id: str) -> None:
         self._by_campaign[campaign_id] = self._by_campaign.get(campaign_id, 0) + 1
         self._total += 1
@@ -151,8 +158,27 @@ class DeliveryService:
         self.max_contacts = max(1, min(3, max_contacts_per_opportunity))
         self.allowed_campaign_ids = tuple((campaign_env or {}).values())
         self.env = os.environ if env is None else env
-        self.canary_caps = CanaryCaps.from_env(self.env)
         self.now = now
+        self.canary_caps = CanaryCaps.from_env(self.env)
+        if self.canary_caps.enabled:
+            # Per UTC DAY, not per service instance. Measured 2026-09-21: run-target
+            # builds a new DeliveryService every round, so an in-process counter let
+            # OPERATIONS take 242 new leads against a ceiling of 150.
+            self.canary_caps.seed(self._instantly_created_today())
+
+    def _instantly_created_today(self) -> Dict[str, int]:
+        moment = self.now()
+        start = moment.replace(hour=0, minute=0, second=0, microsecond=0)
+        with self.conn.cursor() as cur:
+            cur.execute(
+                "SELECT external_campaign, count(*) AS n FROM delivery_receipts "
+                "WHERE channel = 'instantly' AND receipt_kind = 'created' AND received_at >= %s "
+                "AND external_campaign IS NOT NULL GROUP BY external_campaign",
+                (start,),
+            )
+            rows = {str(r["external_campaign"]): int(r["n"]) for r in cur.fetchall()}
+        self.conn.commit()
+        return rows
 
     # --- claim (R06) ----------------------------------------------------------
     def claim(self, channel: str, *, limit: int = 1) -> List[OutboxItem]:
