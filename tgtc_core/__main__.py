@@ -134,7 +134,7 @@ def cmd_cycle(args) -> int:
 
 
 def cmd_run_target(args) -> int:
-    """Target-seeking production controller; only Airtable is delivered here."""
+    """Target-seeking production controller; delivers Airtable and Instantly."""
     _require_spend_acknowledgement(args.i_understand_spend)
     s = _settings()
     _require_persistent_budget(args, s)
@@ -149,14 +149,17 @@ def cmd_run_target(args) -> int:
         deliver=not args.no_deliver,
     )
     print(json.dumps(report.to_dict(), indent=2, default=str))
-    if not report.target_met:
-        print(
-            f"target run incomplete: {report.airtable_created}/{report.target} Airtable leads; "
-            f"stop_reason={report.stop_reason}",
-            file=sys.stderr,
-        )
-        return 1
-    return 0
+    # A completed run below target is a successful process (exit 0, result
+    # target_not_reached in the ledger). Railway marks any non-zero exit
+    # CRASHED, so only a genuinely broken system may return non-zero.
+    from .runner import run_exit_code
+    code = run_exit_code(report)
+    summary = (f"target run {report.result}: {report.airtable_created}/{report.target} Airtable leads; "
+               f"stop_reason={report.stop_reason}")
+    if code:
+        summary += f"; technical_failures={report.technical_failures}"
+    print(summary, file=sys.stderr if code else sys.stdout)
+    return code
 
 
 def _bounded_acceptance_failure(report, *, acquire: bool) -> str:

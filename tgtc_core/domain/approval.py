@@ -21,7 +21,7 @@ from ..policy.compliance import (
     COMPLIANCE_RULE_VERSION, ENTITY_UNKNOWN, OPT_OUT_NONE, ComplianceRecord, evaluate,
 )
 from ..policy.requirements import rule
-from .jurisdiction import observe_job_country
+from .jurisdiction import observe_job_country, resolve_person_contact_country
 from .facts import MIN_CORROBORATING_SIZE_SOURCES, resolve_company_size, size_reject_reason, size_sources_agreeing
 from .identity import lead_key as make_lead_key
 from .employer_attribution import employer_attribution_conflict
@@ -326,10 +326,14 @@ def compliance_decision(*, posting: Mapping[str, Any], employer: Mapping[str, An
     privacy_configured = bool(controls.get("privacy_notice_configured"))
     due_days = int(controls.get("privacy_notice_days") or 30)
     privacy_due_at = moment + timedelta(days=due_days) if privacy_configured else None
+    # The person's own country: the column, else the person's own stored
+    # Apollo evidence. Never the employer's location. See
+    # jurisdiction.resolve_person_contact_country for the measured need.
+    contact_country, contact_country_provenance = resolve_person_contact_country(person)
     record = ComplianceRecord(
         job_country=observe_job_country(posting.get("countries")),
         company_country=str(employer.get("company_country") or ""),
-        contact_country=str(person.get("contact_country") or ""),
+        contact_country=contact_country,
         employer_legal_entity_type=str(employer.get("employer_legal_entity_type") or ""),
         corporate_subscriber_status=str(employer.get("corporate_subscriber_status") or ENTITY_UNKNOWN),
         legal_basis=str(controls.get("legal_basis") or ""),
@@ -348,6 +352,7 @@ def compliance_decision(*, posting: Mapping[str, Any], employer: Mapping[str, An
         "job_country": record.job_country,
         "company_country": record.company_country,
         "contact_country": record.contact_country,
+        "contact_country_provenance": contact_country_provenance,
         "employer_legal_entity_type": record.employer_legal_entity_type,
         "corporate_subscriber_status": record.corporate_subscriber_status,
         "compliance_rule_version": COMPLIANCE_RULE_VERSION,

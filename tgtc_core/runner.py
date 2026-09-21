@@ -15,7 +15,7 @@ import os
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import psycopg
 
@@ -32,6 +32,17 @@ from .domain.exhaustive_routing import exhaustive_enabled
 #: while Airtable delivered in the same run, because this was hardcoded to
 #: ("airtable",). That is an independent cause of production sending zero.
 TARGET_DELIVERY_CHANNELS: tuple[str, ...] = ("airtable", "instantly")
+
+#: Run outcome contract. A completed run below its business target exits 0 and
+#: says so in the ledger; only a broken system exits non-zero.
+EXIT_OK = 0
+EXIT_TECHNICAL_FAILURE = 2
+RESULT_TARGET_REACHED = "target_reached"
+RESULT_TARGET_NOT_REACHED = "target_not_reached"
+RESULT_TECHNICAL_FAILURE = "technical_failure"
+_SYSTEMIC_ACQUISITION_PREFIXES = ("request_error:", "provider_")
+_DELIVERY_SUCCESS_OUTCOMES = ("delivered", "reconciled")
+_DELIVERY_FAILURE_OUTCOMES = ("failed", "uncertain")
 from .providers.airtable import AirtableClient
 from .providers.apollo import ApolloClient
 from .providers.fantastic import FantasticClient
@@ -40,6 +51,7 @@ from .providers.instantly import InstantlyClient
 from .services import provider_state
 from .services.acquisition import AcquisitionService, SOURCE_SPECS
 from .services.classification_service import classify_one, reopen_for_inference
+from .services.compliance_recheck import recheck_unknown_jurisdiction
 from .services.delivery import DeliveryService
 from .services.identity_service import resolve_posting_identity
 from .services.lifecycle import expire_postings
@@ -88,17 +100,70 @@ class TargetRunReport:
     airtable_created: int = 0
     rounds: List[Dict[str, Any]] = field(default_factory=list)
 
+    # --- outcome classification -------------------------------------------
+    # A completed run below target is a SUCCESSFUL process: Railway marks any
+    # non-zero exit CRASHED, and the 2026-09-18 run that finished normally at
+    # 0/1000 (spend_budget_exhausted) read as a code defect for two days.
+    # Only a genuinely broken system exits non-zero.
+
+    def _classify(self) -> Tuple[List[str], List[str]]:
+        failures: List[str] = []
+        warnings: List[str] = []
+        acquired = sum(int(r.get("acquisition_new_postings") or 0) for r in self.rounds)
+        delivery_totals: Dict[str, Dict[str, int]] = {}
+        for rnd in self.rounds:
+            for stop in rnd.get("acquisition_stops") or ():
+                stop = str(stop or "")
+                if stop == "auth_refused":
+                    # Refused credentials never heal on retry.
+                    failures.append("provider:auth_refused")
+                elif stop.startswith(_SYSTEMIC_ACQUISITION_PREFIXES) or stop == "timeout_uncertain":
+                    (failures if acquired == 0 else warnings).append(f"provider:{stop}")
+            for channel, counts in (rnd.get("delivery") or {}).items():
+                bucket = delivery_totals.setdefault(channel, {})
+                for outcome, n in (counts or {}).items():
+                    bucket[outcome] = bucket.get(outcome, 0) + int(n or 0)
+        for channel, counts in sorted(delivery_totals.items()):
+            succeeded = sum(counts.get(k, 0) for k in _DELIVERY_SUCCESS_OUTCOMES)
+            broken = sum(counts.get(k, 0) for k in _DELIVERY_FAILURE_OUTCOMES)
+            if broken and not succeeded:
+                # Every write this channel attempted failed: delivery is broken.
+                failures.append(f"delivery:{channel}:no_successful_write:{broken}")
+            elif broken:
+                # Working channel with retryable failures; the rows retry.
+                warnings.append(f"delivery:{channel}:retryable:{broken}")
+        return failures, warnings
+
+    @property
+    def technical_failures(self) -> List[str]:
+        return self._classify()[0]
+
+    @property
+    def result(self) -> str:
+        if self.technical_failures:
+            return RESULT_TECHNICAL_FAILURE
+        return RESULT_TARGET_REACHED if self.target_met else RESULT_TARGET_NOT_REACHED
+
     def to_dict(self) -> Dict[str, Any]:
+        failures, warnings = self._classify()
         return {
             "run_id": self.run_id,
             "target": self.target,
             "target_met": self.target_met,
+            "result": self.result,
+            "technical_failures": failures,
+            "technical_warnings": warnings,
             "stop_reason": self.stop_reason,
             "rounds_completed": self.rounds_completed,
             "approvals_created": self.approvals_created,
             "airtable_created": self.airtable_created,
             "rounds": self.rounds,
         }
+
+
+def run_exit_code(report: "TargetRunReport") -> int:
+    """Process exit code for a finished target run. Business shortfall is 0."""
+    return EXIT_TECHNICAL_FAILURE if report.technical_failures else EXIT_OK
 
 
 class Runner:
@@ -138,6 +203,10 @@ class Runner:
         out: Dict[str, Any] = dict(expire_postings(self.conn, now=self.now()))
         if self.inference_configured:
             out["reopened_for_inference"] = reopen_for_inference(self.conn, model_version=self.inference.model_version, now=self.now())
+        if exhaustive_enabled(os.environ):
+            # Re-decide unknown contact jurisdictions from the person's own
+            # stored Apollo evidence, before delivery drains. Zero paid calls.
+            out["compliance_recheck"] = recheck_unknown_jurisdiction(self.conn, now=self.now())
         out["reopened_recoverable_opportunities"] = reopen_recoverable_opportunities(
             self.conn, campaign_env=self.s.campaign_env, signing_key=self.s.signing_key,
             now=self.now(), max_contacts_per_opportunity=self.s.max_contacts_per_opportunity,
@@ -484,6 +553,7 @@ class Runner:
                 "new_approvals": after["approvals_created"] - before["approvals_created"],
                 "new_airtable": gained,
                 "acquisition_new_postings": sum(int(item.get("new_postings") or 0) for item in report.acquisition),
+                "acquisition_stops": [str(item.get("stop_reason") or "") for item in report.acquisition],
                 "stages": report.stages,
                 "delivery": report.delivery,
             })
