@@ -9,6 +9,7 @@ have been billed and therefore continues to count.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
@@ -17,6 +18,13 @@ from typing import Any, Callable, Dict, Optional
 import psycopg
 
 from ..db.connection import transaction
+
+
+#: Hard ceiling on Apollo credits reserved across EVERY budget in a rolling 30
+#: days. The daily budget id rotates, so a per-budget limit bounds one day and
+#: nothing more; this bounds the month. Unset means no rolling limit.
+APOLLO_ROLLING_CAP_ENV = "TGTC_APOLLO_ROLLING_30D_CREDITS"
+ROLLING_WINDOW = timedelta(days=30)
 
 
 class BudgetExceeded(RuntimeError):
@@ -223,6 +231,17 @@ class SpendBudget:
         for metric, proposed, ceiling in checks:
             if proposed > ceiling:
                 raise BudgetExceeded(self.budget_id, provider, metric, retry_after)
+        rolling_cap = str(os.environ.get(APOLLO_ROLLING_CAP_ENV, "") or "").strip()
+        if provider == "apollo" and estimated_credits and rolling_cap:
+            # A refused reservation cost nothing and is not counted.
+            cur.execute(
+                "SELECT COALESCE(sum(estimated_credits), 0) AS credits FROM spend_reservations "
+                "WHERE provider = 'apollo' AND status <> 'refused' AND created_at > %s",
+                (now - ROLLING_WINDOW,),
+            )
+            window_used = Decimal(cur.fetchone()["credits"])
+            if window_used + Decimal(str(estimated_credits)) > Decimal(rolling_cap):
+                raise BudgetExceeded(self.budget_id, provider, "rolling_30d_credits", now + timedelta(days=1))
         cur.execute(
             """
             INSERT INTO spend_reservations
