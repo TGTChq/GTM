@@ -402,7 +402,17 @@ def classify_posting(
 
     # 1) hard incompatibility: no model call, ever. Campaign scope NEVER
     # overrides an eligibility gate, so this runs before any routing.
-    if facts.excluded:
+    waived = _licence_waiver(facts, title) if exhaustive else None
+    if facts.excluded and waived:
+        # Audit 2026-09-21: of 95 licence exclusions, two were "Corporate Tax
+        # Manager" / "Family Office Tax Manager" -- a CPA is a professional
+        # credential for remotely executable finance work, not a physical or
+        # jurisdiction-bound duty. The insurance agents and clinical roles in
+        # the same bucket stay excluded: the waiver needs the licence to be the
+        # SOLE exclusion AND the title to route to Finance.
+        result.facts["exclusion_waived"] = waived
+        result.notes.append("exhaustive_scope:licence_is_a_finance_credential")
+    elif facts.excluded:
         result.excluded = True
         result.exclusion_reason = facts.exclusions[0].reason
         result.method = METHOD_DETERMINISTIC
@@ -507,12 +517,24 @@ def classify_posting(
         result.notes.append(f"insufficient_evidence:{response.unavailable_reason or 'inference_unavailable'}")
         return result
     result.method = METHOD_SEMANTIC
-    decided = _apply_semantic(result, response, desc, facts, hits)
+    decided = _apply_semantic(result, response, desc, facts, hits, exhaustive=exhaustive)
     if exhaustive and not decided.excluded and not decided.compatible_functions:
         # The model declined to place it. That is a tie, not a rejection.
         return _apply_route(decided, fallback_route(title))
     return decided
 
+
+
+def _licence_waiver(facts: JobFacts, title: Optional[str]) -> Optional[Dict[str, object]]:
+    """A licence that is only a professional credential for finance work."""
+    if not facts.exclusions or any(e.reason != "deliverability:professional_license" for e in facts.exclusions):
+        return None
+    route = route_by_title(title)
+    if route is None or route.function_key != "finance":
+        return None
+    first = facts.exclusions[0]
+    return {"reason": first.reason, "excerpt": str(getattr(first, "excerpt", "") or "")[:200],
+            "basis": "professional_credential_for_finance_work", "rule_version": EXHAUSTIVE_RULE_VERSION}
 
 def _apply_route(result: ClassificationResult, route: TitleRoute) -> ClassificationResult:
     """Stamp a deterministic routing decision onto a result.
@@ -534,7 +556,7 @@ def _apply_route(result: ClassificationResult, route: TitleRoute) -> Classificat
 
 
 def _apply_semantic(result: ClassificationResult, response: InferenceResponse, desc: str, facts: JobFacts,
-                    hits: Dict[str, List[Tuple[Signal, str]]]) -> ClassificationResult:
+                    hits: Dict[str, List[Tuple[Signal, str]]], exhaustive: bool = False) -> ClassificationResult:
     """Model output is data. Re-validate everything before it can influence a decision.
 
     ``hits`` is ``score_functions``' own evidence for this description (the
@@ -609,6 +631,13 @@ def _apply_semantic(result: ClassificationResult, response: InferenceResponse, d
     if "gtm_revenue" in functions:
         gtm_hits = hits.get("gtm_revenue", ())
         role_exclusion = quota_carrying_sales_exclusion(gtm_hits)
+        if role_exclusion is not None and exhaustive:
+            # The exhaustive scope routes quota-carrying sales to GTM Systems on
+            # BOTH paths. Audit 2026-09-21: 14 sales postings were still excluded
+            # here because the flag had only reached the deterministic path.
+            result.facts["role_exclusion_waived"] = role_exclusion
+            result.notes.append("exhaustive_scope:quota_carrying_sales_routed")
+            role_exclusion = None
         if role_exclusion is not None:
             functions = [f for f in functions if f != "gtm_revenue"]
             result.rule_version = RULE_VERSION
