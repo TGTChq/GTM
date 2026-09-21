@@ -34,3 +34,21 @@ def transaction(conn: psycopg.Connection) -> Iterator[psycopg.Connection]:
 
 def jsonb(value) -> Jsonb:
     return Jsonb(value)
+
+
+#: One production run at a time, whatever started it (the daily cron or a manual
+#: execution). A session-level advisory lock on its own connection: it is released
+#: when the process exits, however it exits, so it can never be left stale.
+RUN_LOCK_KEY = 0x74677463  # "tgtc"
+
+
+def acquire_run_lock(database_url: str, *, connector=None):
+    """Return a connection holding the production run lock, or None if another
+    run holds it. The caller keeps the connection open for the whole run."""
+    lock_conn = (connector or connect)(database_url)
+    lock_conn.autocommit = True
+    got = lock_conn.execute("SELECT pg_try_advisory_lock(%s) AS got", (RUN_LOCK_KEY,)).fetchone()["got"]
+    if not got:
+        lock_conn.close()
+        return None
+    return lock_conn

@@ -138,6 +138,20 @@ def cmd_run_target(args) -> int:
     _require_spend_acknowledgement(args.i_understand_spend)
     s = _settings()
     _require_persistent_budget(args, s)
+    from .db.connection import acquire_run_lock
+    run_lock = acquire_run_lock(args.database_url or s.database_url, connector=connect)
+    if run_lock is None:
+        # Another run (cron or manual) is active: this execution must not become a
+        # duplicate. Exit 0 so the platform does not report a crash.
+        print("run-target: another production run holds the run lock; this execution did nothing")
+        return 0
+    try:
+        return _run_target_locked(args, s)
+    finally:
+        run_lock.close()
+
+
+def _run_target_locked(args, s) -> int:
     conn = connect(args.database_url or s.database_url)
     apply_schema(conn)
     r = _runner(conn, s, allow_spend=args.i_understand_spend)
