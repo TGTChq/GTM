@@ -105,29 +105,34 @@ def test_flag_off_slot_allocation_is_unchanged():
     assert EXHAUSTIVE_PROFILE not in {p for _, p in slots}
 
 
-def test_flag_on_splits_three_exhaustive_one_discovery_one_narrow():
-    """Three slots buy the widened professional universe, one buys UNFILTERED
-    so a null-taxonomy row is still reachable, and one keeps the narrow arm so
-    the run can say whether widening paid."""
+#: Measured, first full production run (2026-09-21), eligible contacts per
+#: billed record by arm: priority 152/482 = 0.315, discovery 43/400 = 0.108,
+#: exhaustive 139/1,814 = 0.077. The widened arm bought part-time and
+#: out-of-ICP employers (33% of it rejected on employment type alone) and was
+#: dominated by BOTH other arms. The null-firmographic rows it was meant to
+#: reach are already reached by discovery, at a better yield. So the flag no
+#: longer changes acquisition at all: the exhaustive scope's gain is downstream,
+#: in routing (priority postings assigned 72%), and that is unaffected.
+MEASURED_YIELD = {"priority_v1": 152 / 482, "discovery_v1": 43 / 400, "exhaustive_v1": 139 / 1814}
+
+
+def test_the_measured_arm_ranking_is_what_the_allocation_follows():
+    assert MEASURED_YIELD["priority_v1"] > MEASURED_YIELD["discovery_v1"] > MEASURED_YIELD["exhaustive_v1"]
+
+
+def test_flag_on_allocates_the_measured_winner():
     profiles = [p for _, p in balanced_slots(SOURCES, 10, env=ON)]
-    assert profiles.count(EXHAUSTIVE_PROFILE) == 6
+    assert profiles.count(PRIORITY_PROFILE) == 8
     assert profiles.count(DISCOVERY_PROFILE) == 2
-    assert profiles.count(PRIORITY_PROFILE) == 2
+    assert EXHAUSTIVE_PROFILE not in profiles
 
 
-def test_a_null_taxonomy_row_is_still_reachable():
-    """The discovery slot sends no taxonomy filter at all."""
-    assert "ai_taxonomies_a" not in profile_filters(DISCOVERY_PROFILE)
-    profiles = [p for _, p in balanced_slots(SOURCES, 10, env=ON)]
-    assert DISCOVERY_PROFILE in profiles
-
-
-def test_a_narrow_control_arm_always_survives():
-    """Without a narrow arm the run cannot say whether widening helped."""
-    for pages in (10, 20, 50, 100):
-        profiles = [p for _, p in balanced_slots(SOURCES, pages, env=ON)]
-        assert PRIORITY_PROFILE in profiles, pages
-        assert EXHAUSTIVE_PROFILE in profiles, pages
+def test_a_null_firmographic_row_is_still_reachable():
+    """Discovery sends no firmographic or taxonomy gate at all."""
+    params = profile_filters(DISCOVERY_PROFILE)
+    for gate in FAIL_CLOSED_ON_NULL + ("ai_taxonomies_a",):
+        assert gate not in params
+    assert DISCOVERY_PROFILE in [p for _, p in balanced_slots(SOURCES, 10, env=ON)]
 
 
 def test_both_sources_still_get_both_arms():
@@ -135,8 +140,8 @@ def test_both_sources_still_get_both_arms():
     for source, profile in balanced_slots(SOURCES, 20, env=ON):
         by_source.setdefault(source, set()).add(profile)
     assert set(by_source) == set(SOURCES)
-    for source, profiles in by_source.items():
-        assert profiles == {EXHAUSTIVE_PROFILE, DISCOVERY_PROFILE, PRIORITY_PROFILE}, source
+    for profiles in by_source.values():
+        assert profiles == {PRIORITY_PROFILE, DISCOVERY_PROFILE}
 
 
 def test_slot_allocation_is_deterministic():

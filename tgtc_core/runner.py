@@ -296,8 +296,7 @@ class Runner:
         slots = list(balanced_slots(selected, self.s.fantastic_cycle_page_slots, env=os.environ))
         # A slot whose profile has no open partition is skipped outright, so the
         # profiles planned here must match the ones the slots ask for.
-        planned_profiles = ((EXHAUSTIVE_PROFILE, DISCOVERY_PROFILE, PRIORITY_PROFILE) if exhaustive_enabled(os.environ)
-                            else (PRIORITY_PROFILE, DISCOVERY_PROFILE))
+        planned_profiles = (PRIORITY_PROFILE, DISCOVERY_PROFILE)
         svc.sources = selected  # don't exclude ATS duplicates when only JB is scheduled
         for source in selected:
             svc.recover_partitions(source)

@@ -117,19 +117,12 @@ def balanced_slots(sources: tuple[str, ...], pages: int, env=None):
     """
     if not sources or len(set(sources)) != len(sources) or not 5 * len(sources) <= pages <= 100:
         raise ValueError("balanced_acquisition_requires_5_slots_per_source_up_to_100")
-    from .exhaustive_routing import exhaustive_enabled
-    if exhaustive_enabled(env):
-        # Four slots in five buy the widened universe; the fifth keeps the
-        # narrow arm alive so the run itself measures whether widening paid --
-        # qualified units per record, arm against arm, with no separate probe.
-        # Three slots buy the widened professional universe, one buys
-        # UNFILTERED so a null-taxonomy row stays reachable, and one keeps the
-        # narrow arm so the run can say whether widening paid.
-        widened = {0: EXHAUSTIVE_PROFILE, 1: EXHAUSTIVE_PROFILE, 2: PRIORITY_PROFILE,
-                   3: DISCOVERY_PROFILE, 4: EXHAUSTIVE_PROFILE}
-        for slot in range(pages):
-            yield sources[slot % len(sources)], widened[slot % 5]
-        return
+    # Measured, first full production run (2026-09-21), eligible contacts per
+    # billed record: priority 0.315, discovery 0.108, exhaustive 0.077. The
+    # widened arm was dominated by both, so the exhaustive flag no longer
+    # changes acquisition. EXHAUSTIVE_PROFILE stays defined for a future
+    # measured arm; `env` is accepted and deliberately unused.
+    del env
     for slot in range(pages):
         yield sources[slot % len(sources)], (DISCOVERY_PROFILE if slot % 5 == 2 else PRIORITY_PROFILE)
 
