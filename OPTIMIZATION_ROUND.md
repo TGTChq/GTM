@@ -140,3 +140,83 @@ psql -v run_id="'<run_id from run_log target/end>'" -f scripts_ops/phase1_waterf
 # 2. bounded B canary on that run's inventory, then compare contacts per record
 # 3. promote the exact tested commit only if B beats A; tag both
 ```
+
+---
+
+# Outcome, 2026-09-21 (supersedes "Promotion decision" and the Instantly/package sections above)
+
+**The +162 above was circular** (a relaxed acceptance could corroborate another).
+The corrected rule seeds only from a strict-rule contact, a provider-confirmed
+organization domain, or at least two independently verified current employees
+whose Apollo org is the employer; same label under another suffix is never enough.
+
+| same 976 paid people | A `6c79aa1` | B (non-circular) |
+|---|---|---|
+| approvals | 724 | 791 (+67) |
+| US outreach-eligible | 639 | 702 (+63) |
+| approvals per credit | 0.742 | 0.810 (+9.2%) |
+
+Live B canary (zero Fantastic, zero paid Apollo, targeted release only): 31
+approvals, all `independent_employees`; 28 eligible; 17 created in Instantly
+exactly once (Challenger only, 0 Control); 11 deferred by the OPERATIONS ceiling;
+3 blocked (unknown jurisdiction); 0 bad basis, 0 employer mismatch, 0
+free/SaaS/ATS, 0 non-US eligible, 0 duplicates, 0 new provider reservations.
+Web check of 26 employer/mail-domain pairs: 21 confirmed, 5 unreachable or
+blocked (all same-employer subsidiaries or legacy domains), 0 wrong employer.
+
+**Promoted:** `c260f3a` (B), then `faad112` (capacity). Deployment `ba69f1f4`.
+Tags: `release-capacity-faad112`, `release-mail-domain-c260f3a`,
+`pre-mail-domain-6c79aa1`.
+
+## Instantly: the real per-campaign ceiling is `daily_max_leads`
+
+All nine Challenger campaigns: `daily_max_leads=100`, `prioritize_new_leads=true`,
+4 steps (delays 3,4,5,1), `stop_on_reply=true`, `daily_limit=550`. So a campaign
+starts at most 100 new leads a day however many are enrolled, and steady state is
+~4 emails per lead. Enrolled is not contacted: on 09-21 OPERATIONS took 338
+eligible contacts and had contacted 191 of 329 enrolled.
+
+Senders: 252, all active, warmup on, score 100, 20/day each (5,040/day). Eight
+pools, each shared by one function's Challenger and Control campaigns (33 each;
+PEOPLE_HR 21; AI_TECHNICAL and ECOMMERCE share one pool).
+
+Changed (add-only, every sender keeps 20/day, copy/steps/schedule/identity
+fingerprint-verified unchanged):
+
+| campaign | senders | daily_limit | daily_max_leads | pipeline ceiling (new/day) |
+|---|---|---|---|---|
+| OPERATIONS | 33 -> **80** (+20 PRODUCT, +17 CX, +5 MARKETING, +5 GTM, shared) | 550 -> **1,600** | 100 -> **350** | 150 -> **350** |
+| PRODUCT | 33 (13 exclusive) | 550 | 100 | 150 -> 60 |
+| CUSTOMER_EXPERIENCE | 33 (16 exclusive) | 550 | 100 | 150 -> 80 |
+| ECOMMERCE | shares AI's pool | 550 | 100 | 150 -> 30 |
+| the other five | unchanged | 550 | 100 | 150 -> 100 |
+
+Pipeline ceilings now equal what each campaign can actually contact, so an
+excess waits in our outbox (`pending`, visible) instead of an invisible Instantly
+backlog. `TGTC_DELIVERY_MAX_TOTAL` stays 1,100.
+
+## Apollo and Fantastic
+
+* Daily grant 1,000 -> **1,450 credits**, requests 3,000 -> 4,800 (09-21 hit the
+  3,000-request ceiling at 986 credits). Hard rolling ceiling in code:
+  `TGTC_APOLLO_ROLLING_30D_CREDITS=50000` across every daily budget.
+* **No purchase.** No public add-on price (only inside the account), the signed-in
+  browser was unreachable, and the API reports rate limits only, never a balance.
+  Exhaustion is a free `refused` and work waits; it cannot become overage.
+* Fantastic unchanged: 3,300 records/day, within the 100k/month plan. The +15,000
+  authorization is unused: no measured marginal yield beyond 3,300/day yet.
+
+## What 1,000/day still needs (derived, not observed)
+
+At 1,450 credits, ~1,000 eligible/day is expected, but ~800-850 contacted/day:
+OPERATIONS demand ~500/day against 350, FINANCE ~127 and AI_TECHNICAL ~115
+against 100. Closing it: OPERATIONS ~2,000 emails/day (~103 shared senders,
+above the authorized 1,400-1,600 band) and FINANCE/AI `daily_max_leads` ~135/130
+inside their existing pools. No new inboxes: 5,040/day of capacity vs ~4,000
+needed.
+
+Rollback, in order: `scripts_ops/instantly_reallocate_operations.py - --rollback`;
+`scripts_ops/set_core_schedule_rollback_1000.graphql`; unset
+`TGTC_DELIVERY_MAX_BY_CAMPAIGN`, set `TGTC_DELIVERY_MAX_PER_CAMPAIGN=150`; push
+`release-mail-domain-c260f3a` (or `pre-mail-domain-6c79aa1` and
+`TGTC_CORROBORATED_MAIL_DOMAIN=0`) to `feat/rebuild-core`; redeploy.
