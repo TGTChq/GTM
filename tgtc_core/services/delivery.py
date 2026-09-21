@@ -89,6 +89,9 @@ class CanaryCaps:
     """
     per_campaign: Optional[int] = None
     total: Optional[int] = None
+    #: Per-campaign overrides (campaign_id -> limit), sized to each campaign's own
+    #: sender capacity. A campaign not listed uses ``per_campaign``.
+    by_campaign: Dict[str, int] = field(default_factory=dict)
     _by_campaign: Dict[str, int] = field(default_factory=dict)
     _total: int = 0
 
@@ -106,14 +109,25 @@ class CanaryCaps:
         # Production names first; the canary names remain valid on their own.
         per_campaign = _limit("TGTC_DELIVERY_MAX_PER_CAMPAIGN")
         total = _limit("TGTC_DELIVERY_MAX_TOTAL")
+        overrides: Dict[str, int] = {}
+        raw = str(env.get("TGTC_DELIVERY_MAX_BY_CAMPAIGN", "") or "").strip()
+        if raw:
+            try:
+                import json as _json
+                parsed = _json.loads(raw)
+                if isinstance(parsed, dict):
+                    overrides = {str(k): int(v) for k, v in parsed.items()}
+            except (ValueError, TypeError):
+                overrides = {}  # malformed: ignored, never fatal; the defaults still bind
         return cls(
             per_campaign=per_campaign if per_campaign is not None else _limit("TGTC_CANARY_MAX_PER_CAMPAIGN"),
             total=total if total is not None else _limit("TGTC_CANARY_MAX_TOTAL"),
+            by_campaign=overrides,
         )
 
     @property
     def enabled(self) -> bool:
-        return self.per_campaign is not None or self.total is not None
+        return self.per_campaign is not None or self.total is not None or bool(self.by_campaign)
 
     def exceeded(self, campaign_id: str) -> Optional[str]:
         """The named reason this write must not happen, or None to proceed."""
@@ -121,7 +135,8 @@ class CanaryCaps:
             return None
         if self.total is not None and self._total >= self.total:
             return "canary_cap_total"
-        if self.per_campaign is not None and self._by_campaign.get(campaign_id, 0) >= self.per_campaign:
+        limit = self.by_campaign.get(campaign_id, self.per_campaign)
+        if limit is not None and self._by_campaign.get(campaign_id, 0) >= limit:
             return "canary_cap_campaign"
         return None
 
@@ -138,6 +153,7 @@ class CanaryCaps:
 
     def summary(self) -> Dict[str, Any]:
         return {"enabled": self.enabled, "per_campaign": self.per_campaign, "total_limit": self.total,
+                "by_campaign_limits": dict(self.by_campaign),
                 "written_total": self._total, "written_by_campaign": dict(self._by_campaign)}
 
 

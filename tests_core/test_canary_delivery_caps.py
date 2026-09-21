@@ -98,3 +98,42 @@ def test_production_names_win_over_canary_names():
 def test_canary_names_still_work_alone():
     caps = CanaryCaps.from_env({"TGTC_CANARY_MAX_PER_CAMPAIGN": "10", "TGTC_CANARY_MAX_TOTAL": "90"})
     assert (caps.per_campaign, caps.total) == (10, 90)
+
+
+# --- per-campaign ceilings ------------------------------------------------------
+# One insertion ceiling for all nine campaigns cannot match nine different sending
+# capacities. TGTC_DELIVERY_MAX_BY_CAMPAIGN (JSON campaign_id -> limit) overrides the
+# default for the campaigns it names, so each campaign accepts only what its own
+# sender accounts can carry through the whole sequence.
+
+
+def test_a_per_campaign_override_applies_only_to_that_campaign():
+    caps = CanaryCaps.from_env({"TGTC_DELIVERY_MAX_PER_CAMPAIGN": "150", "TGTC_DELIVERY_MAX_TOTAL": "2000",
+                                "TGTC_DELIVERY_MAX_BY_CAMPAIGN": '{"%s": 3}' % A})
+    for _ in range(3):
+        caps.record(A)
+    assert caps.exceeded(A) == "canary_cap_campaign"
+    for _ in range(3):
+        caps.record(B)
+    assert caps.exceeded(B) is None
+
+
+def test_an_override_can_raise_a_campaign_above_the_default():
+    caps = CanaryCaps.from_env({"TGTC_DELIVERY_MAX_PER_CAMPAIGN": "2", "TGTC_DELIVERY_MAX_TOTAL": "2000",
+                                "TGTC_DELIVERY_MAX_BY_CAMPAIGN": '{"%s": 5}' % A})
+    for _ in range(4):
+        caps.record(A)
+    assert caps.exceeded(A) is None
+
+
+def test_the_total_still_binds_over_any_override():
+    caps = CanaryCaps.from_env({"TGTC_DELIVERY_MAX_TOTAL": "2", "TGTC_DELIVERY_MAX_BY_CAMPAIGN": '{"%s": 50}' % A})
+    caps.record(A)
+    caps.record(A)
+    assert caps.exceeded(A) == "canary_cap_total"
+
+
+def test_malformed_override_json_is_ignored_not_fatal():
+    caps = CanaryCaps.from_env({"TGTC_DELIVERY_MAX_PER_CAMPAIGN": "150", "TGTC_DELIVERY_MAX_BY_CAMPAIGN": "{not json"})
+    assert caps.per_campaign == 150
+    assert caps.exceeded(A) is None
