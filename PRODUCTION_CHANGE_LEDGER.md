@@ -153,3 +153,34 @@ the same settings were applied directly on the instance:
 |---|---|---|
 | `b4c920b0-4f8e-4f3b-91e7-65a9dfc40ef4` | release `15eb33e`, config file expected | config file NOT applied; ran the old command on fixed id `prod-core` (900 Fantastic credits), superseded |
 | `598f3e86-8514-49b6-a337-9bfd57f75dcd` | exact daily configuration | live: `schema_version=11` first, budget `prod-core-20260921`, 3,300 Fantastic / 1,000 Apollo |
+
+## Full production run, drain, promotion and schedule (2026-09-21)
+
+| # | action | evidence / result |
+|---|---|---|
+| 41 | Full run, exact daily configuration, deployment `598f3e86` | run `20260921T033253.666863Z-6c015841`, 80 min, **SUCCESS** (exit 0), `result=target_not_reached`, `stop_reason=spend_budget_exhausted`, `technical_failures=[]`; 356 approvals, 320 outreach-eligible |
+| 42 | Exit semantics verified live | first run below target to end SUCCESS instead of CRASHED |
+| 43 | Compliance recheck, live | `unknown_jurisdiction` 100 -> 35: 58 recovered to pending (US on the person's own record), 6 reclassified UK, 1 DE |
+| 44 | **Defect: ceiling was per round** | OPERATIONS 242 against 150; fixed: seeded from today's Instantly `created` receipts |
+| 45 | **Defect: 977 bought opportunities stranded** | waiting on `spend_budget_exhausted:apollo:*` until the CANARY budget's expiry while the day's budget had 515 Apollo credits; fixed: `release_budget_waits()` |
+| 46 | **Defect: run stopped on the acquisition budget** | fixed: acquisition off, keep processing until the backlog stops moving |
+| 47 | Drain run, deployment `4d7b81f3`, no new Fantastic spend | run `20260921T050148.931160Z-69eb70b2`, SUCCESS, 368 approvals, 319 eligible, stopped on the Apollo budget; 155 OPERATIONS writes **deferred by the daily ceiling** -- the fix working |
+| 48 | **Arm measurement** (eligible / billed record) | priority 152/482 = **0.315**; discovery 43/400 = 0.108; exhaustive 139/1,814 = **0.077** |
+| 49 | Acquisition allocation reversed to the measured winner | priority 4 : discovery 1; EXHAUSTIVE unallocated; `6c79aa1` |
+| 50 | Smoke on `6c79aa1`, deployment `9e9b4521` | SUCCESS, exit 0, no technical failure |
+| 51 | **Cron enabled** via `serviceInstanceUpdate` | Railway reports `cronSchedule 0 3 * * *`, **`nextCronRunAt 2026-09-22T03:00:00.000Z`**, `restartPolicyType NEVER` |
+| 52 | Tags pushed | `pre-exhaustive-nine-be3af32`, `release-exhaustive-nine-6c79aa1` |
+| 53 | Promoted the EXACT tested commit | `feat/rebuild-core` `be3af32..6c79aa1` (fast-forward); GitHub deployment `9bc1ba57` SUCCESS, commit `6c79aa1`; cron unchanged after it |
+| 54 | Instantly writes today (UTC 2026-09-21) | **610 `created`**, 2 `existing`, all nine Challenger campaigns; 155 deferred by the ceiling; 0 Control; 0 duplicate emails |
+
+### Provider consumption today
+
+| provider | budget | requests | credits / tokens |
+|---|---|---|---|
+| Fantastic | `prod-core` (superseded run) | 9 | 900 records |
+| Fantastic | `prod-core-20260921` | 33 | 3,300 records (3 pages uncertain) |
+| Apollo | `prod-core-20260921` | 2,985 served, 14 failed, 1 refused | 986 credits served |
+| Anthropic | `prod-core-20260921` | 853 | 1.34M input / 249k output tokens |
+
+Fantastic records remaining before today's runs: 51,206. After: about 47,000,
+with the plan resetting 2026-10-01.

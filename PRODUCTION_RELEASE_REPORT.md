@@ -237,3 +237,85 @@ validity before anything is sent.
 
 The 86 rows that reference retired Control campaigns remain blocked
 (`compliance:outreach_eligibility_unknown`). None was remapped.
+
+## Full production cycle — observed funnel (run `20260921T033253.666863Z-6c015841`)
+
+Exact daily configuration, 80 minutes, deployment `598f3e86`, exit 0
+(`result=target_not_reached`, `stop_reason=spend_budget_exhausted`,
+`technical_failures=[]`).
+
+| stage | observed |
+|---|---|
+| Fantastic requests | 33 (30 served, 3 uncertain) |
+| records billed | 3,300 |
+| new unique postings | 2,308 (1,071 employers) |
+| classified in window (incl. backlog) | 2,896: 1,474 assigned, 1,422 excluded |
+| top hard exclusions | part_time 558, physical_title 345, contract 128, professional_license 95, physical_facility 49, employment:other 48, security_clearance 42, internship 32, temporary 29, field_work 20 |
+| assigned by function | operations 824, engineering 238, finance 128, gtm_revenue 95, marketing 80, customer_support 53, people_hr 49, customer_success 40, product 25, ecommerce 11 |
+| qualify-stage closures | employer_too_large 314, employer_too_small 169, person_enrichment not permitted DE 7 / AE 4 / SA 1, excluded industry 4, physical_title 2 |
+| approvals | 356 = 356 people = 356 emails; 208 employers; 235 company x campaign units |
+| verified work email | 356 |
+| outreach-eligible | 320 |
+| Instantly, this run's approvals | 312 delivered, 27 unknown jurisdiction, 8 UK not verified corporate, 8 already in another campaign, 1 DE |
+| Anthropic | 853 requests, 1.34M input / 249k output tokens |
+| Apollo (this run) | 1,199 served requests, 485 credits |
+
+Every work item ended in a terminal reason; the only non-terminal states are
+`waiting` (a dependency with a scheduled retry) and `retry`.
+
+## Drain run and the daily ceiling
+
+After the three fixes, run `20260921T050148.931160Z-69eb70b2` processed only
+already-bought inventory (no new Fantastic spend): 368 approvals, 319 eligible,
+160 Instantly writes, stopped on the Apollo budget. OPERATIONS had 242 writes
+already that day, so its 155 new contacts were **deferred by the per-day
+ceiling** rather than written. This drain is a one-off recovery of stranded
+inventory and is NOT part of the sustainable rate below.
+
+## Instantly writes, UTC 2026-09-21
+
+**610 new enrolments acknowledged** (`created`), 2 reconciled, across all nine
+Challenger campaigns: operations 242, finance 109, ai_technical 76,
+gtm_systems 56, marketing_creative 48, people_hr 28, customer_experience 27,
+product 19, ecommerce 5. Zero Control campaigns. Zero duplicate emails. 155
+deferred to the next day by the ceiling.
+
+## The arm measurement, and why acquisition went back to priority
+
+| arm | billed | assigned | employment-excluded | eligible | eligible / record |
+|---|---|---|---|---|---|
+| priority | 482 | 72% | 3% | 152 | **0.315** |
+| discovery | 400 | 49% | 24% | 43 | 0.108 |
+| exhaustive | 1,814 | 48% | 33% | 139 | **0.077** |
+
+My widened arm was dominated by both others. Slots are now priority 4 :
+discovery 1 (`6c79aa1`). The exhaustive scope's gain is in routing, not in
+buying, and is unaffected.
+
+## Does the evidence support 1,000 sustainable contacts a day? **No.**
+
+The ~904/day below is DERIVED from one day's measured arm yields, weighted by
+the new slot mix. It is not an observed day. The first observed day under the
+new allocation is the 2026-09-22 03:00 UTC run.
+
+| constraint | measured basis | supports per day |
+|---|---|---|
+| Fantastic, 3,300 records/day (100k/month plan) | 0.8 x 0.315 + 0.2 x 0.108 = 0.274 eligible / record | ~904 eligible |
+| **Apollo, 1,000 credits/day grant** | 986 credits for 724 approvals; 639 eligible -> 1.54 credits / eligible | **~650 eligible** |
+| Instantly, OPERATIONS campaign | 550 emails/day / 4 steps -> ceiling 150; OPERATIONS took 40% of today's writes | ~690 delivered |
+
+**Best estimate for the deployed configuration: about 650 outreach-eligible
+contacts a day, bound by Apollo credits, with the OPERATIONS sending ceiling
+close behind.** Not observed; derived; one day of arm data.
+
+### What 1,000 a day would take, none of it bought
+
+| provider | needed | now | gap | cost |
+|---|---|---|---|---|
+| Apollo | ~1,540 credits/day | 1,000/day grant; **balance unknown** — Apollo exposes none without spending | +540 credits/day (~16,200/month) | **unknown** — no USD per Apollo credit exists in the evidence base |
+| Instantly | OPERATIONS ~400 new/day x 4 steps = ~1,600 emails/day | daily_limit 550, 33 senders | raise that campaign's daily_limit (a campaign setting, not changed) and possibly senders | no purchase if the existing 252 accounts have headroom |
+| Fantastic | 1,000 / 0.274 = ~3,650 records/day | 3,333/day on the plan | ~+320/day, ~9,700/month over 100k | ~$24/month at the $0.0025/record rate used before — plan-tier pricing unconfirmed |
+
+Raising the Apollo daily grant is a one-line change, but only safe once the
+Apollo balance is known: if it runs out, every daily run stops producing
+contacts until a top-up (Apollo refuses; it never bills overage).
