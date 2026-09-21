@@ -5,7 +5,7 @@
     "dockerfilePath": "Dockerfile.core"
   },
   "deploy": {
-    "startCommand": "sh -ec 'BID=\"${TGTC_SPEND_BUDGET_ID}-$(date -u +%Y%m%d)\"; python -u -m tgtc_core migrate && python -u -m tgtc_core budget --budget-id \"$BID\" --expires-hours 24 --fantastic-requests 60 --fantastic-credits 3300 --apollo-requests 3000 --apollo-credits 1000 --anthropic-requests 1000 --anthropic-input-tokens 35000000 --anthropic-output-tokens 1024000 && python -u -m tgtc_core run-target --budget-id \"$BID\" --target 1000 --max-rounds 100 --max-items 10000 --i-understand-spend'",
+    "startCommand": "sh -ec 'BID=${TGTC_SPEND_BUDGET_ID}-$(date -u +%Y%m%d); python -u -m tgtc_core migrate && python -u -m tgtc_core budget --budget-id $BID --expires-hours 24 --fantastic-requests 60 --fantastic-credits 3300 --apollo-requests 3000 --apollo-credits 1000 --anthropic-requests 1000 --anthropic-input-tokens 35000000 --anthropic-output-tokens 1024000 && python -u -m tgtc_core run-target --budget-id $BID --target 1000 --max-rounds 100 --max-items 10000 --i-understand-spend'",
     "cronSchedule": "0 3 * * *",
     "restartPolicyType": "NEVER",
     "numReplicas": 1

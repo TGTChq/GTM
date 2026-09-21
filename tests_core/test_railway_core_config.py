@@ -33,7 +33,7 @@ def test_the_budget_id_changes_every_day():
 
 
 def test_budget_and_run_share_the_same_daily_id():
-    ids = re.findall(r'--budget-id \\?"(\$[A-Z]+)\\?"', CMD)
+    ids = re.findall(r"--budget-id (\$[A-Z]+)", CMD)
     assert len(ids) == 2 and ids[0] == ids[1] == "$BID"
 
 
