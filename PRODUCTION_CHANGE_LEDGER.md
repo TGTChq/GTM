@@ -102,3 +102,53 @@ Variable NAMES only, never values. No PII.
 
 The instruction to "not assume these all have the same cause" was correct: they
 had four different fixes, in three different layers.
+
+## Production completion (2026-09-21)
+
+### Code
+
+| commit | change |
+|---|---|
+| `8b0c1a9`..`15eb33e` | exit semantics; contact country from the person's own stored evidence; compliance recheck; production ceiling names; daily budget id |
+| `e1e5aa3` | mutation payloads; Config as Code rejected by Railway |
+
+`tests_core` 1,667 -> **1,721 passed, 0 failed**.
+
+### Variables on `GTM Core Canary 1000` (names and values; none are secrets)
+
+| variable | old | new | why |
+|---|---|---|---|
+| `TGTC_DELIVERY_MAX_PER_CAMPAIGN` | (unset; canary 10) | **150** | Instantly: 550 emails/day per Challenger campaign / 4 sequence steps = ~137 new leads/day steady state |
+| `TGTC_DELIVERY_MAX_TOTAL` | (unset; canary 90) | **1100** | carries the 1,000/day objective, bounds a runaway |
+| `TGTC_SPEND_BUDGET_ID` | `canary-exhaustive-nine-20260920` | `prod-core` | now a PREFIX; the start command appends `-YYYYMMDD` |
+| `RAILWAY_CONFIG_FILE` | (unset) | `railway.core.json` | **has no effect** -- Railway does not honour it (`fileServiceManifest: None`); left in place, harmless |
+| `TGTC_CANARY_MAX_PER_CAMPAIGN` / `_TOTAL` | 10 / 90 | unchanged | superseded: the production names win in code |
+
+### Service instance (via `serviceInstanceUpdate`)
+
+`railwayConfigFile` was refused by Railway itself: "Config as Code
+(railway.json / railway.toml) is deprecated. Use Infrastructure as Code". So
+the same settings were applied directly on the instance:
+
+| field | old | new |
+|---|---|---|
+| `startCommand` | `budget --budget-id $TGTC_SPEND_BUDGET_ID ... --fantastic-credits 1000 --apollo-credits 250 && run-target ...` | `migrate && budget --budget-id ${TGTC_SPEND_BUDGET_ID}-$(date -u +%Y%m%d) ... --fantastic-credits 3300 --apollo-credits 1000 && run-target --budget-id <same> ...` |
+| `restartPolicyType` | NEVER | NEVER |
+| `cronSchedule` | None | set only after the full run passes |
+
+### Provider allowances read live
+
+| provider | measure | value |
+|---|---|---|
+| Fantastic | records limit / remaining | 100,000 / **51,206** (billing 2026-10-01) |
+| Fantastic | requests limit / remaining | 50,000 / 47,305 |
+| Fantastic | 24h active inventory | 101,660 |
+| Instantly | per Challenger campaign | daily_limit 550, 4 steps, 21-33 senders, 252 distinct accounts |
+| Apollo | balance | not exposed without spending; exhaustion is a free refusal, never an overage |
+
+### Deployments
+
+| id | purpose | result |
+|---|---|---|
+| `b4c920b0-4f8e-4f3b-91e7-65a9dfc40ef4` | release `15eb33e`, config file expected | config file NOT applied; ran the old command on fixed id `prod-core` (900 Fantastic credits), superseded |
+| `598f3e86-8514-49b6-a337-9bfd57f75dcd` | exact daily configuration | live: `schema_version=11` first, budget `prod-core-20260921`, 3,300 Fantastic / 1,000 Apollo |
