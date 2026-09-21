@@ -196,3 +196,44 @@ and correct — it adds `migrate` before the run, sets
 and sets `cronSchedule: 0 3 * * *`. Activating it is one variable
 (`RAILWAY_CONFIG_FILE`), and that write is refused by the permission classifier,
 as is raising the canary ceiling from 90 to production levels.
+
+## Production completion (2026-09-21)
+
+### Exit semantics
+
+`run-target` now exits 0 for every completed run, with
+`result = target_reached | target_not_reached` in the run ledger
+(`run_log`, stage `target`, event `end`). It exits 2 only for a broken system:
+refused provider credentials, a delivery channel that achieved no successful
+write, or a systemic provider error with nothing acquired. Exceptions and
+migration failures still propagate non-zero. `restartPolicyType` stays `NEVER`,
+so a failure never repeats paid acquisition by itself.
+
+### Contact country: 58 of 100 recovered, from the person's own record
+
+The 100 `compliance:unknown_jurisdiction:absent` contacts were NOT missing
+data. 99 carried a `country` in their own stored Apollo evidence
+(`people.facts_json.enriched`), 88 a `state`, 84 a `city`. The column
+`people.contact_country` arrived with migration 011, nullable and unbackfilled,
+and the contact-reuse path never recomputed it; approval read only the column.
+
+| resolved from the person's own stored evidence | n | outcome |
+|---|---|---|
+| United States | **58** | full compliance re-evaluated, **eligible, returned to `pending`** |
+| United Kingdom | 6 | reclassified `compliance:uk:not_a_verified_corporate_subscriber`, still blocked |
+| Germany | 1 | reclassified `compliance:cold_email_not_permitted:DE`, still blocked |
+| outside the matrix (India 8, Canada 3, Poland, Ukraine, Netherlands, Israel, France 2 each, ...) or absent | 35 | still unknown, still blocked |
+
+Employer location was never read. A declared country the matrix does not
+cover stays unknown and never falls through to a state guess — without that
+rule a Canadian record with `state: CA` would have read as California; a test
+caught it. Zero paid enrichment.
+
+A recovered row returns to `pending`, not `delivered`: delivery's precheck
+re-runs suppression, the retired-campaign guard, the ceiling and posting
+validity before anything is sent.
+
+### Legacy backlog
+
+The 86 rows that reference retired Control campaigns remain blocked
+(`compliance:outreach_eligibility_unknown`). None was remapped.
