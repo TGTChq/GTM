@@ -14,7 +14,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 from .facts import RULE_VERSION
 from .identity import (
-    company_names_compatible, email_domain, email_on_domains, is_generic_mailbox,
+    FREE_MAIL_DOMAINS, company_names_compatible, email_domain, email_on_domains, is_generic_mailbox,
     safe_employer_domain,
 )
 from .title_norm import is_department_label, not_an_employee_in_role, title_matches as _title_matches
@@ -159,12 +159,86 @@ def corroborated_alternate_domains(*, employer_name: str, employer_domains: Set[
     return out - set(employer_domains)
 
 
+#: A company's mail domain that is not its website domain, accepted only on the
+#: deterministic evidence in `corroborated_mail_domain`. Its own label, so every
+#: lead it admits stays queryable and the UK gate (which demands
+#: EXACT_EMPLOYER_DOMAIN) is unaffected.
+MAIL_DOMAIN_ALIGNMENT = "CORROBORATED_MAIL_DOMAIN"
+MAIL_DOMAIN_FLAG_ENV = "TGTC_CORROBORATED_MAIL_DOMAIN"
+
+#: Hosts whose subdomains are service queues or tenants, never a person's inbox.
+_HOSTED_MAIL_HOSTS = (
+    "zendesk.com", "freshdesk.com", "myshopify.com", "hubspot.com", "hs-inbox.com", "salesforce.com",
+    "force.com", "atlassian.net", "onmicrosoft.com", "google.com", "googlemail.com", "intercom-mail.com",
+    "helpscoutapp.com", "gorgias.com", "kustomerapp.com", "sendgrid.net", "mailgun.org",
+)
+
+
+def _label(domain: str) -> str:
+    return str(domain or "").split(".", 1)[0]
+
+
+def _alnum(text: Any) -> str:
+    return re.sub(r"[^a-z0-9]", "", str(text or "").lower())
+
+
+def _former_employer_domain(domain: str, person: Dict[str, Any]) -> bool:
+    """Does the domain's label name a past position at a DIFFERENT organisation?
+
+    A promotion leaves a past position at the same Apollo organisation; that is
+    not a former employer and does not disqualify the domain.
+    """
+    label = _label(domain)
+    if len(label) < 3:
+        return False
+    history = person.get("employment_history") or []
+    if not isinstance(history, list):
+        return False
+    current_ids = {str(h.get("organization_id") or "") for h in history
+                   if isinstance(h, dict) and h.get("current") is True}
+    for h in history:
+        if not isinstance(h, dict) or h.get("current") is True:
+            continue
+        if str(h.get("organization_id") or "") in current_ids:
+            continue
+        if label in _alnum(h.get("organization_name")):
+            return True
+    return False
+
+
+def corroborated_mail_domain(*, email: Optional[str], person: Dict[str, Any], employer_domains: Set[str],
+                             sibling_domains: Iterable[str] = ()) -> Tuple[bool, str]:
+    """Whether a verified address on a NON-employer domain is the employer's mail domain.
+
+    Returns ``(accepted, reason)``. Measured need: 222 of 976 paid Apollo matches on
+    2026-09-21 were verified, currently employed people rejected only for the
+    domain (Northern Trust mails from ntrs.com, GALE from galepartners.com). All
+    of the following must hold; see tests_core/test_corroborated_mail_domain.py.
+    """
+    d = email_domain(email)
+    employer = {str(x).lower() for x in employer_domains if x}
+    if not d or d in employer:
+        return False, "not_alternate"
+    if d in FREE_MAIL_DOMAINS or any(d == h or d.endswith("." + h) for h in _HOSTED_MAIL_HOSTS):
+        return False, "hosted_or_free"
+    if _org_domain(person_organization(person)) not in employer:
+        return False, "apollo_org_not_employer"
+    if _former_employer_domain(d, person):
+        return False, "former_employer_domain"
+    if d in {str(s).lower() for s in sibling_domains}:
+        return True, "cross_person"
+    if len(_label(d)) >= 3 and any(_label(d) == _label(e) for e in employer):
+        return True, "same_label"
+    return False, "uncorroborated"
+
+
 def evaluate_email(
     *,
     email: Optional[str],
     email_status: Optional[str],
     employer_domains: Set[str],
     corroborated_domains: Set[str] = frozenset(),
+    mail_domains: Set[str] = frozenset(),
 ) -> GateResult:
     addr = str(email or "").strip().lower()
     if not addr:
@@ -176,6 +250,8 @@ def evaluate_email(
         alignment = "EXACT_EMPLOYER_DOMAIN"
     elif email_on_domains(addr, corroborated_domains):
         alignment = "CORROBORATED_ALTERNATE_EMPLOYER_DOMAIN"
+    elif email_on_domains(addr, mail_domains):
+        alignment = MAIL_DOMAIN_ALIGNMENT
     else:
         return GateResult(False, "email:domain_not_employer", {"email_domain": email_domain(addr)})
     status = str(email_status or "").strip().lower()

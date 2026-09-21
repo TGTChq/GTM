@@ -44,10 +44,10 @@ from ..domain.approval import (
 from ..domain.jurisdiction import observe_contact_country
 from ..domain.facts import RULE_VERSION, resolve_company_size, size_corroborated, size_reject_reason
 from ..domain.gates import (
-    corroborated_alternate_domains, evaluate_contact, evaluate_email, person_organization, pre_enrichment_check,
-    title_matches,
+    MAIL_DOMAIN_FLAG_ENV, corroborated_alternate_domains, corroborated_mail_domain, evaluate_contact, evaluate_email,
+    person_organization, pre_enrichment_check, title_matches,
 )
-from ..domain.identity import company_names_compatible, domain_name_consistent, person_ref, safe_employer_domain
+from ..domain.identity import company_names_compatible, domain_name_consistent, email_domain, person_ref, safe_employer_domain
 from ..policy.campaigns import (
     DIRECT_BUYER_TITLES, TALENT_PEOPLE_BUYER_TITLES, campaign_route_configured, buyer_titles,
     resolve_campaign_id,
@@ -1072,9 +1072,33 @@ class OpportunityService:
             employer_name=emp["canonical_name"], employer_domains=employer_domains, person=enriched,
             apollo_org={"name": (apollo_org or {}).get("name"), "primary_domain": (apollo_org or {}).get("primary_domain"),
                         "id": emp.get("apollo_org_id")} if isinstance(apollo_org, dict) else None)
+        mail_domains: Set[str] = set()
+        mail_basis = ""
+        if str(os.environ.get(MAIL_DOMAIN_FLAG_ENV, "") or "").strip() == "1":
+            ok, mail_basis = corroborated_mail_domain(
+                email=enriched.get("email"), person=enriched, employer_domains=employer_domains,
+                sibling_domains=self._sibling_mail_domains(emp.get("id"), str(enriched.get("id") or "")))
+            if ok:
+                mail_domains = {email_domain(enriched.get("email"))}
         email = evaluate_email(email=enriched.get("email"), email_status=enriched.get("email_status") or enriched.get("contact_email_status"),
-                               employer_domains=employer_domains, corroborated_domains=alt)
+                               employer_domains=employer_domains, corroborated_domains=alt, mail_domains=mail_domains)
+        if mail_basis:
+            email.evidence["mail_domain_basis"] = mail_basis
         return contact, email
+
+    def _sibling_mail_domains(self, employer_id: Any, exclude_apollo_id: str) -> Set[str]:
+        """Email domains of OTHER Apollo-verified people whose current employment
+        at this employer was verified (``people.employer_id`` is set only then)."""
+        if not employer_id:
+            return set()
+        with self.conn.cursor() as cur:
+            cur.execute(
+                "SELECT DISTINCT lower(split_part(email, '@', 2)) AS d FROM people "
+                "WHERE employer_id = %s AND email_status = 'verified' AND email IS NOT NULL "
+                "AND COALESCE(apollo_person_id, '') <> %s",
+                (employer_id, exclude_apollo_id),
+            )
+            return {str(r["d"]) for r in cur.fetchall() if r["d"]}
 
     # --- main -------------------------------------------------------------------
     def process(self, opportunity_id: int, *, work_item: Optional[work_queue.WorkItem] = None) -> QualifyOutcome:
