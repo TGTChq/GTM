@@ -76,3 +76,25 @@ def test_a_zero_or_negative_limit_blocks_every_write():
     caps = CanaryCaps.from_env({"TGTC_CANARY_MAX_TOTAL": "0"})
     assert caps.enabled is True
     assert caps.exceeded(A) == "canary_cap_total"
+
+
+# --- production names ---------------------------------------------------------
+# The ceiling outlived the canary: the same code-enforced limit now governs the
+# daily production run, under production names. The canary names still work,
+# and a production name wins when both are set.
+
+
+def test_production_names_are_read():
+    caps = CanaryCaps.from_env({"TGTC_DELIVERY_MAX_PER_CAMPAIGN": "150", "TGTC_DELIVERY_MAX_TOTAL": "1100"})
+    assert (caps.per_campaign, caps.total) == (150, 1100)
+
+
+def test_production_names_win_over_canary_names():
+    caps = CanaryCaps.from_env({"TGTC_DELIVERY_MAX_PER_CAMPAIGN": "150", "TGTC_CANARY_MAX_PER_CAMPAIGN": "10",
+                                "TGTC_DELIVERY_MAX_TOTAL": "1100", "TGTC_CANARY_MAX_TOTAL": "90"})
+    assert (caps.per_campaign, caps.total) == (150, 1100)
+
+
+def test_canary_names_still_work_alone():
+    caps = CanaryCaps.from_env({"TGTC_CANARY_MAX_PER_CAMPAIGN": "10", "TGTC_CANARY_MAX_TOTAL": "90"})
+    assert (caps.per_campaign, caps.total) == (10, 90)

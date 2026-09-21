@@ -103,7 +103,13 @@ class CanaryCaps:
                 return int(raw)
             except ValueError:
                 return None
-        return cls(per_campaign=_limit("TGTC_CANARY_MAX_PER_CAMPAIGN"), total=_limit("TGTC_CANARY_MAX_TOTAL"))
+        # Production names first; the canary names remain valid on their own.
+        per_campaign = _limit("TGTC_DELIVERY_MAX_PER_CAMPAIGN")
+        total = _limit("TGTC_DELIVERY_MAX_TOTAL")
+        return cls(
+            per_campaign=per_campaign if per_campaign is not None else _limit("TGTC_CANARY_MAX_PER_CAMPAIGN"),
+            total=total if total is not None else _limit("TGTC_CANARY_MAX_TOTAL"),
+        )
 
     @property
     def enabled(self) -> bool:
