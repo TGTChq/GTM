@@ -1077,7 +1077,8 @@ class OpportunityService:
         if str(os.environ.get(MAIL_DOMAIN_FLAG_ENV, "") or "").strip() == "1":
             ok, mail_basis = corroborated_mail_domain(
                 email=enriched.get("email"), person=enriched, employer_domains=employer_domains,
-                sibling_domains=self._sibling_mail_domains(emp.get("id"), str(enriched.get("id") or "")))
+                employer_name=emp["canonical_name"],
+                siblings=self._sibling_mail_evidence(emp.get("id"), str(enriched.get("id") or "")))
             if ok:
                 mail_domains = {email_domain(enriched.get("email"))}
         email = evaluate_email(email=enriched.get("email"), email_status=enriched.get("email_status") or enriched.get("contact_email_status"),
@@ -1086,19 +1087,23 @@ class OpportunityService:
             email.evidence["mail_domain_basis"] = mail_basis
         return contact, email
 
-    def _sibling_mail_domains(self, employer_id: Any, exclude_apollo_id: str) -> Set[str]:
-        """Email domains of OTHER Apollo-verified people whose current employment
-        at this employer was verified (``people.employer_id`` is set only then)."""
+    def _sibling_mail_evidence(self, employer_id: Any, exclude_apollo_id: str) -> List[Dict[str, Any]]:
+        """OTHER Apollo-verified people whose current employment at this employer was
+        verified (``people.employer_id`` is set only then): their email domain, the
+        alignment their own email passed with, and their own Apollo organisation
+        domain. The rule itself decides which of them may seed."""
         if not employer_id:
-            return set()
+            return []
         with self.conn.cursor() as cur:
             cur.execute(
-                "SELECT DISTINCT lower(split_part(email, '@', 2)) AS d FROM people "
+                "SELECT lower(split_part(email, '@', 2)) AS email_domain, "
+                "COALESCE(facts_json->>'email_alignment', '') AS alignment, "
+                "lower(COALESCE(organization_domain, '')) AS org_domain FROM people "
                 "WHERE employer_id = %s AND email_status = 'verified' AND email IS NOT NULL "
                 "AND COALESCE(apollo_person_id, '') <> %s",
                 (employer_id, exclude_apollo_id),
             )
-            return {str(r["d"]) for r in cur.fetchall() if r["d"]}
+            return [dict(r) for r in cur.fetchall() if r["email_domain"]]
 
     # --- main -------------------------------------------------------------------
     def process(self, opportunity_id: int, *, work_item: Optional[work_queue.WorkItem] = None) -> QualifyOutcome:

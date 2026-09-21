@@ -30,11 +30,18 @@ candidates = [r for r in rows if not r["a_approved"] and r["email_status"] == "v
               and r["employment_verified"] == "true" and r["a_alignment"] == ""]
 
 accepted, reasons, employers, countries = [], Counter(), set(), Counter()
+eligible_by_basis = Counter()
 for r in candidates:
-    person = {"organization": {"primary_domain": r["org_domain"]}, "employment_history": r["history"]}
-    siblings = {s["email_domain"] for s in by_employer.get(r["employer_id"], []) if s["k"] != r["k"]}
+    person = {"organization": {"primary_domain": r["org_domain"], "website_url": r.get("org_website", ""),
+                               "suborganizations": r.get("org_suborgs", [])},
+              "employment_history": r["history"]}
+    # Non-circular by construction: every sibling carries its A-state alignment,
+    # and nothing B accepts in this pass is fed back as a seed.
+    siblings = [{"email_domain": s["email_domain"], "alignment": s["a_alignment"], "org_domain": s["org_domain"]}
+                for s in by_employer.get(r["employer_id"], []) if s["k"] != r["k"]]
     ok, why = corroborated_mail_domain(email=f"x@{r['email_domain']}", person=person,
-                                       employer_domains={r["employer_domain"]}, sibling_domains=siblings)
+                                       employer_domains={r["employer_domain"]},
+                                       employer_name=r.get("employer_name", ""), siblings=siblings)
     reasons[why] += 1
     if not ok:
         continue
@@ -45,6 +52,8 @@ for r in candidates:
     employers.add(r["employer_id"])
     country, _ = observe_contact_country_with_provenance({"country": r["stored_country"], "state": r["stored_state"]})
     countries[country or "unknown"] += 1
+    if country == "US":
+        eligible_by_basis[why] += 1
 
 print(f"people matched (credits paid): {len(rows)}")
 print(f"A approved:                    {a_approved}")
@@ -54,3 +63,7 @@ print(f"B approved total:              {a_approved + len(accepted)}")
 print(f"approvals per credit:          A {a_approved / len(rows):.3f} -> B {(a_approved + len(accepted)) / len(rows):.3f}")
 print("rule outcomes on the A-rejected:", dict(reasons))
 print("B additions by resolved contact country:", dict(countries))
+print("B US-eligible additions by evidence type:", dict(eligible_by_basis))
+out = Path(sys.argv[2]) if len(sys.argv) > 2 else None
+if out:
+    out.write_text(chr(10).join(str(r["k"]) for r in accepted), encoding="utf-8")

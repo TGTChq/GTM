@@ -1,93 +1,160 @@
-"""A company's MAIL domain is not always its website domain.
+"""A company's MAIL domain is not always its website domain -- accepted only on
+NON-CIRCULAR evidence.
 
-Measured, production 2026-09-21: of 976 paid Apollo person matches, 252 did not
-become contacts, and 222 of those were people with an Apollo-VERIFIED email and
-VERIFIED current employment, rejected only as `email:domain_not_employer`.
-Northern Trust is northerntrust.com on the web and ntrs.com in the inbox; JB
-Poindexter is jbpco.com; GALE is galepartners.com; OTO Development posts from
-careersatoto.com and mails from otodevelopment.com. In 219 of the 222, the
-person's own Apollo organisation carried exactly our employer domain.
+Measured, production 2026-09-21: 222 of 976 paid Apollo matches were
+Apollo-verified, currently employed people rejected only as
+`email:domain_not_employer` (Northern Trust mails from ntrs.com, GALE from
+galepartners.com).
 
-The rule accepts such an address only on deterministic evidence, and is
-stricter than the existing alternate-domain rule:
+Safety correction (Luis, 2026-09-21), before any live canary:
 
-* the email is Apollo-verified and current employment is verified (unchanged);
-* the PERSON's own Apollo organisation domain is one of our employer domains;
-* the domain is not free mail and not a hosted-service subdomain
-  (groceryoutlet.zendesk.com is a support queue, not a person);
-* the domain is not a FORMER employer's: its label must not name a past
-  position at a DIFFERENT Apollo organisation (a promotion inside the same
-  organisation is not a former employer);
-* and it is corroborated -- another verified, currently employed person at the
-  same employer uses it, or it keeps the employer domain's label under another
-  suffix (aeva.com / aeva.ai, dncu.com / dncu.org).
-
-Offline on the 222: 163 accepted across 51 employers; every uncorroborated
-alternate stays rejected.
+* same company label under another TLD is NOT sufficient by itself;
+* corroboration cannot be circular: a contact accepted by this rule never
+  validates another contact under this rule;
+* the seed must be one of --
+  1. provider_confirmed: the person's Apollo organisation record itself carries
+     the domain (primary_domain, website_url, or a suborganisation's domain);
+  2. strict_seed: another contact at the employer that passed the STRICT rule
+     (EXACT or CORROBORATED_ALTERNATE alignment) on that domain;
+  3. independent_employees: at least TWO OTHER Apollo-verified current employees
+     at the employer on that domain, each with an Apollo organisation matching
+     the employer, none of them accepted by this rule;
+* free mail, SaaS support, ATS / job-board and former-employer domains stay
+  rejected, and so does an explicit current-employer disagreement.
 """
 from __future__ import annotations
 
 from tgtc_core.domain.gates import MAIL_DOMAIN_ALIGNMENT, corroborated_mail_domain, evaluate_email
 
 EMPLOYER = {"northerntrust.com"}
+NAME = "Northern Trust"
 
 
-def _person(org_domain="northerntrust.com", history=None):
-    return {"organization": {"primary_domain": org_domain, "name": "Northern Trust"},
+def _person(org_domain="northerntrust.com", history=None, **org_extra):
+    org = {"primary_domain": org_domain, "name": NAME, **org_extra}
+    return {"organization": org,
             "employment_history": history if history is not None else [
-                {"organization_id": "org-nt", "organization_name": "Northern Trust", "current": True}]}
+                {"organization_id": "org-nt", "organization_name": NAME, "current": True}]}
 
 
-def _ok(email, person=None, siblings=frozenset(), employer=EMPLOYER):
+def _sib(domain, alignment="", org_domain="northerntrust.com"):
+    return {"email_domain": domain, "alignment": alignment, "org_domain": org_domain}
+
+
+def _ok(email, person=None, siblings=(), employer=EMPLOYER, name=NAME):
     return corroborated_mail_domain(email=email, person=person or _person(), employer_domains=employer,
-                                    sibling_domains=siblings)
+                                    employer_name=name, siblings=siblings)
 
 
-def test_a_cross_person_corroborated_mail_domain_is_accepted():
-    assert _ok("a.person@ntrs.com", siblings={"ntrs.com"}) == (True, "cross_person")
+# --- the three admissible seeds -----------------------------------------------
 
 
-def test_the_same_label_under_another_suffix_is_accepted():
-    assert _ok("x@aeva.ai", person=_person("aeva.com"), employer={"aeva.com"}) == (True, "same_label")
-    assert _ok("x@dncu.org", person=_person("dncu.com"), employer={"dncu.com"}) == (True, "same_label")
+def test_provider_confirmed_by_the_org_record_website():
+    person = _person(website_url="https://www.ntrs.com")
+    assert _ok("a@ntrs.com", person=person) == (True, "provider_confirmed")
 
 
-def test_an_uncorroborated_alternate_stays_rejected():
-    assert _ok("x@ntrs.com") == (False, "uncorroborated")
+def test_provider_confirmed_by_a_suborganisation():
+    person = _person(suborganizations=[{"name": "NT Securities", "website_url": "http://ntrs.com"}])
+    assert _ok("a@ntrs.com", person=person) == (True, "provider_confirmed")
 
 
-def test_the_persons_apollo_org_must_be_our_employer():
-    assert _ok("x@ntrs.com", person=_person("someoneelse.com"), siblings={"ntrs.com"}) == (False, "apollo_org_not_employer")
+def test_a_strict_seed_is_enough():
+    assert _ok("a@ntrs.com", siblings=[_sib("ntrs.com", "CORROBORATED_ALTERNATE_EMPLOYER_DOMAIN")]) == \
+        (True, "strict_seed")
 
 
-def test_a_hosted_service_subdomain_is_never_a_mail_domain():
+def test_two_independent_current_employees_are_enough():
+    sibs = [_sib("ntrs.com"), _sib("ntrs.com")]
+    assert _ok("a@ntrs.com", siblings=sibs) == (True, "independent_employees")
+
+
+def test_one_independent_employee_is_not_enough():
+    assert _ok("a@ntrs.com", siblings=[_sib("ntrs.com")]) == (False, "uncorroborated")
+
+
+# --- non-circularity ------------------------------------------------------------
+
+
+def test_contacts_accepted_by_this_rule_never_corroborate():
+    sibs = [_sib("ntrs.com", MAIL_DOMAIN_ALIGNMENT), _sib("ntrs.com", MAIL_DOMAIN_ALIGNMENT)]
+    assert _ok("a@ntrs.com", siblings=sibs) == (False, "uncorroborated")
+
+
+def test_a_relaxed_contact_does_not_top_up_an_independent_one():
+    sibs = [_sib("ntrs.com"), _sib("ntrs.com", MAIL_DOMAIN_ALIGNMENT)]
+    assert _ok("a@ntrs.com", siblings=sibs) == (False, "uncorroborated")
+
+
+def test_siblings_whose_apollo_org_is_not_the_employer_do_not_count():
+    sibs = [_sib("ntrs.com", org_domain="other.com"), _sib("ntrs.com", org_domain="other.com")]
+    assert _ok("a@ntrs.com", siblings=sibs) == (False, "uncorroborated")
+
+
+# --- same label is insufficient by itself ---------------------------------------
+
+
+def test_same_label_other_tld_alone_is_rejected_as_insufficient():
+    assert _ok("x@aeva.ai", person=_person("aeva.com"), employer={"aeva.com"}, name="Aeva") == \
+        (False, "same_label_insufficient")
+
+
+def test_same_label_with_real_corroboration_is_accepted_on_that_corroboration():
+    sibs = [_sib("aeva.ai", org_domain="aeva.com"), _sib("aeva.ai", org_domain="aeva.com")]
+    assert _ok("x@aeva.ai", person=_person("aeva.com"), employer={"aeva.com"}, name="Aeva", siblings=sibs) == \
+        (True, "independent_employees")
+
+
+# --- domains that are never a person's mail domain ------------------------------
+
+
+def test_hosted_support_subdomain_is_rejected():
+    sibs = [_sib("groceryoutlet.zendesk.com", org_domain="groceryoutlet.com")] * 2
     assert _ok("help@groceryoutlet.zendesk.com", person=_person("groceryoutlet.com"),
-               employer={"groceryoutlet.com"}, siblings={"groceryoutlet.zendesk.com"})[0] is False
+               employer={"groceryoutlet.com"}, siblings=sibs)[1] == "hosted_or_free"
 
 
-def test_free_mail_is_never_a_mail_domain():
-    assert _ok("someone@gmail.com", siblings={"gmail.com"}) == (False, "hosted_or_free")
+def test_free_mail_is_rejected():
+    assert _ok("someone@gmail.com", siblings=[_sib("gmail.com")] * 2) == (False, "hosted_or_free")
+
+
+def test_ats_and_job_board_domains_are_rejected():
+    for d in ("greenhouse.io", "myworkdayjobs.com", "lever.co", "indeed.com", "acmecareers.com"):
+        assert _ok(f"x@{d}", siblings=[_sib(d)] * 2)[1] == "ats_or_job_board", d
 
 
 def test_a_former_employers_domain_is_rejected():
     history = [{"organization_id": "org-oto", "organization_name": "OTO Development", "current": True},
                {"organization_id": "org-hilton", "organization_name": "Hilton", "current": False}]
     person = _person("careersatoto.com", history)
-    assert _ok("x@hilton.com", person=person, employer={"careersatoto.com"}, siblings={"hilton.com"}) == \
-        (False, "former_employer_domain")
+    assert _ok("x@hilton.com", person=person, employer={"careersatoto.com"}, name="OTO Development",
+               siblings=[_sib("hilton.com", org_domain="careersatoto.com")] * 2) == (False, "former_employer_domain")
 
 
 def test_a_past_role_at_the_same_organisation_is_not_a_former_employer():
-    """A promotion leaves a past position at the SAME Apollo organisation."""
     history = [{"organization_id": "org-oto", "organization_name": "OTO Development", "current": True},
                {"organization_id": "org-oto", "organization_name": "OTO Development", "current": False}]
     person = _person("careersatoto.com", history)
-    assert _ok("x@otodevelopment.com", person=person, employer={"careersatoto.com"},
-               siblings={"otodevelopment.com"}) == (True, "cross_person")
+    sibs = [_sib("otodevelopment.com", org_domain="careersatoto.com")] * 2
+    assert _ok("x@otodevelopment.com", person=person, employer={"careersatoto.com"}, name="OTO Development",
+               siblings=sibs) == (True, "independent_employees")
+
+
+def test_an_explicit_current_employer_disagreement_is_rejected():
+    """A second CURRENT position at another organisation names the domain."""
+    history = [{"organization_id": "org-nt", "organization_name": NAME, "current": True},
+               {"organization_id": "org-x", "organization_name": "Ntrs Advisory LLC", "current": True}]
+    assert _ok("a@ntrs.com", person=_person(history=history), siblings=[_sib("ntrs.com")] * 2) == \
+        (False, "current_employer_disagreement")
+
+
+def test_the_persons_apollo_org_must_be_our_employer():
+    assert _ok("x@ntrs.com", person=_person("someoneelse.com"), siblings=[_sib("ntrs.com")] * 2) == \
+        (False, "apollo_org_not_employer")
 
 
 def test_the_employer_domain_itself_is_not_an_alternate():
-    assert _ok("x@northerntrust.com", siblings={"northerntrust.com"}) == (False, "not_alternate")
+    assert _ok("x@northerntrust.com") == (False, "not_alternate")
 
 
 # --- evaluate_email wiring ----------------------------------------------------

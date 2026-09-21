@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple
 
 from .facts import RULE_VERSION
 from .identity import (
@@ -160,11 +160,17 @@ def corroborated_alternate_domains(*, employer_name: str, employer_domains: Set[
 
 
 #: A company's mail domain that is not its website domain, accepted only on the
-#: deterministic evidence in `corroborated_mail_domain`. Its own label, so every
-#: lead it admits stays queryable and the UK gate (which demands
-#: EXACT_EMPLOYER_DOMAIN) is unaffected.
+#: NON-CIRCULAR evidence in `corroborated_mail_domain`. Its own label, so every
+#: lead it admits stays queryable, never seeds another acceptance, and the UK
+#: gate (which demands EXACT_EMPLOYER_DOMAIN) is unaffected.
 MAIL_DOMAIN_ALIGNMENT = "CORROBORATED_MAIL_DOMAIN"
 MAIL_DOMAIN_FLAG_ENV = "TGTC_CORROBORATED_MAIL_DOMAIN"
+
+#: Alignments that passed the STRICT employer-domain rule and may seed.
+STRICT_ALIGNMENTS = frozenset({"EXACT_EMPLOYER_DOMAIN", "CORROBORATED_ALTERNATE_EMPLOYER_DOMAIN"})
+
+#: At least this many OTHER independently verified current employees.
+MIN_INDEPENDENT_EMPLOYEES = 2
 
 #: Hosts whose subdomains are service queues or tenants, never a person's inbox.
 _HOSTED_MAIL_HOSTS = (
@@ -172,6 +178,16 @@ _HOSTED_MAIL_HOSTS = (
     "force.com", "atlassian.net", "onmicrosoft.com", "google.com", "googlemail.com", "intercom-mail.com",
     "helpscoutapp.com", "gorgias.com", "kustomerapp.com", "sendgrid.net", "mailgun.org",
 )
+
+#: Applicant-tracking systems and job boards: recruiting mailboxes, not a person.
+_ATS_JOB_BOARD_HOSTS = (
+    "greenhouse.io", "lever.co", "myworkdayjobs.com", "workday.com", "icims.com", "smartrecruiters.com",
+    "jobvite.com", "ashbyhq.com", "bamboohr.com", "workable.com", "recruitee.com", "breezy.hr",
+    "jazzhr.com", "applytojob.com", "paylocity.com", "ultipro.com", "adp.com", "dayforcehcm.com",
+    "indeed.com", "linkedin.com", "ziprecruiter.com", "glassdoor.com", "monster.com", "careerbuilder.com",
+    "dice.com", "wellfound.com", "angel.co", "ycombinator.com", "simplyhired.com", "jobs.com",
+)
+_ATS_LABEL = re.compile(r"(careers|jobs)", re.I)
 
 
 def _label(domain: str) -> str:
@@ -182,56 +198,102 @@ def _alnum(text: Any) -> str:
     return re.sub(r"[^a-z0-9]", "", str(text or "").lower())
 
 
+def _on_host(domain: str, hosts: Sequence[str]) -> bool:
+    return any(domain == h or domain.endswith("." + h) for h in hosts)
+
+
+def _history(person: Dict[str, Any]) -> List[Dict[str, Any]]:
+    h = person.get("employment_history") or []
+    return [x for x in h if isinstance(x, dict)] if isinstance(h, list) else []
+
+
+def _names_the_domain(domain: str, org_name: Any) -> bool:
+    label = _label(domain)
+    return len(label) >= 3 and label in _alnum(org_name)
+
+
 def _former_employer_domain(domain: str, person: Dict[str, Any]) -> bool:
-    """Does the domain's label name a past position at a DIFFERENT organisation?
+    """Does the domain name a past position at a DIFFERENT organisation?
 
     A promotion leaves a past position at the same Apollo organisation; that is
     not a former employer and does not disqualify the domain.
     """
-    label = _label(domain)
-    if len(label) < 3:
-        return False
-    history = person.get("employment_history") or []
-    if not isinstance(history, list):
-        return False
-    current_ids = {str(h.get("organization_id") or "") for h in history
-                   if isinstance(h, dict) and h.get("current") is True}
-    for h in history:
-        if not isinstance(h, dict) or h.get("current") is True:
+    history = _history(person)
+    current_ids = {str(h.get("organization_id") or "") for h in history if h.get("current") is True}
+    return any(h.get("current") is not True and str(h.get("organization_id") or "") not in current_ids
+               and _names_the_domain(domain, h.get("organization_name")) for h in history)
+
+
+def _current_employer_disagreement(domain: str, person: Dict[str, Any], employer_name: str) -> bool:
+    """A CURRENT position at an organisation that is not the employer names the domain."""
+    for h in _history(person):
+        if h.get("current") is not True:
             continue
-        if str(h.get("organization_id") or "") in current_ids:
+        name = h.get("organization_name")
+        if employer_name and company_names_compatible(employer_name, str(name or "")):
             continue
-        if label in _alnum(h.get("organization_name")):
+        if _names_the_domain(domain, name):
             return True
     return False
 
 
+def _provider_domains(person: Dict[str, Any]) -> Set[str]:
+    """Domains the person's OWN Apollo organisation record carries."""
+    org = person_organization(person)
+    out: Set[str] = set()
+    for key in ("primary_domain", "website_url", "domain"):
+        d = safe_employer_domain(org.get(key))
+        if d:
+            out.add(d)
+    for sub in org.get("suborganizations") or []:
+        if isinstance(sub, dict):
+            for key in ("primary_domain", "website_url", "domain"):
+                d = safe_employer_domain(sub.get(key))
+                if d:
+                    out.add(d)
+    return out
+
+
 def corroborated_mail_domain(*, email: Optional[str], person: Dict[str, Any], employer_domains: Set[str],
-                             sibling_domains: Iterable[str] = ()) -> Tuple[bool, str]:
+                             employer_name: str = "", siblings: Iterable[Mapping[str, Any]] = ()) -> Tuple[bool, str]:
     """Whether a verified address on a NON-employer domain is the employer's mail domain.
 
-    Returns ``(accepted, reason)``. Measured need: 222 of 976 paid Apollo matches on
-    2026-09-21 were verified, currently employed people rejected only for the
-    domain (Northern Trust mails from ntrs.com, GALE from galepartners.com). All
-    of the following must hold; see tests_core/test_corroborated_mail_domain.py.
+    Returns ``(accepted, reason)``. Acceptance reasons name the seed:
+    ``provider_confirmed`` / ``strict_seed`` / ``independent_employees``. See
+    tests_core/test_corroborated_mail_domain.py for every rule.
+
+    ``siblings`` are OTHER stored people at the same employer, each a mapping with
+    ``email_domain``, ``alignment`` and ``org_domain``. Anyone accepted by this very
+    rule (``alignment == CORROBORATED_MAIL_DOMAIN``) is ignored: corroboration is
+    never circular.
     """
     d = email_domain(email)
     employer = {str(x).lower() for x in employer_domains if x}
     if not d or d in employer:
         return False, "not_alternate"
-    if d in FREE_MAIL_DOMAINS or any(d == h or d.endswith("." + h) for h in _HOSTED_MAIL_HOSTS):
+    if d in FREE_MAIL_DOMAINS or _on_host(d, _HOSTED_MAIL_HOSTS):
         return False, "hosted_or_free"
+    if _on_host(d, _ATS_JOB_BOARD_HOSTS) or _ATS_LABEL.search(_label(d)):
+        return False, "ats_or_job_board"
     if _org_domain(person_organization(person)) not in employer:
         return False, "apollo_org_not_employer"
     if _former_employer_domain(d, person):
         return False, "former_employer_domain"
-    if d in {str(s).lower() for s in sibling_domains}:
-        return True, "cross_person"
+    if _current_employer_disagreement(d, person, employer_name):
+        return False, "current_employer_disagreement"
+    if d in _provider_domains(person):
+        return True, "provider_confirmed"
+    same_domain = [s for s in siblings if str(s.get("email_domain") or "").lower() == d]
+    if any(str(s.get("alignment") or "") in STRICT_ALIGNMENTS for s in same_domain):
+        return True, "strict_seed"
+    independent = [s for s in same_domain
+                   if str(s.get("alignment") or "") != MAIL_DOMAIN_ALIGNMENT
+                   and str(s.get("org_domain") or "").lower() in employer]
+    if len(independent) >= MIN_INDEPENDENT_EMPLOYEES:
+        return True, "independent_employees"
     if len(_label(d)) >= 3 and any(_label(d) == _label(e) for e in employer):
-        return True, "same_label"
+        return False, "same_label_insufficient"
     return False, "uncorroborated"
-
-
 def evaluate_email(
     *,
     email: Optional[str],

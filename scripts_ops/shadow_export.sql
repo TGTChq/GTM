@@ -12,6 +12,11 @@ SELECT json_build_object(
   'a_approved', EXISTS (SELECT 1 FROM approvals a WHERE a.person_id = p.id),
   'employer_domain', lower(coalesce(e.domain, '')),
   'org_domain', lower(coalesce(p.facts_json->'enriched'->'organization'->>'primary_domain', p.organization_domain, '')),
+  'org_website', lower(coalesce(p.facts_json->'enriched'->'organization'->>'website_url', '')),
+  'org_suborgs', (SELECT coalesce(json_agg(json_build_object('website_url', so->>'website_url', 'primary_domain', so->>'primary_domain')), '[]'::json)
+                  FROM jsonb_array_elements(CASE WHEN jsonb_typeof(p.facts_json->'enriched'->'organization'->'suborganizations') = 'array'
+                                                 THEN p.facts_json->'enriched'->'organization'->'suborganizations' ELSE '[]'::jsonb END) so),
+  'employer_name', coalesce(e.canonical_name, ''),
   'history', (SELECT coalesce(json_agg(json_build_object(
                  'organization_id', j->>'organization_id',
                  'organization_name', j->>'organization_name',
@@ -22,4 +27,4 @@ SELECT json_build_object(
   'stored_state', coalesce(p.facts_json->'enriched'->>'state', '')
 )::text
 FROM people p LEFT JOIN employers e ON e.id = p.employer_id
-WHERE (p.facts_json->>'enriched_at')::timestamptz BETWEEN '2026-09-21 03:32+00' AND '2026-09-21 05:17+00';
+WHERE (p.facts_json->>'enriched_at')::timestamptz BETWEEN :'t0'::timestamptz AND :'t1'::timestamptz;
