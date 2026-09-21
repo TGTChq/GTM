@@ -44,7 +44,7 @@ from ..domain.approval import (
 from ..domain.jurisdiction import observe_contact_country
 from ..domain.facts import RULE_VERSION, resolve_company_size, size_corroborated, size_reject_reason
 from ..domain.gates import (
-    MAIL_DOMAIN_FLAG_ENV, corroborated_alternate_domains, corroborated_mail_domain, evaluate_contact, evaluate_email,
+    MAIL_DOMAIN_ALIGNMENT, MAIL_DOMAIN_FLAG_ENV, corroborated_alternate_domains, corroborated_mail_domain, evaluate_contact, evaluate_email,
     person_organization, pre_enrichment_check, title_matches,
 )
 from ..domain.identity import company_names_compatible, domain_name_consistent, email_domain, person_ref, safe_employer_domain
@@ -1085,6 +1085,18 @@ class OpportunityService:
                                employer_domains=employer_domains, corroborated_domains=alt, mail_domains=mail_domains)
         if mail_basis:
             email.evidence["mail_domain_basis"] = mail_basis
+        if email.passed and email.evidence.get("alignment") == MAIL_DOMAIN_ALIGNMENT and enriched.get("id"):
+            # The ONE place every path (fresh match and both reuse paths) is
+            # judged. Record the relaxed acceptance on any stored row for this
+            # person at this employer, or it would still read as an unaligned
+            # independent employee and could validate another contact under the
+            # same rule -- the circularity the rule forbids.
+            with transaction(self.conn):
+                with self.conn.cursor() as cur:
+                    cur.execute("UPDATE people SET facts_json = facts_json || %s, updated_at = now() "
+                                "WHERE apollo_person_id = %s AND employer_id = %s",
+                                (jsonb({"email_alignment": MAIL_DOMAIN_ALIGNMENT, "mail_domain_basis": mail_basis}),
+                                 str(enriched.get("id")), emp.get("id")))
         return contact, email
 
     def _sibling_mail_evidence(self, employer_id: Any, exclude_apollo_id: str) -> List[Dict[str, Any]]:

@@ -31,6 +31,10 @@ candidates = [r for r in rows if not r["a_approved"] and r["email_status"] == "v
 
 accepted, reasons, employers, countries = [], Counter(), set(), Counter()
 eligible_by_basis = Counter()
+# Sequential, in production order (people row id), exactly as the pipeline
+# judges them: each acceptance is written back as CORROBORATED_MAIL_DOMAIN
+# before the next person is judged, so no accepted contact validates another.
+candidates.sort(key=lambda r: r["k"])
 for r in candidates:
     person = {"organization": {"primary_domain": r["org_domain"], "website_url": r.get("org_website", ""),
                                "suborganizations": r.get("org_suborgs", [])},
@@ -48,6 +52,7 @@ for r in candidates:
     gate = evaluate_email(email=f"x@{r['email_domain']}", email_status="verified",
                           employer_domains={r["employer_domain"]}, mail_domains={r["email_domain"]})
     assert gate.passed, gate
+    r["a_alignment"] = "CORROBORATED_MAIL_DOMAIN"
     accepted.append(r)
     employers.add(r["employer_id"])
     country, _ = observe_contact_country_with_provenance({"country": r["stored_country"], "state": r["stored_state"]})

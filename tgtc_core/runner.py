@@ -52,6 +52,7 @@ from .services import provider_state
 from .services.acquisition import AcquisitionService, SOURCE_SPECS
 from .services.classification_service import classify_one, reopen_for_inference
 from .services.compliance_recheck import recheck_unknown_jurisdiction
+from .services.mail_domain_recheck import release_mail_domain_recoverable
 from .services.delivery import DeliveryService
 from .services.identity_service import resolve_posting_identity
 from .services.lifecycle import expire_postings
@@ -207,6 +208,9 @@ class Runner:
             # Work deferred on an EARLIER budget's exhaustion resumes as soon as
             # the active budget has headroom for that provider.
             out["released_budget_waits"] = release_budget_waits(self.conn, self.spend_budget.budget_id, now=self.now())
+        # Units whose stored, already-paid people now pass the mail-domain rule
+        # are re-judged now rather than after a 24-hour buyer-search wait.
+        out["mail_domain_released"] = release_mail_domain_recoverable(self.conn, now=self.now(), env=os.environ)
         if exhaustive_enabled(os.environ):
             # Re-decide unknown contact jurisdictions from the person's own
             # stored Apollo evidence, before delivery drains. Zero paid calls.
