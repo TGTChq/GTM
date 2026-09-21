@@ -109,7 +109,8 @@ had four different fixes, in three different layers.
 
 | commit | change |
 |---|---|
-| `8b0c1a9`..`15eb33e` | exit semantics; contact country from the person's own stored evidence; compliance recheck; production ceiling names; daily budget id |
+| `6ea6bee` | exit semantics; contact country from the person's own stored evidence; compliance recheck |
+| `15eb33e` | production ceiling names; daily budget id |
 | `e1e5aa3` | mutation payloads; Config as Code rejected by Railway |
 
 `tests_core` 1,667 -> **1,721 passed, 0 failed**.
