@@ -35,7 +35,7 @@ for name, cid in IDS.items():
     senders = d.get("email_list") or []
     accounts.update(senders)
     total_limit += int(lim or 0)
-    print(f"{name:<20} status={d.get('status')} daily_limit={lim} senders={len(senders)} "
+    print(f"{name:<20} status={d.get('status')} daily_limit={lim} daily_max_leads={d.get('daily_max_leads')} prioritize_new={d.get('prioritize_new_leads')} senders={len(senders)} "
           f"stop_on_reply={d.get('stop_on_reply')} steps={len(((d.get('sequences') or [{}])[0] or {}).get('steps') or [])} "
           f"delays={[s.get('delay') for s in (((d.get('sequences') or [{}])[0] or {}).get('steps') or [])]}")
 print(f"sum of campaign daily_limit: {total_limit}")
