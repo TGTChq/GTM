@@ -98,6 +98,8 @@ class Pilot:
         self.stats: Dict[str, Any] = {"rejected_after_reveal": {}, "call_first_companies_searched": 0,
                                       "call_first_searches_empty": 0, "surplus_callable_not_used": 0}
         self._in_flight_keys: set = set()
+        #: Employers with a CALL_FIRST reveal in flight (one person per company).
+        self._pending_employers: set = set()
         #: Consecutive request/poll failures; at BREAKER in a row the pilot stops spending.
         self._fail_streak = 0
         for s in william_flagged:
@@ -115,6 +117,9 @@ class Pilot:
             unsubscribed=self.unsub, william=self.william, suppressed=self.store.suppressed(), taken=taken,
             closed_signals=self.store.closed_signals(), founder_max_employees=self.cfg.founder_max_employees)
         per_company: Dict[int, int] = {}
+        for m in self.store.members():
+            if m["cohort"] == EMAIL_FOLLOW_UP and m["status"] == "active":
+                per_company[int(m["employer_id"])] = per_company.get(int(m["employer_id"]), 0) + 1
         out = []
         for c in cands:
             eid = int(c["employer_id"])
@@ -152,26 +157,52 @@ class Pilot:
         email_companies = {int(a["employer_id"]) for a in self.approved}
         later = []
         for u in units:
-            persona_counts = self._persona_counts(CALL_FIRST)
-            want = TALENT if persona_counts.get(TALENT, 0) < persona_counts.get(FUNCTIONAL, 0) else FUNCTIONAL
-            titles = search_titles(u["function_key"], FUNCTIONAL) + search_titles(u["function_key"], TALENT)
+            eid = int(u["employer_id"])
+            if eid in self._call_first_employers():
+                continue          # one CALL_FIRST person per company, across runs
+            counts = self._persona_counts(CALL_FIRST)
+            want = TALENT if counts.get(TALENT, 0) < counts.get(FUNCTIONAL, 0) else FUNCTIONAL
+            domain, org = norm_domain(u.get("employer_domain")), u.get("apollo_org_id") or ""
             emp = _int(u.get("employee_count"))
-            if emp is not None and emp <= self.cfg.founder_max_employees:
-                titles += search_titles(u["function_key"], EXECUTIVE)
+            pick = None
             self.stats["call_first_companies_searched"] += 1
-            people = self.apollo.search(domain=norm_domain(u.get("employer_domain")),
-                                        organization_id=u.get("apollo_org_id") or "", titles=titles)
-            if not people:
-                self.stats["call_first_searches_empty"] += 1
+            if want == TALENT:
+                # Talent/People owners are rarer; look for one first so the sample stays balanced.
+                pick = self._pick(self.apollo.search(domain=domain, organization_id=org,
+                                                     titles=search_titles(u["function_key"], TALENT)), u, TALENT)
+                if pick and pick["persona"] != TALENT:
+                    pick = None
+            if pick is None:
+                titles = search_titles(u["function_key"], FUNCTIONAL) + search_titles(u["function_key"], TALENT)
+                if emp is not None and emp <= self.cfg.founder_max_employees:
+                    titles += search_titles(u["function_key"], EXECUTIVE)
+                people = self.apollo.search(domain=domain, organization_id=org, titles=titles)
+                if not people:
+                    self.stats["call_first_searches_empty"] += 1
+                    continue
+                pick = self._pick(people, u, want)
+            if not pick:
                 continue
-            taken = self.store.active_person_keys() | self.store.called_person_keys()
-            pick = pick_call_first(people, u, core=self.core, crm=self.crm, william=self.william,
-                                   suppressed=self.store.suppressed(), taken=taken | self._in_flight_keys,
-                                   want_persona=want, founder_max_employees=self.cfg.founder_max_employees)
-            if pick:
-                pick["email_exposed_account"] = int(u["employer_id"]) in email_companies or \
-                    str(u.get("email_exposed")).lower() in ("t", "true", "1")
+            pick["email_exposed_account"] = eid in email_companies or                 str(u.get("email_exposed")).lower() in ("t", "true", "1")
+            if pick.get("direct_phone") == "yes":
+                self._pending_employers.add(eid)
                 yield pick
+            else:
+                later.append(pick)
+        for pick in later:
+            if int(pick["unit"]["employer_id"]) not in self._call_first_employers():
+                self._pending_employers.add(int(pick["unit"]["employer_id"]))
+                yield pick
+
+    def _pick(self, people, unit, want):
+        taken = self.store.active_person_keys() | self.store.called_person_keys() | self._in_flight_keys
+        return pick_call_first(people, unit, core=self.core, crm=self.crm, william=self.william,
+                               suppressed=self.store.suppressed(), taken=taken, want_persona=want,
+                               founder_max_employees=self.cfg.founder_max_employees) if people else None
+
+    def _call_first_employers(self) -> set:
+        members = {int(m["employer_id"]) for m in self.store.members() if m["cohort"] == CALL_FIRST}
+        return members | self._pending_employers
 
     def _persona_counts(self, cohort):
         out: Dict[str, int] = {}

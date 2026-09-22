@@ -372,3 +372,35 @@ def test_people_apollo_says_have_no_direct_phone_are_never_revealed(tmp_path):
             p["has_direct_phone"] = "No"
     pilot.run()
     assert apollo.reveals == []
+
+
+def test_a_second_run_never_adds_a_second_call_first_person_at_a_company(tmp_path):
+    pilot, store, apollo, _ = world(tmp_path, n_follow=0, n_first=3)
+    for d, ps in apollo.people_by_domain.items():          # a second decision-maker at every company
+        ps.append({"id": ps[0]["id"] + "b", "title": "Head of Talent Acquisition", "has_direct_phone": "Yes"})
+        apollo.employer_of[ps[0]["id"] + "b"] = d
+        apollo.phones[ps[0]["id"] + "b"] = mobile(900 + len(ps))
+    pilot.run()
+    first = {m["employer_id"] for m in store.members() if m["cohort"] == CALL_FIRST}
+    pilot2, store2, apollo2, _ = world(tmp_path, n_follow=0, n_first=3, target=6)
+    pilot2.run()
+    by_company = {}
+    for m in store2.members():
+        if m["cohort"] == CALL_FIRST:
+            by_company[m["employer_id"]] = by_company.get(m["employer_id"], 0) + 1
+    assert set(by_company) == first and max(by_company.values()) == 1
+
+
+def test_talent_people_owners_are_searched_first_when_under_represented(tmp_path):
+    pilot, store, apollo, _ = world(tmp_path, n_follow=0, n_first=2)
+    # company 0: functional only -> becomes the first (functional) member
+    # company 1: both personas -> talent must win because talent (0) < functional (1)
+    apollo.people_by_domain["new1.com"] = [
+        {"id": "f1", "title": "Operations Director", "has_direct_phone": "Yes"},
+        {"id": "t1", "title": "Head of Talent Acquisition", "has_direct_phone": "Yes"}]
+    apollo.employer_of.update({"f1": "new1.com", "t1": "new1.com"})
+    apollo.phones.update({"f1": mobile(501), "t1": mobile(502)})
+    pilot.cfg = PilotConfig(target_per_cohort=2, apollo_credit_cap=2000, max_in_flight=1)
+    pilot.run()
+    personas = {m["apollo_person_id"]: m["persona"] for m in store.members() if m["cohort"] == CALL_FIRST}
+    assert personas.get("t1") == "talent_people" and "f1" not in personas
