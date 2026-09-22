@@ -234,3 +234,21 @@ def test_inventory_that_never_clears_cannot_loop_the_run(monkeypatch):
     rep = c.run()
     assert purchases(w) and rep.fresh_created >= 1000
     assert any(e == "stuck_inventory_ignored" for _, e, _ in c.r.logs)
+
+
+# --- the only delivery ceiling left is none: every eligible produced contact is delivered ---
+def test_production_env_without_delivery_caps_delivers_without_a_ceiling():
+    from tgtc_core.services.delivery import CanaryCaps
+    cleared = {"TGTC_DELIVERY_MAX_PER_CAMPAIGN": "", "TGTC_DELIVERY_MAX_TOTAL": "", "TGTC_DELIVERY_MAX_BY_CAMPAIGN": "",
+               "TGTC_CANARY_MAX_PER_CAMPAIGN": "", "TGTC_CANARY_MAX_TOTAL": ""}
+    assert CanaryCaps.from_env(cleared).enabled is False
+
+
+def test_clearing_only_the_delivery_caps_would_fall_back_to_the_canary_caps():
+    """The trap found before deploying 2026-09-22: production still carried
+    TGTC_CANARY_MAX_PER_CAMPAIGN=10 / TOTAL=90, the fallback for an empty delivery cap."""
+    from tgtc_core.services.delivery import CanaryCaps
+    trap = {"TGTC_DELIVERY_MAX_PER_CAMPAIGN": "", "TGTC_DELIVERY_MAX_TOTAL": "",
+            "TGTC_CANARY_MAX_PER_CAMPAIGN": "10", "TGTC_CANARY_MAX_TOTAL": "90"}
+    caps = CanaryCaps.from_env(trap)
+    assert caps.enabled and caps.per_campaign == 10 and caps.total == 90
