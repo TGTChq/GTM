@@ -204,7 +204,9 @@ def pick_call_first(people: List[Dict[str, Any]], unit: Dict[str, Any], *, core:
                            founder_max_employees=founder_max_employees)
         if persona is None:
             continue
-        direct = str(p.get("has_direct_phone") or "").lower()
+        direct = direct_phone_flag(p)
+        if direct == "no":
+            continue          # Apollo says it has no direct number: a reveal would buy nothing
         ranked.append(((0 if want_persona and persona == want_persona else 1), PRIORITY[persona],
                        {"yes": 0, "maybe": 1}.get(direct, 2), pid, p, persona))
     if not ranked:
@@ -212,7 +214,19 @@ def pick_call_first(people: List[Dict[str, Any]], unit: Dict[str, Any], *, core:
     ranked.sort(key=lambda r: r[:4])
     _, _, _, _, p, persona = ranked[0]
     return {"apollo_person_id": str(p["id"]), "person_key": person_key(apollo_person_id=str(p["id"])),
-            "persona": persona, "search_title": p.get("title"), "unit": unit}
+            "persona": persona, "search_title": p.get("title"), "unit": unit, "direct_phone": direct_phone_flag(p)}
+
+
+def direct_phone_flag(search_person: Dict[str, Any]) -> str:
+    """Apollo search's has_direct_phone: 'yes' | 'maybe' | 'no' | 'unknown'."""
+    v = str(search_person.get("has_direct_phone") or "").strip().lower()
+    if v.startswith("yes") or v == "true":
+        return "yes"
+    if v.startswith("maybe"):
+        return "maybe"
+    if v in ("no", "false"):
+        return "no"
+    return "unknown"
 
 
 # --- after the reveal ---------------------------------------------------------------

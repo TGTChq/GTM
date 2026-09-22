@@ -16,8 +16,8 @@ from .identity import name_company_key, norm_domain, norm_email, norm_linkedin, 
 from .personas import FUNCTIONAL, TALENT, classify, search_titles, EXECUTIVE
 from .providers import ApolloPhones, AirtableReadOnly, InstantlyReadOnly, request_id_of
 from .selection import (Exclusions, best_callable_phone, call_first_units, company_phones_of,
-                        current_employer_confirmed, follow_up_candidates, hiring_signal_text, pick_call_first,
-                        suggested_opener)
+                        current_employer_confirmed, direct_phone_flag, follow_up_candidates, hiring_signal_text,
+                        pick_call_first, suggested_opener)
 from .store import CreditCapExceeded, SidecarStore
 
 
@@ -125,7 +125,24 @@ class Pilot:
             out.append(c)
         self.stats["follow_up_eligible_before_phone"] = len(out)
         self.stats["follow_up_excluded"] = why
-        return iter(out)
+        return self._direct_phones_first(out)
+
+    def _direct_phones_first(self, cands):
+        """A free search per person finds Apollo's has_direct_phone flag: 'yes' first,
+        'maybe'/'unknown' after, 'no' never (a reveal would buy nothing)."""
+        later, flags = [], {}
+        self.stats["follow_up_direct_phone_flags"] = flags
+        for c in cands:
+            domain = norm_domain(c.get("organization_domain") or c["unit"].get("employer_domain"))
+            found = [p for p in self.apollo.search(domain=domain, titles=[c.get("title") or ""], similar_titles=False)
+                     if str(p.get("id")) == str(c["apollo_person_id"])]
+            flag = direct_phone_flag(found[0]) if found else "unknown"
+            flags[flag] = flags.get(flag, 0) + 1
+            if flag == "yes":
+                yield c
+            elif flag != "no":
+                later.append(c)
+        yield from later
 
     def call_first_queue(self):
         units = call_first_units(self.units, self.store.closed_signals())
@@ -133,6 +150,7 @@ class Pilot:
         self.stats["call_first_companies_unexposed"] = sum(
             1 for u in units if str(u.get("email_exposed")).lower() not in ("t", "true", "1"))
         email_companies = {int(a["employer_id"]) for a in self.approved}
+        later = []
         for u in units:
             persona_counts = self._persona_counts(CALL_FIRST)
             want = TALENT if persona_counts.get(TALENT, 0) < persona_counts.get(FUNCTIONAL, 0) else FUNCTIONAL

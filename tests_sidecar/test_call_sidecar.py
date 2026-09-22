@@ -57,7 +57,7 @@ class FakeApollo:
         self.pending_rounds = pending_rounds
         self.reveals = []
 
-    def search(self, *, domain="", organization_id="", titles, per_page=25, page=1):
+    def search(self, *, domain="", organization_id="", titles, per_page=25, page=1, similar_titles=True):
         return list(self.people_by_domain.get(domain, []))
 
     def reveal(self, person_id):
@@ -363,3 +363,12 @@ def test_repeated_reveal_failures_stop_the_pilot(tmp_path):
     s = pilot.run()
     assert s.get("stopped_by_breaker") and len(apollo.reveals) == 5
     assert s["ledger"]["credits_charged"] == 0
+
+
+def test_people_apollo_says_have_no_direct_phone_are_never_revealed(tmp_path):
+    pilot, store, apollo, _ = world(tmp_path, n_follow=0, n_first=2)
+    for ps in apollo.people_by_domain.values():
+        for p in ps:
+            p["has_direct_phone"] = "No"
+    pilot.run()
+    assert apollo.reveals == []

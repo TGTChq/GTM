@@ -78,10 +78,12 @@ class ApolloPhones:
                 "Cache-Control": "no-cache"}
 
     def search(self, *, domain: str = "", organization_id: str = "", titles: List[str], per_page: int = 25,
-               page: int = 1) -> List[Dict[str, Any]]:
-        """People API Search: documented as consuming no credits."""
+               page: int = 1, similar_titles: bool = True) -> List[Dict[str, Any]]:
+        """People API Search: documented as consuming no credits. Similar titles widen the
+        free search only; every pick is still gated by the core's own title predicate."""
         params: List[tuple] = [("page", str(page)), ("per_page", str(per_page)),
-                               ("include_similar_titles", "false"), ("person_locations[]", "United States")]
+                               ("include_similar_titles", "true" if similar_titles else "false"),
+                               ("person_locations[]", "United States")]
         if organization_id:
             params.append(("organization_ids[]", organization_id))
         elif domain:
