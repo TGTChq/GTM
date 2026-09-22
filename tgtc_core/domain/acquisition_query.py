@@ -127,6 +127,15 @@ def balanced_slots(sources: tuple[str, ...], pages: int, env=None):
         yield sources[slot % len(sources)], (DISCOVERY_PROFILE if slot % 5 == 2 else PRIORITY_PROFILE)
 
 
+def balanced_slot(sources: tuple[str, ...], index: int):
+    """Slot ``index`` of the same 4 priority : 1 discovery round-robin as
+    ``balanced_slots``, for acquisition in small blocks: a run that buys two pages at
+    a time continues the pattern across blocks instead of restarting it."""
+    if not sources or index < 0:
+        raise ValueError("balanced_slot_requires_sources_and_a_non_negative_index")
+    return sources[index % len(sources)], (DISCOVERY_PROFILE if index % 5 == 2 else PRIORITY_PROFILE)
+
+
 def recent_size_exclusions(employers: list[dict], *, now: datetime, minimum: int, maximum: int) -> list[str]:
     """Exclude exact known companies, never every job with an unknown headcount.
 

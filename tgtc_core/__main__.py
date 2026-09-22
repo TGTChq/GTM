@@ -176,6 +176,63 @@ def _run_target_locked(args, s) -> int:
     return code
 
 
+def cmd_budget_id(args) -> int:
+    """Print the namespaced budget id for a kind of run (no database, no spend)."""
+    from .services.budget_policy import budget_id_for
+
+    print(budget_id_for(args.kind))
+    return 0
+
+
+def cmd_run_daily(args) -> int:
+    """The daily production controller: 1,000 fresh Instantly creations is a MINIMUM;
+    drain first, buy in small blocks, deliver everything produced (``tgtc_core.daily``)."""
+    _require_spend_acknowledgement(args.i_understand_spend)
+    s = _settings()
+    _require_persistent_budget(args, s)
+    from .services.budget_policy import BudgetPolicyError, claim, validate
+    try:
+        validate(args.budget_kind, s.spend_budget_id)
+    except BudgetPolicyError as exc:
+        print(f"run-daily refused: {exc}", file=sys.stderr)
+        return EXIT_BUDGET_REFUSED
+    from .db.connection import acquire_run_lock
+    run_lock = acquire_run_lock(args.database_url or s.database_url, connector=connect)
+    if run_lock is None:
+        print("run-daily: another production run holds the run lock; this execution did nothing")
+        return 0
+    try:
+        conn = connect(args.database_url or s.database_url)
+        apply_schema(conn)
+        r = _runner(conn, s, allow_spend=args.i_understand_spend)
+        try:
+            claimed = claim(conn, budget_id=s.spend_budget_id, kind=args.budget_kind, run_id=r.run_id)
+        except BudgetPolicyError as exc:
+            # Visible, non-zero: a scheduled run must never go on silently with a budget
+            # another kind of run consumed.
+            r._log("daily", "refused", {"budget_id": s.spend_budget_id, "reason": str(exc)})
+            print(f"run-daily refused: {exc}", file=sys.stderr)
+            return EXIT_BUDGET_REFUSED
+        r._log("daily", "budget_claim", claimed)
+        from .daily import DailyController
+        report = DailyController(r, budget_id=s.spend_budget_id, target=args.target, block_pages=args.block_pages,
+                                 max_rounds=args.max_rounds, max_items=args.max_items).run()
+        out = report.to_dict()
+        from .runner import TargetRunReport, run_exit_code
+        classified = TargetRunReport(run_id=r.run_id, target=args.target, rounds=report.rounds)
+        out["technical_failures"] = classified.technical_failures
+        print(json.dumps(out, indent=2, default=str))
+        print(f"daily run {report.stop_reason}: fresh Instantly {out['fresh_instantly_created']}/{args.target}, "
+              f"backlog {out['backlog_instantly_created']}")
+        # A business shortfall exits 0 (visible in the ledger); only a broken system is non-zero.
+        return run_exit_code(classified)
+    finally:
+        run_lock.close()
+
+
+EXIT_BUDGET_REFUSED = 3
+
+
 def _bounded_acceptance_failure(report, *, acquire: bool) -> str:
     """Expose technical failures in every stage of a bounded acceptance run.
 
@@ -254,6 +311,12 @@ def cmd_budget(args) -> int:
     budget_id = _budget_id(args, s)
     if not budget_id:
         raise SystemExit("--budget-id is required")
+    if getattr(args, "budget_kind", ""):
+        from .services.budget_policy import BudgetPolicyError, validate
+        try:
+            validate(args.budget_kind, budget_id)
+        except BudgetPolicyError as exc:
+            raise SystemExit(f"budget refused: {exc}")
     if args.expires_hours <= 0:
         raise SystemExit("--expires-hours must be positive")
     expires_at = datetime.now(timezone.utc) + timedelta(hours=args.expires_hours)
@@ -359,10 +422,11 @@ def main(argv=None) -> int:
     for name, fn in (("migrate", cmd_migrate), ("describe", cmd_describe), ("cycle", cmd_cycle),
                      ("run-target", cmd_run_target), ("work", cmd_work),
                      ("deliver", cmd_deliver), ("ledger", cmd_ledger), ("import-airtable", cmd_import_airtable),
-                     ("prune", cmd_prune), ("demo", cmd_demo), ("check-db", cmd_check_db), ("budget", cmd_budget)):
+                     ("prune", cmd_prune), ("demo", cmd_demo), ("check-db", cmd_check_db), ("budget", cmd_budget),
+                     ("run-daily", cmd_run_daily)):
         p = sub.add_parser(name)
         p.add_argument("--database-url", default="")
-        p.add_argument("--max-items", type=int, default=10000 if name == "run-target" else 1000)
+        p.add_argument("--max-items", type=int, default=10000 if name in ("run-target", "run-daily") else 1000)
         p.add_argument("--no-acquire", action="store_true")
         p.add_argument("--no-deliver", action="store_true")
         p.add_argument("--budget-id", default="")
@@ -372,7 +436,13 @@ def main(argv=None) -> int:
         if name == "run-target":
             p.add_argument("--target", type=int, default=None)
             p.add_argument("--max-rounds", type=int, default=None)
+        if name == "run-daily":
+            p.add_argument("--budget-kind", required=True, choices=("scheduled", "manual", "canary"))
+            p.add_argument("--target", type=int, default=1000, help="MINIMUM fresh Instantly creations")
+            p.add_argument("--block-pages", type=int, default=2, help="Fantastic pages per block (<= 250 records)")
+            p.add_argument("--max-rounds", type=int, default=300)
         if name == "budget":
+            p.add_argument("--budget-kind", default="", choices=("", "scheduled", "manual", "canary", "sidecar"))
             p.add_argument("--expires-hours", type=int, default=24)
             p.add_argument("--fantastic-requests", type=int, required=True)
             p.add_argument("--fantastic-credits", type=int, required=True)
@@ -382,6 +452,9 @@ def main(argv=None) -> int:
             p.add_argument("--anthropic-input-tokens", type=int, required=True)
             p.add_argument("--anthropic-output-tokens", type=int, required=True)
         p.set_defaults(fn=fn)
+    p = sub.add_parser("budget-id", help="print the namespaced budget id for a kind of run")
+    p.add_argument("--kind", required=True, choices=("scheduled", "manual", "canary", "sidecar"))
+    p.set_defaults(fn=cmd_budget_id)
     p = sub.add_parser("canary-24h", help="daily 24h acquisition canary; needs FANTASTIC_DAILY_24H_CANARY=1")
     p.add_argument("--state-dir", required=True, help="NEW evidence directory; never a production path")
     p.add_argument("--registry", default="", help="read-only JSON export of already-acquired postings")

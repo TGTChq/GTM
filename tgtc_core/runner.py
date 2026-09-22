@@ -23,7 +23,7 @@ from .config import Settings
 from .db import work_queue
 from .db.connection import jsonb, transaction
 from .domain.inference import BudgetedInference, CachedInference, InferencePort, NullAdapter
-from .domain.acquisition_query import EXHAUSTIVE_PROFILE, PRIORITY_PROFILE, DISCOVERY_PROFILE, balanced_slots
+from .domain.acquisition_query import EXHAUSTIVE_PROFILE, PRIORITY_PROFILE, DISCOVERY_PROFILE, balanced_slot, balanced_slots
 from .domain.exhaustive_routing import exhaustive_enabled
 
 #: `run-target` counts AIRTABLE leads, which is a reason to measure Airtable,
@@ -283,8 +283,26 @@ class Runner:
                     break
         return reports
 
+    def acquire_block(self, pages: int) -> List[Dict[str, Any]]:
+        """Buy ONE small block (``pages`` pages) for the daily controller: the same
+        balanced path, gates and fail-closed stops, continuing the 4:1 slot pattern."""
+        if self.fantastic is None:
+            self._log("acquisition", "skipped", {"reason": "no_fantastic_transport"})
+            return []
+        gate = self.acquisition_gate()
+        if not gate["allowed"]:
+            self._log("acquisition", "withheld", {"reason": f"apollo_{gate['state']}"})
+            return []
+        svc = self._acquisition_service()
+        selected = tuple(svc.sources)
+        start = getattr(self, "_slot_index", 0)
+        slots = [balanced_slot(selected, start + i) for i in range(max(1, int(pages)))]
+        self._slot_index = start + len(slots)
+        return self._acquire_balanced(svc, fresh_partitions=24, backfill_partitions=1, sources=None, slots=slots)
+
     def _acquire_balanced(self, svc: AcquisitionService, *, fresh_partitions: int,
-                          backfill_partitions: int, sources: Optional[List[str]]) -> List[Dict[str, Any]]:
+                          backfill_partitions: int, sources: Optional[List[str]],
+                          slots: Optional[List[tuple]] = None) -> List[Dict[str, Any]]:
         """Priority + independent broad recovery, without a title gate.
 
         One page per slot; all paths use the SAME persistent spend ceiling. Broad
@@ -297,7 +315,8 @@ class Runner:
         selected = tuple(sources or svc.sources)
         if any(source not in SOURCE_SPECS for source in selected):
             raise ValueError("unknown_fantastic_source")
-        slots = list(balanced_slots(selected, self.s.fantastic_cycle_page_slots, env=os.environ))
+        if slots is None:
+            slots = list(balanced_slots(selected, self.s.fantastic_cycle_page_slots, env=os.environ))
         # A slot whose profile has no open partition is skipped outright, so the
         # profiles planned here must match the ones the slots ask for.
         planned_profiles = (PRIORITY_PROFILE, DISCOVERY_PROFILE)
