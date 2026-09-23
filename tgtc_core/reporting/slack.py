@@ -73,140 +73,81 @@ def _code(lines: List[str]) -> str:
 # the report message
 # --------------------------------------------------------------------------------
 
-def blocks_for(report: Dict[str, Any], *, detail_url: Optional[str] = None,
-               detail_hint: Optional[str] = None) -> List[Dict[str, Any]]:
-    """The weekly report as Slack blocks, in the seven sections the readers asked for."""
-    w, d, j = report["window"], report["delivery"], report["jobs"]
-    a, c, u, b = report["acquisition"], report["contacts"], report["units"], report["backlog"]
-    runs, recon, spend = report["runs"], report["reconciliation"], report["spend"]
-    alerts, notes = report.get("alerts", []), report.get("notes", [])
-    integrity = report.get("integrity_alerts", [])
-    status = ("🟥 integrity: " + str(len(integrity)) + " to check" if integrity
-              else f"⚠️ {len(alerts)} exception(s)" if alerts else "✅ reconciled")
+def headline_lines(report: Dict[str, Any]) -> List[str]:
+    """The four figures, in the order they were asked for.
 
-    blocks: List[Dict[str, Any]] = [
-        {"type": "header", "text": {"type": "plain_text", "text": f"TGTC weekly pipeline — {w['window_label']}"}},
-        # 1. window, cutoff, status
-        {"type": "context", "elements": [{"type": "mrkdwn", "text": (
-            f"*Window* {w['window_start_local'][:16]} → {w['window_end_local'][:16]} "
-            f"{w['timezone']} (end exclusive)  •  *Data cutoff* {w['data_cutoff_utc']}  •  "
-            f"*Status* {status}  •  {w['iso_week']}")}]},
-        _section(
-            f"*Net-new leads created in the nine Challenger campaigns: {_n(d['instantly_created_unique_people'])}*\n"
-            f"• {_n(b['created_from_this_weeks_approvals'])} from approvals made this week, "
-            f"{_n(b['created_from_earlier_approvals_backlog'])} from earlier approvals (backlog)\n"
-            f"• Daily production runs completed: {_n(runs['completed_runs'])} "
-            f"({_n(runs['refused_runs'])} refused; {_n(runs['run_count'])} run ids logged activity in the window)"),
-        {"type": "divider"},
-        # 2. capture and review, with the denominators spelled out
-        _section(
-            "*Jobs captured and reviewed*\n"
-            f"• Records captured from the provider: *{_n(a['fantastic_records_returned'])}* "
-            f"({_n(a['fantastic_records_unique_ids'])} unique ids, {_n(a['fantastic_requests'])} requests)\n"
-            f"• New unique jobs: *{_n(j['new_jobs_unique'])}* — "
-            f"{_pct(j['new_jobs_unique'], a['fantastic_records_returned'])} of the "
-            f"{_n(a['fantastic_records_returned'])} records captured\n"
-            f"• Jobs reviewed: *{_n(j['jobs_reviewed'])}* classifications — "
-            f"{_pct(j['jobs_reviewed'], j['new_jobs_unique'])} of this week's "
-            f"{_n(j['new_jobs_unique'])} new jobs (reviews also cover jobs first seen earlier)\n"
-            f"• Still pending review: *{_n(j['jobs_pending_review'])}* — "
-            f"{_pct(j['jobs_pending_review'], j['new_jobs_unique'])} of this week's new jobs"),
-        # 3. qualified, employers, units
-        _section(
-            "*Qualified work*\n"
-            f"• Qualified jobs: *{_n(j['jobs_qualified'])}* — {_pct(j['jobs_qualified'], j['jobs_reviewed'])} "
-            f"of the {_n(j['jobs_reviewed'])} reviewed "
-            f"(rejected {_n(j['jobs_rejected_excluded'])}, no campaign fit {_n(j['jobs_no_campaign_fit'])})\n"
-            f"• Unique employers: *{_n(u['new_employers'])}*\n"
-            f"• Company × campaign units: *{_n(u['new_units'])}* "
-            f"({_n(u['units_worked_for_contacts'])} worked for contacts)"),
-        # 4. contacts, Airtable and Instantly -- three separate measurements
-        _section(
-            "*Contacts and delivery* _(three different things, never added together)_\n"
-            f"• Verified contacts: *{_n(c['emails_verified'])}* verified emails "
-            f"from {_n(c['candidates_found'])} candidates found; "
-            f"*{_n(c['contacts_approved'])}* approved, {_n(c['compliance_blocked'])} compliance-blocked\n"
-            f"• Airtable records created: *{_n(d['airtable_records_created'])}*\n"
-            f"• Genuine new Instantly creations: *{_n(d['instantly_created_unique_people'])}* unique people "
-            f"(already existing {_n(d['instantly_already_existing'])}, rejected {_n(d['instantly_rejected'])})"),
-        {"type": "divider"},
+    The review percentage is only printed when both counts come from the same cohort;
+    where there is no cohort it is omitted with its reason, because a ratio of two
+    populations that do not contain each other is not a percentage of anything.
+    """
+    h = report["headline"]
+    rate = h["jobs_review_rate"]
+    jobs = f"*Jobs:* {_n(h['jobs_captured'])} captured / {_n(h['jobs_reviewed'])} reviewed"
+    jobs += f" ({rate:.1f}%)" if rate is not None else f" (% omitted — {h['jobs_review_rate_omitted_because']})"
+    added = f"*Added to Instantly:* {_n(h['added_to_instantly'])}"
+    if h["added_from_earlier_approvals"]:
+        added += f" _(includes {_n(h['added_from_earlier_approvals'])} from approvals made before this week)_"
+    return [
+        jobs,
+        f"*Qualified opportunities:* {_n(h['qualified_opportunities'])}",
+        f"*Contacts found:* {_n(h['contacts_found'])}",
+        added,
     ]
 
-    # 5. daily trend, previous week, nine campaigns
-    trend = [f"{'day':<12}{'created':>9}{'approved':>10}{'new jobs':>10}{'Apollo cr':>11}"]
-    for day in report["daily"]:
-        if day.get("unavailable"):
-            trend.append(f"{day['weekday']} {day['date'][5:]:<8}{'unavailable — before this database begins':>40}")
-            continue
-        trend.append(f"{day['weekday']} {day['date'][5:]:<8}{day['instantly_created_unique_people']:>9,}"
-                     f"{day['contacts_approved']:>10,}{day['new_jobs']:>10,}{_n(day['apollo_credits']):>11}")
-    blocks.append(_section("*Daily trend* (local days, " + w["timezone"] + ")\n" + _code(trend)))
 
-    previous = report.get("previous_week")
-    if previous:
-        rows = [f"{'metric':<34}{'this week':>12}{'previous':>12}{'change':>10}"]
-        for metric, row in previous["metrics"].items():
-            change = row["change"]
-            rows.append(f"{metric[:34]:<34}{_n(row['this_week']):>12}{_n(row['previous_week']):>12}"
-                        f"{('' if change is None else f'{change:+,}'):>10}")
-        blocks.append(_section(f"*Against the previous week* ({previous['window']})\n" + _code(rows)))
+def _attention_line(report: Dict[str, Any]) -> Optional[str]:
+    """One short line, or nothing. A channel message that lists every exception stops
+    being read; the detail carries them all."""
+    integrity = report.get("integrity_alerts") or []
+    alerts = report.get("alerts") or []
+    if integrity:
+        extra = len(alerts) - 1
+        return f"🟥 {integrity[0]}" + (f" _(+{extra} more in the detail)_" if extra > 0 else "")
+    if alerts:
+        extra = len(alerts) - 1
+        return f"⚠️ {alerts[0]}" + (f" _(+{extra} more in the detail)_" if extra > 0 else "")
+    return None
 
-    table = [f"{'campaign':<30}{'units':>7}{'approved':>10}{'created':>9}{'airtable':>10}{'blocked':>9}"]
-    for row in report["by_campaign"]["campaigns"].values():
-        table.append(f"{row['name'][:30]:<30}{row['new_units']:>7,}{row['contacts_approved']:>10,}"
-                     f"{row['instantly_created_unique_people']:>9,}{row['airtable_records_created']:>10,}"
-                     f"{row['compliance_blocked']:>9,}")
-    blocks.append(_section("*All nine Challenger campaigns*\n" + _code(table)))
 
-    # 6. provider consumption and cost per final new lead
-    spend_lines = []
-    for provider, row in spend["providers"].items():
-        credits = row["credits_confirmed"] if row["credits_confirmed"] is not None else row["credits_estimated"]
-        money = f"${_n(row['spend_usd'])}" if row["spend_usd"] is not None else "no verified unit price"
-        spend_lines.append(f"• *{provider}*: {_n(row['requests'])} requests, {_n(credits)} credits — "
-                           f"{_n(row['credits_per_final_lead'])} per final new lead ({money})")
-    cost = spend["cost_per_final_lead_usd"]
-    spend_lines.append(f"• *Cost per final new lead*: "
-                       f"{('$' + _n(cost)) if cost is not None else 'not reported — a provider unit price is not verified'}")
-    blocks.append(_section("*Provider consumption*\n" + "\n".join(spend_lines)))
+def blocks_for(report: Dict[str, Any], *, detail_url: Optional[str] = None,
+               detail_rows: Optional[int] = None, detail_hint: Optional[str] = None) -> List[Dict[str, Any]]:
+    """The weekly message: four figures, at most one line of attention, and where the
+    lead-level detail is. No personal data appears in it, by construction."""
+    w = report["window"]
+    blocks: List[Dict[str, Any]] = [
+        {"type": "header", "text": {"type": "plain_text", "text": f"TGTC weekly pipeline — {w['window_label']}"}},
+        _section("\n".join(headline_lines(report))),
+    ]
+    attention = _attention_line(report)
+    if attention:
+        blocks.append(_section(attention))
 
-    # 7. exceptions, short and explicit, then where the detail lives
-    legacy = report["legacy_airtable_review"]
-    exceptions = [f"• 🟥 {line}" for line in integrity[:4]]
-    exceptions += [f"• ⚠️ {line}" for line in alerts if line not in integrity][:4]
-    exceptions.append(
-        f"• 🗂️ *Legacy exception, all time (not delivered leads):* {_n(legacy['records'])} Airtable records "
-        "with no genuine Instantly creation behind them — a review population, never counted as delivered, "
-        "never archived or removed here. Where a figure above repeats this number, they are the same records.")
-    if report["coverage"]["local_days_unavailable"]:
-        exceptions.append("• ◻️ *Unavailable:* " + ", ".join(report["coverage"]["local_days_unavailable"]) +
-                          " — before this database's first record, reported as unavailable, not as zero")
-    exceptions.append(
-        f"• 🔎 *Reconciliation:* {_n(recon['airtable_records_created'])} Airtable records = "
-        f"{_n(recon['genuine_instantly_creations_approvals'])} genuine creations + "
-        f"{_n(recon['airtable_records_without_a_genuine_creation'])} with a named reason "
-        f"(unexplained: {_n(recon['unexplained_difference'])})")
-    for line in notes[:2]:
-        exceptions.append(f"• ℹ️ {line}")
-    blocks.append(_section("*Exceptions*\n" + "\n".join(exceptions)))
+    if detail_url:
+        rows = f" — {_n(detail_rows)} rows, one per lead" if detail_rows is not None else ""
+        blocks.append(_section(
+            f"*Lead-level detail (private):* <{detail_url}|this week's file>{rows}, reconciled against "
+            f"*Added to Instantly*. Access is limited to the authorised team."))
+    else:
+        rows = f"{_n(detail_rows)} rows" if detail_rows is not None else "the file"
+        blocks.append(_section(
+            f"*Lead-level detail:* _pending_ — {rows} generated and reconciled against *Added to Instantly*, "
+            "but not published: no private destination and reader list has been verified yet. "
+            + (detail_hint or "It is deliberately not posted here, because it contains personal data.")))
 
-    detail = (f"<{detail_url}|Secure lead-level detail>" if detail_url
-              else (detail_hint or "Lead-level detail is not published: it holds personal data and is generated "
-                                   "on request as a private, deduplicated export (one row per lead, traceable to "
-                                   "job, employer, person, campaign and both delivery receipts)"))
     blocks.append({"type": "context", "elements": [{"type": "mrkdwn", "text": (
-        f"{detail} • no personal data appears in this summary • the 200-person phone sidecar is excluded from "
-        f"every figure • report `{w['report_id']}` generated {report['generated_at']} from the core database")}]})
+        f"Week {w['window_start_local'][:10]} → {w['window_end_local'][:10]} {w['timezone']} (end exclusive) • "
+        f"data cutoff {w['data_cutoff_utc']} • jobs captured/reviewed are the same cohort • "
+        f"'added' counts receipt-confirmed creations only, never existing contacts or the phone sidecar • "
+        f"report `{w['report_id']}`")}]})
     return blocks
 
 
 def text_for(report: Dict[str, Any]) -> str:
     """The notification line, which is all a phone shows."""
-    w, d = report["window"], report["delivery"]
-    alerts = report.get("alerts", [])
-    state = "reconciled" if not alerts else f"{len(alerts)} exception(s)"
-    return (f"TGTC weekly pipeline {w['window_label']}: "
-            f"{d['instantly_created_unique_people']:,} net-new Challenger leads created ({state})")
+    w, h = report["window"], report["headline"]
+    return (f"TGTC weekly pipeline {w['window_label']}: {h['added_to_instantly']:,} added to Instantly, "
+            f"{h['qualified_opportunities']:,} qualified opportunities, "
+            f"{h['jobs_captured']:,} jobs captured")
 
 
 def status_notice_blocks(report: Dict[str, Any], readiness: Dict[str, Any], *,

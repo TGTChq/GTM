@@ -176,6 +176,6 @@ def ensure_schema(conn: psycopg.Connection) -> None:
     migrations = Path(__file__).resolve().parents[1] / "db" / "migrations"
     with conn.cursor() as cur:
         for name in ("013_report_runs.sql", "014_report_deliveries.sql",
-                     "015_report_delivery_test_kind.sql"):
+                     "015_report_delivery_test_kind.sql", "016_report_lead_exports.sql"):
             cur.execute((migrations / name).read_text(encoding="utf-8"))
     conn.commit()

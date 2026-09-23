@@ -11,6 +11,8 @@ Subcommands:
   ledger             print the reconciled ledger
   weekly-report      measure a Friday-to-Friday reporting week from the database (no provider call)
   slack-test         send one labelled connectivity test to a channel (no pipeline data)
+  report-export      write a stored week's private lead-level file out (personal data)
+  report-detail-link record where a week's detail was published, and to whom
   import-airtable    import existing Airtable rows as suppressions (reads only)
   prune              null compressed page payloads older than TGTC_PAYLOAD_RETENTION_DAYS (receipts kept)
   demo               end-to-end run against SIMULATED providers on an embedded PostgreSQL
@@ -424,6 +426,57 @@ EXIT_REPORT_ATTENTION = 4
 EXIT_REPORT_NOT_SENT = 5
 
 
+def cmd_report_export(args) -> int:
+    """Write a stored week's lead-level file out, for handing to a verified destination.
+
+    It carries personal data, so it is written where the lead export always is -- outside
+    the repository -- and its checksum is printed, so the file that reaches the readers
+    can be matched to the one the report reconciled against.
+    """
+    from pathlib import Path
+
+    from .reporting import detail as lead_detail, export as lead_export
+
+    conn = connect(args.database_url or _settings().database_url)
+    stored = lead_detail.load(conn, args.report_id)
+    if stored is None:
+        print(f"no lead detail is stored for {args.report_id}", file=sys.stderr)
+        return 1
+    target = Path(args.out).resolve()
+    try:
+        target.relative_to(lead_export.REPO_ROOT)
+    except ValueError:
+        pass
+    else:
+        print("the lead detail carries personal data and must not be written inside the repository",
+              file=sys.stderr)
+        return 1
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(stored["csv"])
+    print(json.dumps({"report_id": args.report_id, "rows": stored["row_count"], "sha256": stored["sha256"],
+                      "path": str(target), "published_url": stored.get("published_url")}, indent=2, default=str))
+    return 0
+
+
+def cmd_report_detail_link(args) -> int:
+    """Record where a week's detail was published and exactly who was given access."""
+    from .reporting import detail as lead_detail
+
+    viewers = [v.strip() for v in args.viewers.split(",") if v.strip()]
+    if not viewers:
+        print("--viewers lists the accounts that were granted access; 'anyone with the link' is not a reader list",
+              file=sys.stderr)
+        return 1
+    conn = connect(args.database_url or _settings().database_url)
+    try:
+        row = lead_detail.record_publication(conn, args.report_id, url=args.url, viewers=viewers)
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    print(json.dumps(row, indent=2, default=str))
+    return 0
+
+
 def _slack_destination(args, channel):
     """Resolve a sender and say how the destination was established, or refuse.
 
@@ -516,11 +569,14 @@ def _weekly_report_send(conn, args, report, window, now):
     channel = (args.slack_channel or "").strip()
     if not channel:
         return {"sent": False, "error": "refused to send: --slack-channel names the confirmed destination"}
-    detail_url = args.detail_url or os.environ.get("TGTC_REPORT_DETAIL_URL", "").strip()
+    detail = report.get("detail") or {}
+    detail_url = (args.detail_url or detail.get("published_url")
+                  or os.environ.get("TGTC_REPORT_DETAIL_URL", "").strip())
+    detail_rows = detail.get("rows")
     if args.dry_run_send:
         # Rendering is not sending: a rehearsal may look at any week, including the one
         # in progress, and touches neither Slack nor the delivery record.
-        message = {"blocks": slack.blocks_for(report, detail_url=detail_url or None),
+        message = {"blocks": slack.blocks_for(report, detail_url=detail_url or None, detail_rows=detail_rows),
                    "text": slack.text_for(report)}
         return {"sent": False, "reason": "dry_run", "channel": channel, "blocks": len(message["blocks"]),
                 "destination_basis": _weekly_report_destination_basis(args),
@@ -554,7 +610,8 @@ def _weekly_report_send(conn, args, report, window, now):
     common["destination_basis"] = basis
     try:
         if action == ACTION_FINAL:
-            message = {"blocks": slack.blocks_for(report, detail_url=detail_url or None),
+            message = {"blocks": slack.blocks_for(report, detail_url=detail_url or None,
+                                                  detail_rows=detail_rows),
                        "text": slack.text_for(report)}
             out = report_store.deliver_once(conn, report, sender=sender, channel=channel, message=message,
                                             kind=report_store.FINAL, destination_basis=basis, resend=args.resend)
@@ -622,6 +679,7 @@ def cmd_weekly_report(args) -> int:
         report_store.ensure_schema(conn)
     result = pipeline.generate_and_store(
         conn, now=now, out_dir=args.out_dir or None, store_report=not args.no_store,
+        lead_detail=not args.no_lead_detail,
         kind=kind, weeks_back=args.weeks_back, week_start=week_start, tz_name=args.timezone,
         compare_previous=not args.no_compare, unit_prices=prices, target_per_run=args.target)
     report = result["report"]
@@ -660,6 +718,7 @@ def cmd_weekly_report(args) -> int:
         "airtable_records_created": report["delivery"]["airtable_records_created"],
         "reconciliation_holds": report["reconciliation"]["identity_holds"],
         "status": report["status"],
+        "lead_detail": report.get("detail"),
         "integrity_alerts": report["integrity_alerts"],
         "alerts": report["alerts"],
         "notes": report["notes"],
@@ -752,6 +811,8 @@ def main(argv=None) -> int:
     p.add_argument("--out-dir", default="", help="also write <report_id>.json and .txt here")
     p.add_argument("--lead-export", default="", help="write the private lead-level CSV here (outside the repository)")
     p.add_argument("--no-store", action="store_true", help="do not write the report_runs row (pure read)")
+    p.add_argument("--no-lead-detail", action="store_true",
+                   help="skip generating this week's private lead-level file")
     p.add_argument("--no-compare", action="store_true", help="skip the previous-week comparison")
     p.add_argument("--target", type=int, default=1000, help="the per-run minimum a day is flagged against")
     p.add_argument("--print-format", choices=("text", "json", "none"), default="text")
@@ -794,6 +855,17 @@ def main(argv=None) -> int:
     p.add_argument("--resend", action="store_true", help="send today's test again (never automatic)")
     p.add_argument("--now", default="", help="evaluate as of this instant (tests)")
     p.set_defaults(fn=cmd_slack_test)
+    p = sub.add_parser("report-export", help="write a stored week's private lead-level file out")
+    p.add_argument("--database-url", default="")
+    p.add_argument("--report-id", required=True)
+    p.add_argument("--out", required=True, help="a path OUTSIDE the repository")
+    p.set_defaults(fn=cmd_report_export)
+    p = sub.add_parser("report-detail-link", help="record where a week's detail was published, and to whom")
+    p.add_argument("--database-url", default="")
+    p.add_argument("--report-id", required=True)
+    p.add_argument("--url", required=True)
+    p.add_argument("--viewers", required=True, help="comma-separated accounts that were granted access")
+    p.set_defaults(fn=cmd_report_detail_link)
     args = parser.parse_args(argv)
     _require_acceptance_command(args)
     return int(args.fn(args))

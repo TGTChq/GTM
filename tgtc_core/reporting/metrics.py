@@ -250,6 +250,67 @@ def jobs_section(cur, w: ReportWindow) -> Dict[str, Any]:
     }
 
 
+def headline_section(cur, w: ReportWindow) -> Dict[str, Any]:
+    """The four figures the weekly message opens with, and how each is counted.
+
+    All of capture, review and qualification are measured on ONE cohort -- the jobs first
+    seen inside this window -- so the review percentage has a numerator drawn from its own
+    denominator. Where the cohort cannot be reconstructed (no jobs captured at all), the
+    percentage is ``None`` and the message shows the two counts with their definitions
+    instead of inventing a ratio.
+    """
+    p = {"t0": w.start_utc, "t1": w.end_utc, "cutoff": w.data_cutoff}
+    captured = _int(_one(cur, """
+        SELECT count(*) FROM postings
+        WHERE first_seen_at >= %(t0)s AND first_seen_at < %(t1)s""", p))
+    reviewed = _int(_one(cur, """
+        SELECT count(*) FROM postings p WHERE p.first_seen_at >= %(t0)s AND p.first_seen_at < %(t1)s
+          AND EXISTS (SELECT 1 FROM classifications c
+                      WHERE c.posting_id = p.id AND c.created_at < %(cutoff)s)""", p))
+    qualified_jobs = _int(_one(cur, """
+        SELECT count(*) FROM postings p WHERE p.first_seen_at >= %(t0)s AND p.first_seen_at < %(t1)s
+          AND EXISTS (SELECT 1 FROM classifications c
+                      WHERE c.posting_id = p.id AND c.created_at < %(cutoff)s
+                        AND NOT c.excluded AND cardinality(c.compatible_functions) > 0)""", p))
+    opportunities = _int(_one(cur, """
+        SELECT count(*) FROM opportunities
+        WHERE created_at >= %(t0)s AND created_at < %(t1)s""", p))
+    contacts_found = _int(_one(cur, """
+        SELECT count(DISTINCT candidate_ref) FROM candidate_attempts
+        WHERE created_at >= %(t0)s AND created_at < %(t1)s""", p))
+    added = _rows(cur, f"""
+        SELECT count(DISTINCT lower(o.payload_json->>'email')) AS people,
+               count(DISTINCT lower(o.payload_json->>'email')) FILTER (WHERE a.approved_at >= %(t0)s) AS this_week
+        {_DELIVERY_JOIN}
+        WHERE {GENUINE_CREATION_PREDICATE} AND r.received_at >= %(t0)s AND r.received_at < %(t1)s""", p)[0]
+    people, this_week = _int(added["people"]), _int(added["this_week"])
+    return {
+        "jobs_captured": captured,
+        "jobs_reviewed": reviewed,
+        "jobs_review_rate": round(100.0 * reviewed / captured, 1) if captured else None,
+        "jobs_review_rate_omitted_because": (
+            None if captured else "no jobs were captured in this window, so there is no cohort to review"),
+        "qualified_jobs": qualified_jobs,
+        "qualified_opportunities": opportunities,
+        "contacts_found": contacts_found,
+        "added_to_instantly": people,
+        "added_from_this_weeks_approvals": this_week,
+        "added_from_earlier_approvals": people - this_week,
+        "definitions": {
+            "jobs_captured": "job postings first seen in this window (one per source + provider job id)",
+            "jobs_reviewed": "those same jobs that had been classified by the data cutoff -- same cohort, "
+                             "so the percentage divides a count by the count it came from",
+            "qualified_jobs": "those same jobs whose classification matched one of the nine campaigns",
+            "qualified_opportunities": "company x campaign units opened in this window (unique employer + function)",
+            "contacts_found": "distinct people the contact search identified for those units in this window",
+            "added_to_instantly": "distinct people Instantly answered 'created' for, in the campaign the approval "
+                                  "was routed to, receipt-confirmed inside this window. Excludes people Instantly "
+                                  "already had, rejections, Control campaigns, anyone counted twice and the phone "
+                                  "sidecar, which writes to none of these tables",
+        },
+    }
+
+
 def units_section(cur, w: ReportWindow) -> Dict[str, Any]:
     """Employers and company x campaign units -- the unit paid contact work is spent on."""
     p = {"t0": w.start_utc, "t1": w.end_utc}
@@ -710,6 +771,7 @@ def build_report(conn: psycopg.Connection, window: ReportWindow, *,
     prices = dict(unit_prices or {})
     with conn.cursor() as cur:
         coverage = coverage_section(cur, window)
+        headline = headline_section(cur, window)
         runs = runs_section(cur, window, unavailable=coverage["local_days_unavailable"])
         acquisition = acquisition_section(cur, window)
         jobs = jobs_section(cur, window)
@@ -734,6 +796,7 @@ def build_report(conn: psycopg.Connection, window: ReportWindow, *,
             "sidecar_note": ("the 200-person phone sidecar keeps a separate store and writes to none of these "
                              "tables, so no figure above contains it"),
         },
+        "headline": headline,
         "coverage": coverage,
         "runs": runs,
         "acquisition": acquisition,

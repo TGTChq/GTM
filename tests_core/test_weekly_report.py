@@ -451,6 +451,92 @@ def test_the_lead_export_traces_each_lead_and_is_deduplicated_by_person(conn, tm
     assert written.exists() and "dup@example.com" in written.read_text(encoding="utf-8")
 
 
+def test_the_weekly_detail_file_holds_one_row_per_lead_the_headline_counted(conn):
+    """The file and the message must describe the same population, or the link is a lie."""
+    from tgtc_core.reporting import detail
+
+    inside = WEEK_START + timedelta(days=1)
+    for _ in range(3):
+        seed_lead(conn, received_at=inside, campaign_key="product", campaign_id="camp-pr")
+    # ... and three rows that are NOT additions: existing, rejected, and a compliance block.
+    seed_lead(conn, received_at=inside, campaign_key="finance", campaign_id="camp-fi", instantly_kind="existing")
+    seed_lead(conn, received_at=inside, campaign_key="finance", campaign_id="camp-fi",
+              instantly_kind="rejected", blocked_reason="instantly_existing_other_campaign")
+    seed_lead(conn, received_at=inside, campaign_key="ecommerce", campaign_id="camp-ec",
+              instantly_kind=None, outreach_eligible=False)
+    store.ensure_schema(conn)
+    result = pipeline.generate_and_store(conn, now=FRIDAY_MORNING, compare_previous=False)
+    report = result["report"]
+
+    assert report["headline"]["added_to_instantly"] == 3
+    assert report["detail"]["rows"] == 3 and report["detail"]["reconciles"] is True
+    assert report["detail"]["state"].startswith("pending publication")
+    stored = detail.load(conn, "weekly-2026-09-11")
+    body = stored["csv"].decode("utf-8")
+    assert body.count("\n") == 4                        # a header and three leads
+    assert "instantly_lead_id" in body and "job_url" in body
+    # The Airtable records without a genuine creation cannot appear: they have no receipt.
+    assert report["reconciliation"]["airtable_records_without_a_genuine_creation"] == 3
+    assert stored["row_count"] == 3
+
+
+def test_regenerating_a_week_replaces_its_file_and_never_makes_a_second(conn):
+    from tgtc_core.reporting import detail
+
+    seed_lead(conn, received_at=WEEK_START + timedelta(days=1), campaign_key="product", campaign_id="camp-pr")
+    store.ensure_schema(conn)
+    pipeline.generate_and_store(conn, now=FRIDAY_MORNING, compare_previous=False)
+    first = detail.load(conn, "weekly-2026-09-11")
+    seed_lead(conn, received_at=WEEK_START + timedelta(days=2), campaign_key="finance", campaign_id="camp-fi")
+    pipeline.generate_and_store(conn, now=FRIDAY_MORNING, compare_previous=False)
+    second = detail.load(conn, "weekly-2026-09-11")
+    assert (first["row_count"], second["row_count"]) == (1, 2)
+    assert first["sha256"] != second["sha256"]
+    assert conn.execute("SELECT count(*) AS n FROM report_lead_exports").fetchone()["n"] == 1
+
+
+def test_a_detail_that_disagrees_with_the_headline_is_an_integrity_failure(conn):
+    """A file that quietly holds a different number from the summary is worse than none."""
+    seed_lead(conn, received_at=WEEK_START + timedelta(days=1), campaign_key="product", campaign_id="camp-pr")
+    store.ensure_schema(conn)
+    pipeline.generate_and_store(conn, now=FRIDAY_MORNING, compare_previous=False)
+    conn.execute("UPDATE report_lead_exports SET row_count = 99 WHERE report_id = 'weekly-2026-09-11'")
+    conn.commit()
+    report = pipeline.generate_and_store(conn, now=FRIDAY_MORNING, compare_previous=False,
+                                         lead_detail=False)["report"]
+    assert report["detail"]["reconciles"] is False
+    assert any("99 rows while the report counts 1" in item for item in report["integrity_alerts"])
+    assert report["status"] == "integrity"
+
+
+def test_publication_records_the_readers_and_refuses_an_empty_reader_list(conn):
+    from tgtc_core.reporting import detail
+
+    seed_lead(conn, received_at=WEEK_START + timedelta(days=1), campaign_key="product", campaign_id="camp-pr")
+    store.ensure_schema(conn)
+    pipeline.generate_and_store(conn, now=FRIDAY_MORNING, compare_previous=False)
+    with pytest.raises(ValueError, match="not a reader list"):
+        detail.record_publication(conn, "weekly-2026-09-11", url="https://drive.example/f", viewers=[])
+    row = detail.record_publication(conn, "weekly-2026-09-11", url="https://drive.example/f",
+                                    viewers=["brett@example.com", "roman@example.com"])
+    assert row["published_url"] == "https://drive.example/f"
+    assert row["published_to"] == ["brett@example.com", "roman@example.com"]
+    assert store.get(conn, "weekly-2026-09-11")["detail_url"] == "https://drive.example/f"
+    # A later regeneration keeps the publication: a retry never re-shares or re-links.
+    report = pipeline.generate_and_store(conn, now=FRIDAY_MORNING, compare_previous=False)["report"]
+    assert report["detail"]["published_url"] == "https://drive.example/f"
+    assert report["detail"]["state"] == "published"
+
+
+def test_a_week_with_no_detail_yet_is_reported_as_not_generated(conn):
+    from tgtc_core.reporting import detail
+
+    store.ensure_schema(conn)
+    assert detail.summarise(None, 0)["generated"] is False
+    report = pipeline.build(conn, now=FRIDAY_MORNING, compare_previous=False)
+    assert "detail" not in report              # build() measures; only the pipeline stores
+
+
 def test_the_lead_export_refuses_to_be_written_inside_the_repository(conn):
     with pytest.raises(ValueError, match="must not be written inside the repository"):
         export.write_csv(Path(export.REPO_ROOT) / "leads.csv", [])

@@ -610,6 +610,7 @@ CREATE TABLE IF NOT EXISTS report_runs (
     delivered_at     timestamptz,
     delivery_receipt jsonb,
     attempts         integer NOT NULL DEFAULT 0,
+    detail_url       text,
     updated_at       timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS report_runs_window_idx ON report_runs (window_start DESC);
@@ -627,3 +628,18 @@ CREATE TABLE IF NOT EXISTS report_deliveries (
     PRIMARY KEY (report_id, channel, kind)
 );
 CREATE INDEX IF NOT EXISTS report_deliveries_time_idx ON report_deliveries (delivered_at DESC);
+
+-- Weekly lead-level detail (migration 016). Documented there.
+CREATE TABLE IF NOT EXISTS report_lead_exports (
+    report_id     text PRIMARY KEY,
+    window_start  timestamptz NOT NULL,
+    window_end    timestamptz NOT NULL,
+    row_count     integer NOT NULL,
+    columns_json  jsonb NOT NULL,
+    csv_gzip      bytea NOT NULL,
+    sha256        text NOT NULL,
+    generated_at  timestamptz NOT NULL DEFAULT now(),
+    published_url text,
+    published_at  timestamptz,
+    published_to  jsonb
+);

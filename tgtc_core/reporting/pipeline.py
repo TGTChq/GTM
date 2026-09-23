@@ -14,7 +14,7 @@ from typing import Any, Dict, Optional
 
 import psycopg
 
-from . import metrics, render, store
+from . import detail, metrics, render, store
 from .window import PACIFIC_TZ_NAME, ReportWindow, explicit_window, partial_window, weekly_window
 
 
@@ -64,11 +64,26 @@ def artifacts(out_dir: Path | str, report: Dict[str, Any]) -> Dict[str, str]:
 
 
 def generate_and_store(conn: psycopg.Connection, *, now: datetime, out_dir: Optional[Path] = None,
-                       store_report: bool = True, **kwargs) -> Dict[str, Any]:
+                       store_report: bool = True, lead_detail: bool = True, **kwargs) -> Dict[str, Any]:
     window = window_for(now=now, kind=kwargs.get("kind", "weekly"), weeks_back=kwargs.get("weeks_back", 0),
                         week_start=kwargs.get("week_start"), tz_name=kwargs.get("tz_name", PACIFIC_TZ_NAME))
     report = build(conn, now=now, window=window, **kwargs)
     result: Dict[str, Any] = {"report": report, "report_id": report["window"]["report_id"], "window": window}
+    if lead_detail and store_report:
+        # The file is generated and reconciled with the headline BEFORE the report is
+        # stored, so a report can never be published claiming a detail that does not
+        # match it -- or that does not exist.
+        stored_detail = detail.store(conn, window, detail.build(conn, window))
+    else:
+        stored_detail = detail.load(conn, window.report_id) if store_report else None
+    report["detail"] = detail.summarise(stored_detail, report["headline"]["added_to_instantly"])
+    if report["detail"]["generated"] and not report["detail"]["reconciles"]:
+        message = (f"the lead-level detail holds {report['detail']['rows']} rows while the report counts "
+                   f"{report['detail']['headline_added_to_instantly']} added to Instantly")
+        report["integrity_alerts"] = [message] + report["integrity_alerts"]
+        report["alerts"] = [message] + report["alerts"]
+        report["flags"] = [message] + report["flags"]
+        report["status"] = "integrity"
     if store_report:
         result["stored"] = store.save(conn, report)
     if out_dir is not None:

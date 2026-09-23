@@ -18,7 +18,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from tgtc_core.reporting import pipeline, slack, store
+from tgtc_core.reporting import pipeline, render, slack, store
 from tgtc_core.reporting.schedule import (ACTION_FINAL, ACTION_NOTICE, ACTION_SKIP, AFTER_RETRY_WINDOW,
                                           BEFORE_DUE, IN_RETRY_WINDOW, NOT_DELIVERY_DAY, decide,
                                           delivery_state, readiness)
@@ -143,52 +143,122 @@ def _blocks_text(blocks) -> str:
     return "\n".join(out)
 
 
-def test_the_slack_message_carries_the_seven_sections_with_their_denominators(conn):
+def test_the_message_opens_with_the_four_figures_in_the_order_they_were_asked_for(conn):
     seed_run(conn, run_id="run-a", started_at=WEEK_START + timedelta(days=1, hours=3))
-    for i in range(3):
+    for _ in range(3):
         seed_lead(conn, received_at=WEEK_START + timedelta(days=1, hours=4), campaign_key="product",
                   campaign_id="camp-pr", run_id="run-a")
     report = report_for(conn)
-    blocks = slack.blocks_for(report)
+    lines = slack.headline_lines(report)
+    assert [line.split(":*")[0].lstrip("*") for line in lines] == [
+        "Jobs", "Qualified opportunities", "Contacts found", "Added to Instantly"]
+    text = _blocks_text(slack.blocks_for(report))
+    assert text.index("Jobs:") < text.index("Qualified opportunities:") \
+        < text.index("Contacts found:") < text.index("Added to Instantly:")
+    assert "captured /" in text and "reviewed" in text
+
+
+def test_the_review_percentage_divides_a_cohort_by_itself(conn):
+    """Two jobs captured this week, one of them reviewed: 50%. A classification written
+    this week for a job first seen LAST week changes neither count."""
+    inside = WEEK_START + timedelta(days=1)
+    with conn.cursor() as cur:
+        for i, (first_seen, classified) in enumerate(((inside, True), (inside, False),
+                                                      (WEEK_START - timedelta(days=3), True))):
+            cur.execute("INSERT INTO postings (source, provider_job_id, content_hash, commercial_age_anchor, "
+                        "first_seen_at) VALUES ('linkedin', %s, %s, %s, %s) RETURNING id",
+                        (f"job-{i}", f"hash-{i}", first_seen, first_seen))
+            posting_id = int(cur.fetchone()["id"])
+            if classified:
+                cur.execute("INSERT INTO classifications (posting_id, policy_version, method, "
+                            "compatible_functions, excluded, created_at) VALUES (%s, 'v', 'deterministic', "
+                            "'{product}', false, %s)", (posting_id, inside))
+    conn.commit()
+    h = report_for(conn)["headline"]
+    assert (h["jobs_captured"], h["jobs_reviewed"], h["jobs_review_rate"]) == (2, 1, 50.0)
+    assert h["qualified_jobs"] == 1
+    assert "same cohort" in h["definitions"]["jobs_reviewed"]
+
+
+def test_the_percentage_is_omitted_with_its_reason_when_there_is_no_cohort(conn):
+    h = report_for(conn)["headline"]
+    assert (h["jobs_captured"], h["jobs_reviewed"]) == (0, 0)
+    assert h["jobs_review_rate"] is None
+    assert "no cohort" in h["jobs_review_rate_omitted_because"]
+    line = slack.headline_lines(report_for(conn))[0]
+    assert "% omitted" in line and "no cohort" in line
+
+
+def test_added_to_instantly_counts_only_confirmed_unique_creations(conn):
+    """Existing contacts, rejections and Control campaigns are not additions, and a
+    creation from an earlier week's approval is shown as such rather than hidden."""
+    inside = WEEK_START + timedelta(days=2)
+    seed_lead(conn, received_at=inside, campaign_key="product", campaign_id="camp-pr")
+    seed_lead(conn, received_at=inside, campaign_key="finance", campaign_id="camp-fi", instantly_kind="existing")
+    seed_lead(conn, received_at=inside, campaign_key="finance", campaign_id="camp-fi",
+              instantly_kind="rejected", blocked_reason="instantly_existing_other_campaign")
+    seed_lead(conn, received_at=inside, campaign_key="ecommerce", campaign_id="camp-ec",
+              approved_at=WEEK_START - timedelta(days=2))
+    h = report_for(conn)["headline"]
+    assert h["added_to_instantly"] == 2
+    assert (h["added_from_this_weeks_approvals"], h["added_from_earlier_approvals"]) == (1, 1)
+    line = [x for x in slack.headline_lines(report_for(conn)) if x.startswith("*Added")][0]
+    assert "2" in line and "includes 1 from approvals made before this week" in line
+
+
+def test_the_message_stays_short_and_leaves_the_detail_to_the_file(conn):
+    """Trends, the nine-campaign table and the full exception list are review material."""
+    seed_lead(conn, received_at=WEEK_START + timedelta(days=1), campaign_key="product", campaign_id="camp-pr")
+    blocks = slack.blocks_for(report_for(conn))
     text = _blocks_text(blocks)
-    assert len(blocks) <= 50                                   # Slack's own limit
-    # 1 window, cutoff, status
-    assert "end exclusive" in text and "Data cutoff" in text and "America/Los_Angeles" in text
-    # 2 captured and reviewed, each percentage next to the count it came from
-    assert "Records captured from the provider" in text and "of the" in text
-    assert "New unique jobs" in text and "Jobs reviewed" in text
-    # 3 qualified, employers, units
-    assert "Qualified jobs" in text and "Unique employers" in text and "Company × campaign units" in text
-    # 4 three separate delivery measurements
-    assert "Verified contacts" in text and "Airtable records created" in text
-    assert "Genuine new Instantly creations" in text
-    # 5 trend, previous week, nine campaigns
-    assert "Daily trend" in text and "All nine Challenger campaigns" in text
-    assert sum(campaign["name"][:12] in text for campaign in report["by_campaign"]["campaigns"].values()) == 9
-    # 6 provider consumption and cost per final new lead
-    assert "Provider consumption" in text and "Cost per final new lead" in text
-    # 7 exceptions and where the detail lives
-    assert "Exceptions" in text and "Legacy exception" in text and "Reconciliation:" in text
-    assert "Lead-level detail is not published" in text
+    assert len(blocks) <= 6 and len(text) < 1600
+    for absent in ("Daily trend", "All nine Challenger campaigns", "Provider consumption", "```"):
+        assert absent not in text
+    # ... but the week's own identity and the counting rules are still on the message.
+    assert "end exclusive" in text and "data cutoff" in text and "same cohort" in text
+    assert "phone sidecar" in text
 
 
-def test_the_slack_message_never_carries_personal_data(conn):
-    seed_lead(conn, received_at=WEEK_START + timedelta(days=1), campaign_key="product", campaign_id="camp-pr",
-              email="jane.doe@acme-corp.com", person="jane.doe", employer="Acme Corp")
-    text = _blocks_text(slack.blocks_for(report_for(conn)))
-    assert "@" not in text and "jane" not in text.lower() and "acme" not in text.lower()
+def test_only_one_line_of_attention_reaches_the_channel(conn):
+    seed_run(conn, run_id="run-a", started_at=WEEK_START + timedelta(days=1, hours=3))
+    seed_lead(conn, received_at=WEEK_START + timedelta(days=1, hours=4), campaign_key="product",
+              campaign_id="camp-pr", run_id="run-a")
+    report = report_for(conn)
+    assert len(report["alerts"]) > 1
+    text = _blocks_text(slack.blocks_for(report))
+    attention = [line for line in text.splitlines() if line.startswith(("⚠️", "🟥"))]
+    assert len(attention) == 1 and "more in the detail" in attention[0]
 
 
-def test_a_day_the_database_cannot_speak_about_says_so_in_slack(conn):
+def test_the_detail_is_linked_when_published_and_pending_when_not(conn):
+    report = report_for(conn)
+    linked = _blocks_text(slack.blocks_for(report, detail_url="https://drive.example/file", detail_rows=3623))
+    assert "<https://drive.example/file|this week's file>" in linked
+    assert "3,623 rows, one per lead" in linked and "authorised team" in linked
+
+    pending = _blocks_text(slack.blocks_for(report, detail_rows=3623))
+    assert "_pending_" in pending and "no private destination and reader list has been verified" in pending
+    assert "3,623 rows" in pending and "personal data" in pending
+
+
+def test_a_day_the_database_cannot_speak_about_is_kept_in_the_detail_not_the_channel(conn):
+    """Unavailable coverage is a real caveat and it belongs in the file, not in four
+    lines at 06:00 -- but it must never be read as a zero."""
     seed_lead(conn, received_at=WEEK_START + timedelta(days=3), campaign_key="product", campaign_id="camp-pr")
-    text = _blocks_text(slack.blocks_for(report_for(conn)))
-    assert "unavailable — before this database begins" in text
-    assert "reported as unavailable, not as zero" in text
+    report = report_for(conn)
+    assert report["coverage"]["local_days_unavailable"]
+    assert any("unavailable, not as zero production" in note for note in report["notes"])
+    assert all(day["instantly_created_unique_people"] is None
+               for day in report["daily"] if day.get("unavailable"))
+    assert "UNAVAILABLE" in render.render_text(report)
+    assert "unavailable" not in _blocks_text(slack.blocks_for(report)).lower()
 
 
-def test_the_detail_link_is_used_when_one_is_published(conn):
-    text = _blocks_text(slack.blocks_for(report_for(conn), detail_url="https://example.invalid/detail"))
-    assert "<https://example.invalid/detail|Secure lead-level detail>" in text
+def test_the_notification_line_leads_with_the_figures(conn):
+    seed_lead(conn, received_at=WEEK_START + timedelta(days=1), campaign_key="product", campaign_id="camp-pr")
+    line = slack.text_for(report_for(conn))
+    assert line.startswith("TGTC weekly pipeline")
+    assert "1 added to Instantly" in line and "qualified opportunities" in line
 
 
 def test_the_status_notice_publishes_no_pipeline_numbers(conn):
@@ -203,12 +273,6 @@ def test_the_status_notice_publishes_no_pipeline_numbers(conn):
     assert "still in flight" in text
     for word in ("net-new", "Genuine new Instantly creations", "Qualified jobs", "Airtable records created"):
         assert word not in text
-
-
-def test_the_notification_line_says_the_number_and_whether_it_reconciled(conn):
-    seed_lead(conn, received_at=WEEK_START + timedelta(days=1), campaign_key="product", campaign_id="camp-pr")
-    line = slack.text_for(report_for(conn))
-    assert "TGTC weekly pipeline" in line and "1 net-new Challenger leads created" in line
 
 
 # --------------------------------------------------------------------------------
@@ -419,7 +483,7 @@ def test_the_command_can_render_the_message_without_sending_it(conn, pg_url, cap
     assert message["blocks"] and message["text"].startswith("TGTC weekly pipeline")
     summary = json.loads(summary)
     assert summary["delivery"]["reason"] == "dry_run" and summary["delivery"]["sent"] is False
-    assert summary["delivery"]["blocks"] == len(message["blocks"]) >= 10
+    assert summary["delivery"]["blocks"] == len(message["blocks"]) <= 6
     assert summary["delivery"]["destination_basis"] == "webhook_declared"
     assert store.delivery_record(conn, "weekly-2026-09-11", "#gtm-engineering", store.FINAL) is None
 
