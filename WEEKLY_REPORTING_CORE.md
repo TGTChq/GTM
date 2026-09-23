@@ -32,6 +32,42 @@ sampled moments, so they cannot drift apart silently.
 * The timezone resolver is recorded on every report (`zoneinfo:tzdata`, or the codified
   US federal rule where no tz database exists).
 
+## The Friday message
+
+Four figures, in this order, and then where to look further:
+
+```
+Jobs: 13,356 captured / 13,153 reviewed (98.5%)
+Qualified opportunities: 5,728
+Contacts found: 12,922
+Added to Instantly: 3,623
+```
+
+| figure | counted as |
+|---|---|
+| Jobs captured | job postings first seen in the window (one per source + provider job id) |
+| Jobs reviewed | **those same jobs** that had been classified by the data cutoff |
+| Qualified opportunities | company × campaign units opened in the window (unique employer + function) |
+| Contacts found | distinct people the contact search identified for those units |
+| Added to Instantly | distinct people Instantly answered `created` for, in the campaign the approval was routed to, receipt-confirmed inside the window |
+
+**The percentage divides a cohort by itself.** It used to compare classifications
+written this week against jobs first seen this week -- two populations that do not
+contain each other -- and reported 107%, which is not a rate of anything. Capture,
+review and qualification are now all measured on the jobs first seen in the window, and
+where there is no cohort at all the percentage is omitted with its reason rather than
+invented.
+
+**"Added to Instantly" is additions, not activity.** People Instantly already had,
+rejections, Control campaigns, anyone counted twice and the phone sidecar are all
+excluded by construction. A lead created this week from an earlier week's approval is
+still an addition this week, and the message says so in the same line rather than
+folding it in silently.
+
+Everything else -- the funnel, the daily trend, the nine campaigns, the full exception
+list -- lives in the detail, with at most **one line of attention** in the channel
+("+N more in the detail"). A message that carries every exception stops being read.
+
 ## What it measures
 
 Three rules hold everywhere, because a report that breaks them is worse than none:
@@ -82,6 +118,36 @@ and asserts none of it reaches the text.
 
 The lead-level detail is a separate, deduplicated CSV (`--lead-export`) that traces each
 lead to its job, employer, person, campaign and both delivery receipts. It refuses to be
+
+## The weekly private detail
+
+Generated automatically with every weekly report: **one row per lead the headline
+counted** -- the same predicate as *Added to Instantly*, deduplicated by person -- with
+23 columns tracing each lead to its job, employer, person, campaign and both delivery
+receipts. The 217 historical Airtable records without a genuine creation are not in it
+and cannot be: they have no creation receipt to match.
+
+* **It reconciles or it fails.** The row count is checked against *Added to Instantly*
+  on every run; a mismatch is an integrity alert, which fails the job. A detail file
+  that quietly disagrees with the summary is worse than no file.
+* **One file per week.** Stored in `report_lead_exports`, keyed by `report_id`: a retry
+  replaces the week's content and can never create a second file for it.
+* **It stays where the data already lives** until a destination *and* its readers have
+  been verified. Personal data is not copied into a second system on the assumption that
+  the right people can see it.
+
+```bash
+# take the week's file out, to hand to a verified destination (personal data; outside the repo)
+python -m tgtc_core report-export --report-id weekly-2026-09-18 --out C:/TGTC/private/leads.csv
+# record where it was published and exactly who was granted access
+python -m tgtc_core report-detail-link --report-id weekly-2026-09-18 \
+  --url 'https://drive.google.com/file/d/...' --viewers 'brett@...,roman@...'
+```
+
+Once recorded, the Friday message links that file and names the row count. Until then it
+says the detail is **pending**, which is the honest state: the file exists and
+reconciles, but nobody has verified who may read it. `record_publication` refuses an
+empty reader list, so "anyone with the link" cannot be recorded as a destination.
 
 ## Delivery (confirmed 2026-09-23)
 
@@ -351,3 +417,22 @@ used by nothing:
 
 It is therefore safe to revoke in Slack. The only thing that stops working is a manual
 `run_weekly_report.py --slack` from a laptop, which nothing depends on.
+
+
+## Why the detail is not on Google Drive yet
+
+The connected Drive account is **lgarcia-c@wisq.com** -- a different organisation from
+TGTC, holding that company's RevOps spreadsheets. It contains no TGTC folder, nothing
+shared that relates to this pipeline, and no record of Brett's or Roman's addresses;
+searches for `TGTC`, `Challenger`, `lead` and `gtm-engineering` return nothing, and there
+are no folders shared with the account.
+
+So neither half of what the instruction requires can be established: not the destination
+("a private, authenticated destination already available to the team") and not the reader
+list ("check the real recipients before granting access"). Uploading TGTC prospects'
+personal data into another company's Workspace, shared with addresses nobody has
+verified, is exactly the mistake the instruction exists to prevent.
+
+The file is therefore generated, reconciled and stored every week, the summary says the
+detail is pending, and publishing it is two commands once somebody supplies a folder the
+team already uses and the addresses that may read it.
