@@ -319,9 +319,17 @@ def test_the_command_can_render_the_message_without_sending_it(conn, pg_url, cap
     monkeypatch.setenv("SLACK_WEEKLY_REPORT_WEBHOOK_URL", "https://hooks.invalid/whatever")
     assert main(_argv(pg_url, "--send", "slack", "--slack-channel", "#gtm-engineering",
                       "--destination-basis", "webhook-declared", "--dry-run-send")) == 0
-    summary = json.loads(capsys.readouterr().out)
+    out = capsys.readouterr().out
+    preview, summary = out.split("
+", 1)
+    # The whole message on one line, so it survives out-of-order container logs.
+    message = json.loads(preview[len("SLACK_PREVIEW "):])
+    assert preview.startswith("SLACK_PREVIEW ") and "
+" not in preview
+    assert message["blocks"] and message["text"].startswith("TGTC weekly pipeline")
+    summary = json.loads(summary)
     assert summary["delivery"]["reason"] == "dry_run" and summary["delivery"]["sent"] is False
-    assert summary["delivery"]["blocks"] >= 10
+    assert summary["delivery"]["blocks"] == len(message["blocks"]) >= 10
     assert summary["delivery"]["destination_basis"] == "webhook_declared"
     assert store.delivery_record(conn, "weekly-2026-09-11", "#gtm-engineering", store.FINAL) is None
 
