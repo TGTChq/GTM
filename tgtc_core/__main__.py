@@ -443,7 +443,8 @@ def _weekly_report_send(conn, args, report, window, now):
     report follows as soon as the data closes.
     """
     from .reporting import slack, store as report_store
-    from .reporting.schedule import ACTION_FINAL, ACTION_NOTICE, ACTION_SKIP, decide, delivery_state, readiness
+    from .reporting.schedule import (ACTION_FINAL, ACTION_NOTICE, ACTION_SKIP, BEFORE_DUE, NOT_DELIVERY_DAY,
+                                     decide, delivery_state, readiness)
 
     channel = (args.slack_channel or "").strip()
     if not channel:
@@ -459,18 +460,33 @@ def _weekly_report_send(conn, args, report, window, now):
     if report["window"]["kind"] != "weekly":
         return {"sent": False, "error": "refused to send: only a closed week is published"}
 
+    # The clock first: a tick that could not send anything needs no credential, no
+    # readiness query and no noise. A missing destination is then a failure exactly when
+    # it matters -- on Friday, at the moment the report was due.
+    state = delivery_state(now, weekday=WEEKDAYS.index(args.delivery_weekday), due_hour=args.due_hour,
+                           retry_until_hour=args.retry_until_hour, tz_name=args.timezone)
+    schedule = (f"{args.delivery_weekday} {args.due_hour:02d}:00 {args.timezone}, "
+                f"retry until {args.retry_until_hour:02d}:00")
+    if state in (NOT_DELIVERY_DAY, BEFORE_DUE):
+        return {"sent": False, "reason": state, "state": state, "channel": channel, "schedule": schedule}
+
+    ready = readiness(conn, window, report)
+    action, reason = decide(state, ready.ready)
+    common = {"channel": channel, "state": state, "reason": reason, "schedule": schedule,
+              "readiness": ready.to_dict()}
+    if action == ACTION_SKIP:
+        return {"sent": False, **common}
+
     token = os.environ.get(args.slack_token_env, "").strip()
     webhook = os.environ.get(args.webhook_env, "").strip()
-    basis = None
-    sender = None
     if token:
         try:
             found = slack.resolve_channel(token, channel)
         except slack.SlackError as exc:
-            return {"sent": False, "error": f"refused to send: {exc}"}
+            return {"sent": False, "error": f"refused to send: {exc}", **common}
         if not found.get("is_member"):
             return {"sent": False, "error": (f"refused to send: the app is not a member of {channel} "
-                                             f"({found['id']}); invite it first")}
+                                             f"({found['id']}); invite it first"), **common}
         basis = f"slack_api:{found['id']}"
         sender = slack.api_sender(token, found["id"])
     elif webhook and args.destination_basis == "webhook-declared":
@@ -479,21 +495,11 @@ def _weekly_report_send(conn, args, report, window, now):
         basis = "webhook_declared"
         sender = slack.webhook_sender(webhook)
     else:
-        return {"sent": False, "error": (
+        return {"sent": False, **common, "error": (
             f"refused to send: no verified destination. Set {args.slack_token_env} (the channel is then resolved "
             f"by name and confirmed), or pass --destination-basis webhook-declared to assert that "
             f"{args.webhook_env} posts to {channel}")}
-
-    state = delivery_state(now, weekday=WEEKDAYS.index(args.delivery_weekday), due_hour=args.due_hour,
-                           retry_until_hour=args.retry_until_hour, tz_name=args.timezone)
-    ready = readiness(conn, window, report)
-    common = {"channel": channel, "destination_basis": basis, "state": state, "readiness": ready.to_dict(),
-              "schedule": f"{args.delivery_weekday} {args.due_hour:02d}:00 {args.timezone}, "
-                          f"retry until {args.retry_until_hour:02d}:00"}
-    action, reason = decide(state, ready.ready)
-    common["reason"] = reason
-    if action == ACTION_SKIP:
-        return {"sent": False, **common}
+    common["destination_basis"] = basis
     try:
         if action == ACTION_FINAL:
             message = {"blocks": slack.blocks_for(report, detail_url=args.detail_url or None),

@@ -300,11 +300,16 @@ def test_the_command_refuses_to_send_with_no_verifiable_destination(conn, pg_url
 
     monkeypatch.delenv("SLACK_BOT_TOKEN", raising=False)
     monkeypatch.setenv("SLACK_WEEKLY_REPORT_WEBHOOK_URL", "https://hooks.invalid/whatever")
-    # A webhook alone proves nothing about where it posts, so the default refuses.
-    assert main(_argv(pg_url, "--send", "slack", "--slack-channel", "#gtm-engineering")) == 5
+    # A webhook alone proves nothing about where it posts, so the default refuses -- and
+    # it refuses AT THE DELIVERY MOMENT (Friday 06:05 Pacific), where it is a real
+    # failure rather than daily noise.
+    friday = datetime(2026, 9, 25, 13, 5, tzinfo=UTC)
+    argv = ["weekly-report", "--database-url", pg_url, "--week", "last", "--now", friday.isoformat(),
+            "--print-format", "none", "--no-compare", "--send", "slack", "--slack-channel", "#gtm-engineering"]
+    assert main(argv) == 5
     err = capsys.readouterr().err
-    assert "no verified destination" in err and "hooks.invalid" not in err
-    assert store.delivery_record(conn, "weekly-2026-09-11", "#gtm-engineering", store.FINAL) is None
+    assert "no verified destination" in err and "hooks.invalid" not in err      # never the URL
+    assert store.delivery_record(conn, "weekly-2026-09-18", "#gtm-engineering", store.FINAL) is None
 
 
 def test_the_command_can_render_the_message_without_sending_it(conn, pg_url, capsys, monkeypatch):
@@ -331,9 +336,9 @@ def test_the_command_does_not_send_before_the_delivery_moment(conn, pg_url, caps
             "--destination-basis", "webhook-declared"]
     assert main(argv) == 0
     summary = json.loads(capsys.readouterr().out)
+    # A tick that could not send anything asks nothing of Slack and nothing of the
+    # database: no credential is needed, and no readiness query is run.
     assert summary["delivery"] == {"sent": False, "channel": "#gtm-engineering",
-                                   "destination_basis": "webhook_declared", "state": "not_delivery_day",
-                                   "reason": "not_delivery_day",
-                                   "readiness": summary["delivery"]["readiness"],
+                                   "state": "not_delivery_day", "reason": "not_delivery_day",
                                    "schedule": "friday 06:00 America/Los_Angeles, retry until 07:00"}
     assert store.delivery_record(conn, "weekly-2026-09-11", "#gtm-engineering", store.FINAL) is None
