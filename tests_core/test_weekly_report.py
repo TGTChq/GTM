@@ -309,6 +309,25 @@ def test_an_approval_with_no_instantly_answer_is_reported_as_carried_out(conn):
     assert any("no Instantly answer yet" in flag for flag in report["flags"])
 
 
+def test_a_blocked_approval_is_held_with_a_reason_not_counted_as_waiting(conn):
+    """The first production rehearsal counted 594 approvals as "waiting" when 446 of
+    them had already been blocked by the compliance gate. A decision is not a wait."""
+    inside = WEEK_START + timedelta(days=1)
+    seed_lead(conn, received_at=inside, campaign_key="product", campaign_id="camp-pr",
+              instantly_kind=None, airtable=False, approved_at=inside)                    # genuinely waiting
+    seed_lead(conn, received_at=inside, campaign_key="finance", campaign_id="camp-fi",
+              instantly_kind=None, airtable=False, approved_at=inside, outreach_eligible=False)
+    third = seed_lead(conn, received_at=inside, campaign_key="ecommerce", campaign_id="camp-ec",
+                      instantly_kind=None, airtable=False, approved_at=inside)
+    conn.execute("INSERT INTO delivery_outbox (approval_id, channel, idempotency_key, payload_json, state, "
+                 "blocked_reason) VALUES (%s, 'instantly', 'blocked-1', '{}'::jsonb, 'blocked', "
+                 "'compliance:unknown_jurisdiction:absent')", (third["approval_id"],))
+    conn.commit()
+    b = report_for(conn)["backlog"]
+    assert b["approved_this_week_not_yet_delivered"] == 1
+    assert b["approved_this_week_held_with_a_named_reason"] == 2
+
+
 def test_a_day_below_the_minimum_is_named_in_the_flags(conn):
     seed_lead(conn, received_at=WEEK_START + timedelta(days=1), campaign_key="product", campaign_id="camp-pr")
     report = pipeline.build(conn, now=FRIDAY_MORNING, compare_previous=False, target_per_run=1000)

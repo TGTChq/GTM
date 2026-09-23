@@ -4,7 +4,7 @@ half-open ``[start, end)``.
 That definition is not invented here. It is the one recorded in
 ``WEEKLY_REPORTING.md`` ("Friday 00:00 to the following Friday 00:00, America/Los
 Angeles, end exclusive") and re-stated independently in the 2026-09-09 recovery note
-that produced the workbooks Brett read. ``tests_core/test_weekly_report_window.py``
+that produced the workbooks Brett read. ``tests_core/test_weekly_report.py``
 asserts this module and the legacy ``weekly_report.timewindow`` still agree instant
 for instant, so the two can never drift apart silently.
 
@@ -104,8 +104,11 @@ class ReportWindow:
 
     @property
     def label(self) -> str:
-        last_day = (self.end_local - timedelta(days=1)).date()
-        return f"{self.start_local.strftime('%b %d')} - {last_day.strftime('%b %d, %Y')}"
+        # A closed week ends at the boundary, so its last day is the day before it. A
+        # week to date ends at the cutoff, and saying otherwise loses a day of data.
+        last_day = (self.end_local if self.kind == "partial" else self.end_local - timedelta(days=1)).date()
+        suffix = " (to date)" if self.kind == "partial" else ""
+        return f"{self.start_local.strftime('%b %d')} - {last_day.strftime('%b %d, %Y')}{suffix}"
 
     @property
     def report_id(self) -> str:

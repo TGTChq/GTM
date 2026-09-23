@@ -364,12 +364,22 @@ def backlog_section(cur, w: ReportWindow) -> Dict[str, Any]:
         SELECT count(DISTINCT a.id) {_DELIVERY_JOIN}
         WHERE {GENUINE_CREATION_PREDICATE} AND r.received_at >= %(t0)s AND r.received_at < %(t1)s
           AND a.approved_at >= %(t0)s""", p)
-    carry_out = _one(cur, """
+    # An approval is "waiting" only while nothing has decided it. One the compliance or
+    # quality gate BLOCKED with a named reason is decided -- it is reported beside this
+    # figure, never inside it, so the waiting count stays a number worth acting on.
+    answered = ("EXISTS (SELECT 1 FROM delivery_outbox o JOIN delivery_receipts r ON r.outbox_id = o.id "
+                "        WHERE o.approval_id = a.id AND r.channel = 'instantly' "
+                "          AND r.receipt_kind IN ('created', 'existing', 'reconciled', 'rejected'))")
+    blocked = ("EXISTS (SELECT 1 FROM delivery_outbox o WHERE o.approval_id = a.id "
+               "        AND o.channel = 'instantly' AND o.state = 'blocked')")
+    carry_out = _one(cur, f"""
         SELECT count(*) FROM approvals a
         WHERE a.state <> 'revoked' AND a.approved_at >= %(t0)s AND a.approved_at < %(t1)s
-          AND NOT EXISTS (SELECT 1 FROM delivery_outbox o JOIN delivery_receipts r ON r.outbox_id = o.id
-                          WHERE o.approval_id = a.id AND r.channel = 'instantly'
-                            AND r.receipt_kind IN ('created', 'existing', 'reconciled'))""", p)
+          AND a.outreach_eligible IS TRUE AND NOT {answered} AND NOT {blocked}""", p)
+    held = _one(cur, f"""
+        SELECT count(*) FROM approvals a
+        WHERE a.state <> 'revoked' AND a.approved_at >= %(t0)s AND a.approved_at < %(t1)s
+          AND NOT {answered} AND ({blocked} OR a.outreach_eligible IS DISTINCT FROM TRUE)""", p)
     pending = _breakdown(cur, """
         SELECT channel || ':' || state AS k, count(*) AS n FROM delivery_outbox
         WHERE state IN ('pending', 'claimed', 'in_flight', 'failed') GROUP BY 1 ORDER BY 2 DESC""", {})
@@ -377,9 +387,13 @@ def backlog_section(cur, w: ReportWindow) -> Dict[str, Any]:
         "created_from_this_weeks_approvals": _int(from_this_week),
         "created_from_earlier_approvals_backlog": _int(carry_in),
         "approved_this_week_not_yet_delivered": _int(carry_out),
+        "approved_this_week_held_with_a_named_reason": _int(held),
         "delivery_queue_at_cutoff": pending,
         "definitions": {
             "created_from_earlier_approvals_backlog": "leads created this week from approvals made before the window opened",
+            "approved_this_week_not_yet_delivered": ("eligible approvals nothing has decided yet -- a compliance or "
+                                                     "quality block is a decision and is counted separately"),
+            "approved_this_week_held_with_a_named_reason": "approved capacity a gate stopped; never waiting, never sendable",
             "delivery_queue_at_cutoff": "a point-in-time queue depth at the data cutoff, not a count of the window",
         },
     }

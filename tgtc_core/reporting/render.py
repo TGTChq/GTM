@@ -94,6 +94,7 @@ def render_text(report: Dict[str, Any]) -> str:
         f"  Delivery blocked                            : {_reasons(d['delivery_blocked_by_reason'], 5)}",
         f"  Delivery failed                             : {_reasons(d['delivery_failed_by_channel'], 3)}",
         f"  Approved this week, no Instantly answer yet : {_n(b['approved_this_week_not_yet_delivered'])}",
+        f"  Approved this week, held with a named reason: {_n(b['approved_this_week_held_with_a_named_reason'])}",
     ]
 
     out += _rule("BY CAMPAIGN (all nine)")
