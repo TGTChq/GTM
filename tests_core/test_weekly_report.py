@@ -283,11 +283,25 @@ def test_a_day_with_no_run_is_flagged_as_missing_not_as_zero_production(conn):
     report = report_for(conn)
     assert report["runs"]["run_count"] == 1 and report["runs"]["completed_runs"] == 1
     missing = report["runs"]["local_days_without_a_run"]
-    # The run started 03:00 Pacific on Saturday 2026-09-12; the other six days had none.
-    assert "2026-09-12" not in missing and "2026-09-11" in missing
-    assert len(missing) == 6
+    # The run started 03:00 Pacific on Saturday 2026-09-12. 09-11 is before this
+    # database holds anything at all, so it is UNAVAILABLE rather than missing -- the
+    # five days after the run are the ones that genuinely had none.
+    assert "2026-09-12" not in missing and "2026-09-11" not in missing
+    assert missing == ["2026-09-13", "2026-09-14", "2026-09-15", "2026-09-16", "2026-09-17"]
+    assert report["coverage"]["local_days_unavailable"] == ["2026-09-11"]
+    assert report["daily"][0] == {"date": "2026-09-11", "weekday": "Fri", "unavailable": True,
+                                  "instantly_created_unique_people": None, "contacts_approved": None,
+                                  "new_jobs": None, "apollo_credits": None, "fantastic_records": None}
+    assert any("reported as unavailable, not as zero production" in note for note in report["notes"])
     assert any("missing run, not a zero-production day" in flag for flag in report["flags"])
-    assert report["status"] == "attention"
+    # A missing run inside the covered days is an INTEGRITY problem -- it should fail the
+    # scheduled job. A day below the minimum is a business alert: the readers must see it,
+    # but it is not a reason to page anyone at 06:00.
+    assert all("missing run" in item for item in report["integrity_alerts"])
+    assert len(report["integrity_alerts"]) == 5
+    below = [item for item in report["alerts"] if "below the 1000 minimum" in item]
+    assert below and below[0] not in report["integrity_alerts"]
+    assert report["status"] == "integrity"
 
 
 def test_backlog_creations_are_separated_from_this_weeks_own_production(conn):
@@ -444,28 +458,79 @@ def test_the_lead_export_refuses_to_be_written_inside_the_repository(conn):
         export.write_csv(Path(export.REPO_ROOT) / "leads.csv", [])
 
 
-def test_a_week_is_delivered_at_most_once_however_often_the_job_fires(conn):
+MESSAGE = {"blocks": [{"type": "section"}], "text": "TGTC weekly pipeline"}
+
+
+def test_a_week_is_delivered_at_most_once_per_channel_however_often_the_job_fires(conn):
+    """The retry fires every twenty minutes between 06:00 and 07:00 Pacific. That is
+    only safe because a second attempt after a successful one sends nothing."""
     seed_lead(conn, received_at=WEEK_START + timedelta(days=1), campaign_key="product", campaign_id="camp-pr")
     store.ensure_schema(conn)
     report = report_for(conn)
     store.save(conn, report)
     sent = []
 
-    def sender(target, body):
-        sent.append((target, body))
-        return {"http_status": 200}
+    def sender(channel, message):
+        sent.append((channel, message))
+        return {"transport": "test", "channel": channel}
 
-    first = store.deliver(conn, report, sender=sender, target="#gtm-reports", body="x")
-    second = store.deliver(conn, report, sender=sender, target="#gtm-reports", body="x")
-    assert first["sent"] is True and second["sent"] is False
-    assert second["reason"] == "already_delivered"
+    first = store.deliver_once(conn, report, sender=sender, channel="#gtm-engineering", message=MESSAGE)
+    for _ in range(3):          # the 06:20, 06:40 and 07:00 retries
+        again = store.deliver_once(conn, report, sender=sender, channel="#gtm-engineering", message=MESSAGE)
+    assert first["sent"] is True and again["sent"] is False
+    assert again["reason"] == "already_delivered"
     assert len(sent) == 1
     # Re-measuring the same week never erases the fact that it was sent.
     store.save(conn, report_for(conn))
+    assert store.delivery_record(conn, report["window"]["report_id"], "#gtm-engineering", store.FINAL) is not None
     assert store.delivered(conn, report["window"]["report_id"]) is not None
     # An explicit resend is possible, and is never automatic.
-    assert store.deliver(conn, report, sender=sender, target="#gtm-reports", body="x", resend=True)["sent"] is True
+    assert store.deliver_once(conn, report, sender=sender, channel="#gtm-engineering", message=MESSAGE,
+                              resend=True)["sent"] is True
     assert len(sent) == 2
+
+
+def test_the_same_week_may_still_reach_a_different_channel(conn):
+    """Idempotency is per week AND per destination: a channel that never received the
+    report has not received it."""
+    store.ensure_schema(conn)
+    report = report_for(conn)
+    store.save(conn, report)
+    sender = lambda channel, message: {"channel": channel}          # noqa: E731
+    assert store.deliver_once(conn, report, sender=sender, channel="#gtm-engineering", message=MESSAGE)["sent"]
+    assert store.deliver_once(conn, report, sender=sender, channel="#another", message=MESSAGE)["sent"]
+    assert not store.deliver_once(conn, report, sender=sender, channel="#gtm-engineering", message=MESSAGE)["sent"]
+
+
+def test_a_status_notice_never_stands_in_for_the_final_report(conn):
+    """The 07:00 notice says the data has not closed. When it closes, the real report
+    still goes out -- and the notice itself is not posted twice."""
+    store.ensure_schema(conn)
+    report = report_for(conn)
+    store.save(conn, report)
+    sent = []
+    sender = lambda channel, message: sent.append((channel, message["text"])) or {"channel": channel}  # noqa: E731
+
+    notice = store.deliver_once(conn, report, sender=sender, channel="#gtm-engineering",
+                                message={"blocks": [], "text": "delayed"}, kind=store.STATUS_NOTICE)
+    repeat = store.deliver_once(conn, report, sender=sender, channel="#gtm-engineering",
+                                message={"blocks": [], "text": "delayed"}, kind=store.STATUS_NOTICE)
+    final = store.deliver_once(conn, report, sender=sender, channel="#gtm-engineering", message=MESSAGE)
+    assert [notice["sent"], repeat["sent"], final["sent"]] == [True, False, True]
+    assert [text for _, text in sent] == ["delayed", "TGTC weekly pipeline"]
+    assert store.delivered(conn, report["window"]["report_id"]) is not None       # only the FINAL marks the week
+
+
+def test_the_destination_basis_is_recorded_on_every_delivery(conn):
+    """A webhook's target cannot be introspected, so how the destination was
+    established is part of the receipt rather than an assumption."""
+    store.ensure_schema(conn)
+    report = report_for(conn)
+    store.save(conn, report)
+    store.deliver_once(conn, report, sender=lambda c, m: {"ok": True}, channel="#gtm-engineering",
+                       message=MESSAGE, destination_basis="slack_api:C0123456789")
+    row = store.delivery_record(conn, report["window"]["report_id"], "#gtm-engineering", store.FINAL)
+    assert row["destination_basis"] == "slack_api:C0123456789"
 
 
 def test_re_measuring_a_week_to_date_moves_its_stored_end(conn):
@@ -486,14 +551,14 @@ def test_a_partial_week_is_never_delivered(conn):
     report = pipeline.build(conn, now=datetime(2026, 9, 23, 5, 30, tzinfo=UTC), kind="partial", compare_previous=False)
     store.save(conn, report)
     with pytest.raises(store.DeliveryRefused, match="closed week"):
-        store.deliver(conn, report, sender=lambda t, b: {}, target="#gtm-reports", body="x")
+        store.deliver_once(conn, report, sender=lambda c, m: {}, channel="#gtm-engineering", message=MESSAGE)
 
 
 def test_a_report_that_was_never_stored_is_not_sent(conn):
     store.ensure_schema(conn)
     report = report_for(conn)
     with pytest.raises(store.DeliveryRefused, match="saved before it is sent"):
-        store.deliver(conn, report, sender=lambda t, b: {}, target="#gtm-reports", body="x")
+        store.deliver_once(conn, report, sender=lambda c, m: {}, channel="#gtm-engineering", message=MESSAGE)
 
 
 def test_a_failed_send_is_not_recorded_as_delivered(conn):
@@ -501,13 +566,18 @@ def test_a_failed_send_is_not_recorded_as_delivered(conn):
     report = report_for(conn)
     store.save(conn, report)
 
-    def refuse(target, body):
+    def refuse(channel, message):
         raise RuntimeError("HTTP 500")
 
     with pytest.raises(RuntimeError):
-        store.deliver(conn, report, sender=refuse, target="#gtm-reports", body="x")
+        store.deliver_once(conn, report, sender=refuse, channel="#gtm-engineering", message=MESSAGE)
     assert store.delivered(conn, report["window"]["report_id"]) is None
+    assert store.delivery_record(conn, report["window"]["report_id"], "#gtm-engineering", store.FINAL) is None
     assert store.get(conn, report["window"]["report_id"])["attempts"] == 1
+    # The next attempt therefore really does send: a duplicate is recoverable, a
+    # silently skipped report is not.
+    assert store.deliver_once(conn, report, sender=lambda c, m: {"ok": True}, channel="#gtm-engineering",
+                              message=MESSAGE)["sent"] is True
 
 
 def test_generating_a_report_writes_nothing_but_its_own_row(conn):
@@ -587,6 +657,8 @@ def test_the_command_exits_non_zero_on_an_alert_but_never_on_a_note(conn, pg_url
     assert any("below the 1000 minimum" in alert for alert in summary["alerts"])
     assert any("unit price is not verified" in note for note in summary["notes"])
     assert main(argv + ["--fail-on-alerts"]) == 4
+    assert main(argv + ["--fail-on", "integrity"]) == 4       # the missing runs are integrity
+    assert main(argv + ["--fail-on", "never"]) == 0           # a report always still prints
 
     # The unverified price is graded a NOTE, so it can never by itself fail a run.
     graded = graded_flags(report_for(conn))

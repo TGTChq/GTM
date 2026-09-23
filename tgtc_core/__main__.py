@@ -423,6 +423,98 @@ EXIT_REPORT_ATTENTION = 4
 EXIT_REPORT_NOT_SENT = 5
 
 
+def _weekly_report_destination_basis(args) -> str:
+    """What a real send WOULD use, so a rehearsal states it without establishing it."""
+    if os.environ.get(args.slack_token_env, "").strip():
+        return "slack_api (channel id resolved by name at send time)"
+    if args.destination_basis == "webhook-declared":
+        return "webhook_declared"
+    return "none: no verified destination"
+
+
+def _weekly_report_send(conn, args, report, window, now):
+    """Decide whether this tick may post, and post at most once if it may.
+
+    The rule, in order: only a closed week is ever published; the clock is read in the
+    REPORT's timezone so 06:00 local stays 06:00 across a daylight-saving change; the
+    data must have closed; and between 06:00 and 07:00 a tick that finds the week still
+    closing simply waits for the next one. After 07:00 an unclosed week gets a labelled
+    status notice -- never partial numbers dressed as the final report -- and the real
+    report follows as soon as the data closes.
+    """
+    from .reporting import slack, store as report_store
+    from .reporting.schedule import ACTION_FINAL, ACTION_NOTICE, ACTION_SKIP, decide, delivery_state, readiness
+
+    channel = (args.slack_channel or "").strip()
+    if not channel:
+        return {"sent": False, "error": "refused to send: --slack-channel names the confirmed destination"}
+    if args.dry_run_send:
+        # Rendering is not sending: a rehearsal may look at any week, including the one
+        # in progress, and touches neither Slack nor the delivery record.
+        message = {"blocks": slack.blocks_for(report, detail_url=args.detail_url or None),
+                   "text": slack.text_for(report)}
+        return {"sent": False, "reason": "dry_run", "channel": channel, "blocks": len(message["blocks"]),
+                "destination_basis": _weekly_report_destination_basis(args),
+                "preview": message["text"], "message": message}
+    if report["window"]["kind"] != "weekly":
+        return {"sent": False, "error": "refused to send: only a closed week is published"}
+
+    token = os.environ.get(args.slack_token_env, "").strip()
+    webhook = os.environ.get(args.webhook_env, "").strip()
+    basis = None
+    sender = None
+    if token:
+        try:
+            found = slack.resolve_channel(token, channel)
+        except slack.SlackError as exc:
+            return {"sent": False, "error": f"refused to send: {exc}"}
+        if not found.get("is_member"):
+            return {"sent": False, "error": (f"refused to send: the app is not a member of {channel} "
+                                             f"({found['id']}); invite it first")}
+        basis = f"slack_api:{found['id']}"
+        sender = slack.api_sender(token, found["id"])
+    elif webhook and args.destination_basis == "webhook-declared":
+        # An incoming webhook cannot be introspected, so the operator must state which
+        # channel it posts to and the receipt records that it was DECLARED, not verified.
+        basis = "webhook_declared"
+        sender = slack.webhook_sender(webhook)
+    else:
+        return {"sent": False, "error": (
+            f"refused to send: no verified destination. Set {args.slack_token_env} (the channel is then resolved "
+            f"by name and confirmed), or pass --destination-basis webhook-declared to assert that "
+            f"{args.webhook_env} posts to {channel}")}
+
+    state = delivery_state(now, weekday=WEEKDAYS.index(args.delivery_weekday), due_hour=args.due_hour,
+                           retry_until_hour=args.retry_until_hour, tz_name=args.timezone)
+    ready = readiness(conn, window, report)
+    common = {"channel": channel, "destination_basis": basis, "state": state, "readiness": ready.to_dict(),
+              "schedule": f"{args.delivery_weekday} {args.due_hour:02d}:00 {args.timezone}, "
+                          f"retry until {args.retry_until_hour:02d}:00"}
+    action, reason = decide(state, ready.ready)
+    common["reason"] = reason
+    if action == ACTION_SKIP:
+        return {"sent": False, **common}
+    try:
+        if action == ACTION_FINAL:
+            message = {"blocks": slack.blocks_for(report, detail_url=args.detail_url or None),
+                       "text": slack.text_for(report)}
+            out = report_store.deliver_once(conn, report, sender=sender, channel=channel, message=message,
+                                            kind=report_store.FINAL, destination_basis=basis, resend=args.resend)
+            return {**out, **common}
+        assert action == ACTION_NOTICE
+        notice = {"blocks": slack.status_notice_blocks(report, ready.to_dict(),
+                                                       retry_until=f"{args.retry_until_hour:02d}:00 {args.timezone}"),
+                  "text": f"TGTC weekly report for {report['window']['window_label']} is delayed: the week's data "
+                          "has not closed yet"}
+        out = report_store.deliver_once(conn, report, sender=sender, channel=channel, message=notice,
+                                        kind=report_store.STATUS_NOTICE, destination_basis=basis)
+        return {**out, **common}
+    except (report_store.DeliveryRefused, slack.SlackError) as exc:
+        return {"sent": False, "error": str(exc), **common}
+    except Exception as exc:  # noqa: BLE001 - a transport failure must be visible, never swallowed
+        return {"sent": False, "error": f"delivery failed: {type(exc).__name__}: {exc}", **common}
+
+
 def cmd_weekly_report(args) -> int:
     """Measure a reporting week from the database, store it, and deliver it at most once.
 
@@ -476,12 +568,9 @@ def cmd_weekly_report(args) -> int:
         compare_previous=not args.no_compare, unit_prices=prices, target_per_run=args.target)
     report = result["report"]
 
+    window = result["window"]
     if args.lead_export:
         from .reporting import export as lead_export
-        from .reporting.window import explicit_window, partial_window, weekly_window
-        window = (explicit_window(week_start, tz_name=args.timezone, now=now) if week_start
-                  else partial_window(now, tz_name=args.timezone) if kind == "partial"
-                  else weekly_window(now, weeks_back=args.weeks_back, tz_name=args.timezone))
         rows = lead_export.lead_rows(conn, window)
         path = lead_export.write_csv(args.lead_export, rows)
         result["lead_export"] = {"path": str(path), "rows": len(rows)}
@@ -494,22 +583,12 @@ def cmd_weekly_report(args) -> int:
 
     delivery = {"sent": False, "reason": "not requested"}
     if args.send != "none":
-        if not args.confirm_destination:
-            print("weekly-report refused to send: pass --confirm-destination once the recipient and channel "
-                  "are confirmed", file=sys.stderr)
+        delivery = _weekly_report_send(conn, args, report, window, now)
+        if delivery.get("error"):
+            print(f"weekly-report: {delivery['error']}", file=sys.stderr)
+            print(json.dumps({"delivery": delivery}, indent=2, default=str))
             return EXIT_REPORT_NOT_SENT
-        webhook = os.environ.get(args.webhook_env, "").strip()
-        if not webhook:
-            print(f"weekly-report refused to send: {args.webhook_env} is not set on this service", file=sys.stderr)
-            return EXIT_REPORT_NOT_SENT
-        from .reporting import render
-        try:
-            delivery = report_store.deliver(
-                conn, report, sender=pipeline.slack_sender(webhook), target=args.confirm_destination,
-                body=render.render_slack(report), resend=args.resend)
-        except report_store.DeliveryRefused as exc:
-            print(f"weekly-report refused to send: {exc}", file=sys.stderr)
-            return EXIT_REPORT_NOT_SENT
+
     summary = {
         "report_id": result["report_id"],
         "window": report["window"]["window_label"],
@@ -519,6 +598,7 @@ def cmd_weekly_report(args) -> int:
         "airtable_records_created": report["delivery"]["airtable_records_created"],
         "reconciliation_holds": report["reconciliation"]["identity_holds"],
         "status": report["status"],
+        "integrity_alerts": report["integrity_alerts"],
         "alerts": report["alerts"],
         "notes": report["notes"],
         "stored": bool(result.get("stored")),
@@ -527,7 +607,8 @@ def cmd_weekly_report(args) -> int:
         "delivery": delivery,
     }
     print(json.dumps(summary, indent=2, default=str))
-    if args.fail_on_alerts and report["alerts"]:
+    failing = {"integrity": report["integrity_alerts"], "alerts": report["alerts"], "never": []}[args.fail_on]
+    if failing:
         return EXIT_REPORT_ATTENTION
     return 0
 
@@ -617,12 +698,25 @@ def main(argv=None) -> int:
                    help="only produce the report at or after this hour in --timezone on --if-due-weekday")
     p.add_argument("--if-due-minute", type=int, default=0)
     p.add_argument("--send", choices=("none", "slack"), default="none")
+    p.add_argument("--slack-channel", default="", help="the confirmed destination, e.g. '#gtm-engineering'")
+    p.add_argument("--slack-token-env", default="SLACK_BOT_TOKEN",
+                   help="env var holding a bot token; with it the channel is resolved by name and confirmed")
     p.add_argument("--webhook-env", default="SLACK_WEEKLY_REPORT_WEBHOOK_URL")
-    p.add_argument("--confirm-destination", default="",
-                   help="the confirmed destination name; required before anything is sent")
+    p.add_argument("--destination-basis", choices=("verify", "webhook-declared"), default="verify",
+                   help="verify: resolve the channel id from the workspace. webhook-declared: the operator "
+                        "asserts which channel the opaque webhook posts to")
+    p.add_argument("--detail-url", default="", help="link to the secure lead-level detail, when one is published")
+    p.add_argument("--delivery-weekday", choices=WEEKDAYS, default="friday")
+    p.add_argument("--due-hour", type=int, default=6, help="delivery moment in --timezone")
+    p.add_argument("--retry-until-hour", type=int, default=7,
+                   help="retry silently until this local hour; after it, post a labelled status notice instead")
+    p.add_argument("--dry-run-send", action="store_true", help="render the Slack message and send nothing")
     p.add_argument("--resend", action="store_true", help="send again a week already delivered (never automatic)")
-    p.add_argument("--fail-on-alerts", action="store_true",
-                   help="exit 4 when the report raises an ALERT (a note never fails a scheduled run)")
+    p.add_argument("--fail-on", choices=("integrity", "alerts", "never"), default="never",
+                   help="exit 4 on integrity problems (an unexplained difference, a missing run on a covered "
+                        "day, a Control creation, a refused run), on any alert, or never")
+    p.add_argument("--fail-on-alerts", dest="fail_on", action="store_const", const="alerts",
+                   help="deprecated spelling of --fail-on alerts")
     p.add_argument("--now", default="", help="evaluate as of this instant (rehearsal and tests)")
     p.set_defaults(fn=cmd_weekly_report)
     args = parser.parse_args(argv)

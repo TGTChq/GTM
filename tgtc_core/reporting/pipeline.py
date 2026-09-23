@@ -8,9 +8,9 @@ from __future__ import annotations
 
 import hashlib
 import json
-from datetime import date, datetime, timezone
+from datetime import date, datetime
 from pathlib import Path
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Dict, Optional
 
 import psycopg
 
@@ -18,17 +18,24 @@ from . import metrics, render, store
 from .window import PACIFIC_TZ_NAME, ReportWindow, explicit_window, partial_window, weekly_window
 
 
+def window_for(*, now: datetime, kind: str = "weekly", weeks_back: int = 0,
+               week_start: Optional[date] = None, tz_name: str = PACIFIC_TZ_NAME) -> ReportWindow:
+    """The one place a window is chosen, so the report, its readiness check and its
+    lead export can never be measuring three slightly different intervals."""
+    if week_start is not None:
+        return explicit_window(week_start, tz_name=tz_name, now=now)
+    if kind == "partial":
+        return partial_window(now, tz_name=tz_name)
+    return weekly_window(now, weeks_back=weeks_back, tz_name=tz_name)
+
+
 def build(conn: psycopg.Connection, *, now: datetime, kind: str = "weekly", weeks_back: int = 0,
           week_start: Optional[date] = None, tz_name: str = PACIFIC_TZ_NAME,
           compare_previous: bool = True, unit_prices: Optional[Dict[str, float]] = None,
-          target_per_run: int = 1000) -> Dict[str, Any]:
+          target_per_run: int = 1000, window: Optional[ReportWindow] = None) -> Dict[str, Any]:
     """Measure one window and return the report. Reads only; writes nothing."""
-    if week_start is not None:
-        window: ReportWindow = explicit_window(week_start, tz_name=tz_name, now=now)
-    elif kind == "partial":
-        window = partial_window(now, tz_name=tz_name)
-    else:
-        window = weekly_window(now, weeks_back=weeks_back, tz_name=tz_name)
+    if window is None:
+        window = window_for(now=now, kind=kind, weeks_back=weeks_back, week_start=week_start, tz_name=tz_name)
     previous = None
     if compare_previous and window.kind == "weekly":
         earlier = weekly_window(window.end_utc, weeks_back=1, tz_name=tz_name)
@@ -56,27 +63,12 @@ def artifacts(out_dir: Path | str, report: Dict[str, Any]) -> Dict[str, str]:
     return {"json": str(json_path), "text": str(text_path), "text_sha256": payload["text_sha256"]}
 
 
-def slack_sender(webhook_url: str) -> Callable[[str, str], Dict[str, Any]]:
-    """A sender for ``store.deliver``. The URL is a secret: it is never returned,
-    logged or written into a receipt -- only the target NAME the caller passed."""
-
-    def send(target: str, body: str) -> Dict[str, Any]:
-        import requests  # local import: a report that is not sent needs no HTTP stack
-
-        response = requests.post(webhook_url, json={"text": body}, timeout=30)
-        if response.status_code >= 300:
-            raise RuntimeError(f"{target} refused the report: HTTP {response.status_code} {response.text[:200]}")
-        return {"target": target, "http_status": response.status_code,
-                "provider_response": response.text[:200],
-                "sent_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}
-
-    return send
-
-
 def generate_and_store(conn: psycopg.Connection, *, now: datetime, out_dir: Optional[Path] = None,
                        store_report: bool = True, **kwargs) -> Dict[str, Any]:
-    report = build(conn, now=now, **kwargs)
-    result: Dict[str, Any] = {"report": report, "report_id": report["window"]["report_id"]}
+    window = window_for(now=now, kind=kwargs.get("kind", "weekly"), weeks_back=kwargs.get("weeks_back", 0),
+                        week_start=kwargs.get("week_start"), tz_name=kwargs.get("tz_name", PACIFIC_TZ_NAME))
+    report = build(conn, now=now, window=window, **kwargs)
+    result: Dict[str, Any] = {"report": report, "report_id": report["window"]["report_id"], "window": window}
     if store_report:
         result["stored"] = store.save(conn, report)
     if out_dir is not None:

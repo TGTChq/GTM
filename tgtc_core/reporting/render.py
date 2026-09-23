@@ -108,6 +108,10 @@ def render_text(report: Dict[str, Any]) -> str:
 
     out += _rule("DAILY (local days in the report's own timezone)")
     for day in report["daily"]:
+        if day.get("unavailable"):
+            out.append(f"  {day['weekday']} {day['date']}  UNAVAILABLE -- before this database's first record "
+                       "(not a day of zero production)")
+            continue
         out.append(f"  {day['weekday']} {day['date']}  created {day['instantly_created_unique_people']:>6,} | "
                    f"approved {day['contacts_approved']:>6,} | jobs {day['new_jobs']:>7,} | "
                    f"Apollo {_n(day['apollo_credits']):>8} cr | Fantastic {_n(day['fantastic_records']):>8}")

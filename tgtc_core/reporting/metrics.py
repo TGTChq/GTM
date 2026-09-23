@@ -78,7 +78,39 @@ def _breakdown(cur, sql: str, params, key: str = "k", value: str = "n") -> Dict[
 # sections
 # --------------------------------------------------------------------------------
 
-def runs_section(cur, w: ReportWindow) -> Dict[str, Any]:
+def coverage_section(cur, w: ReportWindow) -> Dict[str, Any]:
+    """How much of this window the database can actually speak about.
+
+    A day before the first record exists is UNAVAILABLE. It is not a day of zero
+    production, and reporting it as zero would be a false statement about the business.
+    """
+    # The earliest evidence of ANY kind. A database that holds approvals and receipts
+    # but no postings still covers those days -- coverage is about what can be seen,
+    # not about which table happens to hold it.
+    starts = [x for x in (
+        _one(cur, "SELECT min(first_seen_at) FROM postings"),
+        _one(cur, "SELECT min(created_at) FROM run_log"),
+        _one(cur, "SELECT min(approved_at) FROM approvals"),
+        _one(cur, "SELECT min(received_at) FROM delivery_receipts"),
+    ) if x is not None]
+    coverage_start = min(starts) if starts else None
+    tz = w.start_local.tzinfo
+    unavailable: List[str] = []
+    if coverage_start is not None:
+        first_covered = coverage_start.astimezone(tz).date()
+        unavailable = [d.isoformat() for d in w.local_days() if d < first_covered]
+    else:
+        unavailable = [d.isoformat() for d in w.local_days()]
+    return {
+        "coverage_start_utc": iso_z(coverage_start) if coverage_start else None,
+        "local_days_unavailable": unavailable,
+        "fully_covered": not unavailable,
+        "note": ("a day before the database's first record is reported as unavailable, never as zero production; "
+                 "it cannot be fixed by waiting and does not hold back a report"),
+    }
+
+
+def runs_section(cur, w: ReportWindow, *, unavailable: Optional[List[str]] = None) -> Dict[str, Any]:
     """Which production runs the window contains, and which days had none.
 
     A day with no run is named. It is never reported as a day that produced zero,
@@ -113,7 +145,11 @@ def runs_section(cur, w: ReportWindow) -> Dict[str, Any]:
     all_days = [d.isoformat() for d in w.local_days()]
     # The window's last local day is only partly elapsed on a partial report, and the
     # scheduled run for the report's own day has not happened when the report is built.
-    expected = [d for d in all_days if d < w.data_cutoff.astimezone(tz).date().isoformat()]
+    # A day is EXPECTED to have a run only if it has already elapsed and the database
+    # covers it at all; anything else is unavailable, not missing.
+    blind = set(unavailable or [])
+    expected = [d for d in all_days
+                if d < w.data_cutoff.astimezone(tz).date().isoformat() and d not in blind]
     return {
         "runs": out_runs,
         "run_count": len(out_runs),
@@ -122,6 +158,7 @@ def runs_section(cur, w: ReportWindow) -> Dict[str, Any]:
         "local_days_in_window": all_days,
         "local_days_with_a_run": sorted(days_with_run),
         "local_days_without_a_run": [d for d in expected if d not in days_with_run],
+        "local_days_unavailable": sorted(blind),
     }
 
 
@@ -510,9 +547,11 @@ def _by_day(cur, bounds, scalar_sql: str) -> Dict[str, Any]:
     return {str(r["k"]): r["n"] for r in cur.fetchall()}
 
 
-def daily_section(cur, w: ReportWindow) -> List[Dict[str, Any]]:
+def daily_section(cur, w: ReportWindow, *, unavailable: Optional[List[str]] = None) -> List[Dict[str, Any]]:
     """Day by day in the report's own timezone, so a trend line is not silently drawn
-    on UTC days that straddle two Pacific ones."""
+    on UTC days that straddle two Pacific ones. A day the database does not cover
+    carries nulls, never zeros."""
+    blind = set(unavailable or [])
     bounds = _local_day_bounds(w)
     created = _by_day(cur, bounds, f"""
         SELECT count(DISTINCT lower(o.payload_json->>'email')) {_DELIVERY_JOIN}
@@ -528,15 +567,25 @@ def daily_section(cur, w: ReportWindow) -> List[Dict[str, Any]]:
     fantastic = _by_day(cur, bounds, """
         SELECT COALESCE(sum(COALESCE(ce.confirmed_credits, ce.estimated_credits)), 0) FROM credit_events ce
         WHERE ce.provider = 'fantastic' AND ce.created_at >= days.t0 AND ce.created_at < days.t1""")
-    return [{
-        "date": day.isoformat(),
-        "weekday": day.strftime("%a"),
-        "instantly_created_unique_people": _int(created.get(day.isoformat())),
-        "contacts_approved": _int(approvals.get(day.isoformat())),
-        "new_jobs": _int(jobs.get(day.isoformat())),
-        "apollo_credits": _num(apollo.get(day.isoformat())) or 0.0,
-        "fantastic_records": _num(fantastic.get(day.isoformat())) or 0.0,
-    } for day, _, _ in bounds]
+    out: List[Dict[str, Any]] = []
+    for day, _, _ in bounds:
+        key = day.isoformat()
+        if key in blind:
+            out.append({"date": key, "weekday": day.strftime("%a"), "unavailable": True,
+                        "instantly_created_unique_people": None, "contacts_approved": None,
+                        "new_jobs": None, "apollo_credits": None, "fantastic_records": None})
+            continue
+        out.append({
+            "date": key,
+            "weekday": day.strftime("%a"),
+            "unavailable": False,
+            "instantly_created_unique_people": _int(created.get(key)),
+            "contacts_approved": _int(approvals.get(key)),
+            "new_jobs": _int(jobs.get(key)),
+            "apollo_credits": _num(apollo.get(key)) or 0.0,
+            "fantastic_records": _num(fantastic.get(key)) or 0.0,
+        })
+    return out
 
 
 def cumulative_section(cur, cutoff: datetime) -> Dict[str, Any]:
@@ -660,7 +709,8 @@ def build_report(conn: psycopg.Connection, window: ReportWindow, *,
     """Measure one window. Read-only: this function writes nothing."""
     prices = dict(unit_prices or {})
     with conn.cursor() as cur:
-        runs = runs_section(cur, window)
+        coverage = coverage_section(cur, window)
+        runs = runs_section(cur, window, unavailable=coverage["local_days_unavailable"])
         acquisition = acquisition_section(cur, window)
         jobs = jobs_section(cur, window)
         units = units_section(cur, window)
@@ -669,7 +719,7 @@ def build_report(conn: psycopg.Connection, window: ReportWindow, *,
         backlog = backlog_section(cur, window)
         spend = spend_section(cur, window, delivery, prices)
         campaigns = by_campaign_section(cur, window)
-        daily = daily_section(cur, window)
+        daily = daily_section(cur, window, unavailable=coverage['local_days_unavailable'])
         cumulative = cumulative_section(cur, window.data_cutoff)
         legacy = legacy_airtable_review_section(cur, window.data_cutoff)
         reconciliation = reconciliation_section(cur, window, delivery)
@@ -684,6 +734,7 @@ def build_report(conn: psycopg.Connection, window: ReportWindow, *,
             "sidecar_note": ("the 200-person phone sidecar keeps a separate store and writes to none of these "
                              "tables, so no figure above contains it"),
         },
+        "coverage": coverage,
         "runs": runs,
         "acquisition": acquisition,
         "jobs": jobs,
@@ -701,10 +752,12 @@ def build_report(conn: psycopg.Connection, window: ReportWindow, *,
     if previous is not None:
         report["previous_week"] = _comparison(report, previous)
     graded = graded_flags(report, target_per_run=target_per_run)
-    report["alerts"] = [f["message"] for f in graded if f["level"] == "alert"]
-    report["notes"] = [f["message"] for f in graded if f["level"] != "alert"]
+    report["integrity_alerts"] = [f["message"] for f in graded if f["level"] == "integrity"]
+    report["alerts"] = [f["message"] for f in graded if f["level"] in ("integrity", "alert")]
+    report["notes"] = [f["message"] for f in graded if f["level"] == "note"]
     report["flags"] = report["alerts"] + report["notes"]
-    report["status"] = "attention" if report["alerts"] else "ok"
+    report["status"] = ("integrity" if report["integrity_alerts"]
+                        else "attention" if report["alerts"] else "ok")
     return report
 
 
@@ -737,6 +790,9 @@ def graded_flags(report: Dict[str, Any], *, target_per_run: int = 1000) -> List[
     """
     flags: List[Dict[str, str]] = []
 
+    def integrity(message: str) -> None:
+        flags.append({"level": "integrity", "message": message})
+
     def alert(message: str) -> None:
         flags.append({"level": "alert", "message": message})
 
@@ -745,26 +801,31 @@ def graded_flags(report: Dict[str, Any], *, target_per_run: int = 1000) -> List[
 
     runs = report["runs"]
     for day in runs["local_days_without_a_run"]:
-        alert(f"no production run recorded on {day} -- this is a missing run, not a zero-production day")
+        integrity(f"no production run recorded on {day} -- this is a missing run, not a zero-production day")
     if runs["refused_runs"]:
-        alert(f"{runs['refused_runs']} run(s) were refused (budget policy) inside this window")
+        integrity(f"{runs['refused_runs']} run(s) were refused (budget policy) inside this window")
     recon = report["reconciliation"]
     if not recon["identity_holds"]:
-        alert(f"reconciliation does not close: {recon['unexplained_difference']} Airtable record(s) "
-              "are explained by neither a genuine creation nor a named reason")
+        integrity(f"reconciliation does not close: {recon['unexplained_difference']} Airtable record(s) "
+                  "are explained by neither a genuine creation nor a named reason")
     if recon["airtable_records_without_a_genuine_creation"]:
         alert(f"{recon['airtable_records_without_a_genuine_creation']} Airtable record(s) were written "
               "in this window without a genuine Instantly creation")
     if report["delivery"]["instantly_creations_into_a_control_campaign"]:
-        alert("a lead was created in a CONTROL campaign; Challenger-only routing must be checked")
+        integrity("a lead was created in a CONTROL campaign; Challenger-only routing must be checked")
     if report["backlog"]["approved_this_week_not_yet_delivered"]:
         alert(f"{report['backlog']['approved_this_week_not_yet_delivered']} approval(s) from this window "
               "have no Instantly answer yet")
     if report["window"]["kind"] == "weekly":
         for day in report["daily"]:
-            if 0 < day["instantly_created_unique_people"] < target_per_run:
-                alert(f"{day['date']} produced {day['instantly_created_unique_people']} net-new leads, "
+            created_that_day = day["instantly_created_unique_people"]
+            if created_that_day is not None and 0 < created_that_day < target_per_run:
+                alert(f"{day['date']} produced {created_that_day} net-new leads, "
                       f"below the {target_per_run} minimum")
+    blind = report.get("coverage", {}).get("local_days_unavailable") or []
+    if blind:
+        note(f"no data is available for {', '.join(blind)} (before the database's first record): "
+             "reported as unavailable, not as zero production")
     if report["spend"]["cost_per_final_lead_usd"] is None:
         note("cost per lead in dollars is not reported: at least one provider unit price is not verified")
     if report["window"]["timezone_source"] != "zoneinfo:tzdata":
@@ -773,7 +834,7 @@ def graded_flags(report: Dict[str, Any], *, target_per_run: int = 1000) -> List[
 
 
 def flags_for(report: Dict[str, Any], *, target_per_run: int = 1000) -> List[str]:
-    """Backwards-compatible view: every flag's message, alerts first."""
+    """Every flag's message, most serious first."""
     graded = graded_flags(report, target_per_run=target_per_run)
-    return [f["message"] for f in graded if f["level"] == "alert"] + \
-           [f["message"] for f in graded if f["level"] != "alert"]
+    order = {"integrity": 0, "alert": 1, "note": 2}
+    return [f["message"] for f in sorted(graded, key=lambda f: order.get(f["level"], 9))]

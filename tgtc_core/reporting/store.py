@@ -90,38 +90,72 @@ def mark_delivered(conn: psycopg.Connection, report_id: str, *, target: str, rec
     conn.commit()
 
 
-def deliver(conn: psycopg.Connection, report: Dict[str, Any], *, sender, target: str,
-            body: str, resend: bool = False) -> Dict[str, Any]:
-    """Send this week's report once.
+FINAL = "final"
+STATUS_NOTICE = "status_notice"
 
-    ``sender`` is any callable ``(target, body) -> receipt dict``; the transport lives
-    outside this module so the idempotency rule can be tested without a network.
+
+def delivery_record(conn: psycopg.Connection, report_id: str, channel: str, kind: str) -> Optional[Dict[str, Any]]:
+    """The receipt for this exact message to this exact channel, if it was ever sent."""
+    with conn.cursor() as cur:
+        cur.execute("SELECT * FROM report_deliveries WHERE report_id = %s AND channel = %s AND kind = %s",
+                    (report_id, channel, kind))
+        row = cur.fetchone()
+    conn.rollback()
+    return dict(row) if row else None
+
+
+def deliver_once(conn: psycopg.Connection, report: Dict[str, Any], *, sender, channel: str,
+                 message: Dict[str, Any], kind: str = FINAL, destination_basis: str = "unverified",
+                 resend: bool = False) -> Dict[str, Any]:
+    """Send one message for one reporting week to one channel, at most once.
+
+    ``sender`` is any callable ``(channel, message) -> receipt dict``; the transport
+    lives outside this module so the rule can be tested without a network. The receipt
+    is written only after the provider accepted the message: if the process dies
+    between the POST and the write, the next attempt re-sends -- a duplicate is
+    recoverable, a silently skipped report is not.
     """
     report_id = report["window"]["report_id"]
     if report["window"]["kind"] != "weekly":
         raise DeliveryRefused("only a closed week is delivered; a partial week is for rehearsal and watching")
-    stored = get(conn, report_id)
-    if stored is None:
+    if kind not in (FINAL, STATUS_NOTICE):
+        raise DeliveryRefused(f"unknown message kind {kind!r}")
+    if get(conn, report_id) is None:
         raise DeliveryRefused(f"{report_id} was not stored; a report is saved before it is sent")
-    if stored.get("delivered_at") and not resend:
-        return {"sent": False, "reason": "already_delivered", "report_id": report_id,
-                "delivered_at": stored["delivered_at"].isoformat(), "target": stored.get("delivery_target")}
+    existing = delivery_record(conn, report_id, channel, kind)
+    if existing and not resend:
+        return {"sent": False, "reason": "already_delivered", "report_id": report_id, "kind": kind,
+                "channel": channel, "delivered_at": existing["delivered_at"].isoformat()}
     _record_attempt(conn, report_id)
-    receipt = sender(target, body)
-    mark_delivered(conn, report_id, target=target, receipt=receipt)
-    return {"sent": True, "report_id": report_id, "target": target, "receipt": receipt}
+    receipt = sender(channel, message)
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO report_deliveries (report_id, channel, kind, destination_basis, receipt)
+            VALUES (%s, %s, %s, %s, %s)
+            ON CONFLICT (report_id, channel, kind) DO UPDATE SET
+                delivered_at = now(), receipt = EXCLUDED.receipt,
+                destination_basis = EXCLUDED.destination_basis,
+                attempts = report_deliveries.attempts + 1
+            """, (report_id, channel, kind, destination_basis, jsonb(receipt)))
+    conn.commit()
+    if kind == FINAL:
+        mark_delivered(conn, report_id, target=channel, receipt=receipt)
+    return {"sent": True, "report_id": report_id, "kind": kind, "channel": channel,
+            "destination_basis": destination_basis, "receipt": receipt}
 
 
 def ensure_schema(conn: psycopg.Connection) -> None:
-    """Create ``report_runs`` if it is not there yet.
+    """Create the reporting tables if they are not there yet.
 
-    Narrow on purpose: a reporting command applies its OWN table and nothing else, so
+    Narrow on purpose: a reporting command applies its OWN tables and nothing else, so
     it can never migrate the production database as a side effect of drawing a report.
-    ``migration 013`` records the same statements for a normal migration.
+    Migrations 013 and 014 record the same statements for a normal migration.
     """
     from pathlib import Path
 
-    sql = (Path(__file__).resolve().parents[1] / "db" / "migrations" / "013_report_runs.sql").read_text(encoding="utf-8")
+    migrations = Path(__file__).resolve().parents[1] / "db" / "migrations"
     with conn.cursor() as cur:
-        cur.execute(sql)
+        for name in ("013_report_runs.sql", "014_report_deliveries.sql"):
+            cur.execute((migrations / name).read_text(encoding="utf-8"))
     conn.commit()
