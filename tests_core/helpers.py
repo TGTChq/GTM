@@ -99,3 +99,19 @@ def sqlall(conn, sql: str, params=()):
         rows = [dict(r) for r in cur.fetchall()]
     conn.commit()
     return rows
+
+
+def instantly_created(conn, approval_id=None, *, campaign_id="camp-sim", external_id="lead-sim"):
+    """Satisfy the Airtable gate's precondition: the approval was genuinely created in
+    Instantly. For tests whose subject is Airtable mechanics, not the ordering itself.
+    ``approval_id=None`` marks every Instantly row that has no terminal receipt yet."""
+    with conn.cursor() as cur:
+        cur.execute("UPDATE delivery_outbox SET state = 'delivered', lease_token = NULL, lease_expires_at = NULL "
+                    "WHERE channel = 'instantly' AND (%s::bigint IS NULL OR approval_id = %s::bigint) "
+                    "  AND NOT EXISTS (SELECT 1 FROM delivery_receipts r WHERE r.outbox_id = delivery_outbox.id "
+                    "                  AND r.receipt_kind IN ('created', 'existing', 'reconciled')) RETURNING id",
+                    (approval_id, approval_id))
+        for row in cur.fetchall():
+            cur.execute("INSERT INTO delivery_receipts (outbox_id, channel, receipt_kind, external_id, external_campaign) "
+                        "VALUES (%s, 'instantly', 'created', %s, %s)", (row["id"], external_id, campaign_id))
+    conn.commit()

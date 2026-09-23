@@ -13,7 +13,7 @@ from tgtc_core.services import opportunity as opp_mod
 from tgtc_core.services.delivery import DeliveryService, OutboxItem
 from tgtc_core.testing.fakes import FakeAirtable, FakeInstantly
 from tgtc_core.testing.scenario import CONTROL_ID_BY_CAMPAIGN_KEY
-from tests_core.helpers import delivery_service, opportunity_service, sql1, sqlall
+from tests_core.helpers import delivery_service, instantly_created, opportunity_service, sql1, sqlall
 from tests_core.seed import apollo_for, seed_opportunity
 
 CS_CAMPAIGN = CONTROL_ID_BY_CAMPAIGN_KEY["customer_experience"]
@@ -101,8 +101,8 @@ def test_happy_path_writes_created_receipts_and_marks_the_approval_delivered(con
     approval_id = _approve(conn, clock)
     at, ins = FakeAirtable(), FakeInstantly(campaign_status={CS_CAMPAIGN: 1})
     svc = delivery_service(conn, at, ins, clock)
+    i = svc.drain("instantly")          # Instantly first: Airtable follows a genuine creation
     a = svc.drain("airtable")
-    i = svc.drain("instantly")
     assert [x.outcome for x in a] == ["delivered"] and [x.outcome for x in i] == ["delivered"]
     assert len(at.records) == 1 and len(ins.leads) == 1
     rec = list(at.records.values())[0]["fields"]
@@ -118,7 +118,7 @@ def test_happy_path_writes_created_receipts_and_marks_the_approval_delivered(con
 
 
 def test_lost_airtable_response_is_reconciled_by_lead_key_without_a_second_row(conn, clock):
-    _approve(conn, clock)
+    instantly_created(conn, _approve(conn, clock))
     at = FakeAirtable(lose_response_once=True)
     svc = delivery_service(conn, at, None, clock)
     first = svc.drain("airtable")
@@ -175,7 +175,7 @@ def test_paused_campaign_defers_the_lead_and_does_not_invalidate_it(conn, clock)
 
 
 def test_airtable_422_is_blocked_with_the_field_error_not_retried_forever(conn, clock):
-    _approve(conn, clock)
+    instantly_created(conn, _approve(conn, clock))
     at = FakeAirtable(fail_next_status=422)
     out = delivery_service(conn, at, None, clock).drain("airtable")
     assert [x.outcome for x in out] == ["blocked"] and out[0].reason.startswith("airtable_422")
@@ -185,7 +185,7 @@ def test_airtable_422_is_blocked_with_the_field_error_not_retried_forever(conn, 
 def test_ambiguous_5xx_on_create_is_uncertain_and_reconciled_without_a_second_row(conn, clock):
     """R05: a 503 after the request was sent may have created the row. The client must not
     retry blindly; the outbox reconciles by Lead Key and sends nothing a second time."""
-    _approve(conn, clock)
+    instantly_created(conn, _approve(conn, clock))
     at = FakeAirtable(fail_next_status=503)          # rejected BEFORE creating anything
     svc = delivery_service(conn, at, None, clock)
     assert [x.outcome for x in svc.drain("airtable")] == ["uncertain"]

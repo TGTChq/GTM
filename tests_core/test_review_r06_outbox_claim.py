@@ -5,7 +5,7 @@ are fenced after lease loss."""
 from __future__ import annotations
 
 from tgtc_core.testing.fakes import FakeAirtable
-from tests_core.helpers import delivery_service, opportunity_service, sql1
+from tests_core.helpers import delivery_service, instantly_created, opportunity_service, sql1
 from tests_core.seed import apollo_for, seed_opportunity
 
 
@@ -15,7 +15,7 @@ def _approve(conn, clock):
 
 
 def test_second_connection_cannot_claim_an_item_under_an_active_lease(conn, conn2, clock):
-    _approve(conn, clock)
+    instantly_created(conn, _approve(conn, clock))
     a = delivery_service(conn, FakeAirtable(), None, clock)
     b = delivery_service(conn2, FakeAirtable(), None, clock)
     first = a.claim("airtable")
@@ -28,7 +28,7 @@ def test_second_connection_cannot_claim_an_item_under_an_active_lease(conn, conn
 
 
 def test_stale_worker_cannot_record_a_delivery_after_lease_loss(conn, conn2, clock):
-    _approve(conn, clock)
+    instantly_created(conn, _approve(conn, clock))
     at_a, at_b = FakeAirtable(), FakeAirtable()
     a = delivery_service(conn, at_a, None, clock)
     b = delivery_service(conn2, at_b, None, clock)
@@ -44,12 +44,13 @@ def test_stale_worker_cannot_record_a_delivery_after_lease_loss(conn, conn2, clo
     # B delivers normally
     out = b.process(item_b)
     assert out.outcome == "delivered" and len(at_b.records) == 1 and len(at_a.records) == 0
-    assert sql1(conn, "SELECT count(*) FROM delivery_receipts WHERE receipt_kind = 'created'") == 1
+    assert sql1(conn, "SELECT count(*) FROM delivery_receipts "
+                      "WHERE receipt_kind = 'created' AND channel = 'airtable'") == 1
 
 
 def test_stale_worker_processing_after_lease_loss_reports_lease_lost_and_sends_nothing_twice(conn, conn2, clock):
     """A processes past its lease; it must not double-create and must report the loss."""
-    _approve(conn, clock)
+    instantly_created(conn, _approve(conn, clock))
     at = FakeAirtable()
     a = delivery_service(conn, at, None, clock)
     b = delivery_service(conn2, at, None, clock)

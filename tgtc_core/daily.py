@@ -181,7 +181,7 @@ class DailyController:
         stalled, cycles = 0, 0
         while len(self.report.rounds) < self.max_rounds:
             rep = self.r.cycle(acquire=False, deliver=True, max_items=self.max_items,
-                               delivery_channels=("airtable", "instantly"))
+                               delivery_channels=("instantly", "airtable"))
             cycles += 1
             self._last_delivery = rep.delivery or {}
             self.report.rounds.append({"phase": label, "stages": rep.stages, "delivery": rep.delivery,
@@ -207,7 +207,7 @@ class DailyController:
     def deliver_everything(self) -> None:
         """Finish delivery of every eligible contact already produced. No enrichment."""
         for _ in range(20):
-            out = self.r.deliver(max_items=self.max_items, channels=("airtable", "instantly"))
+            out = self.r.deliver(max_items=self.max_items, channels=("instantly", "airtable"))
             moved = sum(int(v or 0) for counts in out.values() for k, v in counts.items() if k not in ("deferred",))
             if not moved:
                 break

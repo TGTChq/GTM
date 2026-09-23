@@ -31,7 +31,9 @@ from .domain.exhaustive_routing import exhaustive_enabled
 #: production canary: 252 Instantly rows sat at attempts = 0, never claimed,
 #: while Airtable delivered in the same run, because this was hardcoded to
 #: ("airtable",). That is an independent cause of production sending zero.
-TARGET_DELIVERY_CHANNELS: tuple[str, ...] = ("airtable", "instantly")
+# Instantly first: an Airtable record follows a GENUINE Instantly creation (2026-09-22),
+# so draining Instantly first completes both channels in one pass.
+TARGET_DELIVERY_CHANNELS: tuple[str, ...] = ("instantly", "airtable")
 
 #: Run outcome contract. A completed run below its business target exits 0 and
 #: says so in the ledger; only a broken system exits non-zero.
@@ -467,7 +469,7 @@ class Runner:
         return counts
 
     def deliver(self, *, max_items: int = 500,
-                channels: tuple[str, ...] = ("airtable", "instantly")) -> Dict[str, Dict[str, int]]:
+                channels: tuple[str, ...] = TARGET_DELIVERY_CHANNELS) -> Dict[str, Dict[str, int]]:
         svc = DeliveryService(self.conn, airtable=self.airtable, instantly=self.instantly, lease_seconds=self.s.lease_seconds,
                               backoff_seconds=self.s.retry_backoff_seconds,
                               max_contacts_per_opportunity=self.s.max_contacts_per_opportunity,
@@ -485,7 +487,7 @@ class Runner:
         return report
 
     def cycle(self, *, acquire: bool = True, deliver: bool = True, max_items: int = 1000,
-              delivery_channels: tuple[str, ...] = ("airtable", "instantly")) -> CycleReport:
+              delivery_channels: tuple[str, ...] = TARGET_DELIVERY_CHANNELS) -> CycleReport:
         report = CycleReport(run_id=self.run_id)
         self._log("cycle", "start", {"settings": self.s.describe()})
         report.lifecycle = self.lifecycle()

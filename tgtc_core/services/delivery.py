@@ -53,6 +53,28 @@ class OutboxItem:
     version_state_before: str
 
 
+# --- suppression reason codes (2026-09-22) -----------------------------------------
+# Airtable must hold only final, good, non-duplicate leads. Measured that day: the
+# catch-up wrote 905 Airtable rows while Instantly genuinely created 872, and 201 rows
+# in all history have no genuine creation behind them. Every refusal now says which
+# rule refused it, in one vocabulary shared by the reconciliation queries.
+DUP_AIRTABLE = "duplicate_airtable"
+DUP_INSTANTLY_SAME_CAMPAIGN = "duplicate_instantly_same_campaign"
+DUP_INSTANTLY_OTHER_CAMPAIGN = "duplicate_instantly_other_campaign"
+DUP_LOCAL_HISTORY = "duplicate_local_history"
+DUP_IN_FLIGHT = "duplicate_in_flight"
+SAME_PERSON_MULTIPLE_JOBS = "same_person_multiple_jobs"
+SAME_PERSON_MULTIPLE_CAMPAIGNS = "same_person_multiple_campaigns"
+PREVIOUSLY_CONTACTED = "previously_contacted"
+FAILED_QUALITY_GATE = "failed_quality_gate"
+FAILED_COMPLIANCE_GATE = "failed_compliance_gate"
+#: Not a refusal: Instantly has not answered yet, so Airtable waits its turn.
+AWAITING_INSTANTLY = "awaiting_instantly"
+SUPPRESSION_REASONS = (DUP_AIRTABLE, DUP_INSTANTLY_SAME_CAMPAIGN, DUP_INSTANTLY_OTHER_CAMPAIGN, DUP_LOCAL_HISTORY,
+                       DUP_IN_FLIGHT, SAME_PERSON_MULTIPLE_JOBS, SAME_PERSON_MULTIPLE_CAMPAIGNS, PREVIOUSLY_CONTACTED,
+                       FAILED_QUALITY_GATE, FAILED_COMPLIANCE_GATE)
+
+
 def retired_campaign_block_reason(target, allowed_campaign_ids, env=None):
     """Why this destination must not receive a lead, or None to proceed.
 
@@ -372,6 +394,56 @@ class DeliveryService:
         return self.now() + timedelta(seconds=self.backoff * (2 ** max(0, item.attempts - 1)))
 
     # --- Airtable ----------------------------------------------------------------
+    def airtable_gate(self, item: OutboxItem):
+        """May this approval become an Airtable record yet? ``None`` to proceed, else
+        ``(action, reason)``: Airtable follows a GENUINE Instantly creation, and one
+        person never gets a second record."""
+        if self.conn is None:
+            return None
+        with self.conn.cursor() as cur:
+            cur.execute(
+                "SELECT 1 FROM delivery_outbox o JOIN delivery_receipts r ON r.outbox_id = o.id "
+                "WHERE o.approval_id = %s AND o.channel = 'airtable' AND o.id <> %s "
+                "  AND r.receipt_kind IN ('created', 'reconciled') LIMIT 1", (item.approval_id, item.id))
+            if cur.fetchone() is not None:
+                self.conn.commit()
+                return ("block", DUP_AIRTABLE)     # this approval is already in Airtable
+            cur.execute(
+                "SELECT o.state, coalesce(o.blocked_reason, '') AS blocked_reason, "
+                " (SELECT string_agg(r.receipt_kind, ',') FROM delivery_receipts r WHERE r.outbox_id = o.id "
+                "   AND r.receipt_kind IN ('created', 'existing', 'reconciled')) AS kinds "
+                "FROM delivery_outbox o WHERE o.approval_id = %s AND o.channel = 'instantly' LIMIT 1",
+                (item.approval_id,))
+            sibling = cur.fetchone()
+            cur.execute(
+                "SELECT (a2.campaign_id IS DISTINCT FROM a.campaign_id) AS other_campaign "
+                "FROM approvals a JOIN approvals a2 ON a2.person_id = a.person_id AND a2.id <> a.id "
+                "JOIN delivery_outbox o2 ON o2.approval_id = a2.id AND o2.channel = 'airtable' "
+                "JOIN delivery_receipts r2 ON r2.outbox_id = o2.id AND r2.receipt_kind IN ('created', 'reconciled') "
+                "WHERE a.id = %s LIMIT 1", (item.approval_id,))
+            already = cur.fetchone()
+        self.conn.commit()
+        if already is not None:
+            # The same person is already in Airtable from another job or campaign: one lead.
+            return ("block", SAME_PERSON_MULTIPLE_CAMPAIGNS if already["other_campaign"] else SAME_PERSON_MULTIPLE_JOBS)
+        if sibling is None:
+            return ("block", FAILED_QUALITY_GATE)
+        kinds = {k for k in str(sibling["kinds"] or "").split(",") if k}
+        if kinds & {"created", "reconciled"}:
+            return None                                   # a genuine creation: write the record
+        if "existing" in kinds:
+            return ("block", DUP_INSTANTLY_SAME_CAMPAIGN)
+        reason = str(sibling["blocked_reason"] or "")
+        if sibling["state"] == "blocked":
+            if reason.startswith("compliance:"):
+                return ("block", FAILED_COMPLIANCE_GATE)
+            if "existing_other_campaign" in reason:
+                return ("block", DUP_INSTANTLY_OTHER_CAMPAIGN)
+            if reason in SUPPRESSION_REASONS:
+                return ("block", reason)
+            return ("block", FAILED_QUALITY_GATE)
+        return ("defer", AWAITING_INSTANTLY)
+
     def process_airtable(self, item: OutboxItem) -> DeliveryOutcome:
         if self.airtable is None:
             self._set(item, "pending", available_at=self.now() + timedelta(seconds=self.backoff))
@@ -380,6 +452,15 @@ class DeliveryService:
         if stop:
             self._set(item, stop[0], blocked_reason=stop[1])
             return DeliveryOutcome(item.id, "airtable", stop[0], stop[1])
+        gate = self.airtable_gate(item)
+        if gate:
+            action, reason = gate
+            if action == "defer":
+                self._set(item, "pending", error=reason, available_at=self.now() + timedelta(seconds=self.backoff))
+                return DeliveryOutcome(item.id, "airtable", "deferred", reason)
+            self._receipt(item, "rejected", summary={"suppressed": reason})
+            self._set(item, "blocked", blocked_reason=reason)
+            return DeliveryOutcome(item.id, "airtable", "blocked", reason)
         lead_key = item.payload["Lead Key"]
         # Reconcile first whenever an earlier attempt may have reached the provider (R05).
         if item.version_state_before in ("in_flight", "claimed") or item.attempts > 1:

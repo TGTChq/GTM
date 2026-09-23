@@ -9,7 +9,7 @@ from tgtc_core.providers.airtable import AirtableClient
 from tgtc_core.providers.instantly import InstantlyClient
 from tgtc_core.testing.fakes import FakeAirtable, FakeInstantly
 from tgtc_core.testing.scenario import CONTROL_ID_BY_CAMPAIGN_KEY
-from tests_core.helpers import delivery_service, opportunity_service, sql1, sqlall
+from tests_core.helpers import delivery_service, instantly_created, opportunity_service, sql1, sqlall
 from tests_core.seed import apollo_for, seed_opportunity
 
 CS = CONTROL_ID_BY_CAMPAIGN_KEY["customer_experience"]
@@ -32,7 +32,7 @@ def test_client_does_not_retry_an_ambiguous_create(mode):
 
 @pytest.mark.parametrize("mode", ["reset", 500, "timeout"])
 def test_outbox_reconciles_an_accepted_create_after_reset_5xx_or_timeout(conn, clock, mode):
-    _approve(conn, clock)
+    instantly_created(conn, _approve(conn, clock))
     at = FakeAirtable(lose_response_once=(mode == "timeout"), fail_after_create_once=None if mode == "timeout" else mode)
     svc = delivery_service(conn, at, None, clock)
     first = svc.drain("airtable")

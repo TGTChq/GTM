@@ -52,8 +52,8 @@ def test_reapplying_the_schema_keeps_deliveries_and_receipts(conn, clock):
     assert opportunity_service(conn, apollo_for("acme.com", "Acme"), clock).process(oid).outcome == "approved"
     cs = CONTROL_ID_BY_CAMPAIGN_KEY["customer_experience"]
     svc = delivery_service(conn, FakeAirtable(), FakeInstantly(campaign_status={cs: 1}), clock)
+    svc.drain("instantly")       # Instantly first: an Airtable record follows a genuine creation
     svc.drain("airtable")
-    svc.drain("instantly")
     before = (sql1(conn, "SELECT count(*) FROM delivery_receipts"), sql1(conn, "SELECT count(*) FROM approvals"), sql1(conn, "SELECT count(*) FROM page_receipts"))
     apply_schema(conn)   # a redeploy / rollback of the code re-applies the idempotent schema
     after = (sql1(conn, "SELECT count(*) FROM delivery_receipts"), sql1(conn, "SELECT count(*) FROM approvals"), sql1(conn, "SELECT count(*) FROM page_receipts"))
