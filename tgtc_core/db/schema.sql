@@ -592,3 +592,24 @@ CREATE TABLE IF NOT EXISTS run_log (
     created_at  timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS run_log_run_idx ON run_log (run_id, created_at);
+
+-- Weekly reporting state (migration 013). Documented there; repeated here so a fresh
+-- install and a migrated database have the same schema.
+CREATE TABLE IF NOT EXISTS report_runs (
+    report_id        text PRIMARY KEY,
+    kind             text NOT NULL CHECK (kind IN ('weekly', 'partial')),
+    window_start     timestamptz NOT NULL,
+    window_end       timestamptz NOT NULL,
+    timezone         text NOT NULL,
+    data_cutoff      timestamptz NOT NULL,
+    generated_at     timestamptz NOT NULL DEFAULT now(),
+    payload_json     jsonb NOT NULL,
+    flags_json       jsonb NOT NULL DEFAULT '[]'::jsonb,
+    status           text NOT NULL DEFAULT 'ok',
+    delivery_target  text,
+    delivered_at     timestamptz,
+    delivery_receipt jsonb,
+    attempts         integer NOT NULL DEFAULT 0,
+    updated_at       timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS report_runs_window_idx ON report_runs (window_start DESC);

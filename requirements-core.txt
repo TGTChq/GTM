@@ -5,3 +5,8 @@ tldextract==5.3.0
 psycopg[binary]>=3.2,<4
 # Semantic inference adapter (official SDK). Only imported when ANTHROPIC_API_KEY is set.
 anthropic>=1,<2
+# The IANA time zone database. The weekly report's window is defined in
+# America/Los_Angeles, and python:3.12-slim carries no system tz database: without
+# this wheel `zoneinfo` cannot resolve the zone and the report falls back to a
+# codified US rule. Pure data, no code.
+tzdata>=2024.1

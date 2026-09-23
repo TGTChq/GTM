@@ -9,6 +9,7 @@ Subcommands:
   work --kind K      drain one stage
   deliver            drain the outbox
   ledger             print the reconciled ledger
+  weekly-report      measure a Friday-to-Friday reporting week from the database (no provider call)
   import-airtable    import existing Airtable rows as suppressions (reads only)
   prune              null compressed page payloads older than TGTC_PAYLOAD_RETENTION_DAYS (receipts kept)
   demo               end-to-end run against SIMULATED providers on an embedded PostgreSQL
@@ -109,7 +110,8 @@ def _require_acceptance_command(args) -> None:
     if mode == "read_only" and args.cmd not in ("describe", "check-db"):
         raise SystemExit("TGTC_ACCEPTANCE_MODE=read_only allows only describe and check-db")
     if mode == "bounded":
-        allowed = ("describe", "check-db", "migrate", "budget", "ledger", "cycle", "run-target", "work")
+        allowed = ("describe", "check-db", "migrate", "budget", "ledger", "cycle", "run-target", "work",
+                   "weekly-report")
         if args.cmd not in allowed:
             raise SystemExit("TGTC_ACCEPTANCE_MODE=bounded blocks delivery and unbounded maintenance commands")
         if args.cmd in ("cycle", "run-target") and not args.no_deliver:
@@ -416,6 +418,120 @@ def cmd_canary_24h_strategy(args) -> int:
     return strategy_cli(args, os.environ)
 
 
+WEEKDAYS = ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")
+EXIT_REPORT_ATTENTION = 4
+EXIT_REPORT_NOT_SENT = 5
+
+
+def cmd_weekly_report(args) -> int:
+    """Measure a reporting week from the database, store it, and deliver it at most once.
+
+    Reads the pipeline's own receipts, so it needs no run artifacts and no provider
+    call: generating a report spends nothing. Delivery happens only when it is asked
+    for explicitly AND the destination is confirmed on the command line, because a
+    report sent to the wrong place cannot be recalled.
+    """
+    from .reporting import pipeline, store as report_store
+    from .reporting.window import is_due
+
+    now = datetime.now(timezone.utc)
+    if args.now:
+        now = datetime.fromisoformat(args.now.replace("Z", "+00:00"))
+        if now.tzinfo is None:
+            now = now.replace(tzinfo=timezone.utc)
+    if args.if_due_hour is not None:
+        due = is_due(now, weekday=WEEKDAYS.index(args.if_due_weekday), hour=args.if_due_hour,
+                     minute=args.if_due_minute, tz_name=args.timezone)
+        if not due:
+            print(json.dumps({"skipped": "not_due", "now": now.isoformat(),
+                              "schedule": f"{args.if_due_weekday} {args.if_due_hour:02d}:{args.if_due_minute:02d} "
+                                          f"{args.timezone}"}))
+            return 0
+    week_start = None
+    kind = "weekly"
+    week = args.week
+    if week == "auto":
+        # On the delivery weekday the closed week is the subject; on any other day the
+        # week in progress is, so a problem is visible days before Friday.
+        week = "last" if is_due(now, weekday=WEEKDAYS.index(args.if_due_weekday), hour=0,
+                                tz_name=args.timezone) else "current"
+    if week == "current":
+        kind = "partial"
+    elif week not in ("last", ""):
+        week_start = datetime.strptime(week, "%Y-%m-%d").date()
+
+    prices = {}
+    for provider, name in (("apollo", "TGTC_APOLLO_CREDIT_USD"), ("fantastic", "TGTC_FANTASTIC_RECORD_USD")):
+        raw = os.environ.get(name, "").strip()
+        if raw:
+            prices[provider] = float(raw)
+
+    s = _settings()
+    conn = connect(args.database_url or s.database_url)
+    if not args.no_store:
+        report_store.ensure_schema(conn)
+    result = pipeline.generate_and_store(
+        conn, now=now, out_dir=args.out_dir or None, store_report=not args.no_store,
+        kind=kind, weeks_back=args.weeks_back, week_start=week_start, tz_name=args.timezone,
+        compare_previous=not args.no_compare, unit_prices=prices, target_per_run=args.target)
+    report = result["report"]
+
+    if args.lead_export:
+        from .reporting import export as lead_export
+        from .reporting.window import explicit_window, partial_window, weekly_window
+        window = (explicit_window(week_start, tz_name=args.timezone, now=now) if week_start
+                  else partial_window(now, tz_name=args.timezone) if kind == "partial"
+                  else weekly_window(now, weeks_back=args.weeks_back, tz_name=args.timezone))
+        rows = lead_export.lead_rows(conn, window)
+        path = lead_export.write_csv(args.lead_export, rows)
+        result["lead_export"] = {"path": str(path), "rows": len(rows)}
+
+    if args.print_format == "text":
+        from .reporting import render
+        print(render.render_text(report))
+    elif args.print_format == "json":
+        print(json.dumps(report, indent=2, default=str))
+
+    delivery = {"sent": False, "reason": "not requested"}
+    if args.send != "none":
+        if not args.confirm_destination:
+            print("weekly-report refused to send: pass --confirm-destination once the recipient and channel "
+                  "are confirmed", file=sys.stderr)
+            return EXIT_REPORT_NOT_SENT
+        webhook = os.environ.get(args.webhook_env, "").strip()
+        if not webhook:
+            print(f"weekly-report refused to send: {args.webhook_env} is not set on this service", file=sys.stderr)
+            return EXIT_REPORT_NOT_SENT
+        from .reporting import render
+        try:
+            delivery = report_store.deliver(
+                conn, report, sender=pipeline.slack_sender(webhook), target=args.confirm_destination,
+                body=render.render_slack(report), resend=args.resend)
+        except report_store.DeliveryRefused as exc:
+            print(f"weekly-report refused to send: {exc}", file=sys.stderr)
+            return EXIT_REPORT_NOT_SENT
+    summary = {
+        "report_id": result["report_id"],
+        "window": report["window"]["window_label"],
+        "window_utc": [report["window"]["window_start_utc"], report["window"]["window_end_utc"]],
+        "kind": report["window"]["kind"],
+        "instantly_created_unique_people": report["delivery"]["instantly_created_unique_people"],
+        "airtable_records_created": report["delivery"]["airtable_records_created"],
+        "reconciliation_holds": report["reconciliation"]["identity_holds"],
+        "status": report["status"],
+        "alerts": report["alerts"],
+        "notes": report["notes"],
+        "stored": bool(result.get("stored")),
+        "artifacts": result.get("artifacts"),
+        "lead_export": result.get("lead_export"),
+        "delivery": delivery,
+    }
+    print(json.dumps(summary, indent=2, default=str))
+    if args.fail_on_alerts and report["alerts"]:
+        return EXIT_REPORT_ATTENTION
+    return 0
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(prog="tgtc_core", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -483,6 +599,32 @@ def main(argv=None) -> int:
     p.add_argument("--dry-run", action="store_true", help="render every arm's payload; no request")
     p.add_argument("--i-understand-spend", action="store_true")
     p.set_defaults(fn=cmd_canary_24h_strategy)
+    p = sub.add_parser("weekly-report", help="measure a reporting week from the database (spends nothing)")
+    p.add_argument("--database-url", default="")
+    p.add_argument("--week", default="auto",
+                   help="auto (the closed week on the delivery weekday, the week in progress otherwise), "
+                        "last, current, or a YYYY-MM-DD week start")
+    p.add_argument("--weeks-back", type=int, default=0, help="with --week last: how many closed weeks to step back")
+    p.add_argument("--timezone", default="America/Los_Angeles")
+    p.add_argument("--out-dir", default="", help="also write <report_id>.json and .txt here")
+    p.add_argument("--lead-export", default="", help="write the private lead-level CSV here (outside the repository)")
+    p.add_argument("--no-store", action="store_true", help="do not write the report_runs row (pure read)")
+    p.add_argument("--no-compare", action="store_true", help="skip the previous-week comparison")
+    p.add_argument("--target", type=int, default=1000, help="the per-run minimum a day is flagged against")
+    p.add_argument("--print-format", choices=("text", "json", "none"), default="text")
+    p.add_argument("--if-due-weekday", choices=WEEKDAYS, default="friday")
+    p.add_argument("--if-due-hour", type=int, default=None,
+                   help="only produce the report at or after this hour in --timezone on --if-due-weekday")
+    p.add_argument("--if-due-minute", type=int, default=0)
+    p.add_argument("--send", choices=("none", "slack"), default="none")
+    p.add_argument("--webhook-env", default="SLACK_WEEKLY_REPORT_WEBHOOK_URL")
+    p.add_argument("--confirm-destination", default="",
+                   help="the confirmed destination name; required before anything is sent")
+    p.add_argument("--resend", action="store_true", help="send again a week already delivered (never automatic)")
+    p.add_argument("--fail-on-alerts", action="store_true",
+                   help="exit 4 when the report raises an ALERT (a note never fails a scheduled run)")
+    p.add_argument("--now", default="", help="evaluate as of this instant (rehearsal and tests)")
+    p.set_defaults(fn=cmd_weekly_report)
     args = parser.parse_args(argv)
     _require_acceptance_command(args)
     return int(args.fn(args))
