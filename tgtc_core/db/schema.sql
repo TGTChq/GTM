@@ -619,7 +619,7 @@ CREATE INDEX IF NOT EXISTS report_runs_window_idx ON report_runs (window_start D
 CREATE TABLE IF NOT EXISTS report_deliveries (
     report_id     text NOT NULL,
     channel       text NOT NULL,
-    kind          text NOT NULL CHECK (kind IN ('final', 'status_notice')),
+    kind          text NOT NULL CHECK (kind IN ('final', 'status_notice', 'connectivity_test')),
     delivered_at  timestamptz NOT NULL DEFAULT now(),
     destination_basis text NOT NULL DEFAULT 'unverified',
     receipt       jsonb NOT NULL DEFAULT '{}'::jsonb,

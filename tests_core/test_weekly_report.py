@@ -294,14 +294,12 @@ def test_a_day_with_no_run_is_flagged_as_missing_not_as_zero_production(conn):
                                   "new_jobs": None, "apollo_credits": None, "fantastic_records": None}
     assert any("reported as unavailable, not as zero production" in note for note in report["notes"])
     assert any("missing run, not a zero-production day" in flag for flag in report["flags"])
-    # A missing run inside the covered days is an INTEGRITY problem -- it should fail the
-    # scheduled job. A day below the minimum is a business alert: the readers must see it,
-    # but it is not a reason to page anyone at 06:00.
-    assert all("missing run" in item for item in report["integrity_alerts"])
-    assert len(report["integrity_alerts"]) == 5
-    below = [item for item in report["alerts"] if "below the 1000 minimum" in item]
-    assert below and below[0] not in report["integrity_alerts"]
-    assert report["status"] == "integrity"
+    # A missing run is an ALERT: the readers must see it, and a reconciled report is
+    # neither withheld nor failed for a gap that waiting cannot fix. Integrity is kept
+    # for what is genuinely unexplained.
+    assert report["integrity_alerts"] == []
+    assert len([a for a in report["alerts"] if "missing run" in a]) == 5
+    assert report["status"] == "attention"
 
 
 def test_backlog_creations_are_separated_from_this_weeks_own_production(conn):
@@ -657,7 +655,7 @@ def test_the_command_exits_non_zero_on_an_alert_but_never_on_a_note(conn, pg_url
     assert any("below the 1000 minimum" in alert for alert in summary["alerts"])
     assert any("unit price is not verified" in note for note in summary["notes"])
     assert main(argv + ["--fail-on-alerts"]) == 4
-    assert main(argv + ["--fail-on", "integrity"]) == 4       # the missing runs are integrity
+    assert main(argv + ["--fail-on", "integrity"]) == 0       # missing runs are not integrity
     assert main(argv + ["--fail-on", "never"]) == 0           # a report always still prints
 
     # The unverified price is graded a NOTE, so it can never by itself fail a run.

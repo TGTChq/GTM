@@ -212,6 +212,98 @@ def test_the_notification_line_says_the_number_and_whether_it_reconciled(conn):
 
 
 # --------------------------------------------------------------------------------
+# the channel test
+# --------------------------------------------------------------------------------
+
+def test_the_connectivity_test_says_what_it_is_and_carries_no_pipeline_data():
+    """A test that looks like a report teaches people to read a test as a report."""
+    blocks = slack.connectivity_test_blocks(channel="#gtm-engineering",
+                                            schedule="every Friday at 06:00 America/Los_Angeles",
+                                            window_rule="Friday 00:00 to the following Friday 00:00 (end exclusive)")
+    text = _blocks_text(blocks)
+    assert "connectivity test" in text.lower()
+    assert "carries no pipeline numbers" in text
+    assert "#gtm-engineering" in text and "06:00 America/Los_Angeles" in text
+    assert "status notice" in text                      # the reader learns what a delay looks like
+    for word in ("net-new", "Airtable", "Qualified jobs", "campaigns\n"):
+        assert word not in text
+    assert len(blocks) == 2 and len(text) < 1200         # short by construction
+    assert "no pipeline data" in slack.connectivity_test_text("#gtm-engineering")
+
+
+def test_the_channel_test_is_sent_once_per_day_per_channel(conn):
+    """The same rule the Friday retries depend on, proved on the cheapest message there
+    is: a second attempt with the same key sends nothing."""
+    store.ensure_schema(conn)
+    sent = []
+    sender = lambda channel, message: sent.append(channel) or {"transport": "incoming_webhook"}  # noqa: E731
+    key = "connectivity-test-2026-09-23"
+
+    first = store.deliver_guarded(conn, key=key, channel="#gtm-engineering",
+                                  kind=store.CONNECTIVITY_TEST, sender=sender,
+                                  message={"blocks": [], "text": "t"}, destination_basis="webhook_declared")
+    second = store.deliver_guarded(conn, key=key, channel="#gtm-engineering",
+                                   kind=store.CONNECTIVITY_TEST, sender=sender,
+                                   message={"blocks": [], "text": "t"}, destination_basis="webhook_declared")
+    assert first["sent"] is True and second["sent"] is False and second["reason"] == "already_delivered"
+    assert sent == ["#gtm-engineering"]
+    row = store.delivery_record(conn, key, "#gtm-engineering", store.CONNECTIVITY_TEST)
+    assert row["destination_basis"] == "webhook_declared" and row["receipt"]["transport"] == "incoming_webhook"
+
+
+def test_the_channel_test_refuses_the_same_way_the_report_does(conn, pg_url, capsys, monkeypatch):
+    from tgtc_core.__main__ import main
+
+    monkeypatch.delenv("SLACK_BOT_TOKEN", raising=False)
+    monkeypatch.delenv("SLACK_WEEKLY_REPORT_WEBHOOK_URL", raising=False)
+    assert main(["slack-test", "--database-url", pg_url, "--channel", "#gtm-engineering"]) == 5
+    assert "no verified destination" in capsys.readouterr().err
+
+
+# --------------------------------------------------------------------------------
+# a known historical gap
+# --------------------------------------------------------------------------------
+
+def test_a_missing_run_is_reported_but_neither_withholds_nor_fails_the_report(conn, pg_url, capsys):
+    """2026-09-19 had no production run. The week that contains it must still publish:
+    the gap is an exception in the message, not a reason to hold the report or to exit
+    red every twenty minutes."""
+    from tgtc_core.__main__ import main
+
+    seed_run(conn, run_id="run-a", started_at=WEEK_START + timedelta(days=1, hours=3))
+    seed_lead(conn, received_at=WEEK_START + timedelta(days=1, hours=4), campaign_key="product",
+              campaign_id="camp-pr", run_id="run-a")
+    report = report_for(conn)
+
+    assert any("missing run" in item for item in report["alerts"])      # said out loud
+    assert report["integrity_alerts"] == []                             # but not an integrity failure
+    assert _ready(conn, report).ready is True                           # and never withheld
+    assert decide(IN_RETRY_WINDOW, _ready(conn, report).ready)[0] == ACTION_FINAL
+    assert "missing run" in _blocks_text(slack.blocks_for(report))      # visible to the readers
+
+    argv = ["weekly-report", "--database-url", pg_url, "--week", "last", "--now", FRIDAY_MORNING.isoformat(),
+            "--print-format", "none", "--no-compare", "--fail-on", "integrity"]
+    assert main(argv) == 0                                              # the tick is green
+    capsys.readouterr()
+
+
+def test_an_unexplained_difference_still_withholds_and_fails(conn, pg_url, capsys):
+    """The other half of the same rule: what nothing explains is still blocking."""
+    from tgtc_core.__main__ import main
+
+    seed_lead(conn, received_at=WEEK_START + timedelta(days=1), campaign_key="product",
+              campaign_id="camp-pr", instantly_campaign="camp-somewhere-else")
+    report = report_for(conn)
+    assert report["integrity_alerts"] and _ready(conn, report).ready is False
+    assert decide(IN_RETRY_WINDOW, False)[0] == ACTION_SKIP
+    assert decide(AFTER_RETRY_WINDOW, False)[0] == ACTION_NOTICE
+    argv = ["weekly-report", "--database-url", pg_url, "--week", "last", "--now", FRIDAY_MORNING.isoformat(),
+            "--print-format", "none", "--no-compare", "--fail-on", "integrity"]
+    assert main(argv) == 4
+    capsys.readouterr()
+
+
+# --------------------------------------------------------------------------------
 # the destination
 # --------------------------------------------------------------------------------
 

@@ -92,6 +92,7 @@ def mark_delivered(conn: psycopg.Connection, report_id: str, *, target: str, rec
 
 FINAL = "final"
 STATUS_NOTICE = "status_notice"
+CONNECTIVITY_TEST = "connectivity_test"
 
 
 def delivery_record(conn: psycopg.Connection, report_id: str, channel: str, kind: str) -> Optional[Dict[str, Any]]:
@@ -102,6 +103,38 @@ def delivery_record(conn: psycopg.Connection, report_id: str, channel: str, kind
         row = cur.fetchone()
     conn.rollback()
     return dict(row) if row else None
+
+
+def deliver_guarded(conn: psycopg.Connection, *, key: str, channel: str, kind: str, sender,
+                    message: Dict[str, Any], destination_basis: str = "unverified",
+                    resend: bool = False) -> Dict[str, Any]:
+    """Send one message, for one key, to one channel, at most once.
+
+    The rule lives here and nowhere else, so everything that can post to a channel --
+    the weekly report, the status notice, the connectivity test -- obeys the same one.
+    The receipt is written only after the provider accepted the message: if the process
+    dies between the POST and the write, the next attempt re-sends, because a duplicate
+    is recoverable and a silently skipped report is not.
+    """
+    existing = delivery_record(conn, key, channel, kind)
+    if existing and not resend:
+        return {"sent": False, "reason": "already_delivered", "report_id": key, "kind": kind,
+                "channel": channel, "delivered_at": existing["delivered_at"].isoformat(),
+                "destination_basis": existing["destination_basis"]}
+    receipt = sender(channel, message)
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO report_deliveries (report_id, channel, kind, destination_basis, receipt)
+            VALUES (%s, %s, %s, %s, %s)
+            ON CONFLICT (report_id, channel, kind) DO UPDATE SET
+                delivered_at = now(), receipt = EXCLUDED.receipt,
+                destination_basis = EXCLUDED.destination_basis,
+                attempts = report_deliveries.attempts + 1
+            """, (key, channel, kind, destination_basis, jsonb(receipt)))
+    conn.commit()
+    return {"sent": True, "report_id": key, "kind": kind, "channel": channel,
+            "destination_basis": destination_basis, "receipt": receipt}
 
 
 def deliver_once(conn: psycopg.Connection, report: Dict[str, Any], *, sender, channel: str,
@@ -122,27 +155,13 @@ def deliver_once(conn: psycopg.Connection, report: Dict[str, Any], *, sender, ch
         raise DeliveryRefused(f"unknown message kind {kind!r}")
     if get(conn, report_id) is None:
         raise DeliveryRefused(f"{report_id} was not stored; a report is saved before it is sent")
-    existing = delivery_record(conn, report_id, channel, kind)
-    if existing and not resend:
-        return {"sent": False, "reason": "already_delivered", "report_id": report_id, "kind": kind,
-                "channel": channel, "delivered_at": existing["delivered_at"].isoformat()}
-    _record_attempt(conn, report_id)
-    receipt = sender(channel, message)
-    with conn.cursor() as cur:
-        cur.execute(
-            """
-            INSERT INTO report_deliveries (report_id, channel, kind, destination_basis, receipt)
-            VALUES (%s, %s, %s, %s, %s)
-            ON CONFLICT (report_id, channel, kind) DO UPDATE SET
-                delivered_at = now(), receipt = EXCLUDED.receipt,
-                destination_basis = EXCLUDED.destination_basis,
-                attempts = report_deliveries.attempts + 1
-            """, (report_id, channel, kind, destination_basis, jsonb(receipt)))
-    conn.commit()
-    if kind == FINAL:
-        mark_delivered(conn, report_id, target=channel, receipt=receipt)
-    return {"sent": True, "report_id": report_id, "kind": kind, "channel": channel,
-            "destination_basis": destination_basis, "receipt": receipt}
+    if delivery_record(conn, report_id, channel, kind) is None or resend:
+        _record_attempt(conn, report_id)
+    out = deliver_guarded(conn, key=report_id, channel=channel, kind=kind, sender=sender,
+                          message=message, destination_basis=destination_basis, resend=resend)
+    if out["sent"] and kind == FINAL:
+        mark_delivered(conn, report_id, target=channel, receipt=out["receipt"])
+    return out
 
 
 def ensure_schema(conn: psycopg.Connection) -> None:
@@ -156,6 +175,7 @@ def ensure_schema(conn: psycopg.Connection) -> None:
 
     migrations = Path(__file__).resolve().parents[1] / "db" / "migrations"
     with conn.cursor() as cur:
-        for name in ("013_report_runs.sql", "014_report_deliveries.sql"):
+        for name in ("013_report_runs.sql", "014_report_deliveries.sql",
+                     "015_report_delivery_test_kind.sql"):
             cur.execute((migrations / name).read_text(encoding="utf-8"))
     conn.commit()

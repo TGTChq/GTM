@@ -801,7 +801,11 @@ def graded_flags(report: Dict[str, Any], *, target_per_run: int = 1000) -> List[
 
     runs = report["runs"]
     for day in runs["local_days_without_a_run"]:
-        integrity(f"no production run recorded on {day} -- this is a missing run, not a zero-production day")
+        # An ALERT, not an integrity failure. A day whose run never happened is a fact
+        # about the past that waiting cannot change and that a correct, reconciled report
+        # should carry rather than be withheld for -- and a job that exits red every
+        # twenty minutes for a gap nobody can now fix teaches people to ignore red.
+        alert(f"no production run recorded on {day} -- this is a missing run, not a zero-production day")
     if runs["refused_runs"]:
         integrity(f"{runs['refused_runs']} run(s) were refused (budget policy) inside this window")
     recon = report["reconciliation"]

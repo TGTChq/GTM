@@ -232,6 +232,30 @@ def status_notice_blocks(report: Dict[str, Any], readiness: Dict[str, Any], *,
     ]
 
 
+def connectivity_test_blocks(*, channel: str, schedule: str, window_rule: str) -> List[Dict[str, Any]]:
+    """One short message that proves the credential reaches the channel.
+
+    It carries no pipeline data at all: a test that looks like a report teaches people
+    to read a test as a report. It says what it is, what will arrive here later, and
+    nothing else.
+    """
+    return [
+        {"type": "header", "text": {"type": "plain_text", "text": "TGTC reporting — connectivity test"}},
+        _section(
+            f"This is a one-off test that the weekly reporting job can reach *{channel}*. "
+            "It carries no pipeline numbers.\n\n"
+            f"From now on the TGTC weekly pipeline report is posted here *{schedule}*, covering "
+            f"{window_rule}. If a production run or its delivery receipts are still closing at that "
+            "moment, the job retries quietly for an hour and posts a short, labelled status notice "
+            "instead of partial numbers — then the full report as soon as the data closes.\n\n"
+            "Nothing else is ever posted here by this job, and no personal data appears in it."),
+    ]
+
+
+def connectivity_test_text(channel: str) -> str:
+    return f"TGTC reporting — connectivity test for {channel} (no pipeline data)"
+
+
 # --------------------------------------------------------------------------------
 # destinations
 # --------------------------------------------------------------------------------

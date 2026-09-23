@@ -10,6 +10,7 @@ Subcommands:
   deliver            drain the outbox
   ledger             print the reconciled ledger
   weekly-report      measure a Friday-to-Friday reporting week from the database (no provider call)
+  slack-test         send one labelled connectivity test to a channel (no pipeline data)
   import-airtable    import existing Airtable rows as suppressions (reads only)
   prune              null compressed page payloads older than TGTC_PAYLOAD_RETENTION_DAYS (receipts kept)
   demo               end-to-end run against SIMULATED providers on an embedded PostgreSQL
@@ -423,6 +424,72 @@ EXIT_REPORT_ATTENTION = 4
 EXIT_REPORT_NOT_SENT = 5
 
 
+def _slack_destination(args, channel):
+    """Resolve a sender and say how the destination was established, or refuse.
+
+    Used by both the weekly report and the connectivity test, so a message can never
+    reach a channel by a route the other one would not accept.
+    """
+    from .reporting import slack
+
+    token = os.environ.get(args.slack_token_env, "").strip()
+    webhook = os.environ.get(args.webhook_env, "").strip()
+    if token:
+        found = slack.resolve_channel(token, channel)          # raises SlackError if unknown
+        if not found.get("is_member"):
+            raise slack.SlackError(f"the app is not a member of {channel} ({found['id']}); invite it first")
+        return slack.api_sender(token, found["id"]), f"slack_api:{found['id']}"
+    if webhook and args.destination_basis == "webhook-declared":
+        # An incoming webhook cannot be introspected, so the operator states which channel
+        # it posts to and the receipt records that it was DECLARED, not verified.
+        return slack.webhook_sender(webhook), "webhook_declared"
+    raise slack.SlackError(
+        f"no verified destination. Set {args.slack_token_env} (the channel is then resolved by name and "
+        f"confirmed), or pass --destination-basis webhook-declared to assert that {args.webhook_env} "
+        f"posts to {channel}")
+
+
+def cmd_slack_test(args) -> int:
+    """Send exactly one labelled connectivity test to a channel, once per day.
+
+    The test is recorded in the same table as the reports, under its own key, so it both
+    leaves an auditable receipt and demonstrates the property the Friday retries depend
+    on: a second attempt with the same key sends nothing.
+    """
+    from .reporting import slack, store as report_store
+    from .reporting.window import resolve_timezone
+
+    channel = args.channel.strip()
+    tz, _ = resolve_timezone(args.timezone)
+    now = datetime.now(timezone.utc) if not args.now else datetime.fromisoformat(args.now.replace("Z", "+00:00"))
+    key = f"connectivity-test-{now.astimezone(tz).date().isoformat()}"
+    schedule = f"every {args.delivery_weekday.capitalize()} at {args.due_hour:02d}:00 {args.timezone}"
+    window_rule = "Friday 00:00 to the following Friday 00:00 (end exclusive)"
+    message = {"blocks": slack.connectivity_test_blocks(channel=channel, schedule=schedule,
+                                                        window_rule=window_rule),
+               "text": slack.connectivity_test_text(channel)}
+    conn = connect(args.database_url or _settings().database_url)
+    report_store.ensure_schema(conn)
+    try:
+        sender, basis = _slack_destination(args, channel)
+    except slack.SlackError as exc:
+        print(f"slack-test refused: {exc}", file=sys.stderr)
+        return EXIT_REPORT_NOT_SENT
+    if args.dry_run:
+        print(json.dumps({"sent": False, "reason": "dry_run", "key": key, "channel": channel,
+                          "destination_basis": basis, "message": message}, indent=2))
+        return 0
+    try:
+        out = report_store.deliver_guarded(conn, key=key, channel=channel,
+                                           kind=report_store.CONNECTIVITY_TEST, sender=sender,
+                                           message=message, destination_basis=basis, resend=args.resend)
+    except slack.SlackError as exc:
+        print(f"slack-test failed: {exc}", file=sys.stderr)
+        return EXIT_REPORT_NOT_SENT
+    print(json.dumps(out, indent=2, default=str))
+    return 0
+
+
 def _weekly_report_destination_basis(args) -> str:
     """What a real send WOULD use, so a rehearsal states it without establishing it."""
     if os.environ.get(args.slack_token_env, "").strip():
@@ -449,10 +516,11 @@ def _weekly_report_send(conn, args, report, window, now):
     channel = (args.slack_channel or "").strip()
     if not channel:
         return {"sent": False, "error": "refused to send: --slack-channel names the confirmed destination"}
+    detail_url = args.detail_url or os.environ.get("TGTC_REPORT_DETAIL_URL", "").strip()
     if args.dry_run_send:
         # Rendering is not sending: a rehearsal may look at any week, including the one
         # in progress, and touches neither Slack nor the delivery record.
-        message = {"blocks": slack.blocks_for(report, detail_url=args.detail_url or None),
+        message = {"blocks": slack.blocks_for(report, detail_url=detail_url or None),
                    "text": slack.text_for(report)}
         return {"sent": False, "reason": "dry_run", "channel": channel, "blocks": len(message["blocks"]),
                 "destination_basis": _weekly_report_destination_basis(args),
@@ -479,32 +547,14 @@ def _weekly_report_send(conn, args, report, window, now):
     if action == ACTION_SKIP:
         return {"sent": False, **common}
 
-    token = os.environ.get(args.slack_token_env, "").strip()
-    webhook = os.environ.get(args.webhook_env, "").strip()
-    if token:
-        try:
-            found = slack.resolve_channel(token, channel)
-        except slack.SlackError as exc:
-            return {"sent": False, "error": f"refused to send: {exc}", **common}
-        if not found.get("is_member"):
-            return {"sent": False, "error": (f"refused to send: the app is not a member of {channel} "
-                                             f"({found['id']}); invite it first"), **common}
-        basis = f"slack_api:{found['id']}"
-        sender = slack.api_sender(token, found["id"])
-    elif webhook and args.destination_basis == "webhook-declared":
-        # An incoming webhook cannot be introspected, so the operator must state which
-        # channel it posts to and the receipt records that it was DECLARED, not verified.
-        basis = "webhook_declared"
-        sender = slack.webhook_sender(webhook)
-    else:
-        return {"sent": False, **common, "error": (
-            f"refused to send: no verified destination. Set {args.slack_token_env} (the channel is then resolved "
-            f"by name and confirmed), or pass --destination-basis webhook-declared to assert that "
-            f"{args.webhook_env} posts to {channel}")}
+    try:
+        sender, basis = _slack_destination(args, channel)
+    except slack.SlackError as exc:
+        return {"sent": False, "error": f"refused to send: {exc}", **common}
     common["destination_basis"] = basis
     try:
         if action == ACTION_FINAL:
-            message = {"blocks": slack.blocks_for(report, detail_url=args.detail_url or None),
+            message = {"blocks": slack.blocks_for(report, detail_url=detail_url or None),
                        "text": slack.text_for(report)}
             out = report_store.deliver_once(conn, report, sender=sender, channel=channel, message=message,
                                             kind=report_store.FINAL, destination_basis=basis, resend=args.resend)
@@ -731,6 +781,19 @@ def main(argv=None) -> int:
                    help="deprecated spelling of --fail-on alerts")
     p.add_argument("--now", default="", help="evaluate as of this instant (rehearsal and tests)")
     p.set_defaults(fn=cmd_weekly_report)
+    p = sub.add_parser("slack-test", help="send one labelled connectivity test to a channel (no pipeline data)")
+    p.add_argument("--database-url", default="")
+    p.add_argument("--channel", required=True, help="the confirmed destination, e.g. '#gtm-engineering'")
+    p.add_argument("--slack-token-env", default="SLACK_BOT_TOKEN")
+    p.add_argument("--webhook-env", default="SLACK_WEEKLY_REPORT_WEBHOOK_URL")
+    p.add_argument("--destination-basis", choices=("verify", "webhook-declared"), default="verify")
+    p.add_argument("--timezone", default="America/Los_Angeles")
+    p.add_argument("--delivery-weekday", choices=WEEKDAYS, default="friday")
+    p.add_argument("--due-hour", type=int, default=6)
+    p.add_argument("--dry-run", action="store_true", help="render the test message and send nothing")
+    p.add_argument("--resend", action="store_true", help="send today's test again (never automatic)")
+    p.add_argument("--now", default="", help="evaluate as of this instant (tests)")
+    p.set_defaults(fn=cmd_slack_test)
     args = parser.parse_args(argv)
     _require_acceptance_command(args)
     return int(args.fn(args))
