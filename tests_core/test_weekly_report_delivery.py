@@ -320,12 +320,10 @@ def test_the_command_can_render_the_message_without_sending_it(conn, pg_url, cap
     assert main(_argv(pg_url, "--send", "slack", "--slack-channel", "#gtm-engineering",
                       "--destination-basis", "webhook-declared", "--dry-run-send")) == 0
     out = capsys.readouterr().out
-    preview, summary = out.split("
-", 1)
+    preview, summary = out.split(chr(10), 1)
     # The whole message on one line, so it survives out-of-order container logs.
     message = json.loads(preview[len("SLACK_PREVIEW "):])
-    assert preview.startswith("SLACK_PREVIEW ") and "
-" not in preview
+    assert preview.startswith("SLACK_PREVIEW ") and chr(10) not in preview
     assert message["blocks"] and message["text"].startswith("TGTC weekly pipeline")
     summary = json.loads(summary)
     assert summary["delivery"]["reason"] == "dry_run" and summary["delivery"]["sent"] is False
