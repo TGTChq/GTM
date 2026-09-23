@@ -133,28 +133,90 @@ set on the service, and refuses to send a week that was already delivered.
 ## Deployment
 
 The reporting job runs as its **own Railway service**, so nothing about the daily
-production cron changes:
+production cron changes.
 
-* Service: **GTM Weekly Report** (project `898f2e3a`, environment `production`), built
-  from `Dockerfile.core` on branch `feat/rebuild-core` -- the same image as the core,
-  which already copies `tgtc_core/`.
-* Variables: `TGTC_DATABASE_URL` referencing Postgres Core, and nothing else. **No
-  provider API keys**: the service cannot spend even if it were given the wrong command.
-* Start command: `python -u -m tgtc_core weekly-report --week ${TGTC_REPORT_WEEK:-auto}
-  --print-format text --fail-on-alerts`.
-* Schedule: daily at 13:00 UTC. `--week auto` produces the **closed week** on the
-  delivery weekday in Pacific and the **week in progress** on every other day, so a
-  problem is visible days before Friday rather than on it.
-* Alerting: an alert makes the run exit non-zero, which Railway shows as a failed
-  execution; the same alerts are stored on the report row and printed at the top of the
-  text.
-* Rollback: set the service's `cronSchedule` to `null` (it stops running; nothing else
-  in the project depends on it) or delete the service. The core service, its cron and
-  its start command are untouched by any of this.
+| | |
+|---|---|
+| Service | **GTM Weekly Report** `d5a09e27-b403-49c1-9555-75341010a004` (instance `2feae949-03a7-4520-8a73-c3d467f22dcb`), project `898f2e3a`, environment `production` |
+| Source | `TGTChq/GTM`, branch `feat/rebuild-core`, built from `Dockerfile.core` -- the same image as the core, which already copies `tgtc_core/` |
+| Variables | `TGTC_DATABASE_URL` -> Postgres Core, `RAILWAY_DOCKERFILE_PATH`, and the two optional hooks `TGTC_REPORT_WEEK` / `TGTC_REPORT_ARGS`. **No provider API keys**: the service cannot spend even if it were given the wrong command. No Slack webhook: it cannot send. |
+| Start command | `sh -ec 'python -u -m tgtc_core weekly-report --week ${TGTC_REPORT_WEEK:-auto} ${TGTC_REPORT_ARGS:-} --print-format text --fail-on-alerts'` |
+| Schedule | `0 13 * * *` (daily, 13:00 UTC = 06:00 PDT / 05:00 PST), `restartPolicyType: NEVER` |
+| Next executions | 2026-09-23 13:00Z (Wednesday -> week in progress), then daily; the first **closed-week** report is Friday **2026-09-25 13:00Z** = 06:00 Pacific, covering Fri 2026-09-18 00:00 to Fri 2026-09-25 00:00 Pacific |
+
+`--week auto` produces the **closed week** on the delivery weekday in Pacific and the
+**week in progress** on every other day, so a problem is visible days before Friday
+rather than on it.
+
+Alerting: an alert makes the run exit 4, which Railway shows as a failed cron
+execution; the same alerts are stored on the report row and printed at the top of the
+text. A note (for example the unverified Fantastic add-on price) never fails a run.
+
+Rollback, in order of severity:
+
+```bash
+# stop the schedule, keep the service and its history
+railway api 'mutation { serviceInstanceUpdate(serviceId: "d5a09e27-b403-49c1-9555-75341010a004", environmentId: "bae427bd-64a6-4f4e-8f56-fbd406985434", input: {cronSchedule: null}) }'
+# or remove the service entirely; nothing else in the project depends on it
+```
+
+Neither touches the core service, its cron, its start command or its image. Reverting
+the reporting code itself is `git revert` of the reporting commits on
+`feat/rebuild-core`: the core pipeline imports nothing from `tgtc_core/reporting/`.
 
 `migration 013` adds `report_runs`. The reporting command creates only that table
 (`store.ensure_schema`) and never migrates anything else; the nightly `run-daily`
-applies the migration in the ordinary way.
+applies the migration in the ordinary way and records the version.
+
+## Rehearsals against production (2026-09-23)
+
+Both were run on the deployed service, read-only apart from their own `report_runs`
+row, and spent nothing.
+
+**A completed week -- `weekly-2026-09-11` (Sep 11 - Sep 17, 2026):** 0 genuine
+Instantly creations and 0 Airtable records, 86 contacts approved, 3,548 new unique
+jobs, 708 new units, 3,820 Fantastic records, 284 Apollo credits. Four alerts, all of
+them "no production run recorded on <day>" for 09-11 to 09-14 -- correct: the core
+database's oldest posting is 2026-09-16, and delivery started on 09-20. Reconciliation
+closes at 0.
+
+**The week in progress -- `partial-2026-09-18` (Sep 18 - Sep 22, to date):** 3,623
+genuine Instantly creations against 3,840 Airtable records; 14,024 Fantastic records
+returned; 13,356 new unique jobs; 14,317 reviewed (8,964 qualified, 5,348 rejected, 408
+no campaign fit, 203 pending); 5,308 new employers; 5,728 new units; 12,922 candidates
+found, 5,057 emails verified, 4,230 contacts approved, 476 compliance-blocked; 118
+Instantly rejections (all `instantly_existing_other_campaign`) and 13 already existing;
+1.43 Apollo credits per final lead. Reconciliation closes exactly: 3,840 = 3,623 + 217,
+and the 217 are named. The lead-level export produced **3,623 rows -- one per person,
+the same number as the KPI**.
+
+### Why the 2026-09-23 run recorded 1,045 Airtable rows and 1,013 Instantly creations
+
+Measured per approval, the 1,045 are exactly `1,013 + 30 + 2`:
+
+| | approvals |
+|---|---|
+| Airtable record **and** a genuine Instantly creation | 1,013 |
+| Airtable record, Instantly **rejected** -- the person was already in another campaign | 30 |
+| Airtable record, Instantly **existing** -- already in this campaign | 2 |
+| no delivery at all (blocked or undelivered) | 122 |
+
+The run did **not** carry the Airtable gate. Deployment `cf759d02` (commit `9be626b`,
+the gate) was created at 05:17Z on 2026-09-23, after the run finished at 05:11Z; the run
+executed on `14a09232` (commit `d943d2b`). The receipts show it directly: in every one
+of the 1,045 rows, including the 1,013 good ones, the Airtable receipt precedes the
+Instantly one. From the next scheduled run onward the gate blocks those 32 rows with
+their named reason.
+
+## The 217 legacy Airtable records
+
+The report recomputes this population from the database on every run rather than
+quoting the audit: **217 records** with no genuine Instantly creation behind them --
+118 `not_delivered:instantly_existing_other_campaign`, 86
+`compliance:outreach_eligibility_unknown` (all 2026-09-18), 13 `existing`. They are
+reported in their own section, are **not** counted as delivered leads anywhere, and are
+neither archived nor removed by anything here. A person decides what happens to them;
+the private list is `C:\TGTC\call_sidecar_private\airtable_rows_for_review_20260923.csv`.
 
 ## Still missing, and deliberately not guessed
 

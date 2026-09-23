@@ -468,6 +468,19 @@ def test_a_week_is_delivered_at_most_once_however_often_the_job_fires(conn):
     assert len(sent) == 2
 
 
+def test_re_measuring_a_week_to_date_moves_its_stored_end(conn):
+    """A partial window ends at its cutoff. Storing it twice must not leave the first
+    run's end behind on a row whose payload covers more."""
+    store.ensure_schema(conn)
+    first = pipeline.build(conn, now=datetime(2026, 9, 22, 12, tzinfo=UTC), kind="partial", compare_previous=False)
+    store.save(conn, first)
+    later = pipeline.build(conn, now=datetime(2026, 9, 23, 5, tzinfo=UTC), kind="partial", compare_previous=False)
+    store.save(conn, later)
+    row = store.get(conn, "partial-2026-09-18")
+    assert row["window_end"].astimezone(UTC) == datetime(2026, 9, 23, 5, tzinfo=UTC)
+    assert row["payload_json"]["window"]["window_end_utc"] == "2026-09-23T05:00:00Z"
+
+
 def test_a_partial_week_is_never_delivered(conn):
     store.ensure_schema(conn)
     report = pipeline.build(conn, now=datetime(2026, 9, 23, 5, 30, tzinfo=UTC), kind="partial", compare_previous=False)

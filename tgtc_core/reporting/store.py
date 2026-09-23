@@ -40,6 +40,11 @@ def save(conn: psycopg.Connection, report: Dict[str, Any]) -> Dict[str, Any]:
                 flags_json   = EXCLUDED.flags_json,
                 status       = EXCLUDED.status,
                 data_cutoff  = EXCLUDED.data_cutoff,
+                -- A week to date ends at its cutoff, so its end moves every time it is
+                -- measured; leaving the stored end behind would mislabel the window the
+                -- payload actually covers. A closed week's boundaries never move.
+                window_end   = EXCLUDED.window_end,
+                window_start = EXCLUDED.window_start,
                 generated_at = now(),
                 updated_at   = now()
             RETURNING report_id, delivered_at, delivery_target, attempts
