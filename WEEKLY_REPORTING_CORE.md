@@ -48,7 +48,7 @@ Added to Instantly: 3,623
 | Jobs captured | job postings first seen in the window (one per source + provider job id) |
 | Jobs reviewed | **those same jobs** that had been classified by the data cutoff |
 | Qualified opportunities | company × campaign units opened in the window (unique employer + function) |
-| Contacts found | distinct people the contact search identified for those units |
+| Contacts found | distinct people who cleared **both** gates in the window: current employment at that employer confirmed, and a work email on the employer's domain verified by Apollo |
 | Added to Instantly | distinct people Instantly answered `created` for, in the campaign the approval was routed to, receipt-confirmed inside the window |
 
 **The percentage divides a cohort by itself.** It used to compare classifications
@@ -57,6 +57,30 @@ contain each other -- and reported 107%, which is not a rate of anything. Captur
 review and qualification are now all measured on the jobs first seen in the window, and
 where there is no cohort at all the percentage is omitted with its reason rather than
 invented.
+
+**"Contacts found" is usable contacts, not search results.** Audited on production for
+the week to 2026-09-23, tracing every stage to its table:
+
+| stage | count | what it is |
+|---|---|---|
+| search candidates seen | 12,922 | Apollo search rows considered; 7,738 discarded before any spend, and only 5,193 ever became a person |
+| contacts enriched | 5,067 | people a paid Apollo match returned |
+| emails verified by provider | 5,057 | addresses Apollo verified, **before** the employer-domain rule |
+| not usable | 595 + 101 | work email not on the employer's domain (589 of them), no address, generic mailbox; or employer/title not confirmed |
+| **contacts found** | **4,251** | cleared both gates: 4,169 verified this week, 82 verified earlier and re-used |
+| approvals | 4,230 | the 21 difference is suppression, a refused approval and one person already approved elsewhere |
+| verified but blocked for outreach | 476 | approved capacity a compliance rule forbids sending to -- reported on its own line, never inside the four figures |
+
+The first two rows are what had been published as "contacts found". The rule is a named
+SQL predicate (`CLEARED_BOTH_GATES_SQL`): the gate outcomes it accepts are only reachable
+after both gates passed, because `services/opportunity.py` evaluates them in that order.
+A test seeds a discarded search row, a verified address on the wrong domain, an
+unconfirmed employer, one person worked on two units and one stopped by suppression, and
+fails if any of them is ever folded back into the executive figure.
+
+**"Qualified opportunities" is distinct company × campaign pairs** (5,716 that week). The
+underlying employer × function units (5,728) are reported beside it: twelve companies were
+open for two functions of the same campaign.
 
 **"Added to Instantly" is additions, not activity.** People Instantly already had,
 rejections, Control campaigns, anyone counted twice and the phone sidecar are all
@@ -436,3 +460,36 @@ verified, is exactly the mistake the instruction exists to prevent.
 The file is therefore generated, reconciled and stored every week, the summary says the
 detail is pending, and publishing it is two commands once somebody supplies a folder the
 team already uses and the addresses that may read it.
+
+
+## The Drive destination: what exists and what is missing
+
+The TGTC Drive account `luis@globaltalent.co` **is** reachable from the Claude Code
+session, and its policy **does** allow link sharing (an existing file in it carries
+`{"role": "reader", "type": "anyone"}`). A destination folder now exists:
+
+* **TGTC Weekly Lead Detail** — `18pSf8dk0e8ugAMNYC7KPEKZsxZkd4700`
+* it holds `TGTC_weekly_leads_2026-09-18_MANIFEST.txt` (row count, checksum, columns,
+  window and exclusions — **no personal data**), which proves a file uploads into it
+
+Two things still block the automatic weekly upload, and neither is a code change:
+
+1. **Railway has no Drive credential.** The reporting job runs with `TGTC_DATABASE_URL`
+   and nothing else; a Google connector in a chat session is not a credential the
+   container can use. Minimum needed: a **service account** in the `globaltalent.co`
+   workspace with the Drive API enabled, its JSON key on the *GTM Weekly Report* service
+   as `TGTC_DRIVE_SERVICE_ACCOUNT_JSON`, the folder above shared with that service
+   account as **Editor**, and its id as `TGTC_REPORT_DRIVE_FOLDER_ID`.
+2. **The file cannot travel through the chat connector.** The week's CSV is 1.93 MB
+   (3,623 rows); a connector upload takes the content as a tool parameter, which is far
+   beyond a single request even gzipped. The upload has to happen from the job, which
+   returns to point 1.
+
+Setting "anyone with the link → reader" also could not be done from here: the connector's
+share tool takes an email address only, and the attempt was refused by this environment's
+data-exfiltration guard. With the service account in place the job can set it directly,
+or the folder can be set to link-sharing once by hand and every upload inherits it.
+
+Until then the weekly file is generated, reconciled and stored every week, and the Slack
+summary says the detail is **pending** rather than linking to something that does not
+exist.
