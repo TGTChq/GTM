@@ -332,6 +332,20 @@ def test_the_command_can_render_the_message_without_sending_it(conn, pg_url, cap
     assert store.delivery_record(conn, "weekly-2026-09-11", "#gtm-engineering", store.FINAL) is None
 
 
+def test_a_weekday_tick_measures_the_week_in_progress_and_is_not_an_error(conn, pg_url, capsys, monkeypatch):
+    """The job runs daily so a problem is visible before Friday. On a Tuesday it holds a
+    week-to-date report and simply has nowhere to send it -- that is not a failure."""
+    from tgtc_core.__main__ import main
+
+    tuesday = datetime(2026, 9, 22, 20, 0, tzinfo=UTC)          # 13:00 Pacific, Tuesday
+    assert main(["weekly-report", "--database-url", pg_url, "--week", "auto", "--now", tuesday.isoformat(),
+                 "--print-format", "none", "--no-compare", "--send", "slack",
+                 "--slack-channel", "#gtm-engineering", "--fail-on", "never"]) == 0
+    summary = json.loads(capsys.readouterr().out)
+    assert summary["kind"] == "partial"
+    assert summary["delivery"]["reason"] == "not_delivery_day" and "error" not in summary["delivery"]
+
+
 def test_the_command_does_not_send_before_the_delivery_moment(conn, pg_url, capsys, monkeypatch):
     from tgtc_core.__main__ import main
 

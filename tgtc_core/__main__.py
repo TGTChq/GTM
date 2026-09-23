@@ -457,18 +457,20 @@ def _weekly_report_send(conn, args, report, window, now):
         return {"sent": False, "reason": "dry_run", "channel": channel, "blocks": len(message["blocks"]),
                 "destination_basis": _weekly_report_destination_basis(args),
                 "preview": message["text"], "message": message}
-    if report["window"]["kind"] != "weekly":
-        return {"sent": False, "error": "refused to send: only a closed week is published"}
-
     # The clock first: a tick that could not send anything needs no credential, no
-    # readiness query and no noise. A missing destination is then a failure exactly when
-    # it matters -- on Friday, at the moment the report was due.
+    # readiness query and no noise. On any day but Friday the job is measuring the week
+    # in progress, which is the point of running daily -- it is not an error.
     state = delivery_state(now, weekday=WEEKDAYS.index(args.delivery_weekday), due_hour=args.due_hour,
                            retry_until_hour=args.retry_until_hour, tz_name=args.timezone)
     schedule = (f"{args.delivery_weekday} {args.due_hour:02d}:00 {args.timezone}, "
                 f"retry until {args.retry_until_hour:02d}:00")
     if state in (NOT_DELIVERY_DAY, BEFORE_DUE):
         return {"sent": False, "reason": state, "state": state, "channel": channel, "schedule": schedule}
+    # It IS the delivery moment: holding anything but a closed week is now a real
+    # misconfiguration, and a missing destination is a real delivery failure.
+    if report["window"]["kind"] != "weekly":
+        return {"sent": False, "state": state, "channel": channel, "schedule": schedule,
+                "error": "refused to send: only a closed week is published"}
 
     ready = readiness(conn, window, report)
     action, reason = decide(state, ready.ready)
