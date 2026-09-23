@@ -95,8 +95,8 @@ def blocks_for(report: Dict[str, Any], *, detail_url: Optional[str] = None,
             f"*Net-new leads created in the nine Challenger campaigns: {_n(d['instantly_created_unique_people'])}*\n"
             f"• {_n(b['created_from_this_weeks_approvals'])} from approvals made this week, "
             f"{_n(b['created_from_earlier_approvals_backlog'])} from earlier approvals (backlog)\n"
-            f"• Production runs in the window: {_n(runs['run_count'])} "
-            f"({_n(runs['completed_runs'])} completed, {_n(runs['refused_runs'])} refused)"),
+            f"• Daily production runs completed: {_n(runs['completed_runs'])} "
+            f"({_n(runs['refused_runs'])} refused; {_n(runs['run_count'])} run ids logged activity in the window)"),
         {"type": "divider"},
         # 2. capture and review, with the denominators spelled out
         _section(
@@ -151,9 +151,9 @@ def blocks_for(report: Dict[str, Any], *, detail_url: Optional[str] = None,
                         f"{('' if change is None else f'{change:+,}'):>10}")
         blocks.append(_section(f"*Against the previous week* ({previous['window']})\n" + _code(rows)))
 
-    table = [f"{'campaign':<24}{'units':>7}{'approved':>10}{'created':>9}{'airtable':>10}{'blocked':>9}"]
+    table = [f"{'campaign':<30}{'units':>7}{'approved':>10}{'created':>9}{'airtable':>10}{'blocked':>9}"]
     for row in report["by_campaign"]["campaigns"].values():
-        table.append(f"{row['name'][:24]:<24}{row['new_units']:>7,}{row['contacts_approved']:>10,}"
+        table.append(f"{row['name'][:30]:<30}{row['new_units']:>7,}{row['contacts_approved']:>10,}"
                      f"{row['instantly_created_unique_people']:>9,}{row['airtable_records_created']:>10,}"
                      f"{row['compliance_blocked']:>9,}")
     blocks.append(_section("*All nine Challenger campaigns*\n" + _code(table)))
@@ -175,9 +175,9 @@ def blocks_for(report: Dict[str, Any], *, detail_url: Optional[str] = None,
     exceptions = [f"• 🟥 {line}" for line in integrity[:4]]
     exceptions += [f"• ⚠️ {line}" for line in alerts if line not in integrity][:4]
     exceptions.append(
-        f"• 🗂️ *Legacy exception (not delivered leads):* {_n(legacy['records'])} historical Airtable records "
+        f"• 🗂️ *Legacy exception, all time (not delivered leads):* {_n(legacy['records'])} Airtable records "
         "with no genuine Instantly creation behind them — a review population, never counted as delivered, "
-        "never archived or removed here")
+        "never archived or removed here. Where a figure above repeats this number, they are the same records.")
     if report["coverage"]["local_days_unavailable"]:
         exceptions.append("• ◻️ *Unavailable:* " + ", ".join(report["coverage"]["local_days_unavailable"]) +
                           " — before this database's first record, reported as unavailable, not as zero")

@@ -809,8 +809,8 @@ def graded_flags(report: Dict[str, Any], *, target_per_run: int = 1000) -> List[
         integrity(f"reconciliation does not close: {recon['unexplained_difference']} Airtable record(s) "
                   "are explained by neither a genuine creation nor a named reason")
     if recon["airtable_records_without_a_genuine_creation"]:
-        alert(f"{recon['airtable_records_without_a_genuine_creation']} Airtable record(s) were written "
-              "in this window without a genuine Instantly creation")
+        alert(f"{recon['airtable_records_without_a_genuine_creation']} Airtable record(s) written IN THIS WINDOW "
+              "have no genuine Instantly creation behind them (each one carries a named reason)")
     if report["delivery"]["instantly_creations_into_a_control_campaign"]:
         integrity("a lead was created in a CONTROL campaign; Challenger-only routing must be checked")
     if report["backlog"]["approved_this_week_not_yet_delivered"]:

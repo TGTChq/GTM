@@ -255,7 +255,7 @@ def test_airtable_records_reconcile_to_creations_plus_named_reasons(conn):
     assert recon["unexplained_difference"] == 0 and recon["identity_holds"] is True
     assert set(recon["airtable_records_without_a_creation_by_reason"]) == {
         "not_delivered:instantly_existing_other_campaign", "existing"}
-    assert any("without a genuine Instantly creation" in flag for flag in report_for(conn)["flags"])
+    assert any("no genuine Instantly creation behind them" in flag for flag in report_for(conn)["flags"])
 
 
 def test_the_legacy_review_population_is_separate_and_never_counted_as_delivered(conn):
