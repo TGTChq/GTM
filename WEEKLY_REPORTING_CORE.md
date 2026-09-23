@@ -115,13 +115,16 @@ year. The cron fires across a wider UTC band and every tick decides locally.
 
 ### Exceptions are graded
 
-* **integrity** — a difference nothing explains, a lead created in a Control campaign, a
-  refused run, or a day inside the database's coverage with no run at all. These fail the
-  scheduled job (exit 4), which is how they reach a person.
-* **alert** — a business fact the readers must see: a day below the 1,000 minimum,
-  Airtable records written with a named reason behind them. Shown in the report and in
-  Slack; never fails a job, because a known exception that fails every run teaches people
-  to ignore failures.
+* **integrity** — a difference nothing explains, a lead created in a Control campaign, or
+  a refused run. These fail the scheduled job (exit 4), which is how they reach a person.
+  A day inside the coverage with **no run at all** is deliberately NOT here: it is a fact
+  about the past that waiting cannot change, a correct reconciled report should carry it
+  rather than be withheld for it, and a job that exits red every twenty minutes over a
+  gap nobody can now fix teaches people to ignore red.
+* **alert** — a fact the readers must see but nobody needs woken for: a missing run (such
+  as 2026-09-19), a day below the 1,000 minimum, Airtable records written with a named
+  reason behind them. Shown in the report and in Slack; never fails a job and never
+  withholds one.
 * **note** — true, worth printing, never a reason to act: an unverified unit price, days
   the database cannot speak about.
 
@@ -222,28 +225,37 @@ Migrations **013** (`report_runs`) and **014** (`report_deliveries`) are applied
 reporting command itself (`store.ensure_schema`, which touches only its own two tables)
 and, in the ordinary way, by the nightly `run-daily`.
 
-## The one thing still needed to switch posting on
+## Posting is active (2026-09-23)
 
-The channel, the hour and the retry rule are confirmed and configured. What is missing is
-a credential that can *prove* where a message lands, because the instruction was not to
-infer the destination from an opaque webhook URL -- and an incoming webhook cannot be
-introspected by anyone, including us.
+The destination is a **new incoming webhook created for `#gtm-engineering`**, held on the
+reporting service as `SLACK_WEEKLY_REPORT_WEBHOOK_URL` — a different credential from the
+older webhook on the legacy `GTM` service (confirmed by comparing fingerprints, never
+values). Because an incoming webhook cannot be introspected, the destination is recorded
+as **declared** rather than resolved: `TGTC_REPORT_DESTINATION_ARGS=--destination-basis
+webhook-declared`, and every receipt says so. Adding a `SLACK_BOT_TOKEN` later upgrades
+the same job to a resolved-by-name channel id without any other change.
 
-Either of these turns posting on, with no code change and no redeploy (the next cron tick
-picks up the variable):
+**The channel was proved before the first report.** `slack-test` posted exactly one short,
+labelled connectivity test — what it is, when the report arrives, what a delay looks
+like, and no pipeline numbers — and Slack accepted it:
 
-1. **`SLACK_BOT_TOKEN`** on the reporting service — scopes `channels:read` and
-   `chat:write`, with the app invited to `#gtm-engineering`. The job then resolves the
-   channel id by name, refuses if the app is not a member, posts to that id and records
-   `slack_api:C…` on the receipt. This is the only path that *verifies* the destination.
-2. **`TGTC_REPORT_DESTINATION_ARGS=--destination-basis webhook-declared`** — an explicit
-   statement that the existing `SLACK_WEEKLY_REPORT_WEBHOOK_URL` posts to
-   `#gtm-engineering`. The receipt then records `webhook_declared`, because nothing can
-   check that claim.
+```json
+{"sent": true, "report_id": "connectivity-test-2026-09-23", "kind": "connectivity_test",
+ "channel": "#gtm-engineering", "destination_basis": "webhook_declared",
+ "receipt": {"transport": "incoming_webhook", "sent_at": "2026-09-23T07:27:40Z"}}
+```
 
-Until one exists, every tick still measures and stores the week; the Friday 06:00 tick
-fails visibly with `refused to send: no verified destination`, which is the delivery alert
-doing its job.
+A second execution of the same command returned `already_delivered` and sent nothing —
+the same guard the Friday retries rely on, proved live on the cheapest message there is.
+
+### A Railway fact worth knowing
+
+**Variables are baked into a deployment.** `variableCollectionUpsert` with
+`skipDeploys: true` changes what the next *deployment* will see, not what an existing
+one runs with: a cron execution of the current deployment keeps the values captured when
+it was created. So after changing any `TGTC_REPORT_*` variable or the Slack credential,
+redeploy (`serviceInstanceDeployV2`) or the change will not take effect. This was found
+the hard way here — a rehearsal flag was set and silently ignored for two executions.
 
 ## Rehearsals against production (2026-09-23)
 
@@ -323,3 +335,19 @@ phone number appears anywhere in it.
 
 Two things the first render showed, both fixed: the same 217 records were listed twice
 without saying they were the same rows, and two campaign names were cut mid-word.
+
+## The old webhook on the legacy GTM service
+
+`SLACK_WEEKLY_REPORT_WEBHOOK_URL` on the `GTM` service is a **different** webhook and is
+used by nothing:
+
+* `GTM` and `GTM Approved Sync` have no cron, and both start commands only print
+  `TGTC_PAUSED_PENDING_CREDITS`;
+* no other service in the environment holds a Slack webhook at all (checked by
+  fingerprint, so no value was read or printed);
+* CI only asserts the variable is *absent*; it never posts;
+* the only code that would use it, `weekly_report/slack.py` via
+  `run_weekly_report.py --slack`, is not in the core image and nothing schedules it.
+
+It is therefore safe to revoke in Slack. The only thing that stops working is a manual
+`run_weekly_report.py --slack` from a laptop, which nothing depends on.
