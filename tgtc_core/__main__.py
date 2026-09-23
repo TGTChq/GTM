@@ -590,6 +590,10 @@ def cmd_weekly_report(args) -> int:
     delivery = {"sent": False, "reason": "not requested"}
     if args.send != "none":
         delivery = _weekly_report_send(conn, args, report, window, now)
+        if delivery.get("message") is not None:
+            # One line, on purpose: a container's log lines can arrive out of order, and
+            # a rehearsal that has to be reassembled by hand is not a rehearsal.
+            print("SLACK_PREVIEW " + json.dumps(delivery.pop("message"), separators=(",", ":")))
         if delivery.get("error"):
             print(f"weekly-report: {delivery['error']}", file=sys.stderr)
             print(json.dumps({"delivery": delivery}, indent=2, default=str))
