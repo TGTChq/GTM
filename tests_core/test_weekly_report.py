@@ -392,6 +392,105 @@ def test_jobs_reviewed_qualified_rejected_and_pending_are_counted_in_their_own_u
     assert "first seen in this window" in j["definitions"]["new_jobs_unique"]
 
 
+def seed_candidate(conn, *, when, kind, outcome, reason=None, person_id=None, ref=None, opportunity_id=None,
+                   employer_id=None):
+    """One row of contact work, at whichever stage a test needs."""
+    with conn.cursor() as cur:
+        if opportunity_id is None:
+            if employer_id is None:
+                cur.execute("INSERT INTO employers (canonical_name, name_key) VALUES (%s, %s) RETURNING id",
+                            (f"Emp {next(_SEQ)}", f"emp-{next(_SEQ)}"))
+                employer_id = int(cur.fetchone()["id"])
+            cur.execute("INSERT INTO opportunities (employer_id, function_key, campaign_key, created_at) "
+                        "VALUES (%s, 'product', 'product', %s) RETURNING id", (employer_id, when))
+            opportunity_id = int(cur.fetchone()["id"])
+        cur.execute("INSERT INTO candidate_attempts (opportunity_id, person_id, candidate_ref, attempt_kind, "
+                    "outcome, reason, created_at) VALUES (%s, %s, %s, %s, %s, %s, %s) "
+                    "ON CONFLICT (opportunity_id, candidate_ref, attempt_kind) DO UPDATE SET outcome = EXCLUDED.outcome "
+                    "RETURNING id", (opportunity_id, person_id, ref or f"ref-{next(_SEQ)}", kind, outcome, reason, when))
+    conn.commit()
+    return opportunity_id
+
+
+def seed_person(conn, *, verified=True, verified_at=None, employer_id=None):
+    with conn.cursor() as cur:
+        if employer_id is None:
+            cur.execute("INSERT INTO employers (canonical_name, name_key) VALUES (%s, %s) RETURNING id",
+                        (f"Emp {next(_SEQ)}", f"emp-{next(_SEQ)}"))
+            employer_id = int(cur.fetchone()["id"])
+        serial = next(_SEQ)
+        cur.execute("INSERT INTO people (first_name, last_name, title, employer_id, email, email_status, "
+                    "email_verified_at) VALUES (%s, 'Doe', 'Head of Product', %s, %s, %s, %s) RETURNING id",
+                    (f"person{serial}", employer_id, f"p{serial}@example.com",
+                     "verified" if verified else "extrapolated", verified_at))
+        person_id = int(cur.fetchone()["id"])
+    conn.commit()
+    return person_id
+
+
+def test_contacts_found_never_mixes_candidates_attempts_duplicates_and_verified_people(conn):
+    """The 2026-09-23 audit in one test.
+
+    The figure that reached Brett counted 12,922 Apollo SEARCH rows for a week that found
+    4,251 usable contacts. Each stage below is a different unit, and this test fails if
+    any of them is ever folded back into the executive line.
+    """
+    inside = WEEK_START + timedelta(days=1)
+
+    # 1. a search row discarded before any spend: no person, no email, no verification
+    seed_candidate(conn, when=inside, kind="gate", outcome="skipped_pre_enrichment",
+                   reason="contact:function_or_authority_mismatch")
+    # 2. a paid match whose address is verified but NOT on the employer's domain
+    wrong_domain = seed_person(conn, verified=True, verified_at=inside)
+    unit = seed_candidate(conn, when=inside, kind="match", outcome="served", person_id=wrong_domain, ref="r2")
+    seed_candidate(conn, when=inside, kind="gate", outcome="fail", reason="email:domain_not_employer",
+                   person_id=wrong_domain, ref="r2", opportunity_id=unit)
+    # 3. a person whose current employer could not be confirmed
+    wrong_org = seed_person(conn, verified=True, verified_at=inside)
+    unit3 = seed_candidate(conn, when=inside, kind="match", outcome="served", person_id=wrong_org, ref="r3")
+    seed_candidate(conn, when=inside, kind="gate", outcome="fail", reason="contact:wrong_organization",
+                   person_id=wrong_org, ref="r3", opportunity_id=unit3)
+    # 4. one usable contact -- counted once, however many units it was worked on
+    good = seed_person(conn, verified=True, verified_at=inside)
+    unit4 = seed_candidate(conn, when=inside, kind="match", outcome="served", person_id=good, ref="r4")
+    seed_candidate(conn, when=inside, kind="gate", outcome="pass", reason="approved", person_id=good,
+                   ref="r4", opportunity_id=unit4)
+    seed_candidate(conn, when=inside, kind="gate", outcome="pass", reason="reused_verified_person",
+                   person_id=good, ref="r4-second-unit")
+    # 5. a person who cleared both gates and was then stopped by suppression
+    suppressed = seed_person(conn, verified=True, verified_at=inside)
+    unit5 = seed_candidate(conn, when=inside, kind="match", outcome="served", person_id=suppressed, ref="r5")
+    seed_candidate(conn, when=inside, kind="gate", outcome="fail", reason="suppressed:person_email",
+                   person_id=suppressed, ref="r5", opportunity_id=unit5)
+
+    h = report_for(conn)["headline"]
+    assert h["contacts_found"] == 2                     # the approved one and the suppressed one
+    assert h["search_candidates_seen"] == 6             # every distinct ref, which is NOT the same thing
+    assert h["contacts_enriched"] == 4                  # paid matches, which is NOT the same thing either
+    assert h["emails_verified_by_provider"] == 4        # nor is everything the provider verified
+    assert h["verified_but_not_usable"] == {"work_email_not_usable": 1,
+                                            "employer_or_title_not_confirmed": 1}
+    assert h["contacts_cleared_but_unverified"] == 0
+    assert "not the number of search results seen" in h["definitions"]["contacts_found"]
+
+
+def test_qualified_opportunities_are_distinct_company_x_campaign_pairs(conn):
+    """One company open for two functions of the SAME campaign is one pair, two units."""
+    inside = WEEK_START + timedelta(days=1)
+    with conn.cursor() as cur:
+        cur.execute("INSERT INTO employers (canonical_name, name_key) VALUES ('Two Functions', 'two-functions') "
+                    "RETURNING id")
+        employer = int(cur.fetchone()["id"])
+        for function_key in ("customer_success", "customer_support"):
+            cur.execute("INSERT INTO opportunities (employer_id, function_key, campaign_key, created_at) "
+                        "VALUES (%s, %s, 'customer_experience', %s)", (employer, function_key, inside))
+    conn.commit()
+    h = report_for(conn)["headline"]
+    assert h["qualified_opportunities"] == 1
+    assert h["qualified_opportunity_rows_employer_x_function"] == 2
+    assert h["qualified_opportunity_employers"] == 1
+
+
 def test_compliance_blocked_contacts_are_reported_beside_approvals_never_inside_them(conn):
     inside = WEEK_START + timedelta(days=1)
     seed_lead(conn, received_at=inside, campaign_key="product", campaign_id="camp-pr")

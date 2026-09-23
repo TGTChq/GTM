@@ -87,12 +87,18 @@ def headline_lines(report: Dict[str, Any]) -> List[str]:
     added = f"*Added to Instantly:* {_n(h['added_to_instantly'])}"
     if h["added_from_earlier_approvals"]:
         added += f" _(includes {_n(h['added_from_earlier_approvals'])} from approvals made before this week)_"
-    return [
+    lines = [
         jobs,
         f"*Qualified opportunities:* {_n(h['qualified_opportunities'])}",
         f"*Contacts found:* {_n(h['contacts_found'])}",
         added,
     ]
+    blocked = h.get("verified_contacts_blocked_for_outreach") or 0
+    if blocked:
+        # Reported beside the four figures, never inside them: a contact a compliance
+        # rule forbids sending to is real capacity and is not a lead that went out.
+        lines.append(f"_Verified but blocked for outreach: {_n(blocked)} — counted capacity, never sent._")
+    return lines
 
 
 def _attention_line(report: Dict[str, Any]) -> Optional[str]:
@@ -137,6 +143,7 @@ def blocks_for(report: Dict[str, Any], *, detail_url: Optional[str] = None,
     blocks.append({"type": "context", "elements": [{"type": "mrkdwn", "text": (
         f"Week {w['window_start_local'][:10]} → {w['window_end_local'][:10]} {w['timezone']} (end exclusive) • "
         f"data cutoff {w['data_cutoff_utc']} • jobs captured/reviewed are the same cohort • "
+        f"'contacts found' = current employer confirmed + work email verified • "
         f"'added' counts receipt-confirmed creations only, never existing contacts or the phone sidecar • "
         f"report `{w['report_id']}`")}]})
     return blocks

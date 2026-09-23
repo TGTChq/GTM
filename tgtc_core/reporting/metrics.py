@@ -39,6 +39,19 @@ GENUINE_CREATION_PREDICATE = (
     "r.channel = 'instantly' AND r.receipt_kind = 'created' AND r.external_campaign = a.campaign_id"
 )
 
+#: Gate outcomes that are only reachable AFTER both the employer gate and the
+#: verified-work-email gate have passed. ``services/opportunity.py`` evaluates them in
+#: that order -- contact gate, email gate, suppression, approval decision, already
+#: approved elsewhere, pass -- so any of these is positive evidence that a person is a
+#: usable contact, while a ``contact:`` or ``email:`` failure is evidence that they are
+#: not. Counting search rows or enrichment attempts instead is what produced "12,922
+#: contacts" for a week that found 4,251.
+CLEARED_BOTH_GATES_SQL = (
+    "ca.attempt_kind = 'gate' AND (ca.outcome = 'pass' "
+    " OR ca.reason LIKE 'suppressed:%%' OR ca.reason LIKE 'approval_refused:%%' "
+    " OR ca.reason = 'person_already_approved_elsewhere')"
+)
+
 #: An Airtable record that exists: created outright, or recovered by reconciliation
 #: after an uncertain response (the same row, found again -- never a second row).
 AIRTABLE_RECORD_PREDICATE = "r.channel = 'airtable' AND r.receipt_kind IN ('created', 'reconciled')"
@@ -272,12 +285,47 @@ def headline_section(cur, w: ReportWindow) -> Dict[str, Any]:
           AND EXISTS (SELECT 1 FROM classifications c
                       WHERE c.posting_id = p.id AND c.created_at < %(cutoff)s
                         AND NOT c.excluded AND cardinality(c.compatible_functions) > 0)""", p))
-    opportunities = _int(_one(cur, """
-        SELECT count(*) FROM opportunities
-        WHERE created_at >= %(t0)s AND created_at < %(t1)s""", p))
-    contacts_found = _int(_one(cur, """
+    units = _rows(cur, """
+        SELECT count(DISTINCT (employer_id, campaign_key)) AS company_x_campaign,
+               count(*) AS employer_x_function,
+               count(DISTINCT employer_id) AS employers
+        FROM opportunities WHERE created_at >= %(t0)s AND created_at < %(t1)s""", p)[0]
+    opportunities = _int(units["company_x_campaign"])
+    contacts = _rows(cur, f"""
+        WITH cleared AS (
+            SELECT DISTINCT ca.person_id FROM candidate_attempts ca
+            WHERE ca.created_at >= %(t0)s AND ca.created_at < %(t1)s AND ca.person_id IS NOT NULL
+              AND {CLEARED_BOTH_GATES_SQL})
+        SELECT count(*) FILTER (WHERE p.email_status = 'verified') AS found,
+               count(*) FILTER (WHERE p.email_status = 'verified'
+                                AND p.email_verified_at >= %(t0)s AND p.email_verified_at < %(t1)s) AS in_window,
+               count(*) FILTER (WHERE p.email_status = 'verified'
+                                AND (p.email_verified_at IS NULL OR p.email_verified_at < %(t0)s)) AS reused,
+               count(*) FILTER (WHERE p.email_status IS DISTINCT FROM 'verified') AS cleared_unverified
+        FROM cleared c JOIN people p ON p.id = c.person_id""", p)[0]
+    contacts_found = _int(contacts["found"])
+    candidates_seen = _int(_one(cur, """
         SELECT count(DISTINCT candidate_ref) FROM candidate_attempts
         WHERE created_at >= %(t0)s AND created_at < %(t1)s""", p))
+    enriched = _int(_one(cur, """
+        SELECT count(DISTINCT person_id) FROM candidate_attempts
+        WHERE attempt_kind = 'match' AND outcome IN ('served', 'reused_stored_evidence')
+          AND created_at >= %(t0)s AND created_at < %(t1)s AND person_id IS NOT NULL""", p))
+    provider_verified = _int(_one(cur, """
+        SELECT count(*) FROM people WHERE email_status = 'verified'
+          AND email_verified_at >= %(t0)s AND email_verified_at < %(t1)s""", p))
+    not_usable = _breakdown(cur, """
+        SELECT CASE WHEN reason LIKE 'email:%%' THEN 'work_email_not_usable'
+                    ELSE 'employer_or_title_not_confirmed' END AS k,
+               count(DISTINCT person_id) AS n
+        FROM candidate_attempts
+        WHERE attempt_kind = 'gate' AND outcome = 'fail' AND person_id IS NOT NULL
+          AND (reason LIKE 'email:%%' OR reason LIKE 'contact:%%')
+          AND created_at >= %(t0)s AND created_at < %(t1)s GROUP BY 1""", p)
+    blocked_for_outreach = _int(_one(cur, """
+        SELECT count(*) FROM approvals WHERE state <> 'revoked'
+          AND outreach_eligible IS DISTINCT FROM TRUE
+          AND approved_at >= %(t0)s AND approved_at < %(t1)s""", p))
     added = _rows(cur, f"""
         SELECT count(DISTINCT lower(o.payload_json->>'email')) AS people,
                count(DISTINCT lower(o.payload_json->>'email')) FILTER (WHERE a.approved_at >= %(t0)s) AS this_week
@@ -292,7 +340,17 @@ def headline_section(cur, w: ReportWindow) -> Dict[str, Any]:
             None if captured else "no jobs were captured in this window, so there is no cohort to review"),
         "qualified_jobs": qualified_jobs,
         "qualified_opportunities": opportunities,
+        "qualified_opportunity_rows_employer_x_function": _int(units["employer_x_function"]),
+        "qualified_opportunity_employers": _int(units["employers"]),
         "contacts_found": contacts_found,
+        "contacts_found_verified_in_window": _int(contacts["in_window"]),
+        "contacts_found_verified_earlier_and_reused": _int(contacts["reused"]),
+        "contacts_cleared_but_unverified": _int(contacts["cleared_unverified"]),
+        "search_candidates_seen": candidates_seen,
+        "contacts_enriched": enriched,
+        "emails_verified_by_provider": provider_verified,
+        "verified_but_not_usable": not_usable,
+        "verified_contacts_blocked_for_outreach": blocked_for_outreach,
         "added_to_instantly": people,
         "added_from_this_weeks_approvals": this_week,
         "added_from_earlier_approvals": people - this_week,
@@ -301,8 +359,22 @@ def headline_section(cur, w: ReportWindow) -> Dict[str, Any]:
             "jobs_reviewed": "those same jobs that had been classified by the data cutoff -- same cohort, "
                              "so the percentage divides a count by the count it came from",
             "qualified_jobs": "those same jobs whose classification matched one of the nine campaigns",
-            "qualified_opportunities": "company x campaign units opened in this window (unique employer + function)",
-            "contacts_found": "distinct people the contact search identified for those units in this window",
+            "qualified_opportunities": "distinct company x campaign pairs opened in this window",
+            "qualified_opportunity_rows_employer_x_function": (
+                "the underlying units (employer + function); larger than the pairs when one company is open "
+                "for two functions inside the same campaign"),
+            "contacts_found": (
+                "distinct people who cleared BOTH gates in this window: current employment at that employer "
+                "confirmed, and a work email on the employer's domain verified by Apollo. It is not the number "
+                "of search results seen (search_candidates_seen), not enrichment attempts (contacts_enriched) "
+                "and not every address the provider verified (emails_verified_by_provider), because an address "
+                "that is not on the employer's domain is not a usable contact"),
+            "search_candidates_seen": "Apollo search rows considered, most of them discarded before any spend",
+            "contacts_enriched": "people a paid Apollo match returned in this window",
+            "emails_verified_by_provider": "addresses Apollo verified in this window, before the employer-domain rule",
+            "verified_but_not_usable": "people rejected by the work-email or employer/title rule",
+            "verified_contacts_blocked_for_outreach": (
+                "approved contacts a compliance rule forbids sending to -- counted capacity, never a sent lead"),
             "added_to_instantly": "distinct people Instantly answered 'created' for, in the campaign the approval "
                                   "was routed to, receipt-confirmed inside this window. Excludes people Instantly "
                                   "already had, rejections, Control campaigns, anyone counted twice and the phone "
