@@ -225,10 +225,32 @@ record, one caller per `TGTC_INFERENCE_RETRY_HOURS` (default 1) asks again, and 
 call lifts it. Postings still wait rather than close -- a billing problem must never
 lose a job.
 
-**This does not fix the cause.** The Anthropic account needs credit, which is outside
-what this work was authorised to buy. Until then, classification is deterministic only,
-which is the measured reason a run needs ~3,900 Fantastic records to produce ~1,000
-leads instead of fewer.
+**This does not fix the cause.** The Anthropic account needs credit. Until then,
+classification is deterministic only, which is the measured reason a run needs ~3,900
+Fantastic records to produce ~1,000 leads instead of fewer.
+
+### What a classification costs, measured
+
+Not an estimate -- `spend_reservations` holds the token usage of **6,218 served
+classifications**: **1,569 input tokens and 293 output tokens** on average (output p90
+451, max 891, comfortably under `max_tokens` 1024). At claude-opus-5 rates ($5/M in,
+$25/M out) that is **$0.0152 per classification**. The last funded day,
+`prod-scheduled-20260923`, ran 1,036 of them for **$16.04**, and the start command's
+`--anthropic-requests 1500` caps the worst case at **$22.76 a day**. A $100 one-time
+balance is therefore about **4.4 days at the cap, 6 at the observed rate**.
+
+Semantic classifications per day, measured: 76 on 09-20, 397 on 09-21, 273 on 09-22,
+340 on 09-23, and **zero on 09-24** once the balance was gone.
+
+### Telling a funding problem from a key problem
+
+The balance error blocks **everything on the inference path, including
+`messages.count_tokens`**, while `models.list` still answers 200. That asymmetry is the
+diagnostic: a valid key whose metadata calls work and whose inference calls return
+`invalid_request_error: Your credit balance is too low` has a funding problem, not an
+auth, scope or model-access problem. The key's organization is
+`0e0f7a32-063c-4850-ad68-078251d5a537` -- the id to match against whichever Console
+organization was funded.
 
 ## Two guards that are not about capacity, and shipped with it
 
