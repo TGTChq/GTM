@@ -218,13 +218,14 @@ def poll(conn: psycopg.Connection, client, *, campaign_ids: Sequence[str], now: 
         if not items:
             break
         report.pages += 1
-        new_on_this_page = 0
+        ours_on_page = new_on_this_page = 0
         for item in items:
             report.seen += 1
             if str(item.get("campaign_id") or "") not in ours:
                 report.skipped_other_campaigns += 1
                 continue
             report.ours += 1
+            ours_on_page += 1
             outcome = ingest_one(conn, item, now=now, dry_run=dry_run)
             report.by_label[outcome["label"]] = report.by_label.get(outcome["label"], 0) + 1
             if outcome["recorded"] == "duplicate":
@@ -244,8 +245,10 @@ def poll(conn: psycopg.Connection, client, *, campaign_ids: Sequence[str], now: 
             write_cursor(conn, cursor, seen=len(items), now=now)
         if not cursor:
             break
-        if new_on_this_page == 0 and report.ours:
-            # Everything on this page was already known: the rest is older still.
+        if ours_on_page and new_on_this_page == 0:
+            # This page held replies of ours and every one was already known, so the
+            # rest is older still. A page holding NONE of ours proves nothing: the feed
+            # is mostly other campaigns, and ours can sit deeper.
             report.stopped_at_known_ground = True
             break
     report.cursor = cursor

@@ -204,6 +204,17 @@ def test_a_poll_stops_as_soon_as_a_page_holds_nothing_new(conn):
     assert second.duplicates == 1 and second.recorded == 0
 
 
+def test_a_page_holding_none_of_our_campaigns_does_not_end_the_sweep(conn):
+    """The feed is mostly other campaigns -- 483 of 540 on 2026-09-24. A page without any
+    of ours proves nothing about what is deeper."""
+    lead(conn, "deep@example.com")
+    pages = [[reply("x1", "stranger@example.com", "Re:", "hello", campaign=THEIRS)],
+             [reply("m1", "deep@example.com", "Re:", "Please remove me from your list.")]]
+    report = replies.poll(conn, FakeInbox(pages), campaign_ids=[OURS], now=NOW)
+    assert report.stopped_at_known_ground is False
+    assert report.by_label == {"opt_out": 1}, "the reply of ours on page two was never read"
+
+
 def test_a_page_that_fails_does_not_move_the_cursor(conn):
     lead(conn, "a@example.com")
     inbox = FakeInbox([[reply("m1", "a@example.com", "Automatic reply", "Out of the office.")]], fail_after=0)
