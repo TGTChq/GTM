@@ -87,7 +87,7 @@ def test_re_polling_the_same_page_records_nothing_new(conn):
     lead(conn, "ours@example.com")
     page = [reply("m1", "ours@example.com", "Automatic reply", "Out of the office until Friday.")]
     first = replies.poll(conn, FakeInbox([page]), campaign_ids=[OURS], now=NOW)
-    second = replies.poll(conn, FakeInbox([page]), campaign_ids=[OURS], now=NOW, restart=True)
+    second = replies.poll(conn, FakeInbox([page]), campaign_ids=[OURS], now=NOW)
     assert (first.recorded, first.duplicates) == (1, 0)
     assert (second.recorded, second.duplicates) == (0, 1)
     assert sql1(conn, "SELECT count(*) FROM outcome_events") == 1
@@ -168,18 +168,40 @@ def test_a_reply_from_an_address_the_core_does_not_know_is_recorded_and_queues_n
 # the cursor
 # --------------------------------------------------------------------------------
 
-def test_the_cursor_advances_over_pages_and_resumes_where_it_stopped(conn):
+def test_each_poll_starts_at_the_top_because_the_feed_is_newest_first(conn):
+    """Resuming from the last cursor would walk further into history and never see the
+    replies that arrived since."""
     lead(conn, "a@example.com")
     lead(conn, "b@example.com")
     pages = [[reply("m1", "a@example.com", "Automatic reply", "Out of the office.")],
              [reply("m2", "b@example.com", "Re:", "Please remove me from your list.")]]
     inbox = FakeInbox(pages)
-    report = replies.poll(conn, inbox, campaign_ids=[OURS], now=NOW, max_pages=1)
-    assert inbox.calls == [None] and report.pages == 1
+    replies.poll(conn, inbox, campaign_ids=[OURS], now=NOW, max_pages=1)
+    assert inbox.calls == [None]
     assert replies.read_cursor(conn) == "1"
 
-    resumed = replies.poll(conn, FakeInbox(pages), campaign_ids=[OURS], now=NOW)
-    assert resumed.seen == 1 and resumed.by_label == {"opt_out": 1}
+    # The next hour: the top again, not page two.
+    again = FakeInbox(pages)
+    replies.poll(conn, again, campaign_ids=[OURS], now=NOW)
+    assert again.calls[0] is None
+
+    # ... and a sweep that IS asked to resume continues into the older page.
+    deeper = FakeInbox(pages)
+    resumed = replies.poll(conn, deeper, campaign_ids=[OURS], now=NOW, resume=True)
+    assert deeper.calls[0] == "1" and resumed.by_label == {"opt_out": 1}
+
+
+def test_a_poll_stops_as_soon_as_a_page_holds_nothing_new(conn):
+    lead(conn, "a@example.com")
+    lead(conn, "b@example.com")
+    pages = [[reply("m1", "a@example.com", "Automatic reply", "Out of the office.")],
+             [reply("m2", "b@example.com", "Re:", "Please remove me from your list.")]]
+    replies.poll(conn, FakeInbox(pages), campaign_ids=[OURS], now=NOW)      # reads both pages
+    inbox = FakeInbox(pages)
+    second = replies.poll(conn, inbox, campaign_ids=[OURS], now=NOW)
+    assert second.stopped_at_known_ground is True
+    assert inbox.calls == [None], "it should not have asked for the second page"
+    assert second.duplicates == 1 and second.recorded == 0
 
 
 def test_a_page_that_fails_does_not_move_the_cursor(conn):

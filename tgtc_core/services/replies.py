@@ -56,6 +56,7 @@ class PollReport:
     suppressed: int = 0
     unmatched_people: int = 0
     cursor: Optional[str] = None
+    stopped_at_known_ground: bool = False
     dry_run: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
@@ -63,7 +64,8 @@ class PollReport:
                 "skipped_other_campaigns": self.skipped_other_campaigns, "recorded": self.recorded,
                 "already_known": self.duplicates, "by_label": self.by_label, "queued": self.queued,
                 "addresses_suppressed": self.suppressed, "replies_with_no_person_in_the_core": self.unmatched_people,
-                "cursor": self.cursor, "dry_run": self.dry_run}
+                "cursor": self.cursor, "stopped_at_known_ground": self.stopped_at_known_ground,
+                "dry_run": self.dry_run}
 
 
 # --------------------------------------------------------------------------------
@@ -192,15 +194,21 @@ def _parsed(value: Any) -> Optional[datetime]:
 
 def poll(conn: psycopg.Connection, client, *, campaign_ids: Sequence[str], now: datetime,
          page_size: int = 100, max_pages: int = 10, dry_run: bool = False,
-         restart: bool = False) -> PollReport:
+         resume: bool = False) -> PollReport:
     """Read new replies for the nine campaigns and record what they mean.
 
-    The cursor advances only after a page has been written, so an interruption re-reads
-    a page rather than skipping one -- duplicates are free, a missed departure is not.
+    The feed is newest-first, so each poll starts at the TOP and stops as soon as a page
+    holds nothing new: resuming from the last cursor would walk further into history and
+    never see the replies that arrived since. The dedupe key makes that cheap -- a page
+    of replies already known costs one request and no writes -- and it makes an
+    interrupted poll safe, because re-reading is free and a missed departure is not.
+
+    ``resume`` continues from the stored cursor instead, which is how a first sweep
+    through older history is finished.
     """
     ours = {str(c) for c in campaign_ids if c}
     report = PollReport(dry_run=dry_run)
-    cursor = None if restart else read_cursor(conn)
+    cursor = read_cursor(conn) if resume else None
     for _ in range(max_pages):
         result = client.list_received_emails(limit=page_size, starting_after=cursor)
         if not result.ok:
@@ -210,6 +218,7 @@ def poll(conn: psycopg.Connection, client, *, campaign_ids: Sequence[str], now: 
         if not items:
             break
         report.pages += 1
+        new_on_this_page = 0
         for item in items:
             report.seen += 1
             if str(item.get("campaign_id") or "") not in ours:
@@ -220,8 +229,10 @@ def poll(conn: psycopg.Connection, client, *, campaign_ids: Sequence[str], now: 
             report.by_label[outcome["label"]] = report.by_label.get(outcome["label"], 0) + 1
             if outcome["recorded"] == "duplicate":
                 report.duplicates += 1
-            elif outcome["recorded"] in ("applied", "recorded"):
-                report.recorded += 1
+            else:
+                new_on_this_page += 1
+                if outcome["recorded"] in ("applied", "recorded"):
+                    report.recorded += 1
             if outcome["recorded"] == "applied":
                 report.suppressed += 1
             if not outcome["person_known"]:
@@ -232,6 +243,10 @@ def poll(conn: psycopg.Connection, client, *, campaign_ids: Sequence[str], now: 
         if not dry_run:
             write_cursor(conn, cursor, seen=len(items), now=now)
         if not cursor:
+            break
+        if new_on_this_page == 0 and report.ours:
+            # Everything on this page was already known: the rest is older still.
+            report.stopped_at_known_ground = True
             break
     report.cursor = cursor
     return report

@@ -503,7 +503,7 @@ def cmd_replies_poll(args) -> int:
     client = InstantlyClient(RequestsTransport(), base_url=s.instantly_base_url, api_key=s.instantly_api_key)
     report = reply_service.poll(conn, client, campaign_ids=campaign_ids,
                                 now=datetime.now(timezone.utc), page_size=args.page_size,
-                                max_pages=args.max_pages, dry_run=args.dry_run, restart=args.restart)
+                                max_pages=args.max_pages, dry_run=args.dry_run, resume=args.resume)
     print(json.dumps({"campaigns": len(campaign_ids), **report.to_dict()}, indent=2, default=str))
     return 0
 
@@ -911,7 +911,8 @@ def main(argv=None) -> int:
     p.add_argument("--dry-run", action="store_true", help="classify and report; write nothing, move no cursor")
     p.add_argument("--max-pages", type=int, default=10)
     p.add_argument("--page-size", type=int, default=100)
-    p.add_argument("--restart", action="store_true", help="ignore the stored cursor and read from the newest again")
+    p.add_argument("--resume", action="store_true",
+                   help="continue the stored cursor deeper into history instead of reading from the top")
     p.set_defaults(fn=cmd_replies_poll)
     args = parser.parse_args(argv)
     _require_acceptance_command(args)
