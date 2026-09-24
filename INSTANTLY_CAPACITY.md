@@ -182,6 +182,30 @@ domain, no new inbox, no change to the sending window.
 `scripts/instantly_occupancy_forecast.py` simulates both ceilings per calendar day from
 the live account, including weekend steps waiting for Monday.
 
+## A third ceiling, found while measuring: semantic classification was dead
+
+The day's budget carried **1,500 Anthropic reservations, every one refused, none
+served**, with 3,710 deterministic classifications and no semantic ones. One call from
+the core's own environment gave the reason:
+
+```
+400 {"type":"invalid_request_error","message":"Your credit balance is too low to access the Anthropic API."}
+```
+
+Every classify call had been failing all day. Because a 400 is a configuration failure,
+the work item correctly waited -- and tried again next cycle, 1,500 times, each attempt
+consuming one of the day's 1,500 request slots and classifying nothing.
+
+The provider is now gated exactly like Apollo and Instantly: one refusal puts it on
+record, one caller per `TGTC_INFERENCE_RETRY_HOURS` (default 1) asks again, and a served
+call lifts it. Postings still wait rather than close -- a billing problem must never
+lose a job.
+
+**This does not fix the cause.** The Anthropic account needs credit, which is outside
+what this work was authorised to buy. Until then, classification is deterministic only,
+which is the measured reason a run needs ~3,900 Fantastic records to produce ~1,000
+leads instead of fewer.
+
 ## Two guards that are not about capacity, and shipped with it
 
 **A deploy no longer kills a run.** A push to `feat/rebuild-core` replaces the core
