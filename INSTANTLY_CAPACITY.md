@@ -154,6 +154,34 @@ contact from a legacy `completed` campaign, then retry one of the 107 deliveries
 That deletion needs an explicit authorisation. It is one legacy contact whose sequence
 finished, and no live campaign is touched.
 
+## Two guards that are not about capacity, and shipped with it
+
+**A deploy no longer kills a run.** A push to `feat/rebuild-core` replaces the core
+container; on 2026-09-24 one at 03:40:11Z ended that day's run 30 seconds later with 73
+approvals produced and nothing delivered. `.githooks/pre-push` refuses a push to that
+branch while the run lock is held (`git config core.hooksPath .githooks`, override with
+`TGTC_ALLOW_DEPLOY_DURING_RUN=1`), and `python -m tgtc_core run-lock` answers the same
+question anywhere, exiting 3 when a run is in flight.
+
+**The kind of a run is declared, never read off the clock.** The start command decided
+`scheduled` vs `manual` from the UTC hour, so the same recovery resumed the day's
+allowance at 04:47 and would have opened a second one at 06:00. `scheduled` needs no
+declaration -- the service has one cron and that is what it is; every other kind must be
+named through `TGTC_RUN_KIND`, and both `budget` and `run-daily` refuse before touching
+the database or a provider when it is not.
+
+The start command still contains the old hour test. It is now inert in the safe
+direction (an hour-inferred `manual` run is refused rather than silently given a new
+allowance), and replacing its text needs one manual step, because
+`serviceInstanceUpdate` is blocked for me:
+
+```
+railway api 'mutation { serviceInstanceUpdate(serviceId: "f83cd97a-135d-48e3-8e12-d517a51edfff", environmentId: "bae427bd-64a6-4f4e-8f56-fbd406985434", input: { startCommand: "..." }) }'
+```
+
+with `KIND=${TGTC_RUN_KIND:-scheduled}` and `BID=${TGTC_BUDGET_ID:-$(python -m tgtc_core budget-id --kind $KIND)}` in place of the hour test. Setting
+`TGTC_RUN_KIND=scheduled` as a service variable has the same effect today.
+
 ## Rollback
 
 The gate is a provider row and a code path. To disable it without a deploy, raise
