@@ -529,3 +529,56 @@ nobody else.
 Until then the weekly file is generated, reconciled and stored every week, and the Slack
 summary says the detail is **pending** rather than linking to something that does not
 exist.
+
+
+## The CSV goes to Slack (live 2026-09-24)
+
+`TGTC_REPORT_DETAIL_DESTINATION=slack` on the **GTM Weekly Report** service. On Friday,
+once the week is closed AND the detail reconciles with the headline, the job uploads the
+full CSV -- one row per genuine Instantly creation -- into `#gtm-engineering`, reads the
+permalink back from `files.info`, records it, and posts the four figures with that link.
+
+What makes it safe rather than merely working:
+
+* **only a real final report uploads.** The call sits inside `action == ACTION_FINAL`, so
+  a dry run, a day that is not Friday, a partial week and the 07:00 delay notice cannot
+  put personal data in the channel. Four tests hold each of those;
+* **a retry never uploads twice.** `publish_detail` returns `already_published` from the
+  stored URL before it reaches Slack;
+* **a failure never becomes a link.** The permalink is read back and matched against the
+  file id; anything else returns a named reason and the message says *pending*;
+* **no public file URL is ever created.** The code uses `permalink` only and never calls
+  `files.sharedPublicURL`, so the file needs a Slack session to open.
+
+### The channel is externally shared, and that was a decision
+
+`#gtm-engineering` (`C0BEFFVC5CN`) is public, has 8 members, and is a **Slack Connect
+channel shared with another organisation** (`connected_team_ids: T0531U71W,
+T06S1HJ71GV`). The CSV carries prospect personal data, so this was put to the owner
+before anything was configured; posting it there is **authorised** as of 2026-09-24.
+
+### Credentials
+
+The previous bot token was exposed in a screenshot and **revoked** on 2026-09-24
+(`revoked: true`, then `account_inactive`). It carried only `incoming-webhook`, so its
+blast radius was posting into that one channel. Revoking it killed the incoming webhook
+(`404 no_service`), and `SLACK_WEEKLY_REPORT_WEBHOOK_URL` has been removed.
+
+The replacement token is stored as `SLACK_BOT_TOKEN` on the service and carries
+`files:write`, `files:read`, `channels:read`, `chat:write`. With a token present the
+summary stops using a webhook and posts through `chat.postMessage` to a channel resolved
+**by name and verified for membership** -- `slack_api:C0BEFFVC5CN` rather than
+`webhook_declared`. Token rotation (12h) is NOT enabled: it needs automatic refresh first.
+
+**Finding from that token:** `resolve_channel` used to ask `conversations.list` for
+private channels too, which requires `groups:read`. A token holding exactly the four
+scopes above got `missing_scope` for a channel that is public. It now falls back to
+public channels once, so the app is not made to carry a scope it has no use for.
+
+### Rehearsed against the real workspace, 2026-09-24
+
+With a synthetic two-row CSV and no personal data: channel resolved through the new
+fallback, upload → share → `files.info` read-back matched the file id, and the rehearsal
+file was deleted again. One labelled connectivity test posted through the report's own
+sender (`message_ts 1790294263.648579`). **The first real send is Friday 13:00 UTC and
+has not happened yet.**
