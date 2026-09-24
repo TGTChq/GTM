@@ -10,3 +10,7 @@ anthropic>=1,<2
 # this wheel `zoneinfo` cannot resolve the zone and the report falls back to a
 # codified US rule. Pure data, no code.
 tzdata>=2024.1
+# Service-account authentication for publishing the weekly lead file to Drive. Only
+# imported when TGTC_DRIVE_SERVICE_ACCOUNT_JSON is set, so a deployment without Drive
+# configured never touches it.
+google-auth>=2.30,<3

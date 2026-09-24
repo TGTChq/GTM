@@ -14,7 +14,7 @@ from typing import Any, Dict, Optional
 
 import psycopg
 
-from . import detail, metrics, render, store
+from . import detail, drive, metrics, render, store
 from .window import PACIFIC_TZ_NAME, ReportWindow, explicit_window, partial_window, weekly_window
 
 
@@ -89,3 +89,44 @@ def generate_and_store(conn: psycopg.Connection, *, now: datetime, out_dir: Opti
     if out_dir is not None:
         result["artifacts"] = artifacts(out_dir, report)
     return result
+
+
+def publish_detail(conn: psycopg.Connection, report: Dict[str, Any], *,
+                   env: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
+    """Put this week's lead file where the readers can open it, once.
+
+    Every refusal is a named, honest state rather than a link: no credential, no folder,
+    no stored file, a week that is not closed, or a link that would not open without
+    signing in. A week that has already been published is left exactly as it is -- the
+    retry that runs twenty minutes later must not re-upload, re-share, or move the link.
+    """
+    import os as _os
+
+    env = _os.environ if env is None else env
+    window = report["window"]
+    report_id = window["report_id"]
+    if window["kind"] != "weekly":
+        return {"published": False, "reason": "only a closed week is published"}
+    stored = detail.load(conn, report_id)
+    if stored is None:
+        return {"published": False, "reason": "no lead detail is stored for this week"}
+    if stored.get("published_url"):
+        return {"published": False, "reason": "already_published", "url": stored["published_url"],
+                "rows": stored["row_count"]}
+    folder_id = (env.get("TGTC_REPORT_DRIVE_FOLDER_ID") or "").strip()
+    try:
+        credentials = drive.credentials_from_env(env)
+    except drive.DriveError as exc:
+        return {"published": False, "reason": f"credential unusable: {exc}"}
+    if credentials is None or not folder_id:
+        missing = [name for name, value in (("TGTC_DRIVE_SERVICE_ACCOUNT_JSON", credentials),
+                                            ("TGTC_REPORT_DRIVE_FOLDER_ID", folder_id)) if not value]
+        return {"published": False, "reason": "Drive is not configured on this service",
+                "missing": missing}
+    try:
+        out = drive.publish(drive.DriveFolder(drive.authorised_session(credentials), folder_id),
+                            report_id=report_id, content=stored["csv"])
+    except drive.DriveError as exc:
+        return {"published": False, "reason": str(exc)}
+    detail.record_publication(conn, report_id, url=out["url"], viewers=["anyone-with-the-link:reader"])
+    return {"published": True, "rows": stored["row_count"], "sha256": stored["sha256"], **out}

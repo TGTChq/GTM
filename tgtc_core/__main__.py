@@ -685,6 +685,14 @@ def cmd_weekly_report(args) -> int:
     report = result["report"]
 
     window = result["window"]
+    # The file goes to its private destination BEFORE the message is built, so the link
+    # in Slack is one that was uploaded, shared and opened -- never a URL we hoped for.
+    if not args.no_lead_detail and report["window"]["kind"] == "weekly":
+        published = pipeline.publish_detail(conn, report)
+        result["detail_publication"] = published
+        if published.get("published") or published.get("reason") == "already_published":
+            report["detail"] = {**(report.get("detail") or {}),
+                                "published_url": published.get("url"), "state": "published"}
     if args.lead_export:
         from .reporting import export as lead_export
         rows = lead_export.lead_rows(conn, window)
@@ -719,6 +727,7 @@ def cmd_weekly_report(args) -> int:
         "reconciliation_holds": report["reconciliation"]["identity_holds"],
         "status": report["status"],
         "lead_detail": report.get("detail"),
+        "detail_publication": result.get("detail_publication"),
         "integrity_alerts": report["integrity_alerts"],
         "alerts": report["alerts"],
         "notes": report["notes"],
