@@ -74,13 +74,48 @@ being read against the poll's clock instead of the reply's own (which turned "ba
 September 22" in a reply from the 19th into September 2027), and a rollover beyond 120
 days is now treated as no date at all rather than a follow-up parked for a year.
 
-## What is NOT built
+## What Instantly itself does, measured 2026-09-24
 
-The replacement search is **queued, not executed**. Acting on it means re-opening a
-closed company × campaign unit and running contact discovery again, which is the
-acquisition and qualification path this work was told not to change. The queue makes the
-vacancy visible with its evidence; a deliberate step, with its own gates and budget, is
-what should drain it.
+Our database is only half the answer. The nine campaigns run with **`stop_on_reply:
+true`**, so **any** reply ends that contact's sequence in Instantly -- including an
+out-of-office auto-answer. Checking all 57 ingested replies against the live workspace:
+
+| our verdict | found in the nine | their lead state in Instantly |
+|---|---|---|
+| out of office | 38 | **all 38 `status 3` (sequence completed)** |
+| no longer here | 9 | all 9 `status 3` |
+| human reply | 5 | all 5 `status 3` |
+| opt-out | 0 | that person's lead is not in the nine campaigns |
+
+Two consequences, and the second corrects what this file used to imply:
+
+* **a departed person does not keep receiving the sequence.** Instantly stopped it the
+  moment they replied, and our suppression stops them being approved again.
+* **an out-of-office does not "pause" anything: the sequence is already over.** Nothing
+  is suppressed, so the person may be approached again, but the remaining steps will
+  never fire by themselves. A `reply_followup_when_back` item is therefore a note for a
+  person, and acting on it means uploading the contact again -- a new lead slot, with
+  the destination's capacity gate in front of it -- not resuming a sequence.
+
+The opt-out is enforced where it governs every send we initiate: our own suppression,
+which acquisition, qualification and delivery all consult. Instantly's own block list is
+not exposed at the v2 paths tried (`/block-lists`, `/block-list-entries`, `/blocklist`
+all answer 404), so it is not part of this.
+
+## Filling the vacancy a departure leaves
+
+`services/replacements.py`, live since 2026-09-24. Before it drains the backlog, the
+daily run hands each queued `replace_departed_contact` back to **ordinary qualification**
+for that company x campaign unit, bounded by `TGTC_REPLACEMENTS_PER_RUN` (default 25).
+
+Every gate that ever applied still applies -- current employer, verified work email, the
+suppression now holding the departed address, compliance, campaign routing -- so a
+replacement is **discovered**, never promoted, and a colleague named in the reply stays
+evidence for whoever reads the case. A unit whose posting is gone is not revived: that
+would be inventing commercial evidence, so it closes as `no_current_vacancy`.
+
+It is not "fully automated" until an end-to-end case has run in production. The first
+one is due on the next scheduled run; 8 are queued.
 
 Rollback: set the service's `cronSchedule` to null (ingestion stops; nothing else reads
 those tables), or delete the service. The suppressions it wrote are ordinary suppression

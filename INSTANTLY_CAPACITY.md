@@ -126,33 +126,61 @@ active Control campaign.** Live sequences. Our own contacts become rotatable onl
 their 13 days, and that is the steady-state supply: ~1,000 a day, removed 13+ days after
 creation, which is exactly the rate we add.
 
-## The options, with what is known and what is not
+## The options, corrected and measured
+
+Two things in the earlier version of this file were wrong, and the account settled both:
+
+* **deleting a contact does return a slot.** Proved on 2026-09-24: one finished legacy
+  contact removed at 07:07:14Z, the workspace counter went 25,000 -> 24,999 at 07:12:41Z.
+  About five and a half minutes, matching Instantly's documented 5-10. Deleting a CRM
+  list entry does not do this; deleting the lead does.
+* **an Email Outreach add-on exists**: $87/month list price for 25,000 further uploaded
+  contacts, and it is not the Instantly Credits add-on. The earlier claim that no
+  contact add-on existed came from the public pricing page and was wrong.
 
 | | what it does | monthly cost | contacts | days of 1,000/day before the same wall |
 |---|---|---|---|---|
-| **A. Recover the space we already own** | archive the 9,591 finished legacy + Control contacts, then rotate our own after 13 days | **$0 extra** (stay on HyperGrowth, $97) | 25,000 | indefinite while rotation runs; 9.6 days of headroom from the first sweep alone, 19.8 if the uncertain groups go too |
-| **B. A lead add-on** | — | — | — | Instantly publishes no contact-only add-on; its credits add-on is for Lead Finder and verification, not slots. To be confirmed in Billing |
-| **C. Light Speed** | bigger stock | $358 list (+$261) | 100,000 | ~75 days as things stand, ~95 after a sweep — then the same wall, unless rotation runs anyway |
+| **A. Rotate finished contacts** | remove contacts whose sequence ended and who never replied | **$0** | 25,000 | 9 from the legacy pool alone; **indefinite** once our own finished contacts rotate too |
+| B. Email Outreach add-on | +25,000 stored contacts | $87 list, to be confirmed at checkout | 50,000 | ~34, then the same wall unless rotation runs anyway |
+| C. Light Speed | +75,000 stored contacts | $358 (+$261) | 100,000 | ~95, then the same wall |
 
-Cost per delivered lead at 30,000/month: **$0.0032** on A, **$0.0119** on C.
+Cost per delivered lead at 30,000/month: **$0 on A**, $0.0029 on B, $0.0119 on C.
 
-**Recommendation: A.** The workspace is not short of space, it is holding 19,811
-contacts that no longer receive anything. C pays $261 a month to postpone a problem that
-rotation has to solve regardless.
+**Chosen: A, and B not purchased.** Rotation restores capacity before acquisition
+resumes, which is what the authorisation made the add-on conditional on, and it is the
+only option that is sustainable rather than a postponement. B stays available and
+pre-priced if the rotation policy is ever declined.
 
-### The one thing that is not verified
+### What was rotated on 2026-09-24
 
-That **deleting a contact actually returns a slot** is not proven — only that the stored
-total equals the allowance exactly. Instantly's help centre sits behind a bot check and
-the API exposes no usage counter. The minimal test is one contact: remove a single
-contact from a legacy `completed` campaign, then retry one of the 107 deliveries.
+Every candidate was backed up in full and judged one at a time before anything was
+removed: 9,591 contacts exported from 33 finished campaigns (18 MB, sha256 per file,
+`C:/TGTC/instantly_rotation_private/backup`), of which **9,079 were individually
+removable** and 512 were protected -- 261 had replied, 253 had not finished the sequence
+(bounced), and **one was a contact still awaiting delivery for us**.
 
-* it succeeds → capacity is recoverable, option A is real, and the sweep can proceed;
-* it still fails → the allowance is not a stock and only a plan change can help, which
-  makes the decision C instead.
+Nothing was removed by campaign. The nine Challenger campaigns and the active Control
+campaign are refused by id in the tool itself, and every removal is written to a ledger
+BEFORE the call, so an interrupted session resumes without repeating one.
 
-That deletion needs an explicit authorisation. It is one legacy contact whose sequence
-finished, and no live campaign is touched.
+## What it takes to sustain 1,000 a day: the sending side
+
+Slots are only half of it. Measured on the same day: **252 inboxes, every one at 20 a
+day, sending Monday to Friday 08:00-18:00 America/Chicago** -- 25,200 emails a week. A
+four-step sequence at 1,000 leads a day needs 7,000 x 4 = **28,000 a week**.
+
+So the intake the current setting can carry is **900 a day**, and at 1,000 the unsent
+queue grows by **2,800 emails a week**. It is not a forecast: 2,234 of our 5,189 stored
+contacts had not received a first email on 2026-09-24.
+
+The only lever inside the existing senders is the per-inbox figure: 28,000 / 5 / 252 =
+22.2, so **23 a day per inbox** carries 1,000 with a small margin. What makes that safe
+is measured too -- every inbox created 2026-05-22, warmup score >=90 on all 252, bounce
+rate 1.26% in September, and an 18-minute gap that already permits 33 a day. No new
+domain, no new inbox, no change to the sending window.
+
+`scripts/instantly_occupancy_forecast.py` simulates both ceilings per calendar day from
+the live account, including weekend steps waiting for Monday.
 
 ## Two guards that are not about capacity, and shipped with it
 
