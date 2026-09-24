@@ -21,14 +21,16 @@ tool, a URL fetch or a requirement change.
 from __future__ import annotations
 
 import json
+import os
 import re
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional, Protocol
+from typing import Any, Callable, Dict, List, Mapping, Optional, Protocol
 
 import psycopg
 
 from ..db.connection import jsonb, transaction
 from ..policy.campaigns import FUNCTION_KEYS, POLICY_VERSION, POLICY_VERSION_FALLBACKS
+from ..services import provider_state
 from ..services.spend_budget import BudgetExceeded, SpendBudget
 
 # Exclusions now require grounded evidence. A new cache namespace prevents old,
@@ -348,6 +350,20 @@ class AnthropicAdapter:
         return resp
 
 
+#: The provider row this wrapper keeps, so a refusal is visible and asked about once.
+PROVIDER = "anthropic"
+RETRY_HOURS_ENV = "TGTC_INFERENCE_RETRY_HOURS"
+DEFAULT_RETRY_HOURS = 1.0
+
+
+def _retry_hours(env: Optional[Mapping[str, str]] = None) -> float:
+    raw = str((env if env is not None else os.environ).get(RETRY_HOURS_ENV, "") or "").strip()
+    try:
+        return max(0.0, float(raw)) if raw else DEFAULT_RETRY_HOURS
+    except ValueError:
+        return DEFAULT_RETRY_HOURS
+
+
 class BudgetedInference:
     """Reserve one Anthropic request before dispatch and retain its outcome.
 
@@ -375,6 +391,16 @@ class BudgetedInference:
         return len(json.dumps(payload, ensure_ascii=False, default=str).encode("utf-8"))
 
     def classify(self, request: InferenceRequest) -> InferenceResponse:
+        # Measured 2026-09-24: the Anthropic key had no credit balance, so every call
+        # came back 400 "credit balance is too low". Each one is a CONFIG failure, which
+        # makes the work item wait and try again next cycle -- 1,500 attempts in a day,
+        # every one of them burning a request slot of the day's allowance for nothing.
+        # A provider that is refusing is asked ONCE per interval, exactly like Apollo.
+        probe = provider_state.reserve_probe(self.conn, PROVIDER, retry_hours=_retry_hours())
+        if not probe["allowed"]:
+            return InferenceResponse(
+                available=False, unavailable_reason="provider_refusing", model_version=self.model_version,
+                unavailable_kind=UNAVAILABLE_TRANSIENT)
         input_reserved = self._input_reservation(request)
         output_reserved = int(getattr(self.inner, "max_tokens", 1024) or 1024)
         try:
@@ -400,8 +426,11 @@ class BudgetedInference:
         response = self.inner.classify(request)
         if response.available or response.unavailable_kind == UNAVAILABLE_ANSWER:
             status = "served"
+            provider_state.record_served(self.conn, PROVIDER)
         elif response.unavailable_kind == UNAVAILABLE_CONFIG:
             status = "refused"
+            provider_state.record_refusal(self.conn, PROVIDER, str(response.unavailable_reason or "")[:120],
+                                          details={"kind": "config", "reason": response.unavailable_reason})
         else:
             status = "uncertain"
         usage = response.usage or {}
