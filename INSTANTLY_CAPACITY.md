@@ -163,6 +163,22 @@ Nothing was removed by campaign. The nine Challenger campaigns and the active Co
 campaign are refused by id in the tool itself, and every removal is written to a ledger
 BEFORE the call, so an interrupted session resumes without repeating one.
 
+### What was rotated, and what emptying a campaign does to it
+
+**5,450 contacts removed** in three audited batches (1 canary, 3,500, 1,949), zero
+failures. The counter tracked every one of them: 25,000 -> 24,999 -> 21,499 -> **19,550**,
+so **5,450 slots are free**. Only legacy completed campaigns were touched; the 3,338
+finished Control contacts are untouched reserve.
+
+At 1,000 a day with no further rotation that is full intake **through 2026-09-28**, with
+**2026-09-29** the first short day.
+
+One measured side effect: **deleting the finished leads out of a `completed` campaign can
+flip it back to `active`**. 21 legacy campaigns flipped, holding 583 leads between them --
+431 finished, 152 bounced, **none in a sendable state** -- so no email can leave them. The
+tool's live campaign-state check then refused the last 291 candidates, which is the guard
+working. They were not paused: that would change live campaign objects for no gain.
+
 ## What it takes to sustain 1,000 a day: the sending side
 
 Slots are only half of it. Measured on the same day: **252 inboxes, every one at 20 a
