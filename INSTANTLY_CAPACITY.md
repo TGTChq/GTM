@@ -268,10 +268,13 @@ declaration -- the service has one cron and that is what it is; every other kind
 named through `TGTC_RUN_KIND`, and both `budget` and `run-daily` refuse before touching
 the database or a provider when it is not.
 
-The start command still contains the old hour test. It is now inert in the safe
-direction (an hour-inferred `manual` run is refused rather than silently given a new
-allowance), and replacing its text needs one manual step, because
-`serviceInstanceUpdate` is blocked for me:
+**Applied 2026-09-24 22:16Z:** the core service now carries `TGTC_RUN_KIND=scheduled`,
+so the start command's `KIND=${TGTC_RUN_KIND:-}` resolves before the hour test ever runs
+-- the clock no longer decides anything. A deliberate manual run must change that
+variable first, which is the friction the rule is for.
+
+The start command's text still contains the dead hour test. Replacing it needs one
+manual step, because `serviceInstanceUpdate` is blocked for me:
 
 ```
 railway api 'mutation { serviceInstanceUpdate(serviceId: "f83cd97a-135d-48e3-8e12-d517a51edfff", environmentId: "bae427bd-64a6-4f4e-8f56-fbd406985434", input: { startCommand: "..." }) }'

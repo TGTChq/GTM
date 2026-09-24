@@ -473,7 +473,12 @@ prospect data needs:
 * it holds `TGTC_weekly_leads_2026-09-18_MANIFEST.txt` (row count, checksum, columns,
   window and exclusions — **no personal data**), which proves a file uploads into it
 
-Two things still block the automatic weekly upload, and neither is a code change:
+**`TGTC_REPORT_DRIVE_FOLDER_ID` is set on the service (2026-09-24 22:16Z)** to the
+folder below. It is inert on its own -- `publish_detail` needs BOTH the folder and the
+credential, and reports precisely which one is missing -- so the only thing left is the
+credential.
+
+One thing still blocks the automatic weekly upload, and it is not a code change:
 
 1. **Railway has no Drive credential.** The reporting job runs with `TGTC_DATABASE_URL`
    and nothing else; a Google connector in a chat session is not a credential the
@@ -481,10 +486,9 @@ Two things still block the automatic weekly upload, and neither is a code change
    workspace with the Drive API enabled, its JSON key on the *GTM Weekly Report* service
    as `TGTC_DRIVE_SERVICE_ACCOUNT_JSON`, the folder above shared with that service
    account as **Editor**, and its id as `TGTC_REPORT_DRIVE_FOLDER_ID`.
-2. **The file cannot travel through the chat connector.** The week's CSV is 1.93 MB
-   (3,623 rows); a connector upload takes the content as a tool parameter, which is far
-   beyond a single request even gzipped. The upload has to happen from the job, which
-   returns to point 1.
+   (The file cannot travel through the chat connector instead: the week's CSV is 1.93 MB
+   (3,623 rows) and a connector upload takes the content as a tool parameter, far beyond
+   a single request even gzipped. The upload has to happen from the job.)
 
 **Sharing is no longer "anyone with the link" (changed 2026-09-24.)** A URL that anyone
 can open is not an access-controlled destination for prospect data. The file now inherits
