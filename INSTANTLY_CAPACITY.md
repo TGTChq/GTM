@@ -173,11 +173,19 @@ So the intake the current setting can carry is **900 a day**, and at 1,000 the u
 queue grows by **2,800 emails a week**. It is not a forecast: 2,234 of our 5,189 stored
 contacts had not received a first email on 2026-09-24.
 
-The only lever inside the existing senders is the per-inbox figure: 28,000 / 5 / 252 =
-22.2, so **23 a day per inbox** carries 1,000 with a small margin. What makes that safe
-is measured too -- every inbox created 2026-05-22, warmup score >=90 on all 252, bounce
-rate 1.26% in September, and an 18-minute gap that already permits 33 a day. No new
-domain, no new inbox, no change to the sending window.
+**But the configured limit is not what binds.** Actual sends in the nine campaigns were
+**1,141 on 09-21, 795 on 09-22 and 979 on 09-23** -- about **20% of the 5,040
+configured**. All 252 inboxes are attached across the nine (33 each, 80 on OPERATIONS,
+21 on PEOPLE & HR) and the campaign ceilings total 6,000 a day, so neither limit is the
+constraint. Raising 20 -> 23 would raise a ceiling nobody is touching, so it was tested
+on one inbox (`PATCH /accounts/{email}` answers 200 and reads back 23) and **reverted**:
+all 252 are back at 20.
+
+What actually holds first emails at ~800 a day is not visible through the v2 API. That
+is the open question behind the 2,234 contacts stored with no first email, and it needs
+the Instantly UI -- campaign sending health, the four `accounts unhealthy` campaigns, or
+per-account ramp. Until it is answered, **first-email throughput, not lead slots, is the
+binding constraint on the outreach behind 1,000 creations a day.**
 
 `scripts/instantly_occupancy_forecast.py` simulates both ceilings per calendar day from
 the live account, including weekend steps waiting for Monday.
