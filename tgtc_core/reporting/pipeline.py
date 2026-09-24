@@ -97,7 +97,7 @@ DETAIL_READERS_ENV = "TGTC_REPORT_DETAIL_READERS"
 
 
 def publish_detail(conn: psycopg.Connection, report: Dict[str, Any], *,
-                   env: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
+                   env: Optional[Dict[str, str]] = None, channel: str = "") -> Dict[str, Any]:
     """Put this week's lead file where the readers can open it, once.
 
     Every refusal is a named, honest state rather than a link: no credential, no folder,
@@ -118,6 +118,30 @@ def publish_detail(conn: psycopg.Connection, report: Dict[str, Any], *,
     if stored.get("published_url"):
         return {"published": False, "reason": "already_published", "url": stored["published_url"],
                 "rows": stored["row_count"]}
+    if (env.get("TGTC_REPORT_DETAIL_DESTINATION") or "").strip().lower() == "slack":
+        from . import slack_file
+
+        token = (env.get("SLACK_BOT_TOKEN") or "").strip()
+        if not token or not channel:
+            return {"published": False, "reason": "Slack file upload is not configured",
+                    "missing": [name for name, value in (("SLACK_BOT_TOKEN", token),
+                                                         ("--slack-channel", channel)) if not value]}
+        if not report.get("detail", {}).get("reconciles"):
+            return {"published": False, "reason": "lead detail does not reconcile with the headline"}
+        try:
+            out = slack_file.publish(token, channel, drive.file_name(report_id), stored["csv"],
+                                     report_id=report_id, rows=stored["row_count"])
+        except slack_file.SlackFileError as exc:
+            return {"published": False, "reason": str(exc)}
+        except Exception as exc:  # a transport timeout must not suppress the headline
+            import requests
+
+            if not isinstance(exc, requests.RequestException):
+                raise
+            return {"published": False, "reason": f"Slack file transport failed: {type(exc).__name__}"}
+        detail.record_publication(conn, report_id, url=out["url"],
+                                  viewers=[f"slack-channel:{channel}:{out['channel_id']}"])
+        return {"published": True, "rows": stored["row_count"], "sha256": stored["sha256"], **out}
     folder_id = (env.get("TGTC_REPORT_DRIVE_FOLDER_ID") or "").strip()
     try:
         credentials = drive.credentials_from_env(env)

@@ -625,6 +625,9 @@ def _weekly_report_send(conn, args, report, window, now):
     if not channel:
         return {"sent": False, "error": "refused to send: --slack-channel names the confirmed destination"}
     detail = report.get("detail") or {}
+    slack_detail = os.environ.get("TGTC_REPORT_DETAIL_DESTINATION", "").strip().lower() == "slack"
+    if slack_detail:
+        report["detail"] = {**detail, "destination": "slack"}
     detail_url = (args.detail_url or detail.get("published_url")
                   or os.environ.get("TGTC_REPORT_DETAIL_URL", "").strip())
     detail_rows = detail.get("rows")
@@ -665,6 +668,19 @@ def _weekly_report_send(conn, args, report, window, now):
     common["destination_basis"] = basis
     try:
         if action == ACTION_FINAL:
+            # A Slack file is posted only when the final report is actually due and
+            # the week's data is ready. Dry runs and daily partials cannot upload PII.
+            if slack_detail:
+                from .reporting import pipeline as report_pipeline
+
+                publication = report_pipeline.publish_detail(conn, report, channel=channel)
+                common["detail_publication"] = publication
+                if publication.get("published") or publication.get("reason") == "already_published":
+                    detail_url = publication.get("url")
+                    report["detail"] = {**(report.get("detail") or {}),
+                                        "published_url": detail_url, "state": "published"}
+                else:
+                    detail_url = ""  # never substitute an unrelated preconfigured URL
             message = {"blocks": slack.blocks_for(report, detail_url=detail_url or None,
                                                   detail_rows=detail_rows),
                        "text": slack.text_for(report)}
@@ -742,7 +758,8 @@ def cmd_weekly_report(args) -> int:
     window = result["window"]
     # The file goes to its private destination BEFORE the message is built, so the link
     # in Slack is one that was uploaded, shared and opened -- never a URL we hoped for.
-    if not args.no_lead_detail and report["window"]["kind"] == "weekly":
+    if (not args.no_lead_detail and report["window"]["kind"] == "weekly" and
+            os.environ.get("TGTC_REPORT_DETAIL_DESTINATION", "").strip().lower() != "slack"):
         published = pipeline.publish_detail(conn, report)
         result["detail_publication"] = published
         if published.get("published") or published.get("reason") == "already_published":
@@ -763,6 +780,8 @@ def cmd_weekly_report(args) -> int:
     delivery = {"sent": False, "reason": "not requested"}
     if args.send != "none":
         delivery = _weekly_report_send(conn, args, report, window, now)
+        if delivery.get("detail_publication") is not None:
+            result["detail_publication"] = delivery["detail_publication"]
         if delivery.get("message") is not None:
             # One line, on purpose: a container's log lines can arrive out of order, and
             # a rehearsal that has to be reassembled by hand is not a rehearsal.

@@ -1,5 +1,29 @@
 # Weekly reporting (core)
 
+## Optional CSV directly in Slack
+
+To attach the reconciled lead-level CSV to `#gtm-engineering` without Google Drive,
+set `TGTC_REPORT_DETAIL_DESTINATION=slack` on **GTM Weekly Report** and provide the
+existing Slack app's `SLACK_BOT_TOKEN`. The app needs the bot scopes `files:write`,
+`files:read`, `channels:read`, and `chat:write`, must be reinstalled after scopes change,
+and must be a member of `#gtm-engineering`. The CSV is visible to the channel's members;
+check its membership before enabling this option. The current incoming webhook remains
+configured but cannot upload a file. Keep the token in Railway, never in the repository,
+chat, or logs. A new reporting-service deployment is necessary to pick up variables.
+
+Slack files are uploaded only for a **ready, closed weekly report at delivery time**;
+daily partials, dry runs, and delayed notices never upload the CSV. The file is shared
+first; Slack returns its private permalink; that URL is recorded in `report_lead_exports`
+and included in the four-number headline message. A retry that finds a recorded URL
+does not re-upload. If the app lacks a scope or the upload is refused, the headline
+still goes out with the CSV marked pending and the reason in the job result. Sending
+an attachment and recording its receipt are separate operations; a container crash
+between them can cause a duplicate attachment on the next retry, so reconcile the
+channel and ledger before rerunning a failed upload.
+
+The existing Drive path remains the default when this variable is absent. No service
+account key is required for the Slack option.
+
 The weekly report for the rebuilt pipeline. It is measured from the **core database** --
 the provider and delivery receipts the production runs write themselves -- so it needs
 no run artifacts, survives the container that produced them, and costs nothing to

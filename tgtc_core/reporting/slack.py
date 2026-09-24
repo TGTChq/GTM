@@ -130,15 +130,25 @@ def blocks_for(report: Dict[str, Any], *, detail_url: Optional[str] = None,
 
     if detail_url:
         rows = f" — {_n(detail_rows)} rows, one per lead" if detail_rows is not None else ""
-        blocks.append(_section(
-            f"*Lead-level detail (private):* <{detail_url}|this week's file>{rows}, reconciled against "
-            f"*Added to Instantly*. Access is limited to the authorised team."))
+        if (report.get("detail") or {}).get("destination") == "slack":
+            blocks.append(_section(
+                f"*Lead-level CSV:* <{detail_url}|this week's file>{rows}, reconciled against "
+                f"*Added to Instantly*. The file is visible to members of this channel."))
+        else:
+            blocks.append(_section(
+                f"*Lead-level detail (private):* <{detail_url}|this week's file>{rows}, reconciled against "
+                f"*Added to Instantly*. Access is limited to the authorised team."))
     else:
         rows = f"{_n(detail_rows)} rows" if detail_rows is not None else "the file"
-        blocks.append(_section(
-            f"*Lead-level detail:* _pending_ — {rows} generated and reconciled against *Added to Instantly*, "
-            "but not published: no private destination and reader list has been verified yet. "
-            + (detail_hint or "It is deliberately not posted here, because it contains personal data.")))
+        if (report.get("detail") or {}).get("destination") == "slack":
+            blocks.append(_section(
+                f"*Lead-level CSV:* _pending_ — {rows} generated and reconciled against *Added to Instantly*. "
+                "The file upload to this channel has not been confirmed."))
+        else:
+            blocks.append(_section(
+                f"*Lead-level detail:* _pending_ — {rows} generated and reconciled against *Added to Instantly*, "
+                "but not published: no private destination and reader list has been verified yet. "
+                + (detail_hint or "It is deliberately not posted here, because it contains personal data.")))
 
     blocks.append({"type": "context", "elements": [{"type": "mrkdwn", "text": (
         f"Week {w['window_start_local'][:10]} → {w['window_end_local'][:10]} {w['timezone']} (end exclusive) • "
