@@ -27,6 +27,8 @@ from typing import Any, Dict, List
 
 import psycopg
 
+from ..services import instantly_capacity
+from ..services.delivery import AWAITING_INSTANTLY
 from .window import FRIDAY, PACIFIC_TZ_NAME, ReportWindow, resolve_timezone
 
 #: The delivery moment and the end of the automatic-retry window, in local time.
@@ -79,6 +81,11 @@ def decide(state: str, ready: bool) -> tuple:
     return ACTION_NOTICE, "data_did_not_close_within_the_retry_window"
 
 
+#: Waiting states whose meaning is already settled: the week's figures are correct
+#: without them, and nothing that is still running will change them today.
+NAMED_WAITING_STATES = [instantly_capacity.DEFERRED_REASON, AWAITING_INSTANTLY]
+
+
 @dataclass(frozen=True)
 class Readiness:
     """Has everything belonging to this window finished closing?"""
@@ -100,8 +107,12 @@ def readiness(conn: psycopg.Connection, window: ReportWindow, report: Dict[str, 
     nothing explains.
 
     Not blocking (waiting will not change them): a day that had no run at all, days
-    before the database's coverage begins, and the historical Airtable records that
-    already carry a named reason.
+    before the database's coverage begins, the historical Airtable records that already
+    carry a named reason, and a contact waiting because the DESTINATION is full. That
+    last one is named, not hidden: the week's figures are already correct without it
+    (nothing counts it as created), and a full Instantly workspace can stay full for
+    days. Holding Friday's report hostage to it would make the report less true, not
+    more.
     """
     blockers: List[str] = []
     with conn.cursor() as cur:
@@ -116,11 +127,15 @@ def readiness(conn: psycopg.Connection, window: ReportWindow, report: Dict[str, 
         unfinished = int(cur.fetchone()["n"])
         cur.execute(
             """
-            SELECT count(*) AS n FROM delivery_outbox o JOIN approvals a ON a.id = o.approval_id
+            SELECT
+              count(*) FILTER (WHERE COALESCE(o.last_error, '') <> ALL(%(named)s)) AS queued,
+              count(*) FILTER (WHERE COALESCE(o.last_error, '') = ANY(%(named)s)) AS waiting_capacity
+            FROM delivery_outbox o JOIN approvals a ON a.id = o.approval_id
             WHERE o.state IN ('pending', 'claimed', 'in_flight')
               AND a.approved_at >= %(t0)s AND a.approved_at < %(t1)s
-            """, {"t0": window.start_utc, "t1": window.end_utc})
-        queued = int(cur.fetchone()["n"])
+            """, {"t0": window.start_utc, "t1": window.end_utc, "named": NAMED_WAITING_STATES})
+        row = cur.fetchone()
+        queued, waiting_capacity = int(row["queued"]), int(row["waiting_capacity"])
         cur.execute("SELECT count(*) AS n FROM pg_locks WHERE locktype = 'advisory' AND objid = %s AND granted",
                     (0x74677463,))
         run_in_progress = int(cur.fetchone()["n"])
@@ -138,6 +153,8 @@ def readiness(conn: psycopg.Connection, window: ReportWindow, report: Dict[str, 
     return Readiness(ready=not blockers, blockers=blockers, detail={
         "unfinished_runs": unfinished,
         "queued_delivery_rows": queued,
+        "waiting_on_a_named_condition": waiting_capacity,
+        "waiting_for_destination_capacity": waiting_capacity,
         "production_run_in_progress": bool(run_in_progress),
         "unexplained_reconciliation_difference": unexplained,
         "known_exceptions_do_not_block": (

@@ -50,7 +50,7 @@ from .providers.apollo import ApolloClient
 from .providers.fantastic import FantasticClient
 from .providers.http import Transport
 from .providers.instantly import InstantlyClient
-from .services import instantly_capacity, provider_state
+from .services import instantly_capacity, provider_state, replacements
 from .services.acquisition import AcquisitionService, SOURCE_SPECS
 from .services.classification_service import classify_one, reopen_for_inference
 from .services.compliance_recheck import recheck_unknown_jurisdiction
@@ -261,6 +261,13 @@ class Runner:
             "since": str(gate.get("since")), "remaining_uploads": gate.get("remaining_uploads"),
             "message": gate.get("message", "")[:200], "consecutive_refusals": gate.get("consecutive_refusals")})
         return True
+
+    def fill_departed_units(self, *, limit: int) -> Dict[str, int]:
+        """Hand queued departures back to the ordinary contact path (bounded)."""
+        out = replacements.reopen_departed_units(self.conn, now=self.now(), limit=limit)
+        if out.get("considered"):
+            self._log("replacements", "reopened", out)
+        return out
 
     def acquire(self, *, fresh_partitions: int = 24, backfill_partitions: int = 1, sources: Optional[List[str]] = None) -> List[Dict[str, Any]]:
         if self.fantastic is None:

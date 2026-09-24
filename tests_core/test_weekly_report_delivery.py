@@ -92,6 +92,44 @@ def test_delivery_rows_still_in_flight_hold_the_report_back(conn):
     assert any("still queued or in flight" in b for b in state.blockers)
 
 
+def test_a_contact_waiting_for_destination_capacity_does_not_hold_the_report_back(conn):
+    """Measured 2026-09-24: 107 approved contacts sat behind a full Instantly workspace.
+    Their week's figures are already correct -- nothing counts them as created -- and a
+    full workspace stays full for days. Waiting would publish nothing at all."""
+    lead = seed_lead(conn, received_at=WEEK_START + timedelta(days=1), campaign_key="product",
+                     campaign_id="camp-pr", approved_at=WEEK_START + timedelta(days=1),
+                     instantly_kind=None, airtable=False)
+    conn.execute("INSERT INTO delivery_outbox (approval_id, channel, idempotency_key, payload_json, state, last_error) "
+                 "VALUES (%s, 'instantly', 'full-1', '{}'::jsonb, 'pending', 'instantly_capacity_blocked')",
+                 (lead["approval_id"],))
+    conn.commit()
+
+    state = _ready(conn)
+
+    assert state.ready is True, "a full destination is a named condition, not an open question"
+    assert state.to_dict()["waiting_for_destination_capacity"] == 1
+    assert state.to_dict()["queued_delivery_rows"] == 0
+
+    # The Airtable row the gate is holding for that same contact is the same kind of
+    # named condition: it is not counted anywhere, and it cannot change until Instantly
+    # accepts the contact.
+    conn.execute("INSERT INTO delivery_outbox (approval_id, channel, idempotency_key, payload_json, state, last_error) "
+                 "VALUES (%s, 'airtable', 'held-1', '{}'::jsonb, 'pending', 'awaiting_instantly')",
+                 (lead["approval_id"],))
+    conn.commit()
+    again = _ready(conn)
+    assert again.ready is True and again.to_dict()["waiting_on_a_named_condition"] == 2
+
+    # ... while an ordinary in-flight row, for another contact, still holds it back.
+    other = seed_lead(conn, received_at=WEEK_START + timedelta(days=1), campaign_key="finance",
+                      campaign_id="camp-fi", approved_at=WEEK_START + timedelta(days=1),
+                      instantly_kind=None, airtable=False)
+    conn.execute("INSERT INTO delivery_outbox (approval_id, channel, idempotency_key, payload_json, state) "
+                 "VALUES (%s, 'instantly', 'inflight-1', '{}'::jsonb, 'in_flight')", (other["approval_id"],))
+    conn.commit()
+    assert _ready(conn).ready is False
+
+
 def test_a_creation_in_the_wrong_campaign_is_an_unexplained_difference_and_blocks(conn):
     """An Airtable record whose Instantly creation went to a campaign the approval was
     not routed to is explained by nothing. That is exactly the case a report must not

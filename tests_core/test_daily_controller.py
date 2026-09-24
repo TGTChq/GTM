@@ -57,6 +57,10 @@ class FakeRunner:
         return {"blocked": full, "state": "refusing" if full else "serving", "since": None,
                 "remaining_uploads": 0 if full else None, "message": "", "alerted_at": None}
 
+    def fill_departed_units(self, *, limit):
+        self.w.calls.append(("replacements", limit))
+        return {"considered": 0, "requalifying": 0, "no_current_vacancy": 0}
+
     def instantly_capacity_alert(self):
         self.w.calls.append(("capacity_alert",))
         return True
@@ -136,9 +140,12 @@ def purchases(world):
 def test_backlog_is_drained_before_any_purchase_and_never_counts_toward_the_target(monkeypatch):
     w = World(backlog=1500)
     rep = controller(w, monkeypatch).run()
-    # Deliver first (free, and it answers whether the destination has room), then
-    # drain the backlog, and only then consider buying.
-    assert w.calls[0] == ("deliver",) and w.calls[1] == ("cycle", False)
+    # Deliver first (free, and it answers whether the destination has room), hand any
+    # queued departure back to the ordinary queue, then drain the backlog, and only
+    # then consider buying.
+    assert w.calls[0] == ("deliver",)
+    assert w.calls[1][0] == "replacements"
+    assert w.calls[2] == ("cycle", False)
     assert rep.backlog_created == 1500
     assert rep.fresh_created >= 1000           # the target was met by FRESH leads, not by the 1,500 backlog
     assert purchases(w)                        # backlog alone never satisfied it
