@@ -274,6 +274,7 @@ CREATE TABLE IF NOT EXISTS classifications (
     exclusion_reason      text,
     result_json           jsonb NOT NULL DEFAULT '{}'::jsonb,
     created_at            timestamptz NOT NULL DEFAULT now(),
+    first_recorded_at     timestamptz NOT NULL DEFAULT now(),
     UNIQUE (posting_id, policy_version, model_version)
 );
 
@@ -343,6 +344,9 @@ CREATE TABLE IF NOT EXISTS candidate_attempts (
     details           jsonb NOT NULL DEFAULT '{}'::jsonb,
     epoch             integer NOT NULL DEFAULT 1,
     created_at        timestamptz NOT NULL DEFAULT now(),
+    -- Written once and never updated: an upsert's DO UPDATE never names it, so a
+    -- replay cannot move this row into another reporting week (migration 017).
+    first_recorded_at timestamptz NOT NULL DEFAULT now(),
     UNIQUE (opportunity_id, candidate_ref, attempt_kind)
 );
 
@@ -355,7 +359,8 @@ CREATE TABLE IF NOT EXISTS evidence (
     status        text NOT NULL,
     source        text NOT NULL,
     excerpt       text,
-    created_at    timestamptz NOT NULL DEFAULT now()
+    created_at    timestamptz NOT NULL DEFAULT now(),
+    first_recorded_at timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS evidence_subject_idx ON evidence (subject_kind, subject_id);
 -- One row per employer per company-size state (fix round 1, I3): dedupe only

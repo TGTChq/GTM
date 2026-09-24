@@ -376,8 +376,9 @@ def test_jobs_reviewed_qualified_rejected_and_pending_are_counted_in_their_own_u
                         (f"job-{i}", f"hash-{i}", inside, inside))
             posting_id = int(cur.fetchone()["id"])
             cur.execute("INSERT INTO classifications (posting_id, policy_version, method, compatible_functions, "
-                        "excluded, exclusion_reason, created_at) VALUES (%s, 'tgtc-core/3-exhaustive-nine', "
-                        "'deterministic', %s, %s, %s, %s)", (posting_id, functions, excluded, reason, inside))
+                        "excluded, exclusion_reason, created_at, first_recorded_at) "
+                        "VALUES (%s, 'tgtc-core/3-exhaustive-nine', 'deterministic', %s, %s, %s, %s, %s)",
+                        (posting_id, functions, excluded, reason, inside, inside))
         cur.execute("INSERT INTO postings (source, provider_job_id, content_hash, commercial_age_anchor, "
                     "first_seen_at) VALUES ('linkedin', 'job-pending', 'h', %s, %s)", (inside, inside))
     conn.commit()
@@ -405,9 +406,10 @@ def seed_candidate(conn, *, when, kind, outcome, reason=None, person_id=None, re
                         "VALUES (%s, 'product', 'product', %s) RETURNING id", (employer_id, when))
             opportunity_id = int(cur.fetchone()["id"])
         cur.execute("INSERT INTO candidate_attempts (opportunity_id, person_id, candidate_ref, attempt_kind, "
-                    "outcome, reason, created_at) VALUES (%s, %s, %s, %s, %s, %s, %s) "
+                    "outcome, reason, created_at, first_recorded_at) VALUES (%s, %s, %s, %s, %s, %s, %s, %s) "
                     "ON CONFLICT (opportunity_id, candidate_ref, attempt_kind) DO UPDATE SET outcome = EXCLUDED.outcome "
-                    "RETURNING id", (opportunity_id, person_id, ref or f"ref-{next(_SEQ)}", kind, outcome, reason, when))
+                    "RETURNING id", (opportunity_id, person_id, ref or f"ref-{next(_SEQ)}", kind, outcome, reason,
+                                     when, when))
     conn.commit()
     return opportunity_id
 

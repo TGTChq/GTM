@@ -39,6 +39,8 @@ GENUINE_CREATION_PREDICATE = (
     "r.channel = 'instantly' AND r.receipt_kind = 'created' AND r.external_campaign = a.campaign_id"
 )
 
+#: Windowed on ``first_recorded_at``: these rows are upserted, and the upsert rewrites
+#: ``created_at``, so windowing on it lets a replay move a closed week (migration 017).
 #: Gate outcomes that are only reachable AFTER both the employer gate and the
 #: verified-work-email gate have passed. ``services/opportunity.py`` evaluates them in
 #: that order -- contact gate, email gate, suppression, approval decision, already
@@ -223,25 +225,25 @@ def jobs_section(cur, w: ReportWindow) -> Dict[str, Any]:
     dupes = _one(cur, """SELECT count(*) FROM postings WHERE first_seen_at >= %(t0)s AND first_seen_at < %(t1)s
                          AND duplicate_of_posting_id IS NOT NULL""", p)
     reviewed = _one(cur, """SELECT count(DISTINCT posting_id) FROM classifications
-                            WHERE created_at >= %(t0)s AND created_at < %(t1)s""", p)
+                            WHERE first_recorded_at >= %(t0)s AND first_recorded_at < %(t1)s""", p)
     qualified = _one(cur, """SELECT count(DISTINCT posting_id) FROM classifications
-                             WHERE created_at >= %(t0)s AND created_at < %(t1)s
+                             WHERE first_recorded_at >= %(t0)s AND first_recorded_at < %(t1)s
                                AND NOT excluded AND cardinality(compatible_functions) > 0""", p)
     excluded = _one(cur, """SELECT count(DISTINCT posting_id) FROM classifications
-                            WHERE created_at >= %(t0)s AND created_at < %(t1)s AND excluded""", p)
+                            WHERE first_recorded_at >= %(t0)s AND first_recorded_at < %(t1)s AND excluded""", p)
     no_fit = _one(cur, """SELECT count(DISTINCT posting_id) FROM classifications
-                          WHERE created_at >= %(t0)s AND created_at < %(t1)s
+                          WHERE first_recorded_at >= %(t0)s AND first_recorded_at < %(t1)s
                             AND NOT excluded AND cardinality(compatible_functions) = 0""", p)
     reasons = _breakdown(cur, """
         SELECT COALESCE(exclusion_reason, 'unspecified') AS k, count(*) AS n FROM classifications
-        WHERE created_at >= %(t0)s AND created_at < %(t1)s AND excluded GROUP BY 1 ORDER BY 2 DESC""", p)
+        WHERE first_recorded_at >= %(t0)s AND first_recorded_at < %(t1)s AND excluded GROUP BY 1 ORDER BY 2 DESC""", p)
     pending = _one(cur, """
         SELECT count(*) FROM postings p
         WHERE p.first_seen_at >= %(t0)s AND p.first_seen_at < %(t1)s
           AND NOT EXISTS (SELECT 1 FROM classifications c WHERE c.posting_id = p.id)""", p)
     methods = _breakdown(cur, """
         SELECT method AS k, count(*) AS n FROM classifications
-        WHERE created_at >= %(t0)s AND created_at < %(t1)s GROUP BY 1""", p)
+        WHERE first_recorded_at >= %(t0)s AND first_recorded_at < %(t1)s GROUP BY 1""", p)
     return {
         "new_jobs_unique": _int(new_jobs),
         "new_jobs_duplicates_of_existing": _int(dupes),
@@ -279,11 +281,11 @@ def headline_section(cur, w: ReportWindow) -> Dict[str, Any]:
     reviewed = _int(_one(cur, """
         SELECT count(*) FROM postings p WHERE p.first_seen_at >= %(t0)s AND p.first_seen_at < %(t1)s
           AND EXISTS (SELECT 1 FROM classifications c
-                      WHERE c.posting_id = p.id AND c.created_at < %(cutoff)s)""", p))
+                      WHERE c.posting_id = p.id AND c.first_recorded_at < %(cutoff)s)""", p))
     qualified_jobs = _int(_one(cur, """
         SELECT count(*) FROM postings p WHERE p.first_seen_at >= %(t0)s AND p.first_seen_at < %(t1)s
           AND EXISTS (SELECT 1 FROM classifications c
-                      WHERE c.posting_id = p.id AND c.created_at < %(cutoff)s
+                      WHERE c.posting_id = p.id AND c.first_recorded_at < %(cutoff)s
                         AND NOT c.excluded AND cardinality(c.compatible_functions) > 0)""", p))
     units = _rows(cur, """
         SELECT count(DISTINCT (employer_id, campaign_key)) AS company_x_campaign,
@@ -294,7 +296,7 @@ def headline_section(cur, w: ReportWindow) -> Dict[str, Any]:
     contacts = _rows(cur, f"""
         WITH cleared AS (
             SELECT DISTINCT ca.person_id FROM candidate_attempts ca
-            WHERE ca.created_at >= %(t0)s AND ca.created_at < %(t1)s AND ca.person_id IS NOT NULL
+            WHERE ca.first_recorded_at >= %(t0)s AND ca.first_recorded_at < %(t1)s AND ca.person_id IS NOT NULL
               AND {CLEARED_BOTH_GATES_SQL})
         SELECT count(*) FILTER (WHERE p.email_status = 'verified') AS found,
                count(*) FILTER (WHERE p.email_status = 'verified'
@@ -306,11 +308,11 @@ def headline_section(cur, w: ReportWindow) -> Dict[str, Any]:
     contacts_found = _int(contacts["found"])
     candidates_seen = _int(_one(cur, """
         SELECT count(DISTINCT candidate_ref) FROM candidate_attempts
-        WHERE created_at >= %(t0)s AND created_at < %(t1)s""", p))
+        WHERE first_recorded_at >= %(t0)s AND first_recorded_at < %(t1)s""", p))
     enriched = _int(_one(cur, """
         SELECT count(DISTINCT person_id) FROM candidate_attempts
         WHERE attempt_kind = 'match' AND outcome IN ('served', 'reused_stored_evidence')
-          AND created_at >= %(t0)s AND created_at < %(t1)s AND person_id IS NOT NULL""", p))
+          AND first_recorded_at >= %(t0)s AND first_recorded_at < %(t1)s AND person_id IS NOT NULL""", p))
     provider_verified = _int(_one(cur, """
         SELECT count(*) FROM people WHERE email_status = 'verified'
           AND email_verified_at >= %(t0)s AND email_verified_at < %(t1)s""", p))
@@ -321,7 +323,7 @@ def headline_section(cur, w: ReportWindow) -> Dict[str, Any]:
         FROM candidate_attempts
         WHERE attempt_kind = 'gate' AND outcome = 'fail' AND person_id IS NOT NULL
           AND (reason LIKE 'email:%%' OR reason LIKE 'contact:%%')
-          AND created_at >= %(t0)s AND created_at < %(t1)s GROUP BY 1""", p)
+          AND first_recorded_at >= %(t0)s AND first_recorded_at < %(t1)s GROUP BY 1""", p)
     blocked_for_outreach = _int(_one(cur, """
         SELECT count(*) FROM approvals WHERE state <> 'revoked'
           AND outreach_eligible IS DISTINCT FROM TRUE
@@ -393,7 +395,7 @@ def units_section(cur, w: ReportWindow) -> Dict[str, Any]:
         WHERE op.created_at >= %(t0)s AND op.created_at < %(t1)s""", p)
     worked = _one(cur, """
         SELECT count(DISTINCT opportunity_id) FROM candidate_attempts
-        WHERE created_at >= %(t0)s AND created_at < %(t1)s""", p)
+        WHERE first_recorded_at >= %(t0)s AND first_recorded_at < %(t1)s""", p)
     closed = _breakdown(cur, """
         SELECT COALESCE(close_reason, 'unspecified') AS k, count(*) AS n FROM opportunities
         WHERE state = 'closed' AND updated_at >= %(t0)s AND updated_at < %(t1)s GROUP BY 1 ORDER BY 2 DESC""", p)
@@ -414,10 +416,10 @@ def contacts_section(cur, w: ReportWindow) -> Dict[str, Any]:
     """Contacts found, verified, approved -- and the ones held back, with the reason."""
     p = {"t0": w.start_utc, "t1": w.end_utc}
     found = _one(cur, """SELECT count(DISTINCT candidate_ref) FROM candidate_attempts
-                         WHERE created_at >= %(t0)s AND created_at < %(t1)s""", p)
+                         WHERE first_recorded_at >= %(t0)s AND first_recorded_at < %(t1)s""", p)
     matched = _one(cur, """SELECT count(*) FROM candidate_attempts
                            WHERE attempt_kind = 'match' AND outcome = 'served'
-                             AND created_at >= %(t0)s AND created_at < %(t1)s""", p)
+                             AND first_recorded_at >= %(t0)s AND first_recorded_at < %(t1)s""", p)
     verified = _one(cur, """SELECT count(*) FROM people WHERE email_status = 'verified'
                             AND email_verified_at >= %(t0)s AND email_verified_at < %(t1)s""", p)
     approved = _one(cur, """SELECT count(*) FROM approvals WHERE state <> 'revoked'
@@ -427,7 +429,7 @@ def contacts_section(cur, w: ReportWindow) -> Dict[str, Any]:
     gate_fail = _breakdown(cur, """
         SELECT COALESCE(reason, outcome) AS k, count(*) AS n FROM candidate_attempts
         WHERE attempt_kind = 'gate' AND outcome <> 'pass'
-          AND created_at >= %(t0)s AND created_at < %(t1)s GROUP BY 1 ORDER BY 2 DESC""", p)
+          AND first_recorded_at >= %(t0)s AND first_recorded_at < %(t1)s GROUP BY 1 ORDER BY 2 DESC""", p)
     compliance = _breakdown(cur, """
         SELECT COALESCE(outreach_block_reason, 'compliance:outreach_eligibility_unknown') AS k, count(*) AS n
         FROM approvals WHERE state <> 'revoked' AND outreach_eligible IS DISTINCT FROM TRUE

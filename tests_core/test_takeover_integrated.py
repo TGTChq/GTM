@@ -130,7 +130,7 @@ def test_v1_migration_preserves_inventory_and_cursor(conn, clock):
     apply_schema(conn)
     assert sql1(conn, 'SELECT next_offset FROM source_partitions') == 100
     assert sql1(conn, 'SELECT provider_job_id FROM postings') == 'saved-job'
-    assert sql1(conn, 'SELECT max(version) FROM schema_migrations') == 16   # 016: the weekly lead-level detail (report_lead_exports)
+    assert sql1(conn, 'SELECT max(version) FROM schema_migrations') == 17   # 017: first_recorded_at, so a replay cannot move a closed week
     assert sql1(conn, 'SELECT query_profile FROM source_partitions') == 'legacy_v1'
 
 

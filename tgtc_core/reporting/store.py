@@ -175,7 +175,11 @@ def ensure_schema(conn: psycopg.Connection) -> None:
 
     migrations = Path(__file__).resolve().parents[1] / "db" / "migrations"
     with conn.cursor() as cur:
+        # 017 is not a reporting table, but the reporting layer READS it: the immutable
+        # timestamp that stops a replay moving a closed week. A report must not depend on
+        # the nightly run having migrated first.
         for name in ("013_report_runs.sql", "014_report_deliveries.sql",
-                     "015_report_delivery_test_kind.sql", "016_report_lead_exports.sql"):
+                     "015_report_delivery_test_kind.sql", "016_report_lead_exports.sql",
+                     "017_immutable_first_recorded_at.sql"):
             cur.execute((migrations / name).read_text(encoding="utf-8"))
     conn.commit()

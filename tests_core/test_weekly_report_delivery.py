@@ -171,8 +171,9 @@ def test_the_review_percentage_divides_a_cohort_by_itself(conn):
             posting_id = int(cur.fetchone()["id"])
             if classified:
                 cur.execute("INSERT INTO classifications (posting_id, policy_version, method, "
-                            "compatible_functions, excluded, created_at) VALUES (%s, 'v', 'deterministic', "
-                            "'{product}', false, %s)", (posting_id, inside))
+                            "compatible_functions, excluded, created_at, first_recorded_at) "
+                            "VALUES (%s, 'v', 'deterministic', '{product}', false, %s, %s)",
+                            (posting_id, inside, inside))
     conn.commit()
     h = report_for(conn)["headline"]
     assert (h["jobs_captured"], h["jobs_reviewed"], h["jobs_review_rate"]) == (2, 1, 50.0)
