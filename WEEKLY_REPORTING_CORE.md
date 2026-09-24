@@ -171,7 +171,7 @@ python -m tgtc_core report-detail-link --report-id weekly-2026-09-18 \
 Once recorded, the Friday message links that file and names the row count. Until then it
 says the detail is **pending**, which is the honest state: the file exists and
 reconciles, but nobody has verified who may read it. `record_publication` refuses an
-empty reader list, so "anyone with the link" cannot be recorded as a destination.
+empty reader list, and the publisher refuses a file that anyone with the link can read.
 
 ## Delivery (confirmed 2026-09-23)
 
@@ -485,10 +485,17 @@ Two things still block the automatic weekly upload, and neither is a code change
    beyond a single request even gzipped. The upload has to happen from the job, which
    returns to point 1.
 
-Setting "anyone with the link → reader" also could not be done from here: the connector's
-share tool takes an email address only, and the attempt was refused by this environment's
-data-exfiltration guard. With the service account in place the job can set it directly,
-or the folder can be set to link-sharing once by hand and every upload inherits it.
+**Sharing is no longer "anyone with the link" (changed 2026-09-24.)** A URL that anyone
+can open is not an access-controlled destination for prospect data. The file now inherits
+the private folder's access, named readers come from `TGTC_REPORT_DETAIL_READERS`
+(comma-separated addresses, granted once, no notification email), and a file that turns
+out to be world-readable is refused rather than recorded. The recorded destination says
+what access exists -- `drive-folder:<id>` plus `reader:<address>` -- instead of claiming
+a share nobody verified.
+
+The folder already exists and is genuinely access-controlled: **TGTC Weekly Lead Detail**
+(`18pSf8dk0e8ugAMNYC7KPEKZsxZkd4700`), owned by `luis@globaltalent.co` and shared with
+nobody else.
 
 Until then the weekly file is generated, reconciled and stored every week, and the Slack
 summary says the detail is **pending** rather than linking to something that does not
