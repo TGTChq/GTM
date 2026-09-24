@@ -98,6 +98,15 @@ def test_a_return_date_is_read_when_the_reply_gives_one():
     assert classify("Automatic reply", "I am out of the office.").returns_on is None
 
 
+def test_a_date_that_rolls_a_year_forward_is_not_a_date():
+    """"Until September 21" in a reply from September 22 is a leave that already ended.
+    Rolling it to next year would park the follow-up for a year, which is never."""
+    assert classify("Automatic reply", "I am out of the office until September 21.",
+                    received_at=datetime(2026, 9, 22)).returns_on is None
+    # ... while a real leave that crosses the new year still reads correctly.
+    assert classify("Automatic reply", "back January 5", received_at=datetime(2026, 12, 20)).returns_on ==         date(2027, 1, 5)
+
+
 def test_a_covering_contact_is_only_taken_when_the_reply_directs_us_to_one():
     named = classify("Automatic reply", "I am out of the office. If urgent, please reach out to Dana Whitfield "
                                         "at dana.whitfield@example.com and she will assist.")

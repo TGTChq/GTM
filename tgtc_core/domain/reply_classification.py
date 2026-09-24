@@ -38,6 +38,9 @@ OPT_OUT = "opt_out"
 HUMAN_REPLY = "human_reply"
 UNKNOWN = "unknown"
 
+#: The longest leave a reply is believed to state. Beyond it, the date is not a date.
+MAX_LEAVE_DAYS = 120
+
 #: Checked first: a departure that also reads like an auto-reply is a departure.
 _GONE = re.compile(
     r"no longer (?:with|at|works?|working|employed|here|part of)"
@@ -134,6 +137,12 @@ def _parse_return(text: str, *, received: Optional[datetime] = None) -> Optional
             parsed = date(year + 1, month, day)
         except ValueError:
             return None
+    if received and (parsed - received.date()).days > MAX_LEAVE_DAYS:
+        # A rollover that lands a year out is a date the text did not really give --
+        # "until September 21" in a reply from September 22 is a leave that already
+        # ended. Waiting a year is the same as never, so it is treated as no date and
+        # the follow-up takes the ordinary short wait.
+        return None
     return parsed
 
 
