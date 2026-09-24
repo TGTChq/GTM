@@ -10,6 +10,7 @@ import pytest
 from tgtc_core.providers.instantly import InstantlyResult
 from tgtc_core.policy.campaigns import POLICY_VERSION
 from tgtc_core.services import opportunity as opp_mod
+from tgtc_core.services import delivery as delivery_mod
 from tgtc_core.services.delivery import DeliveryService, OutboxItem
 from tgtc_core.testing.fakes import FakeAirtable, FakeInstantly
 from tgtc_core.testing.scenario import CONTROL_ID_BY_CAMPAIGN_KEY
@@ -37,6 +38,10 @@ def test_campaign_preflight_fails_closed_without_database_or_send(monkeypatch, c
     client = SimpleNamespace(get_campaign=lambda target: result, create_lead=forbidden, resolve_membership=forbidden)
     svc = DeliveryService(None, airtable=None, instantly=client, now=clock)
     changes = []
+    # This regression runs WITHOUT a database on purpose, and the destination-capacity
+    # gate reads the provider row. Answer it as "there is room", so what is under test
+    # here stays the campaign preflight.
+    monkeypatch.setattr(delivery_mod.instantly_capacity, "reserve_probe", lambda *a, **kw: {"allowed": True})
     monkeypatch.setattr(svc, "_precheck", lambda item: None)
     monkeypatch.setattr(svc, "_set", lambda item, state, **kw: changes.append((state, kw)))
     monkeypatch.setattr(svc, "_receipt", forbidden)

@@ -21,7 +21,8 @@ class World:
     bought record into ``yield_per_record`` fresh leads once processed."""
 
     def __init__(self, *, backlog=0, retry_leads=0, yield_per_record=0.263, credits_per_lead=1.48,
-                 fantastic_limit=4000, apollo_limit=1600, apollo_refusing=False, market=10 ** 9):
+                 fantastic_limit=4000, apollo_limit=1600, apollo_refusing=False, market=10 ** 9,
+                 instantly_full=False, room_returns_on_probe=False):
         self.backlog_pending, self.backlog_created = backlog, 0
         self.retry_pending, self.fresh_retries = retry_leads, 0
         self.fresh_new, self.new_pending = 0, 0.0
@@ -29,6 +30,7 @@ class World:
         self.ypr, self.cpl = yield_per_record, credits_per_lead
         self.fantastic_limit, self.apollo_limit = fantastic_limit, apollo_limit
         self.apollo_refusing, self.market = apollo_refusing, market
+        self.instantly_full, self.room_returns_on_probe = instantly_full, room_returns_on_probe
         self.calls = []
         self.unprocessed = 0
 
@@ -49,6 +51,15 @@ class FakeRunner:
 
     def _log(self, stage, event, details=None):
         self.logs.append((stage, event, details))
+
+    def instantly_capacity_gate(self):
+        full = self.w.instantly_full
+        return {"blocked": full, "state": "refusing" if full else "serving", "since": None,
+                "remaining_uploads": 0 if full else None, "message": "", "alerted_at": None}
+
+    def instantly_capacity_alert(self):
+        self.w.calls.append(("capacity_alert",))
+        return True
 
     def acquisition_gate(self):
         return {"allowed": not self.w.apollo_refusing, "state": "refusing" if self.w.apollo_refusing else "serving"}
@@ -80,7 +91,10 @@ class FakeRunner:
                            delivery={"instantly": {"delivered": moved}} if moved else {"instantly": {}})
 
     def deliver(self, *, max_items, channels):
-        self.w.calls.append(("deliver",))
+        w = self.w
+        w.calls.append(("deliver",))
+        if w.instantly_full and w.room_returns_on_probe:
+            w.instantly_full = False          # the free probe found room again
         return {"airtable": {}, "instantly": {}}
 
     def acquire_block(self, pages):
@@ -122,7 +136,9 @@ def purchases(world):
 def test_backlog_is_drained_before_any_purchase_and_never_counts_toward_the_target(monkeypatch):
     w = World(backlog=1500)
     rep = controller(w, monkeypatch).run()
-    assert w.calls[0] == ("cycle", False)
+    # Deliver first (free, and it answers whether the destination has room), then
+    # drain the backlog, and only then consider buying.
+    assert w.calls[0] == ("deliver",) and w.calls[1] == ("cycle", False)
     assert rep.backlog_created == 1500
     assert rep.fresh_created >= 1000           # the target was met by FRESH leads, not by the 1,500 backlog
     assert purchases(w)                        # backlog alone never satisfied it

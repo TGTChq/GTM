@@ -1,0 +1,30 @@
+#!/bin/sh
+# A push to the core's deploy branch REPLACES the running container. On 2026-09-24 a
+# push at 03:40:11Z killed the 03:00 production run 30 seconds later: 73 approvals
+# produced, 0 delivered, and the day had to be recovered by hand.
+#
+# So: never deploy the core while the run lock is held. Override deliberately with
+# TGTC_ALLOW_DEPLOY_DURING_RUN=1 when you mean to stop a run.
+set -eu
+DEPLOY_BRANCH=feat/rebuild-core
+deploying=0
+while read -r _local_ref _local_sha remote_ref _remote_sha; do
+  case "$remote_ref" in
+    *"$DEPLOY_BRANCH") deploying=1 ;;
+  esac
+done
+[ "$deploying" = "1" ] || exit 0
+if [ "${TGTC_ALLOW_DEPLOY_DURING_RUN:-}" = "1" ]; then
+  echo "pre-push: deploying to $DEPLOY_BRANCH with the run-lock check overridden" >&2
+  exit 0
+fi
+status=$(sh scripts/run_lock_status.sh || echo "held=?")
+case "$status" in
+  held=0) exit 0 ;;
+  held=?*)
+    echo "pre-push: REFUSED. A production run holds the run lock ($status)." >&2
+    echo "          Deploying now kills it mid-flight. Wait for it to finish, or" >&2
+    echo "          push again with TGTC_ALLOW_DEPLOY_DURING_RUN=1 if you mean to." >&2
+    exit 1 ;;
+esac
+exit 1

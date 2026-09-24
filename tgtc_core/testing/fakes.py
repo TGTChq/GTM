@@ -370,6 +370,7 @@ class FakeInstantly:
     campaign_status: Dict[str, int] = field(default_factory=dict)    # campaign id -> status (1 active)
     lose_response_once: bool = False
     fail_after_create_once: Optional[Any] = None                     # 'reset' | 500
+    refuse_leads_with: Optional[Any] = None                          # (status, body) for every POST /leads
     requests: List[Dict[str, Any]] = field(default_factory=list)
     clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc)
 
@@ -378,6 +379,9 @@ class FakeInstantly:
         p = _params_dict(params)
         self.requests.append({"method": method, "path": path, "params": p, "body": json_body})
         if path.endswith("/leads") and method == "POST":
+            if self.refuse_leads_with is not None:
+                status, body = self.refuse_leads_with
+                return _json(int(status), body)
             email = str((json_body or {}).get("email") or "").lower()
             campaign = str((json_body or {}).get("campaign") or "")
             existing = self.leads.get(email)

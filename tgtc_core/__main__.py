@@ -71,6 +71,28 @@ def cmd_check_db(args) -> int:
     return 0 if result["status"] == "database_reachable" else 1
 
 
+def cmd_run_lock(args) -> int:
+    """Is a production run in flight? Read-only, and the ONLY honest answer before a
+    deploy: pushing to the core's branch replaces the container and kills whatever the
+    run was doing (2026-09-24: a push at 03:40:11Z ended the 03:00 run 30 seconds later
+    with 73 approvals undelivered)."""
+    from .db.connection import RUN_LOCK_KEY
+
+    s = _settings()
+    conn = connect(args.database_url or s.database_url)
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT count(*) AS n FROM pg_locks WHERE locktype = 'advisory' AND objid = %s AND granted",
+                        (RUN_LOCK_KEY,))
+            held = int(cur.fetchone()["n"])
+            cur.execute("SELECT max(created_at) AS t FROM candidate_attempts")
+            last = cur.fetchone()["t"]
+    finally:
+        conn.close()
+    print(json.dumps({"run_in_flight": bool(held), "holders": held, "last_write_at": str(last or "")}, sort_keys=True))
+    return 3 if held else 0
+
+
 def _runner(conn, s: Settings, *, allow_spend: bool):
     _require_spend_acknowledgement(allow_spend)
 
@@ -810,6 +832,9 @@ def main(argv=None) -> int:
             p.add_argument("--anthropic-input-tokens", type=int, required=True)
             p.add_argument("--anthropic-output-tokens", type=int, required=True)
         p.set_defaults(fn=fn)
+    p = sub.add_parser("run-lock", help="is a production run in flight? exit 3 when it is (pre-deploy check)")
+    p.add_argument("--database-url", default="")
+    p.set_defaults(fn=cmd_run_lock)
     p = sub.add_parser("budget-id", help="print the namespaced budget id for a kind of run")
     p.add_argument("--kind", required=True, choices=("scheduled", "manual", "canary", "sidecar"))
     p.set_defaults(fn=cmd_budget_id)

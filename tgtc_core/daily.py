@@ -27,6 +27,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
+from .services import instantly_capacity
 from .services.spend_budget import APOLLO_ROLLING_CAP_ENV, ROLLING_WINDOW, budget_status
 
 STAGE_KINDS = ("resolve_identity", "classify", "qualify_opportunity")
@@ -69,6 +70,7 @@ class DailyReport:
     fantastic_requests: int = 0
     apollo_credits: float = 0.0
     apollo_requests: int = 0
+    capacity_block: Dict[str, Any] = field(default_factory=dict)
     blocks: List[Dict[str, Any]] = field(default_factory=list)
     drains: List[Dict[str, Any]] = field(default_factory=list)
     rounds: List[Dict[str, Any]] = field(default_factory=list)
@@ -90,6 +92,7 @@ class DailyReport:
             "fantastic_records": self.fantastic_records, "fantastic_requests": self.fantastic_requests,
             "apollo_credits": self.apollo_credits, "apollo_requests": self.apollo_requests,
             "apollo_credits_per_fresh_lead": round(cost, 3) if cost else None,
+            "capacity_block": self.capacity_block,
             "blocks": self.blocks, "drains": self.drains, "rounds": len(self.rounds),
         }
 
@@ -212,10 +215,20 @@ class DailyController:
             if not moved:
                 break
 
+    def capacity_check(self) -> Dict[str, Any]:
+        """Is there room in the destination? One delivery pass answers it, and that pass
+        is free and owed anyway: it hands over contacts that are already paid for. It
+        runs BEFORE any processing, because enrichment spends Apollo credits and a full
+        destination makes that spend worthless (measured 2026-09-24)."""
+        self.r.deliver(max_items=self.max_items, channels=("instantly", "airtable"))
+        return self.r.instantly_capacity_gate()
+
     def block_gate(self, m: Dict[str, Any], records: int) -> str:
         """'' when buying ``records`` more is justified and safe, else why not."""
         if self.r.instantly is None or self.r.airtable is None:
             return "delivery_unavailable"
+        if self.r.instantly_capacity_gate().get("blocked"):
+            return instantly_capacity.STOP_REASON
         inst = self._last_delivery.get("instantly") or {}
         ok = sum(int(inst.get(k, 0)) for k in ("delivered", "reconciled", "blocked", "deferred"))
         if int(inst.get("failed", 0)) + int(inst.get("uncertain", 0)) > 0 and ok == 0:
@@ -256,6 +269,20 @@ class DailyController:
         rp = self.report
         self.r._log("daily", "start", {"budget_id": self.budget_id, "target": self.target,
                                        "block_pages": self.block_pages, "campaign_ids": len(self.campaign_ids())})
+        capacity = self.capacity_check()                      # 0: is there anywhere to put leads?
+        if capacity.get("blocked"):
+            # Every contact this run would produce would land nowhere. Stop before the
+            # first purchase and the first enrichment; the approved contacts already
+            # waiting keep their identity, verified email and suppressions and go first
+            # when there is room again.
+            rp.capacity_block = {"blocked": True, "since": str(capacity.get("since") or ""),
+                                 "remaining_uploads": capacity.get("remaining_uploads"),
+                                 "alerted": bool(self.r.instantly_capacity_alert())}
+            rp.acquisition_stop = instantly_capacity.STOP_REASON
+            rp.stop_reason = f"target_not_reached:{instantly_capacity.STOP_REASON}"
+            self._apply(self.measure())
+            self.r._log("daily", "end", rp.to_dict())
+            return rp
         outcome = self.drain("backlog")                       # A: free and already-paid inventory first
         empty_blocks = 0
         unprocessed_streak = 0
@@ -314,6 +341,11 @@ class DailyController:
             if empty_blocks >= 2:
                 rp.acquisition_stop = "no_new_inventory"
                 break
+        if rp.acquisition_stop == instantly_capacity.STOP_REASON and not rp.capacity_block:
+            gate = self.r.instantly_capacity_gate()           # it filled up DURING the run
+            rp.capacity_block = {"blocked": True, "since": str(gate.get("since") or ""),
+                                 "remaining_uploads": gate.get("remaining_uploads"),
+                                 "alerted": bool(self.r.instantly_capacity_alert())}
         self.deliver_everything()                            # finish delivery of what exists
         final = self.measure()
         self._apply(final)

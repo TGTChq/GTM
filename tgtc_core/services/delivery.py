@@ -24,6 +24,7 @@ from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
 import psycopg
 
 from ..db.connection import jsonb, transaction
+from . import instantly_capacity
 from ..domain.approval import outreach_blocked_reason
 from ..providers.airtable import AirtableClient
 from ..providers.instantly import ALREADY_IN_TARGET_CAMPAIGN, MEMBERSHIP_UNKNOWN, NEWLY_CREATED, InstantlyClient, classify_membership
@@ -506,6 +507,13 @@ class DeliveryService:
         payload = item.payload
         target = str(payload["campaign"])
         email = str(payload["email"])
+        # The destination has a finite number of lead slots. While it is on record as
+        # full, exactly one caller per interval may find out whether there is room;
+        # everybody else waits without asking, because the answer is the same for all.
+        room = instantly_capacity.reserve_probe(self.conn, env=self.env, now=self.now())
+        if not room["allowed"]:
+            self._set(item, "pending", available_at=self._capacity_retry_at(), error=instantly_capacity.DEFERRED_REASON)
+            return DeliveryOutcome(item.id, "instantly", "deferred", instantly_capacity.DEFERRED_REASON)
         # R-cutover: the destination must still be a CONFIGURED route. A stored
         # payload signed before the Control -> Challenger cutover names a
         # retired campaign that is nonetheless still active in Instantly, so
@@ -548,7 +556,15 @@ class DeliveryService:
         result = self.instantly.create_lead(payload)
         if result.uncertain:
             return DeliveryOutcome(item.id, "instantly", "uncertain", f"uncertain:{result.message[:40]}")
+        if instantly_capacity.is_capacity_refusal(result.status, result.message):
+            # Nothing is wrong with this contact and nothing was created: the workspace
+            # is full. Keep the row pending -- failing it would age good contacts into
+            # 'blocked: max_attempts' over a few days of a wall that is not theirs.
+            instantly_capacity.record_refusal(self.conn, message=result.message, now=self.now())
+            self._set(item, "pending", available_at=self._capacity_retry_at(), error=instantly_capacity.DEFERRED_REASON)
+            return DeliveryOutcome(item.id, "instantly", "deferred", instantly_capacity.DEFERRED_REASON)
         if result.ok:
+            instantly_capacity.record_available(self.conn, now=self.now())
             membership, lead_id, lead_campaign, created_at = classify_membership(result.data, target_campaign=target, request_started_at=started)
             if membership != NEWLY_CREATED:
                 membership, campaigns = self.instantly.resolve_membership(email, target)
@@ -586,11 +602,20 @@ class DeliveryService:
             return DeliveryOutcome(item.id, item.channel, "lease_lost", "lease_lost_before_processing")
         return self.process_airtable(item) if item.channel == "airtable" else self.process_instantly(item)
 
+    def _capacity_retry_at(self) -> datetime:
+        return self.now() + timedelta(hours=instantly_capacity.retry_hours(self.env))
+
     def drain(self, channel: str, *, max_items: int = 100) -> List[DeliveryOutcome]:
         out: List[DeliveryOutcome] = []
         while len(out) < max_items:
+            if channel == "instantly" and not instantly_capacity.may_attempt(
+                    self.conn, env=self.env, now=self.now())["allowed"]:
+                break          # full and not due: claiming rows would only age them
             items = self.claim(channel, limit=1)
             if not items:
                 break
-            out.append(self.process(items[0]))
+            outcome = self.process(items[0])
+            out.append(outcome)
+            if outcome.reason == instantly_capacity.DEFERRED_REASON:
+                break          # one refusal answers for every row waiting behind it
         return out

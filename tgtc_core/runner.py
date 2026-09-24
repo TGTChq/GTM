@@ -50,7 +50,7 @@ from .providers.apollo import ApolloClient
 from .providers.fantastic import FantasticClient
 from .providers.http import Transport
 from .providers.instantly import InstantlyClient
-from .services import provider_state
+from .services import instantly_capacity, provider_state
 from .services.acquisition import AcquisitionService, SOURCE_SPECS
 from .services.classification_service import classify_one, reopen_for_inference
 from .services.compliance_recheck import recheck_unknown_jurisdiction
@@ -244,6 +244,23 @@ class Runner:
         gate = provider_state.acquisition_allowed(self.conn, "apollo")
         self.conn.commit()
         return gate
+
+    def instantly_capacity_gate(self) -> Dict[str, Any]:
+        """Is the delivery destination on record as full? Paid work upstream of a full
+        destination produces contacts with nowhere to go (measured 2026-09-24)."""
+        gate = instantly_capacity.state(self.conn)
+        self.conn.commit()
+        return gate
+
+    def instantly_capacity_alert(self) -> bool:
+        """Emit the block alert once per episode; True when this call was the one."""
+        gate = instantly_capacity.state(self.conn)
+        if not instantly_capacity.alert_once(self.conn, now=self.now()):
+            return False
+        self._log("delivery", "instantly_capacity_blocked", {
+            "since": str(gate.get("since")), "remaining_uploads": gate.get("remaining_uploads"),
+            "message": gate.get("message", "")[:200], "consecutive_refusals": gate.get("consecutive_refusals")})
+        return True
 
     def acquire(self, *, fresh_partitions: int = 24, backfill_partitions: int = 1, sources: Optional[List[str]] = None) -> List[Dict[str, Any]]:
         if self.fantastic is None:
