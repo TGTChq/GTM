@@ -30,14 +30,27 @@ def test_unsubscribe_between_approval_and_delivery_blocks_both_channels(conn, cl
     assert sql1(conn, "SELECT count(*) FROM delivery_receipts WHERE receipt_kind IN ('created','existing','reconciled')") == 0
 
 
-def test_reply_event_suppresses_future_approval_of_the_same_person(conn, clock):
-    apply_outcome_event(conn, provider="instantly", event_type="reply", dedupe_key="r-1", email="good.buyer@acme.com")
+def test_an_opt_out_suppresses_future_approval_of_the_same_person(conn, clock):
+    apply_outcome_event(conn, provider="instantly", event_type="opt_out", dedupe_key="r-1",
+                        email="good.buyer@acme.com")
     pid, eid, oid = seed_opportunity(conn, clock)
     out = opportunity_service(conn, apollo_for("acme.com", "Acme"), clock).process(oid)
     assert out.outcome == "wait" and out.reason == "buyer_search_pending:no_verified_buyer_in_candidates"
     reasons = {a["reason"] for a in sqlall(conn, "SELECT reason FROM candidate_attempts")}
     assert "suppressed:person_email" in reasons
     assert sql1(conn, "SELECT count(*) FROM approvals") == 0
+
+
+def test_an_out_of_office_leaves_the_person_approvable(conn, clock):
+    """The reason the suppressing set changed: an auto-answer from somebody on holiday
+    is not a relationship ending, and it used to end one."""
+    apply_outcome_event(conn, provider="instantly", event_type="out_of_office", dedupe_key="ooo-1",
+                        email="good.buyer@acme.com")
+    assert sql1(conn, "SELECT count(*) FROM suppressions") == 0
+    pid, eid, oid = seed_opportunity(conn, clock)
+    out = opportunity_service(conn, apollo_for("acme.com", "Acme"), clock).process(oid)
+    assert out.outcome == "approved"
+    assert sql1(conn, "SELECT count(*) FROM approvals") == 1
 
 
 def test_active_company_function_history_closes_before_any_spend(conn, clock):

@@ -116,6 +116,13 @@ class InstantlyClient:
             return result, ()
         return result, tuple(str(c.get("id") or "") for c in items if isinstance(c, dict) and c.get("id"))
 
+    def list_received_emails(self, *, limit: int = 100, starting_after: Optional[str] = None) -> InstantlyResult:
+        """One page of replies, newest first. A GET: it changes nothing in Instantly."""
+        params = {"email_type": "received", "limit": int(limit)}
+        if starting_after:
+            params["starting_after"] = starting_after
+        return self._call("GET", "/emails", params=params)
+
     def get_campaign(self, campaign_id: str) -> InstantlyResult:
         return self._call("GET", f"/campaigns/{campaign_id}")
 

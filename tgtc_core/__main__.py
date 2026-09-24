@@ -13,6 +13,7 @@ Subcommands:
   slack-test         send one labelled connectivity test to a channel (no pipeline data)
   report-export      write a stored week's private lead-level file out (personal data)
   report-detail-link record where a week's detail was published, and to whom
+  replies-poll       ingest Instantly replies (out of office / departed / opt-out); never sends
   import-airtable    import existing Airtable rows as suppressions (reads only)
   prune              null compressed page payloads older than TGTC_PAYLOAD_RETENTION_DAYS (receipts kept)
   demo               end-to-end run against SIMULATED providers on an embedded PostgreSQL
@@ -477,6 +478,36 @@ def cmd_report_detail_link(args) -> int:
     return 0
 
 
+def cmd_replies_poll(args) -> int:
+    """Read Instantly's replies for the nine campaigns and record what each one means.
+
+    Reading never sends. An out-of-office waits, a departure stops that address and
+    queues a replacement search, an opt-out is respected, and anything a person wrote
+    goes to a human. ``--dry-run`` decides everything and writes nothing, which is how
+    a change to the classifier is judged against production before it touches it.
+    """
+    from .providers.http import RequestsTransport
+    from .providers.instantly import InstantlyClient
+    from .services import replies as reply_service
+
+    s = _settings()
+    campaign_ids = sorted({v for v in (s.campaign_env or {}).values() if v})
+    if not campaign_ids:
+        print("replies-poll refused: no INSTANTLY_CAMPAIGN_* ids are configured on this service", file=sys.stderr)
+        return 1
+    if not s.instantly_api_key:
+        print("replies-poll refused: INSTANTLY_API_KEY is not set on this service", file=sys.stderr)
+        return 1
+    conn = connect(args.database_url or s.database_url)
+    apply_schema(conn)
+    client = InstantlyClient(RequestsTransport(), base_url=s.instantly_base_url, api_key=s.instantly_api_key)
+    report = reply_service.poll(conn, client, campaign_ids=campaign_ids,
+                                now=datetime.now(timezone.utc), page_size=args.page_size,
+                                max_pages=args.max_pages, dry_run=args.dry_run, restart=args.restart)
+    print(json.dumps({"campaigns": len(campaign_ids), **report.to_dict()}, indent=2, default=str))
+    return 0
+
+
 def _slack_destination(args, channel):
     """Resolve a sender and say how the destination was established, or refuse.
 
@@ -875,6 +906,13 @@ def main(argv=None) -> int:
     p.add_argument("--url", required=True)
     p.add_argument("--viewers", required=True, help="comma-separated accounts that were granted access")
     p.set_defaults(fn=cmd_report_detail_link)
+    p = sub.add_parser("replies-poll", help="ingest Instantly replies for the nine campaigns (never sends)")
+    p.add_argument("--database-url", default="")
+    p.add_argument("--dry-run", action="store_true", help="classify and report; write nothing, move no cursor")
+    p.add_argument("--max-pages", type=int, default=10)
+    p.add_argument("--page-size", type=int, default=100)
+    p.add_argument("--restart", action="store_true", help="ignore the stored cursor and read from the newest again")
+    p.set_defaults(fn=cmd_replies_poll)
     args = parser.parse_args(argv)
     _require_acceptance_command(args)
     return int(args.fn(args))

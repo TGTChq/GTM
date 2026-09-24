@@ -25,8 +25,17 @@ from ..domain.identity import is_intermediary_host, linkedin_slug, name_key, saf
 from ..policy.requirements import rule
 
 RETRYABLE_STATUSES = {"error", "rejected"}
-OUTCOME_SUPPRESSING_EVENTS = {"unsubscribe", "unsubscribed", "reply", "replied", "bounce", "bounced",
-                              "existing_customer", "do_not_contact", "spam_complaint"}
+#: Events that permanently stop an address being used. A REPLY is deliberately not one
+#: of them: audited 2026-09-24, 293 of the 540 most recent replies were out-of-office
+#: auto-answers, and suppressing on a generic reply would have burned every one of those
+#: contacts for a holiday. Only an explicit opt-out, a departure, a bounce or a complaint
+#: ends a relationship -- and `no_longer_here` ends it for THAT address, which is why the
+#: departure also queues a replacement rather than closing the unit.
+OUTCOME_SUPPRESSING_EVENTS = {"unsubscribe", "unsubscribed", "opt_out", "no_longer_here",
+                              "bounce", "bounced", "existing_customer", "do_not_contact", "spam_complaint"}
+
+#: Recorded, never suppressing: the person is coming back, or a human needs to read it.
+OUTCOME_NON_SUPPRESSING_EVENTS = {"out_of_office", "human_reply", "unknown", "reply", "replied"}
 
 
 @dataclass
