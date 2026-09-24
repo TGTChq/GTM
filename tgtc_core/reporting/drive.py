@@ -12,6 +12,9 @@ Three properties, because a link in a report is a promise:
    GET that lands on a sign-in page is a link nobody outside the account can use, and
    that is a failure, not a detail.
 
+The file is never shared with "anyone with the link": it inherits the private folder's
+access, and named readers are granted explicitly. Prospect data does not get a public URL.
+
 Authentication is a Google **service account** (``TGTC_DRIVE_SERVICE_ACCOUNT_JSON``,
 raw or base64), because the job runs in a container with no browser and no user session.
 A connector authorised in a chat client is not a credential this process can use.
@@ -29,7 +32,6 @@ DRIVE_UPLOAD = "https://www.googleapis.com/upload/drive/v3/files"
 SCOPES = ("https://www.googleapis.com/auth/drive",)
 
 #: What a published weekly file must be shared as, and what is read back to prove it.
-ANYONE_READER = {"type": "anyone", "role": "reader"}
 
 
 class DriveError(RuntimeError):
@@ -133,66 +135,49 @@ class DriveFolder:
             raise DriveError(f"Drive refused the upload: HTTP {response.status_code}")
         return {**(response.json() or {}), "created": True}
 
-    def share_anyone_reader(self, file_id: str) -> List[Dict[str, Any]]:
-        """Make the file readable by anyone with the link -- and prove it afterwards.
-
-        Idempotent: an existing ``anyone`` permission is left exactly as it is rather
-        than re-created, so a retry never changes what is already granted.
-        """
-        current = self.permissions(file_id)
-        if not any(p.get("type") == "anyone" and p.get("role") == "reader" for p in current):
+    def share_with_readers(self, file_id: str, readers: List[str]) -> List[str]:
+        """Grant reader to named people, and to nobody else. Idempotent: an address that
+        already has access is left exactly as it is."""
+        have = {str(p.get("emailAddress") or "").lower() for p in self.permissions(file_id)}
+        granted: List[str] = []
+        for address in readers:
+            email = str(address or "").strip()
+            if not email or email.lower() in have:
+                continue
             response = self._s.post(f"{DRIVE_FILES}/{file_id}/permissions",
-                                    params={"fields": "id,type,role", "supportsAllDrives": "true"},
-                                    json=dict(ANYONE_READER), timeout=60)
+                                    params={"fields": "id,type,role", "supportsAllDrives": "true",
+                                            "sendNotificationEmail": "false"},
+                                    json={"type": "user", "role": "reader", "emailAddress": email}, timeout=60)
             if response.status_code >= 300:
-                raise DriveError(f"Drive refused the sharing change: HTTP {response.status_code}. "
-                                 "If the workspace forbids link sharing this is an administrator setting, "
-                                 "not something the job can grant itself")
-            current = self.permissions(file_id)
-        if not any(p.get("type") == "anyone" and p.get("role") == "reader" for p in current):
-            raise DriveError("the file is not readable by anyone with the link after sharing; "
-                             "nothing was recorded as published")
-        return current
+                raise DriveError(f"Drive refused reader access for a named person: HTTP {response.status_code}")
+            granted.append(email)
+        return granted
 
-    def opens_without_credentials(self, url: str) -> Tuple[bool, str]:
-        """Fetch the link with no authentication at all. A sign-in page is a failure."""
-        if self._open is None:
-            import requests
+def publish(folder: DriveFolder, *, report_id: str, content: bytes,
+            readers: Optional[List[str]] = None) -> Dict[str, Any]:
+    """Upload into the private folder, grant named readers if any, and read the access
+    back before returning a URL.
 
-            opener = requests.Session().get
-        else:
-            opener = self._open
-        try:
-            response = opener(url, timeout=60)
-        except Exception as exc:  # noqa: BLE001
-            return False, f"{type(exc).__name__}: {exc}"
-        status = getattr(response, "status_code", 0)
-        body = (getattr(response, "text", "") or "")[:4000].lower()
-        final = str(getattr(response, "url", url))
-        if status >= 400:
-            return False, f"HTTP {status}"
-        if "accounts.google.com" in final or "sign in" in body and "signin" in final:
-            return False, f"redirected to a sign-in page ({final[:80]})"
-        if "accounts.google.com/v3/signin" in body or "you need access" in body:
-            return False, "Drive answered 'you need access'"
-        return True, f"HTTP {status}"
+    The file is NOT shared with "anyone with the link". It inherits the folder's access,
+    which is the access control, and named readers are granted explicitly when the
+    operator names them. A link that anyone can open is not an access-controlled
+    destination for prospect data, whatever convenience it buys.
 
-
-def publish(folder: DriveFolder, *, report_id: str, content: bytes) -> Dict[str, Any]:
-    """Upload, share, read the permission back, and open the link unauthenticated.
-
-    Returns everything the caller needs to record -- and raises rather than returning a
-    URL it could not prove is readable.
+    Raises rather than returning a URL whose access it could not read back.
     """
     uploaded = folder.upload(file_name(report_id), content)
     file_id = str(uploaded.get("id") or "")
     if not file_id:
         raise DriveError("Drive returned no file id")
-    permissions = folder.share_anyone_reader(file_id)
+    granted = folder.share_with_readers(file_id, readers or [])
     url = uploaded.get("webViewLink") or folder.link(file_id)
-    opened, detail = folder.opens_without_credentials(url)
-    if not opened:
-        raise DriveError(f"the published link does not open without credentials: {detail}")
+    if not url:
+        raise DriveError("Drive returned no link for the uploaded file")
+    current = folder.permissions(file_id)
+    public = [p for p in current if p.get("type") == "anyone"]
+    if public:
+        raise DriveError("the uploaded file is readable by anyone with the link; "
+                         "prospect data must not be published that way")
     return {"file_id": file_id, "url": url, "created": bool(uploaded.get("created")),
-            "permissions": [{"type": p.get("type"), "role": p.get("role")} for p in permissions],
-            "link_opens_unauthenticated": detail, "bytes": len(content)}
+            "permissions": [{"type": p.get("type"), "role": p.get("role")} for p in current],
+            "named_readers_granted": granted, "bytes": len(content)}

@@ -1,9 +1,12 @@
-"""Publishing the week's lead file: once, shared, proved, and never faked.
+"""Publishing the week's lead file: once, into a private folder, proved, never faked.
 
-A link in a report is a promise that a file exists, is readable and opens. These tests
-hold each half of that promise: the upload happens once per week, the permission is read
-back rather than assumed, the link is fetched with no credentials before it is recorded,
-and every refusal is a named state instead of a URL.
+A link in a report is a promise that a file exists and the right people can read it.
+These tests hold each half of that promise: the upload happens once per week, the access
+is read back rather than assumed, and every refusal is a named state instead of a URL.
+
+The file carries prospect data, so it is NOT shared with anyone who has the link. It
+inherits the private folder's access, named readers are granted explicitly, and a file
+that turns out to be world-readable is refused rather than recorded.
 """
 
 from __future__ import annotations
@@ -70,10 +73,6 @@ def opener_ok(url, timeout=None):
     return FakeResponse(status=200, text="lead_key,campaign,email", url=url)
 
 
-def opener_signin(url, timeout=None):
-    return FakeResponse(status=200, text="Sign in to continue", url="https://accounts.google.com/v3/signin/x")
-
-
 def folder(session, **kw):
     return drive.DriveFolder(session, "folder-1", opener=kw.pop("opener", opener_ok))
 
@@ -92,25 +91,41 @@ def test_a_week_is_uploaded_once_and_replaced_on_a_retry():
     assert len(api.files) == 1
 
 
-def test_sharing_is_read_back_and_not_repeated():
+def test_nothing_is_shared_with_anyone_who_has_the_link():
+    """The folder is the access control. A public link to prospect data is not."""
     api = FakeDrive()
     out = drive.publish(folder(api), report_id="weekly-2026-09-11", content=b"x")
-    assert {"type": "anyone", "role": "reader"} in [
-        {"type": p["type"], "role": p["role"]} for p in out["permissions"]]
-    drive.publish(folder(api), report_id="weekly-2026-09-11", content=b"x")
-    assert len(api.shares) == 1, "a retry re-granted a permission that was already there"
+    assert api.shares == [], "no permission was granted at all, so none can be public"
+    assert all(p.get("type") != "anyone" for p in out["permissions"])
+    assert out["named_readers_granted"] == []
 
 
-def test_a_link_that_asks_for_a_sign_in_is_not_published():
+def test_named_readers_are_granted_once_and_never_again():
     api = FakeDrive()
-    with pytest.raises(drive.DriveError, match="does not open without credentials"):
-        drive.publish(folder(api, opener=opener_signin), report_id="weekly-2026-09-11", content=b"x")
+    out = drive.publish(folder(api), report_id="weekly-2026-09-11", content=b"x",
+                        readers=["brett@example.com", "roman@example.com"])
+    assert out["named_readers_granted"] == ["brett@example.com", "roman@example.com"]
+    assert [j["role"] for _, j in api.shares] == ["reader", "reader"]
+    assert all(j["type"] == "user" for _, j in api.shares)
+
+    drive.publish(folder(api), report_id="weekly-2026-09-11", content=b"x",
+                  readers=["brett@example.com", "roman@example.com"])
+    assert len(api.shares) == 2, "a retry re-granted access that was already there"
 
 
-def test_a_workspace_that_refuses_link_sharing_is_reported_as_such():
-    api = FakeDrive(share_status=403)
-    with pytest.raises(drive.DriveError, match="administrator setting"):
+def test_a_file_that_turns_out_to_be_world_readable_is_refused():
+    """Whatever put it there -- an inherited setting, a hand-made share -- the report
+    does not record a link to prospect data that anyone can open."""
+    api = FakeDrive()
+    api.permissions["file-1"] = [{"id": "p0", "type": "anyone", "role": "reader"}]
+    with pytest.raises(drive.DriveError, match="readable by anyone"):
         drive.publish(folder(api), report_id="weekly-2026-09-11", content=b"x")
+
+
+def test_a_workspace_that_refuses_a_named_reader_is_reported_as_such():
+    api = FakeDrive(share_status=403)
+    with pytest.raises(drive.DriveError, match="refused reader access"):
+        drive.publish(folder(api), report_id="weekly-2026-09-11", content=b"x", readers=["brett@example.com"])
 
 
 def test_no_credential_is_a_state_not_a_guess():
@@ -150,19 +165,21 @@ def test_a_published_week_is_recorded_with_its_readers_and_never_uploaded_twice(
                         lambda session, folder_id, **kw: real_folder(session, folder_id, opener=opener_ok))
     env = {"TGTC_DRIVE_SERVICE_ACCOUNT_JSON": "{}", "TGTC_REPORT_DRIVE_FOLDER_ID": "folder-1"}
 
+    env = {**env, "TGTC_REPORT_DETAIL_READERS": "brett@example.com, roman@example.com"}
     first = pipeline.publish_detail(conn, report, env=env)
     assert first["published"] is True and first["rows"] == 1
-    assert first["permissions"] == [{"type": "anyone", "role": "reader"}]
+    assert all(p["type"] != "anyone" for p in first["permissions"])
 
     stored = detail.load(conn, "weekly-2026-09-11")
     assert stored["published_url"] == first["url"]
-    assert stored["published_to"] == ["anyone-with-the-link:reader"]
+    assert stored["published_to"] == ["drive-folder:folder-1", "reader:brett@example.com",
+                                      "reader:roman@example.com"]
     assert store.get(conn, "weekly-2026-09-11")["detail_url"] == first["url"]
 
     # The 06:20 retry: nothing is uploaded, nothing is re-shared, the link does not move.
     again = pipeline.publish_detail(conn, report, env=env)
     assert again == {"published": False, "reason": "already_published", "url": first["url"], "rows": 1}
-    assert len(api.uploads) == 1 and len(api.shares) == 1
+    assert len(api.uploads) == 1 and len(api.shares) == 2
 
     # ... and the message now carries that link instead of the pending line.
     report["detail"] = {**report["detail"], "published_url": first["url"], "state": "published"}

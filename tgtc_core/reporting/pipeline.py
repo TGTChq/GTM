@@ -91,13 +91,18 @@ def generate_and_store(conn: psycopg.Connection, *, now: datetime, out_dir: Opti
     return result
 
 
+#: Named people who should be able to open the weekly detail, comma separated. The
+#: folder's own access already governs it; this only adds explicit readers.
+DETAIL_READERS_ENV = "TGTC_REPORT_DETAIL_READERS"
+
+
 def publish_detail(conn: psycopg.Connection, report: Dict[str, Any], *,
                    env: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
     """Put this week's lead file where the readers can open it, once.
 
     Every refusal is a named, honest state rather than a link: no credential, no folder,
-    no stored file, a week that is not closed, or a link that would not open without
-    signing in. A week that has already been published is left exactly as it is -- the
+    no stored file, a week that is not closed, or a file that turned out to be readable
+    by anyone with the link. A week that has already been published is left exactly as it is -- the
     retry that runs twenty minutes later must not re-upload, re-share, or move the link.
     """
     import os as _os
@@ -123,10 +128,14 @@ def publish_detail(conn: psycopg.Connection, report: Dict[str, Any], *,
                                             ("TGTC_REPORT_DRIVE_FOLDER_ID", folder_id)) if not value]
         return {"published": False, "reason": "Drive is not configured on this service",
                 "missing": missing}
+    readers = [a.strip() for a in str(env.get(DETAIL_READERS_ENV, "") or "").split(",") if a.strip()]
     try:
         out = drive.publish(drive.DriveFolder(drive.authorised_session(credentials), folder_id),
-                            report_id=report_id, content=stored["csv"])
+                            report_id=report_id, content=stored["csv"], readers=readers)
     except drive.DriveError as exc:
         return {"published": False, "reason": str(exc)}
-    detail.record_publication(conn, report_id, url=out["url"], viewers=["anyone-with-the-link:reader"])
+    # What the file is actually readable by, never a claim about it. The folder's own
+    # access is the access control; named readers are recorded only when granted.
+    viewers = [f"drive-folder:{folder_id}"] + [f"reader:{a}" for a in out.get("named_readers_granted", [])]
+    detail.record_publication(conn, report_id, url=out["url"], viewers=viewers)
     return {"published": True, "rows": stored["row_count"], "sha256": stored["sha256"], **out}
