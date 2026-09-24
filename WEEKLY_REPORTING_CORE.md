@@ -465,8 +465,9 @@ team already uses and the addresses that may read it.
 ## The Drive destination: what exists and what is missing
 
 The TGTC Drive account `luis@globaltalent.co` **is** reachable from the Claude Code
-session, and its policy **does** allow link sharing (an existing file in it carries
-`{"role": "reader", "type": "anyone"}`). A destination folder now exists:
+session. A destination folder now exists, and it is private -- owned by
+`luis@globaltalent.co` and shared with nobody else, which is exactly the access control
+prospect data needs:
 
 * **TGTC Weekly Lead Detail** — `18pSf8dk0e8ugAMNYC7KPEKZsxZkd4700`
 * it holds `TGTC_weekly_leads_2026-09-18_MANIFEST.txt` (row count, checksum, columns,
