@@ -218,8 +218,9 @@ def cmd_run_daily(args) -> int:
     _require_spend_acknowledgement(args.i_understand_spend)
     s = _settings()
     _require_persistent_budget(args, s)
-    from .services.budget_policy import BudgetPolicyError, claim, validate
+    from .services.budget_policy import BudgetPolicyError, claim, require_declared_kind, validate
     try:
+        require_declared_kind(args.budget_kind)
         validate(args.budget_kind, s.spend_budget_id)
     except BudgetPolicyError as exc:
         print(f"run-daily refused: {exc}", file=sys.stderr)
@@ -340,8 +341,9 @@ def cmd_budget(args) -> int:
     if not budget_id:
         raise SystemExit("--budget-id is required")
     if getattr(args, "budget_kind", ""):
-        from .services.budget_policy import BudgetPolicyError, validate
+        from .services.budget_policy import BudgetPolicyError, require_declared_kind, validate
         try:
+            require_declared_kind(args.budget_kind)
             validate(args.budget_kind, budget_id)
         except BudgetPolicyError as exc:
             raise SystemExit(f"budget refused: {exc}")

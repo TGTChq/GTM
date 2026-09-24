@@ -15,6 +15,7 @@ a scheduled budget at all, today's or a future day's.
 """
 from __future__ import annotations
 
+import os
 import re
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
@@ -34,8 +35,31 @@ _SCHEDULED = re.compile(r"^prod-scheduled-(\d{8})$")
 _STAMPED = re.compile(r"^\d{8}T\d{6}Z$")
 
 
+#: The kind of run is DECLARED by whoever means it, never inferred.
+RUN_KIND_ENV = "TGTC_RUN_KIND"
+
+
 class BudgetPolicyError(RuntimeError):
     """The run may not use this budget. Never silently worked around."""
+
+
+def require_declared_kind(kind: str, env: Optional[Dict[str, str]] = None) -> None:
+    """Refuse a run whose kind nobody named.
+
+    The core's start command used to read the UTC hour and call 03:00-05:59
+    ``scheduled`` and everything else ``manual``. The same recovery was therefore a
+    resume of the day's allowance at 04:47 and a brand-new one at 06:00 -- a second
+    daily budget opened by the clock, which is exactly what budget namespaces exist to
+    prevent. ``scheduled`` needs no declaration: the service has one cron and that is
+    what it is. Every other kind must be named.
+    """
+    if kind == "scheduled":
+        return
+    declared = str((env if env is not None else os.environ).get(RUN_KIND_ENV, "") or "").strip()
+    if declared != kind:
+        raise BudgetPolicyError(
+            f"a {kind!r} run must be declared: set {RUN_KIND_ENV}={kind}. "
+            "A kind inferred from the clock opens a second daily allowance.")
 
 
 def budget_id_for(kind: str, now: Optional[datetime] = None) -> str:

@@ -14,7 +14,8 @@ import pytest
 
 from tgtc_core import __main__ as cli
 from tgtc_core.db.connection import connect, jsonb, transaction
-from tgtc_core.services.budget_policy import BudgetPolicyError, budget_id_for, claim, kind_of, validate
+from tgtc_core.services.budget_policy import (RUN_KIND_ENV, BudgetPolicyError, budget_id_for, claim,
+                                             kind_of, require_declared_kind, validate)
 from tgtc_core.services.spend_budget import BudgetLimits, SpendBudget, budget_status, create_budget
 
 NOW = datetime(2026, 9, 23, 3, 0, tzinfo=timezone.utc)
@@ -129,6 +130,33 @@ def test_run_daily_refuses_a_future_scheduled_budget_before_touching_anything(pg
     args = argparse.Namespace(i_understand_spend=True, database_url=pg_url, budget_id=tomorrow, budget_kind="manual",
                               target=1000, block_pages=2, max_rounds=5, max_items=10)
     assert cli.cmd_run_daily(args) == cli.EXIT_BUDGET_REFUSED
+
+
+def test_a_run_kind_nobody_named_is_refused(pg_url, monkeypatch):
+    """The start command used to read the UTC hour: 03:00-05:59 was 'scheduled' and
+    everything else 'manual'. The recovery run of 2026-09-24 resumed the day's budget
+    only because it happened to start at 04:47; an hour later the same recovery would
+    have opened a second daily allowance by itself."""
+    monkeypatch.delenv(RUN_KIND_ENV, raising=False)
+    manual = budget_id_for("manual")
+    args = argparse.Namespace(i_understand_spend=True, database_url=pg_url, budget_id=manual, budget_kind="manual",
+                              target=1000, block_pages=2, max_rounds=5, max_items=10)
+    assert cli.cmd_run_daily(args) == cli.EXIT_BUDGET_REFUSED
+
+    # ... and it runs when somebody means it.
+    monkeypatch.setenv(RUN_KIND_ENV, "manual")
+    require_declared_kind("manual")
+
+
+def test_the_scheduled_kind_needs_no_declaration_because_the_cron_is_the_declaration(monkeypatch):
+    monkeypatch.delenv(RUN_KIND_ENV, raising=False)
+    require_declared_kind("scheduled")
+    for kind in ("manual", "canary", "sidecar"):
+        with pytest.raises(BudgetPolicyError, match="must be declared"):
+            require_declared_kind(kind)
+        monkeypatch.setenv(RUN_KIND_ENV, kind)
+        require_declared_kind(kind)
+        monkeypatch.delenv(RUN_KIND_ENV, raising=False)
 
 
 def test_budget_usage_is_correct_across_process_restarts(conn, pg_url):
