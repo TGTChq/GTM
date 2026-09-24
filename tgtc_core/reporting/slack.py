@@ -246,15 +246,22 @@ def resolve_channel(token: str, name: str) -> Dict[str, Any]:
     import requests
 
     wanted = name.lstrip("#").strip().lower()
+    # Asking for private channels as well requires groups:read. A token that only needs
+    # to find a PUBLIC channel should not be made to carry that scope, so a missing_scope
+    # refusal falls back to public channels once instead of failing the whole report.
+    types = "public_channel,private_channel"
     cursor, seen = "", 0
     while True:
         response = requests.get(
             f"{SLACK_API}/conversations.list",
             headers={"Authorization": f"Bearer {token}"},
             params={"limit": 1000, "exclude_archived": "true", "cursor": cursor,
-                    "types": "public_channel,private_channel"}, timeout=30)
+                    "types": types}, timeout=30)
         body = response.json()
         if not body.get("ok", False):
+            if body.get("error") == "missing_scope" and types != "public_channel":
+                types, cursor, seen = "public_channel", "", 0
+                continue
             raise SlackError(f"Slack refused conversations.list: {body.get('error', 'unknown_error')}")
         for channel in body.get("channels", []):
             seen += 1

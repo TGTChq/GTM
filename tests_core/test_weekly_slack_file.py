@@ -219,3 +219,46 @@ def test_a_week_that_is_not_closed_is_never_uploaded_in_slack_mode(conn, monkeyp
 
     assert out == {"published": False, "reason": "only a closed week is published"}
     assert uploaded == [], "a partial week uploaded the lead CSV"
+
+
+def test_a_public_channel_is_found_without_the_private_channel_scope(monkeypatch):
+    """Measured against the real workspace on 2026-09-24: a token with files:write,
+    files:read, channels:read and chat:write gets `missing_scope` from
+    conversations.list when the call also asks for private channels, because that needs
+    groups:read. #gtm-engineering is public, so the report must not demand a scope it
+    does not need."""
+    calls = []
+
+    class Resp:
+        def __init__(self, payload):
+            self._p = payload
+
+        def json(self):
+            return self._p
+
+    def fake_get(url, headers=None, params=None, timeout=None):
+        calls.append(params["types"])
+        if params["types"] != "public_channel":
+            return Resp({"ok": False, "error": "missing_scope"})
+        return Resp({"ok": True, "channels": [{"id": "C0BEFFVC5CN", "name": "gtm-engineering",
+                                               "is_private": False, "is_member": True}],
+                     "response_metadata": {"next_cursor": ""}})
+
+    import requests
+    monkeypatch.setattr(requests, "get", fake_get)
+
+    found = slack.resolve_channel("xoxb-test", "#gtm-engineering")
+
+    assert found == {"id": "C0BEFFVC5CN", "name": "gtm-engineering", "is_private": False, "is_member": True}
+    assert calls == ["public_channel,private_channel", "public_channel"], "it retried exactly once"
+
+
+def test_a_real_refusal_is_still_raised(monkeypatch):
+    class Resp:
+        def json(self):
+            return {"ok": False, "error": "invalid_auth"}
+
+    import requests
+    monkeypatch.setattr(requests, "get", lambda *a, **kw: Resp())
+    with pytest.raises(slack.SlackError, match="invalid_auth"):
+        slack.resolve_channel("xoxb-test", "#gtm-engineering")
