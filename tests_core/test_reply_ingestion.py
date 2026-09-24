@@ -118,6 +118,17 @@ def test_an_out_of_office_without_a_date_still_waits_rather_than_sending(conn):
     assert when > NOW, "no date in the reply is not a reason to follow up immediately"
 
 
+def test_a_return_date_is_read_against_the_replys_own_clock(conn):
+    """A reply from the 19th saying "back September 22" means this year. Reading it
+    against the poll time instead pushed it to 2027, which is the same as never."""
+    lead(conn, "dated@example.com")
+    item = reply("m1", "dated@example.com", "Automatic reply", "I am out of the office, back September 22.")
+    item["timestamp_email"] = "2026-09-19T08:00:00Z"
+    replies.poll(conn, FakeInbox([[item]]), campaign_ids=[OURS], now=NOW)
+    when = sql1(conn, "SELECT available_at FROM work_items WHERE kind = %s", (replies.FOLLOW_UP_WHEN_BACK,))
+    assert when.date().isoformat() == "2026-09-22"
+
+
 def test_a_departure_stops_that_address_and_queues_a_replacement_for_the_unit(conn):
     seeded = lead(conn, "gone@example.com")
     inbox = FakeInbox([[reply("m1", "gone@example.com", "No longer with the organization",

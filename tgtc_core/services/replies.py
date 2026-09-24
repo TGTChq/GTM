@@ -136,8 +136,12 @@ def ingest_one(conn: psycopg.Connection, item: Dict[str, Any], *, now: datetime,
     email = str(item.get("from_address_email") or "").strip().lower()
     body = item.get("body")
     text = str((body or {}).get("text") or "") if isinstance(body, dict) else str(body or "")
+    # The reply's OWN timestamp decides how its dates read. Using the poll time instead
+    # turned "back September 22" in a reply from the 19th into September 2027, because the
+    # year-rollover rule saw a date two days in the past.
+    received = _parsed(item.get("timestamp_email")) or now
     verdict: ReplyVerdict = classify(str(item.get("subject") or ""), text or str(item.get("content_preview") or ""),
-                                     provider_label=item.get("i_status"), received_at=now)
+                                     provider_label=item.get("i_status"), received_at=received)
     located = _locate(conn, email)
     out = {"message_id": message_id, "label": verdict.label, "queued": None, "recorded": None,
            "person_known": located is not None}
@@ -152,7 +156,7 @@ def ingest_one(conn: psycopg.Connection, item: Dict[str, Any], *, now: datetime,
         conn, provider="instantly", event_type=verdict.label,
         dedupe_key=f"instantly:email:{message_id}", email=email,
         campaign_id=str(item.get("campaign_id") or ""), external_id=message_id,
-        occurred_at=_parsed(item.get("timestamp_email")) or now,
+        occurred_at=received,
         payload={**verdict.to_dict(), "subject": str(item.get("subject") or "")[:140],
                  "approval_id": (located or {}).get("approval_id")})
     if out["recorded"] == "duplicate" or located is None:
