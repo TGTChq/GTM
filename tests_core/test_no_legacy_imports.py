@@ -9,7 +9,10 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 PKG = ROOT / "tgtc_core"
 ALLOWED_LEGACY = {"domain_utils", "source_domains"}
-STDLIB_OR_DEPS = set(sys.stdlib_module_names) | {"psycopg", "requests", "anthropic", "pgserver", "__future__", "tgtc_core"}
+# Declared runtime dependencies (requirements-core.txt). `google` is google-auth,
+# imported only inside the Drive publication path and only when it is configured.
+STDLIB_OR_DEPS = set(sys.stdlib_module_names) | {"psycopg", "requests", "anthropic", "pgserver",
+                                                 "google", "__future__", "tgtc_core"}
 
 
 def _top_level_imports(path: Path):
