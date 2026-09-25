@@ -31,6 +31,7 @@ from typing import Any, Dict, List, Optional
 import psycopg
 
 from ..policy.campaigns import CAMPAIGNS, KNOWN_CONTROL_CAMPAIGN_IDS
+from . import incidents
 from .window import ReportWindow, iso_z
 
 #: A GENUINE net-new lead: Instantly answered "created" for the campaign the approval
@@ -155,6 +156,9 @@ def runs_section(cur, w: ReportWindow, *, unavailable: Optional[List[str]] = Non
             "stop_reason": outcome.get("stop_reason") or outcome.get("reason"),
             "budget_id": outcome.get("budget_id"),
         })
+    # A run the container replacement killed is named in the report, not quietly dropped:
+    # it is an incident that happened, and a week that contains one should say so.
+    interrupted = incidents.settled(cur, window_start=w.start_utc, window_end=w.end_utc)
     tz = w.start_local.tzinfo
     days_with_run = {r["started_at"].astimezone(tz).date().isoformat() for r in runs}
     all_days = [d.isoformat() for d in w.local_days()]
@@ -170,6 +174,7 @@ def runs_section(cur, w: ReportWindow, *, unavailable: Optional[List[str]] = Non
         "run_count": len(out_runs),
         "completed_runs": sum(1 for r in out_runs if r["completed"]),
         "refused_runs": sum(1 for r in out_runs if r["refused"]),
+        "interrupted_runs": interrupted,
         "local_days_in_window": all_days,
         "local_days_with_a_run": sorted(days_with_run),
         "local_days_without_a_run": [d for d in expected if d not in days_with_run],
@@ -945,6 +950,11 @@ def graded_flags(report: Dict[str, Any], *, target_per_run: int = 1000) -> List[
         alert(f"no production run recorded on {day} -- this is a missing run, not a zero-production day")
     if runs["refused_runs"]:
         integrity(f"{runs['refused_runs']} run(s) were refused (budget policy) inside this window")
+    for item in runs.get("interrupted_runs", []):
+        # Visible, and named as what it was. The work is accounted for by the run that
+        # took over, so this does not hold the report back -- but it is not hidden either.
+        alert(f"run {item['run_id']} was interrupted ({item['kind'].replace('_', ' ')}) and could not close "
+              f"itself; the work was completed by {item['superseded_by']}")
     recon = report["reconciliation"]
     if not recon["identity_holds"]:
         integrity(f"reconciliation does not close: {recon['unexplained_difference']} Airtable record(s) "

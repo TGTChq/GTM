@@ -557,6 +557,32 @@ def _slack_destination(args, channel):
         f"posts to {channel}")
 
 
+def cmd_run_incident(args) -> int:
+    """Record that a run was interrupted and which run did the work instead.
+
+    This never writes a `daily/end`: the run did not finish, and saying it did would be
+    a lie a future reader could not detect. It records what actually happened, refuses
+    anything it can see is untrue, and leaves the weekly report's gate to re-check the
+    proofs every time it runs.
+    """
+    from .reporting import incidents
+
+    with connect(args.database_url or _settings().database_url) as conn:
+        try:
+            row = incidents.record(
+                conn, run_id=args.run_id, superseded_by=args.superseded_by, kind=args.kind,
+                note=args.note, recorded_by=args.recorded_by,
+                evidence={"deployment_that_replaced_it": args.deployment or "",
+                          "checked": ["the run never logged an end or refusal",
+                                      "the successor completed and started after it",
+                                      "the run lock was free when this was filed"]})
+        except ValueError as exc:
+            print(f"run-incident refused: {exc}", file=sys.stderr)
+            return 1
+    print(json.dumps(row, indent=2))
+    return 0
+
+
 def cmd_slack_test(args) -> int:
     """Send exactly one labelled connectivity test to a channel, once per day.
 
@@ -928,6 +954,16 @@ def main(argv=None) -> int:
                    help="deprecated spelling of --fail-on alerts")
     p.add_argument("--now", default="", help="evaluate as of this instant (rehearsal and tests)")
     p.set_defaults(fn=cmd_weekly_report)
+    p = sub.add_parser("run-incident",
+                       help="record that a run was interrupted and which run did the work instead")
+    p.add_argument("--run-id", required=True, help="the run that was interrupted and can never close itself")
+    p.add_argument("--superseded-by", required=True, help="the run that completed the work instead")
+    p.add_argument("--kind", default="container_replaced")
+    p.add_argument("--deployment", default="", help="the deployment that replaced the container, if known")
+    p.add_argument("--note", default="")
+    p.add_argument("--recorded-by", default="")
+    p.set_defaults(fn=cmd_run_incident)
+
     p = sub.add_parser("slack-test", help="send one labelled connectivity test to a channel (no pipeline data)")
     p.add_argument("--database-url", default="")
     p.add_argument("--channel", required=True, help="the confirmed destination, e.g. '#gtm-engineering'")

@@ -29,6 +29,7 @@ import psycopg
 
 from ..services import instantly_capacity
 from ..services.delivery import AWAITING_INSTANTLY
+from . import incidents
 from .window import FRIDAY, PACIFIC_TZ_NAME, ReportWindow, resolve_timezone
 
 #: The delivery moment and the end of the automatic-retry window, in local time.
@@ -124,7 +125,8 @@ def readiness(conn: psycopg.Connection, window: ReportWindow, report: Dict[str, 
               AND NOT EXISTS (SELECT 1 FROM run_log e WHERE e.run_id = l.run_id
                               AND e.stage = 'daily' AND e.event IN ('end', 'refused'))
             """, {"t0": window.start_utc, "t1": window.end_utc})
-        unfinished = int(cur.fetchone()["n"])
+        open_runs = int(cur.fetchone()["n"])
+        interrupted = incidents.settled(cur, window_start=window.start_utc, window_end=window.end_utc)
         cur.execute(
             """
             SELECT
@@ -142,6 +144,15 @@ def readiness(conn: psycopg.Connection, window: ReportWindow, report: Dict[str, 
     conn.rollback()
     unexplained = int(report["reconciliation"]["unexplained_difference"])
 
+    # An interrupted run stops blocking ONLY when every proof holds: its own (a later run
+    # took the exclusive lock and completed, and it has been silent since the incident was
+    # filed -- checked in `incidents.settled`), and the window's (nothing holds the lock
+    # now, and the receipts reconcile). If the week does not reconcile, or a run is going
+    # right now, no record dismisses anything: the gate blocks and the incident waits.
+    proofs_hold = not run_in_progress and not unexplained
+    settled_ids = [i["run_id"] for i in interrupted] if proofs_hold else []
+    unfinished = open_runs - len(settled_ids)
+
     if unfinished:
         blockers.append(f"{unfinished} production run(s) inside the window logged no end event yet")
     if queued:
@@ -152,6 +163,9 @@ def readiness(conn: psycopg.Connection, window: ReportWindow, report: Dict[str, 
         blockers.append(f"{unexplained} Airtable record(s) are explained by neither a creation nor a named reason")
     return Readiness(ready=not blockers, blockers=blockers, detail={
         "unfinished_runs": unfinished,
+        "open_runs_without_an_end_event": open_runs,
+        "interrupted_runs_settled_as_incidents": settled_ids,
+        "interrupted_runs": interrupted,
         "queued_delivery_rows": queued,
         "waiting_on_a_named_condition": waiting_capacity,
         "waiting_for_destination_capacity": waiting_capacity,

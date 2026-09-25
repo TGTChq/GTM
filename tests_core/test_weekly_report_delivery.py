@@ -557,3 +557,121 @@ def test_the_command_does_not_send_before_the_delivery_moment(conn, pg_url, caps
                                    "state": "not_delivery_day", "reason": "not_delivery_day",
                                    "schedule": "friday 06:00 America/Los_Angeles, retry until 07:00"}
     assert store.delivery_record(conn, "weekly-2026-09-11", "#gtm-engineering", store.FINAL) is None
+
+
+# --------------------------------------------------------------------------------
+# a run the container replacement killed, told apart from a run still working
+# --------------------------------------------------------------------------------
+# Measured 2026-09-25: run 20260924T030130...-91bada58 logged a start and died ten
+# seconds later when a push replaced the container. Nothing can ever close it, so the
+# readiness gate would have held Friday's report back for ever. Recording a `daily/end`
+# would have fixed that by lying; this records what happened and re-checks it instead.
+
+def _log(conn, run_id, event, at, stage="daily"):
+    with conn.cursor() as cur:
+        cur.execute("INSERT INTO run_log (run_id, stage, event, details, created_at) "
+                    "VALUES (%s, %s, %s, '{}'::jsonb, %s)", (run_id, stage, event, at))
+    conn.commit()
+
+
+def _killed_and_superseded(conn):
+    """The shape of the real incident: one run starts and dies, a later one completes."""
+    from tgtc_core.reporting import incidents
+
+    _log(conn, "run-killed", "start", WEEK_START + timedelta(days=1))
+    _log(conn, "run-recovery", "start", WEEK_START + timedelta(days=1, hours=2))
+    _log(conn, "run-recovery", "end", WEEK_START + timedelta(days=1, hours=5))
+    return incidents
+
+
+def test_a_run_still_working_keeps_blocking_even_with_an_incident_on_file(conn):
+    """The distinction has to survive the case it exists to exclude."""
+    incidents = _killed_and_superseded(conn)
+    incidents.record(conn, run_id="run-killed", superseded_by="run-recovery",
+                     kind=incidents.KIND_CONTAINER_REPLACED, recorded_by="test")
+    assert _ready(conn).ready is True, "the settled incident should not block"
+
+    # now a genuinely active run: started, no end, and no incident claims otherwise
+    _log(conn, "run-live", "start", WEEK_START + timedelta(days=2))
+    state = _ready(conn)
+    assert state.ready is False
+    assert any("logged no end event yet" in b for b in state.blockers)
+    assert state.detail["unfinished_runs"] == 1, "only the live run should be counted as in flight"
+    assert state.detail["interrupted_runs_settled_as_incidents"] == ["run-killed"]
+
+
+def test_an_interrupted_run_without_a_record_still_blocks(conn):
+    _killed_and_superseded(conn)
+    state = _ready(conn)
+    assert state.ready is False and state.detail["unfinished_runs"] == 1
+
+
+def test_it_blocks_again_the_moment_any_proof_stops_holding(conn):
+    """A record is a claim, never a dismissal."""
+    incidents = _killed_and_superseded(conn)
+    incidents.record(conn, run_id="run-killed", superseded_by="run-recovery",
+                     kind=incidents.KIND_CONTAINER_REPLACED, recorded_by="test")
+    assert _ready(conn).ready is True
+
+    # the run speaks again after the incident was filed: it was never gone. A live run
+    # stamps its own events with the current time, which is what makes this detectable.
+    with conn.cursor() as cur:
+        cur.execute("INSERT INTO run_log (run_id, stage, event, details, created_at) "
+                    "VALUES ('run-killed', 'daily', 'round', '{}'::jsonb, now())")
+    conn.commit()
+    state = _ready(conn)
+    assert state.ready is False and state.detail["interrupted_runs_settled_as_incidents"] == []
+
+
+def test_a_week_that_does_not_reconcile_is_never_dismissed_by_a_record(conn):
+    incidents = _killed_and_superseded(conn)
+    incidents.record(conn, run_id="run-killed", superseded_by="run-recovery",
+                     kind=incidents.KIND_CONTAINER_REPLACED, recorded_by="test")
+    report = report_for(conn)
+    report["reconciliation"] = {**report["reconciliation"], "unexplained_difference": 3}
+    window = pipeline.window_for(now=FRIDAY_MORNING)
+    state = readiness(conn, window, report)
+    assert state.ready is False
+    assert state.detail["interrupted_runs_settled_as_incidents"] == []
+    assert any("logged no end event yet" in b for b in state.blockers)
+
+
+def test_the_record_refuses_what_it_can_see_is_untrue(conn):
+    import pytest as _pytest
+    from tgtc_core.reporting import incidents
+
+    _log(conn, "run-closed", "start", WEEK_START + timedelta(days=1))
+    _log(conn, "run-closed", "end", WEEK_START + timedelta(days=1, hours=1))
+    _log(conn, "run-open", "start", WEEK_START + timedelta(days=2))
+    _log(conn, "run-never-ended", "start", WEEK_START + timedelta(days=3))
+
+    with _pytest.raises(ValueError, match="closed itself"):
+        incidents.record(conn, run_id="run-closed", superseded_by="run-open", kind="container_replaced")
+    with _pytest.raises(ValueError, match="has not completed"):
+        incidents.record(conn, run_id="run-open", superseded_by="run-never-ended", kind="container_replaced")
+    with _pytest.raises(ValueError, match="never logged a start"):
+        incidents.record(conn, run_id="ghost", superseded_by="run-closed", kind="container_replaced")
+    with _pytest.raises(ValueError, match="cannot supersede itself"):
+        incidents.record(conn, run_id="run-open", superseded_by="run-open", kind="container_replaced")
+
+
+def test_a_successor_that_ran_BEFORE_it_proves_nothing(conn):
+    import pytest as _pytest
+    from tgtc_core.reporting import incidents
+
+    _log(conn, "earlier", "start", WEEK_START + timedelta(days=1))
+    _log(conn, "earlier", "end", WEEK_START + timedelta(days=1, hours=1))
+    _log(conn, "later-killed", "start", WEEK_START + timedelta(days=3))
+    with _pytest.raises(ValueError, match="did not run after"):
+        incidents.record(conn, run_id="later-killed", superseded_by="earlier", kind="container_replaced")
+
+
+def test_the_incident_is_visible_in_the_report_not_silently_dropped(conn):
+    incidents = _killed_and_superseded(conn)
+    incidents.record(conn, run_id="run-killed", superseded_by="run-recovery",
+                     kind=incidents.KIND_CONTAINER_REPLACED, recorded_by="test")
+    report = report_for(conn)
+    listed = report["runs"]["interrupted_runs"]
+    assert [i["run_id"] for i in listed] == ["run-killed"]
+    assert any("was interrupted" in f and "run-recovery" in f
+               for f in report["alerts"]), "the week must say an incident happened"
