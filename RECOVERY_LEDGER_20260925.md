@@ -322,13 +322,41 @@ Why, checked unit by unit rather than asserted:
   are genuinely unfilled while the unit reads as covered.
 
 So the replacement path is **not proven end to end**: it has never produced a real
-Instantly creation. The two uncovered units are the case that would prove it, and the
-thing to look at is whether qualification treats a unit as satisfied by an approval whose
-person is suppressed. That is a change to the core contact path and is not being made
-mid-flight on the back of two rows.
+Instantly creation.
 
 The departed addresses stay suppressed throughout: **13** `person_email` suppressions with
 a departure reason, and none of the ten re-openings touched them.
+
+#### 14a. The first explanation was wrong. Corrected 07:40Z.
+
+The entry above originally suspected that qualification counts an approval whose person
+is suppressed toward the contact quota, so a unit holding only a departed contact would
+read as covered. **The evidence contradicts that**, and leaving the guess on the record
+would be worse than saying nothing.
+
+`max_contacts_per_opportunity` is **3**, and each of these units holds exactly **one**
+approval. The quota was therefore never reached and `contact_quota_already_reached` was
+never the outcome. `candidate_attempts` shows what actually happened:
+
+* **unit 5005** -- at 02:52:43Z, immediately after the replacement re-opened it, the
+  qualifier evaluated **two** candidates and rejected both before spending anything:
+  `gate | skipped_pre_enrichment | contact:function_or_authority_mismatch`. It looked for
+  a replacement and there was no eligible one;
+* **unit 8127** -- re-qualified at 02:52:44Z with **no candidate evaluated at all**: the
+  candidate list for that employer x function was empty.
+
+Both work items closed `done` after 2 attempts. So the replacement path **ran correctly
+and applied the ordinary gates**; it produced nothing because neither unit had an
+eligible person behind it, not because a gate was wrong.
+
+It remains unproven end to end -- no replacement has ever reached a genuine Instantly
+creation -- but the reason is the absence of an eligible case, which is a different
+statement from a defect, and it is the one the evidence supports.
+
+For completeness, the quota question was measured anyway: **11** units hold at least one
+suppressed contact and **3** hold nothing but suppressed contacts (5005, 8127, 8199). If
+`max_contacts_per_opportunity` were ever lowered to 1, those three WOULD start reading as
+covered by somebody unreachable. That is a latent trap, not a live one.
 
 ### 15. 2026-09-25 06:20:35Z -- the exposed Postgres password, rotated
 
@@ -375,3 +403,29 @@ old one; the **07:15Z tick** is the first on the new one and is being watched.
 **Rollback:** none is possible for the password itself -- the old one is gone. If a
 service cannot connect, the fix is forward: read `DATABASE_URL` from Postgres Core and
 re-upsert it as that service's `TGTC_DATABASE_URL`.
+
+### 16. 2026-09-25 07:27Z -- the rotation is proven end to end, and a redeploy costs a tick
+
+The 07:15Z Replies tick, which should have been the first connection on the new
+credential, **never happened**: `provider_state` still read 06:17:58Z at 07:18Z and the
+deployment's log was completely empty -- not an error, no output at all. A tick that had
+run and failed would have left something.
+
+Rather than guess, the job was fired directly with a one-shot cron at 07:23Z. It ran:
+connected to the database, read 100 replies from Instantly (69 for the nine campaigns:
+49 out-of-office, 12 departures, 7 human, 1 opt-out -- all already known), and wrote
+`last_attempt = 07:27:02Z`.
+
+So **the rotation is verified end to end**: a service, on its own schedule, with the new
+credential, from connection through provider read to database write. Together with the
+internal-network check and the refused tampered password, every link is measured.
+
+The operational fact left over: **a redeploy appears to cost the next cron tick.** The
+service was redeployed at 06:20:33Z and the 07:15Z tick did not fire. It matters for
+planning -- the weekly report was redeployed in the same batch, so its 13:00Z tick may be
+skipped too. That is survivable because it also runs at :20 and :40 through to 20:00, so
+the worst case is a twenty-minute delay rather than a missed report. Worth knowing before
+assuming a quiet cron means a broken service.
+
+Replies cron restored to `15 * * * *`. All three confirmed: core `0 3 * * *`, weekly
+`0,20,40 13-20 * * *`, replies `15 * * * *`.
