@@ -44,7 +44,7 @@ def test_unknown_mode_fails_closed_without_echoing_value(monkeypatch):
 def test_normal_runtime_keeps_existing_dispatch_when_mode_is_unset(monkeypatch):
     monkeypatch.delenv("TGTC_ACCEPTANCE_MODE", raising=False)
     monkeypatch.setattr(cli, "cmd_migrate", lambda args: 17)
-    assert cli.main(["migrate"]) == 17
+    assert cli.main(["migrate"]) == 17   # the stub's own value: this is about dispatch, not the schema
 
 
 def test_bounded_mode_requires_delivery_to_stay_off(monkeypatch):
