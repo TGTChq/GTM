@@ -61,6 +61,10 @@ class FakeRunner:
         self.w.calls.append(("replacements", limit))
         return {"considered": 0, "requalifying": 0, "no_current_vacancy": 0}
 
+    def decide_due_followups(self, *, limit):
+        self.w.calls.append(("followups", limit))
+        return {"considered": 0, "suppressed": 0, "no_current_vacancy": 0, "verified_due": 0}
+
     def instantly_capacity_alert(self):
         self.w.calls.append(("capacity_alert",))
         return True
@@ -145,7 +149,8 @@ def test_backlog_is_drained_before_any_purchase_and_never_counts_toward_the_targ
     # then consider buying.
     assert w.calls[0] == ("deliver",)
     assert w.calls[1][0] == "replacements"
-    assert w.calls[2] == ("cycle", False)
+    assert w.calls[2][0] == "followups"
+    assert w.calls[3] == ("cycle", False)
     assert rep.backlog_created == 1500
     assert rep.fresh_created >= 1000           # the target was met by FRESH leads, not by the 1,500 backlog
     assert purchases(w)                        # backlog alone never satisfied it

@@ -50,7 +50,7 @@ from .providers.apollo import ApolloClient
 from .providers.fantastic import FantasticClient
 from .providers.http import Transport
 from .providers.instantly import InstantlyClient
-from .services import instantly_capacity, provider_state, replacements
+from .services import followups, instantly_capacity, provider_state, replacements
 from .services.acquisition import AcquisitionService, SOURCE_SPECS
 from .services.classification_service import classify_one, reopen_for_inference
 from .services.compliance_recheck import recheck_unknown_jurisdiction
@@ -267,6 +267,13 @@ class Runner:
         out = replacements.reopen_departed_units(self.conn, now=self.now(), limit=limit)
         if out.get("considered"):
             self._log("replacements", "reopened", out)
+        return out
+
+    def decide_due_followups(self, *, limit: int) -> Dict[str, int]:
+        """Decide out-of-office follow-ups whose return date has arrived. Sends nothing."""
+        out = followups.due_followups(self.conn, now=self.now(), limit=limit)
+        if out.get("considered"):
+            self._log("followups", "decided", out)
         return out
 
     def acquire(self, *, fresh_partitions: int = 24, backfill_partitions: int = 1, sources: Optional[List[str]] = None) -> List[Dict[str, Any]]:

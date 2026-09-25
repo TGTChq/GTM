@@ -102,6 +102,36 @@ which acquisition, qualification and delivery all consult. Instantly's own block
 not exposed at the v2 paths tried (`/block-lists`, `/block-list-entries`, `/blocklist`
 all answer 404), so it is not part of this.
 
+## Why a return date is not a follow-up, and what now happens instead
+
+Three things were measured against the live workspace on 2026-09-25, because together
+they decide what this step can honestly do:
+
+* `stop_on_reply: true` means an out-of-office auto-answer **ends** the sequence. All 38
+  out-of-office repliers sit at lead status 3;
+* Instantly exposes **no way to resume a finished lead**: `/leads/{id}/resume` and
+  `/leads/{id}/restart` both answer "route not found";
+* the nine campaigns have **no subsequences** configured, so there is no follow-up
+  vehicle attached to them either.
+
+So a queued `reply_followup_when_back` item could never, by itself, cause an email --
+and 41 of them had been sitting there with nothing looking at them.
+
+`services/followups.py` now decides each one when its return date arrives, bounded by
+`TGTC_FOLLOWUPS_PER_RUN` (default 50):
+
+| case | what happens |
+|---|---|
+| the address is suppressed, or the person opted out | **closed**, and never written to. An out-of-office is not an opt-out, and an opt-out is not a follow-up |
+| the approval was revoked, or the vacancy is gone | closed as `no_current_vacancy`: there is no longer a reason to write |
+| everything still true | marked **verified and due**, held for a week, and re-examined -- so a suppression that arrives later still closes it |
+
+It sends nothing and it suppresses nothing. Turning a verified case into an actual email
+needs one of the two mechanisms Instantly does support, and both are content decisions
+rather than engineering ones: a **subsequence** attached to the campaign, which needs
+copy nobody has written, or **removing and re-adding** the contact, which replays the
+same four emails at somebody who only said they were away.
+
 ## Filling the vacancy a departure leaves
 
 `services/replacements.py`, live since 2026-09-24. Before it drains the backlog, the

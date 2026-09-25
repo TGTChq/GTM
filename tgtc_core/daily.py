@@ -27,7 +27,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
-from .services import instantly_capacity, replacements
+from .services import followups, instantly_capacity, replacements
 from .services.spend_budget import APOLLO_ROLLING_CAP_ENV, ROLLING_WINDOW, budget_status
 
 STAGE_KINDS = ("resolve_identity", "classify", "qualify_opportunity")
@@ -72,6 +72,7 @@ class DailyReport:
     apollo_requests: int = 0
     capacity_block: Dict[str, Any] = field(default_factory=dict)
     replacements: Dict[str, int] = field(default_factory=dict)
+    followups: Dict[str, int] = field(default_factory=dict)
     blocks: List[Dict[str, Any]] = field(default_factory=list)
     drains: List[Dict[str, Any]] = field(default_factory=list)
     rounds: List[Dict[str, Any]] = field(default_factory=list)
@@ -94,6 +95,7 @@ class DailyReport:
             "apollo_credits": self.apollo_credits, "apollo_requests": self.apollo_requests,
             "apollo_credits_per_fresh_lead": round(cost, 3) if cost else None,
             "capacity_block": self.capacity_block, "replacements": self.replacements,
+            "followups": self.followups,
             "blocks": self.blocks, "drains": self.drains, "rounds": len(self.rounds),
         }
 
@@ -287,6 +289,9 @@ class DailyController:
         # A departure left a vacancy; putting it back on the ordinary queue BEFORE the
         # backlog drain means the same run fills it, with every gate it always had.
         rp.replacements = self.r.fill_departed_units(limit=replacements.per_run(self.env))
+        # An out-of-office that said "back on the 6th" is decided when the 6th arrives:
+        # suppressed addresses and gone vacancies are closed, the rest are verified.
+        rp.followups = self.r.decide_due_followups(limit=followups.per_run(self.env))
         outcome = self.drain("backlog")                       # A: free and already-paid inventory first
         empty_blocks = 0
         unprocessed_streak = 0
