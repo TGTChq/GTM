@@ -73,6 +73,7 @@ class DailyReport:
     capacity_block: Dict[str, Any] = field(default_factory=dict)
     replacements: Dict[str, int] = field(default_factory=dict)
     followups: Dict[str, int] = field(default_factory=dict)
+    rotation: Dict[str, Any] = field(default_factory=dict)
     blocks: List[Dict[str, Any]] = field(default_factory=list)
     drains: List[Dict[str, Any]] = field(default_factory=list)
     rounds: List[Dict[str, Any]] = field(default_factory=list)
@@ -96,6 +97,7 @@ class DailyReport:
             "apollo_credits_per_fresh_lead": round(cost, 3) if cost else None,
             "capacity_block": self.capacity_block, "replacements": self.replacements,
             "followups": self.followups,
+            "rotation": {k: v for k, v in (self.rotation or {}).items() if k != "rotation"},
             "blocks": self.blocks, "drains": self.drains, "rounds": len(self.rounds),
         }
 
@@ -222,8 +224,14 @@ class DailyController:
         """Is there room in the destination? One delivery pass answers it, and that pass
         is free and owed anyway: it hands over contacts that are already paid for. It
         runs BEFORE any processing, because enrichment spends Apollo credits and a full
-        destination makes that spend worthless (measured 2026-09-24)."""
+        destination makes that spend worthless (measured 2026-09-24).
+
+        Then, and only if the workspace would not hold what this run intends to create,
+        room is made by removing contacts whose sequence finished and who never replied.
+        That decision reads the occupancy first, so a workspace with room is left alone.
+        """
         self.r.deliver(max_items=self.max_items, channels=("instantly", "airtable"))
+        self.report.rotation = self.r.make_instantly_room(target=self.target)
         return self.r.instantly_capacity_gate()
 
     def block_gate(self, m: Dict[str, Any], records: int) -> str:
@@ -273,6 +281,22 @@ class DailyController:
         self.r._log("daily", "start", {"budget_id": self.budget_id, "target": self.target,
                                        "block_pages": self.block_pages, "campaign_ids": len(self.campaign_ids())})
         capacity = self.capacity_check()                      # 0: is there anywhere to put leads?
+        short = int((rp.rotation or {}).get("deficit") or 0)
+        if short > 0 and not capacity.get("blocked"):
+            # There is room for some of this run but not for the whole of it, and
+            # rotation could not make up the difference. Buying the shortfall would
+            # produce contacts with nowhere to go, so acquisition stops here and says
+            # by exactly how many slots it is short. Delivery already ran, so what was
+            # already paid for still went.
+            rp.acquisition_stop = f"instantly_slots_short_by:{short}"
+            rp.stop_reason = f"target_not_reached:instantly_slots_short_by:{short}"
+            self.r._log("daily", "instantly_slots_short", {
+                "deficit": short, "free": (rp.rotation or {}).get("free_after")
+                or (rp.rotation or {}).get("free_before"),
+                "reason": (rp.rotation or {}).get("reason", "")})
+            self._apply(self.measure())
+            self.r._log("daily", "end", rp.to_dict())
+            return rp
         if capacity.get("blocked"):
             # Every contact this run would produce would land nowhere. Stop before the
             # first purchase and the first enrichment; the approved contacts already

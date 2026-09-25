@@ -177,3 +177,91 @@ def test_the_settings_are_bounded_and_off_by_default():
 
 def test_the_protected_set_is_all_eighteen_live_ids():
     assert len(rot.protected_ids()) == 18
+
+
+# --- when rotation is allowed to happen at all -------------------------------------
+# Measured 2026-09-25: 19,549 stored of 25,000, so 5,451 free. A 1,000-contact run plus
+# a 1,500 reserve fits with room to spare, and nothing should be deleted.
+
+
+class Analytics:
+    """Just enough of the client for the capacity policy."""
+
+    def __init__(self, counts, *, fails=False):
+        self.counts, self.fails, self.calls = list(counts), fails, 0
+
+    def campaign_analytics(self):
+        self.calls += 1
+        if self.fails:
+            return type("R", (), {"ok": False, "status": 503, "message": "unavailable", "data": {}})()
+        rows = self.counts[min(self.calls - 1, len(self.counts) - 1)]
+        return type("R", (), {"ok": True, "status": 200,
+                              "data": {"items": [{"campaign_id": f"c{i}", "leads_count": n}
+                                                 for i, n in enumerate(rows)]}})()
+
+
+def test_occupancy_is_the_sum_of_every_campaign_in_one_request():
+    client = Analytics([[2601, 501, 14361, 2086]])
+    out = rot.occupancy(client, plan_contacts=25000)
+    assert out["known"] is True and out["stored"] == 19549 and out["free"] == 5451
+    assert client.calls == 1, "occupancy must not page through the whole workspace"
+
+
+def test_an_unreadable_occupancy_never_becomes_a_reason_to_delete(conn):
+    client = Analytics([], fails=True)
+    out = rot.make_room(conn, client, target=1000, campaigns=[], leads_of=lambda c: [],
+                        delete=lambda i: None, env={"TGTC_INSTANTLY_ROTATION_ENABLED": "1"})
+    assert out["rotated"] is False and out["reason"] == "occupancy_unknown"
+
+
+def test_room_needed_counts_the_run_and_a_reserve():
+    assert rot.room_needed(5451, target=1000, reserve=1500) == 0
+    assert rot.room_needed(900, target=1000, reserve=1500) == 1600
+    assert rot.room_needed(0, target=1000, reserve=0) == 1000
+    assert rot.room_needed(None, target=1000, reserve=1500) == 0, "unknown is not a mandate to delete"
+
+
+def test_todays_workspace_needs_no_rotation_at_all(conn):
+    """The live figures on 2026-09-25. Nothing is deleted and nothing is even considered."""
+    client = Analytics([[19549]])
+    deleted = []
+    out = rot.make_room(conn, client, target=1000, campaigns=[{"id": OLD, "status": 3, "name": "Old"}],
+                        leads_of=lambda c: [lead(1)], delete=lambda i: deleted.append(i),
+                        env={"TGTC_INSTANTLY_ROTATION_ENABLED": "1"})
+    assert out["needed"] == 0 and out["reason"] == "enough_room"
+    assert out["rotated"] is False and deleted == []
+    assert backup_rows(conn) == []
+
+
+def test_a_full_workspace_frees_exactly_what_the_run_needs_and_proves_it(conn):
+    """24,600 stored leaves 400 free; a 500-contact run plus the 1,500 reserve needs 1,600."""
+    leads_of, delete, deleted = world({OLD: [lead(i) for i in range(4000)]})
+    client = Analytics([[24600], [24600 - 1600]])       # before, then after the deletes
+    out = rot.make_room(conn, client, target=500, campaigns=[{"id": OLD, "status": 3, "name": "Old"}],
+                        leads_of=leads_of, delete=delete,
+                        env={"TGTC_INSTANTLY_ROTATION_ENABLED": "1", "TGTC_INSTANTLY_ROTATION_BATCH": "2000"})
+    assert out["needed"] == 1600 and out["rotated"] is True
+    assert out["rotation"]["deleted"] == 1600 and len(deleted) == 1600
+    assert out["freed_measured"] == 1600, "the freed slots were assumed, not measured"
+    assert out["deficit"] == 0 and out["reason"] == "room_made"
+    assert len(backup_rows(conn)) == 1600, "every removal must be recoverable"
+
+
+def test_too_few_safe_candidates_reports_the_exact_deficit(conn):
+    """The number the caller needs is how many slots it is STILL short, not how many went."""
+    leads_of, delete, deleted = world({OLD: [lead(i) for i in range(30)]})
+    client = Analytics([[24600], [24600 - 30]])
+    out = rot.make_room(conn, client, target=500, campaigns=[{"id": OLD, "status": 3, "name": "Old"}],
+                        leads_of=leads_of, delete=delete,
+                        env={"TGTC_INSTANTLY_ROTATION_ENABLED": "1", "TGTC_INSTANTLY_ROTATION_BATCH": "2000"})
+    assert out["rotation"]["deleted"] == 30 and out["freed_measured"] == 30
+    assert out["deficit"] == 1570 and out["reason"] == "not_enough_safe_candidates"
+
+
+def test_while_rotation_is_switched_off_a_shortfall_is_reported_not_acted_on(conn):
+    deleted = []
+    client = Analytics([[24600]])
+    out = rot.make_room(conn, client, target=1000, campaigns=[{"id": OLD, "status": 3, "name": "Old"}],
+                        leads_of=lambda c: [lead(1)], delete=lambda i: deleted.append(i), env={})
+    assert out["reason"] == "rotation_disabled" and out["deficit"] == 2100
+    assert deleted == [] and out["rotated"] is False

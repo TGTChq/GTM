@@ -189,6 +189,82 @@ def rotate(conn: psycopg.Connection, transport: Any, *, needed: int, batch: int,
     return out
 
 
+def occupancy(instantly: Any, *, plan_contacts: int = DEFAULT_PLAN_CONTACTS) -> Dict[str, Any]:
+    """How full the workspace is, in one request, BEFORE anything is spent.
+
+    The plan caps stored contacts. `/campaigns/analytics` reports `leads_count` per
+    campaign, and the sum is the occupancy -- the only figure available before the API
+    starts refusing creates, which is too late to act on.
+    """
+    result = instantly.campaign_analytics()
+    if not getattr(result, "ok", False):
+        return {"known": False, "stored": None, "free": None, "plan": plan_contacts,
+                "message": str(getattr(result, "message", ""))[:200]}
+    data = getattr(result, "data", None) or {}
+    rows = data.get("items") if isinstance(data, dict) else None
+    if not isinstance(rows, list):
+        rows = data if isinstance(data, list) else []
+    stored = sum(int((row or {}).get("leads_count") or 0) for row in rows if isinstance(row, dict))
+    return {"known": True, "stored": stored, "free": max(0, plan_contacts - stored),
+            "plan": plan_contacts, "campaigns": len(rows)}
+
+
+def room_needed(free: Optional[int], *, target: int, reserve: int) -> int:
+    """Slots this run must free before it starts. Zero means leave the workspace alone.
+
+    A run needs one slot per contact it intends to create, and a reserve on top so the
+    next one is not starting from empty. Nothing is deleted while that holds.
+    """
+    if free is None:
+        return 0
+    return max(0, int(target) + max(0, int(reserve)) - int(free))
+
+
+def make_room(conn: psycopg.Connection, instantly: Any, *, target: int,
+              campaigns: Sequence[Dict[str, Any]], leads_of: Callable[[str], Iterable[Dict[str, Any]]],
+              delete: Callable[[str], Any], env: Optional[Dict[str, str]] = None,
+              now: Optional[datetime] = None) -> Dict[str, Any]:
+    """Free slots only if this run would otherwise not fit, and prove that it worked.
+
+    Returns what it decided and what actually changed. ``deficit`` is non-zero only when
+    there were not enough contacts safe to remove -- in that case the caller must stop
+    buying, because everything it bought would land nowhere.
+    """
+    conf = settings(env)
+    out: Dict[str, Any] = {"enabled": enabled(env), "target": int(target),
+                           "reserve": conf["free_slot_floor"], "rotated": False, "deficit": 0}
+    before = occupancy(instantly, plan_contacts=conf["plan_contacts"])
+    out["free_before"] = before.get("free")
+    out["stored_before"] = before.get("stored")
+    if not before.get("known"):
+        # We do not know how full it is, so we do not delete on a guess.
+        out["reason"] = "occupancy_unknown"
+        return out
+    need = room_needed(before.get("free"), target=target, reserve=conf["free_slot_floor"])
+    out["needed"] = need
+    if need <= 0:
+        out["reason"] = "enough_room"
+        return out
+    if not out["enabled"]:
+        out["reason"] = "rotation_disabled"
+        out["deficit"] = need
+        return out
+    result = rotate(conn, None, needed=need, batch=conf["batch"], campaigns=campaigns,
+                    leads_of=leads_of, delete=delete, now=now)
+    out["rotated"] = True
+    out["rotation"] = result
+    after = occupancy(instantly, plan_contacts=conf["plan_contacts"])
+    out["free_after"] = after.get("free")
+    out["stored_after"] = after.get("stored")
+    # A delete that answered 200 is not a slot until the workspace says so.
+    out["freed_measured"] = (None if not after.get("known") or not before.get("known")
+                             else int(after["free"]) - int(before["free"]))
+    still = room_needed(after.get("free"), target=target, reserve=conf["free_slot_floor"])
+    out["deficit"] = still
+    out["reason"] = "room_made" if still <= 0 else "not_enough_safe_candidates"
+    return out
+
+
 def pending_backups(conn: psycopg.Connection) -> int:
     """Rows we backed up and cannot prove we deleted. Should be zero after a clean batch."""
     with conn.cursor() as cur:
@@ -199,4 +275,4 @@ def pending_backups(conn: psycopg.Connection) -> int:
 
 
 __all__ = ["rotate", "judge", "settings", "enabled", "protected_ids", "pending_backups",
-           "RotationRefused", "HARD_BATCH_CEILING"]
+           "occupancy", "room_needed", "make_room", "RotationRefused", "HARD_BATCH_CEILING"]

@@ -376,6 +376,8 @@ class FakeInstantly:
     #: The real POST /leads/move answers 200 with a *background job*, so the lead's
     #: campaign can still be the old one when the call returns (measured 2026-09-25).
     move_is_async: bool = False
+    #: email -> the messages GET /emails reports. ue_type 1 is one Instantly sent.
+    emails: Dict[str, List[Dict[str, Any]]] = field(default_factory=dict)
     clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc)
 
     def request(self, method: str, url: str, *, headers=None, params=None, json_body=None, timeout=30.0) -> Response:
@@ -404,6 +406,12 @@ class FakeInstantly:
                 return _json(200, lead)
             # 200 for an existing email, with the ORIGINAL timestamp (integration truth)
             return _json(200, existing)
+        if path.endswith("/emails") and method == "GET":
+            who = str(p.get("lead", [""])[0] or "").lower()
+            campaign = str(p.get("campaign_id", [""])[0] or "")
+            items = [m for m in self.emails.get(who, [])
+                     if not campaign or str(m.get("campaign_id") or campaign) == campaign]
+            return _json(200, {"items": items})
         if method == "GET" and "/leads/" in path and not path.endswith("/leads"):
             wanted = path.rsplit("/", 1)[-1]
             for lead in self.leads.values():

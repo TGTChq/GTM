@@ -67,6 +67,10 @@ MOVE_FAILED = "followup_move_failed"
 MOVE_UNCONFIRMED = "followup_move_unconfirmed"
 #: The contact is still being emailed where they are. Moving them would stop that.
 STILL_IN_SEQUENCE = "followup_contact_still_in_sequence"
+#: Moved, and now waiting for the one-step campaign's own send window.
+AWAITING_SEND = "followup_awaiting_send"
+#: Instantly's sent-message marker in GET /emails.
+UE_TYPE_SENT = 1
 #: Instantly's lead status for "in sequence".
 IN_SEQUENCE = 1
 NO_CURRENT_VACANCY = "no_current_vacancy"
@@ -138,6 +142,61 @@ def _lead_now(instantly: Any, lead_id: str) -> Any:
     return GONE if getattr(result, "status", None) == 404 else None
 
 
+def _replied_since(conn: psycopg.Connection, email: str, since: Optional[datetime]) -> bool:
+    """Did this person write to us after the auto-reply that queued the follow-up?
+
+    A real answer supersedes an out-of-office. Following up anyway would be writing to
+    somebody who has already said something, and nobody read it.
+    """
+    if not email or since is None:
+        return False
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT 1 FROM outcome_events WHERE lower(email) = %s AND occurred_at > %s "
+            "AND event_type IN ('reply', 'replied') LIMIT 1", (email.lower(), since))
+        found = cur.fetchone() is not None
+    conn.commit()
+    return found
+
+
+def _record_move(conn: psycopg.Connection, *, lead_id: str, approval_id: int, email: str,
+                 from_campaign: str, to_campaign: str) -> None:
+    """The move, recorded on the lead id so a retry can never move anybody twice."""
+    with transaction(conn):
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO followup_deliveries (lead_id, approval_id, email, from_campaign, to_campaign) "
+                "VALUES (%s, %s, %s, %s, %s) ON CONFLICT (lead_id) DO NOTHING",
+                (lead_id, approval_id, email.lower(), from_campaign, to_campaign))
+
+
+def _record_send(conn: psycopg.Connection, lead_id: str, message: Dict[str, Any]) -> None:
+    """The email itself, with Instantly's own message id as the receipt."""
+    with transaction(conn):
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE followup_deliveries SET sent_message_id = %s, sent_at = %s, sent_subject = %s, "
+                "sent_from = %s WHERE lead_id = %s AND sent_at IS NULL",
+                (str(message.get("id") or "")[:200], message.get("timestamp_created"),
+                 str(message.get("subject") or "")[:300], str(message.get("from_address_email") or "")[:200],
+                 lead_id))
+
+
+def _sent_message(instantly: Any, *, email: str, campaign: str) -> Optional[Dict[str, Any]]:
+    """The follow-up message Instantly actually sent, or None if it has not yet.
+
+    Only a message FROM us counts. The contact's own out-of-office is in the same feed.
+    """
+    result = instantly.emails_for(email, campaign_id=campaign)
+    if not getattr(result, "ok", False):
+        return None
+    items = (getattr(result, "data", None) or {}).get("items") or []
+    for item in items:
+        if isinstance(item, dict) and int(item.get("ue_type") or 0) == UE_TYPE_SENT:
+            return item
+    return None
+
+
 def _done(conn: psycopg.Connection, work_id: int, reason: str) -> None:
     with transaction(conn):
         with conn.cursor() as cur:
@@ -177,7 +236,8 @@ def due_followups(conn: psycopg.Connection, *, now: Optional[datetime] = None,
     moment = now or datetime.now(timezone.utc)
     out = {"considered": 0, "suppressed": 0, "no_current_vacancy": 0, "verified_due": 0,
            "moved_to_followup": 0, "no_recorded_creation": 0, "move_failed": 0,
-           "move_unconfirmed": 0, "lead_gone": 0, "still_in_sequence": 0}
+           "move_unconfirmed": 0, "lead_gone": 0, "still_in_sequence": 0,
+           "replied_since": 0, "awaiting_send": 0, "followup_sent": 0}
     destination = followup_campaign(env)
     if limit <= 0:
         return out
@@ -185,6 +245,7 @@ def due_followups(conn: psycopg.Connection, *, now: Optional[datetime] = None,
         cur.execute(
             """
             SELECT w.id AS work_id, a.id AS approval_id, a.state AS approval_state,
+                   w.created_at AS queued_at,
                    lower(coalesce(p.email, '')) AS email,
                    coalesce(p.opt_out_status, '') AS opt_out,
                    po.state AS posting_state,
@@ -211,6 +272,11 @@ def due_followups(conn: psycopg.Connection, *, now: Optional[datetime] = None,
             # is not written to again, and the follow-up ends here.
             _close(conn, work_id, f"suppressed:{row['opt_out'] or 'person_email'}")
             out["suppressed"] += 1
+            continue
+        if _replied_since(conn, row["email"], row["queued_at"]):
+            # They answered for themselves after the auto-reply. Nothing to follow up.
+            _close(conn, work_id, "replied_since_the_out_of_office")
+            out["replied_since"] += 1
             continue
         if row["approval_state"] == "revoked" or (row["posting_state"] or "closed") != "classified":
             _close(conn, work_id, f"{NO_CURRENT_VACANCY}:{row['posting_state'] or 'no_posting'}")
@@ -239,8 +305,18 @@ def due_followups(conn: psycopg.Connection, *, now: Optional[datetime] = None,
             out["move_failed"] += 1
             continue
         if where == destination:
-            _done(conn, work_id, f"already_in_followup:{lead['lead_id']}")
-            out["moved_to_followup"] += 1
+            # Already moved -- by an earlier run, or by a move that landed late. Never
+            # move again; the only thing still outstanding is the email itself.
+            _record_move(conn, lead_id=lead["lead_id"], approval_id=int(row["approval_id"]),
+                         email=row["email"], from_campaign=lead["campaign"], to_campaign=destination)
+            sent = _sent_message(instantly, email=row["email"], campaign=destination)
+            if sent:
+                _record_send(conn, lead["lead_id"], sent)
+                _done(conn, work_id, f"followup_sent:{str(sent.get('id') or '')[:60]}")
+                out["followup_sent"] += 1
+            else:
+                _hold(conn, work_id, moment + timedelta(days=1), AWAITING_SEND)
+                out["awaiting_send"] += 1
             continue
         if int(current.get("status") or 0) == IN_SEQUENCE:
             # They are still being emailed where they are. Moving them would stop a
@@ -256,8 +332,14 @@ def due_followups(conn: psycopg.Connection, *, now: Optional[datetime] = None,
             out["move_failed"] += 1
             continue
         if str((_lead_now(instantly, lead["lead_id"]) or {}).get("campaign") or "") == destination:
-            _done(conn, work_id, f"moved_to_followup:{lead['lead_id']}")
+            # Moved, and Instantly agrees. The email has NOT happened yet: it is the
+            # one-step campaign's to send, in its own window. So this waits for the
+            # receipt rather than calling itself finished.
+            _record_move(conn, lead_id=lead["lead_id"], approval_id=int(row["approval_id"]),
+                         email=row["email"], from_campaign=where, to_campaign=destination)
+            _hold(conn, work_id, moment + timedelta(days=1), AWAITING_SEND)
             out["moved_to_followup"] += 1
+            out["awaiting_send"] += 1
         else:
             # 200 meant the job was accepted. Only Instantly's own record of the
             # contact settles whether it happened, and it does not say so yet.
@@ -268,4 +350,4 @@ def due_followups(conn: psycopg.Connection, *, now: Optional[datetime] = None,
 
 __all__ = ["due_followups", "per_run", "followup_campaign", "WORK_KIND", "NEEDS_MECHANISM",
            "NO_CURRENT_VACANCY", "RECHECK_DAYS", "FOLLOWUP_CAMPAIGN_ENV", "GONE",
-           "MOVE_FAILED", "MOVE_UNCONFIRMED", "STILL_IN_SEQUENCE"]
+           "MOVE_FAILED", "MOVE_UNCONFIRMED", "STILL_IN_SEQUENCE", "AWAITING_SEND"]

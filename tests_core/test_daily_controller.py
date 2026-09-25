@@ -22,7 +22,7 @@ class World:
 
     def __init__(self, *, backlog=0, retry_leads=0, yield_per_record=0.263, credits_per_lead=1.48,
                  fantastic_limit=4000, apollo_limit=1600, apollo_refusing=False, market=10 ** 9,
-                 instantly_full=False, room_returns_on_probe=False):
+                 instantly_full=False, room_returns_on_probe=False, rotation=None):
         self.backlog_pending, self.backlog_created = backlog, 0
         self.retry_pending, self.fresh_retries = retry_leads, 0
         self.fresh_new, self.new_pending = 0, 0.0
@@ -30,6 +30,10 @@ class World:
         self.ypr, self.cpl = yield_per_record, credits_per_lead
         self.fantastic_limit, self.apollo_limit = fantastic_limit, apollo_limit
         self.apollo_refusing, self.market = apollo_refusing, market
+        # What the capacity policy decided before the run. The default is the live
+        # 2026-09-25 case: plenty of room, so nothing is rotated and nothing is short.
+        self.rotation = rotation or {"enabled": False, "reason": "enough_room", "deficit": 0,
+                                     "needed": 0, "rotated": False, "free_before": 5451}
         self.instantly_full, self.room_returns_on_probe = instantly_full, room_returns_on_probe
         self.calls = []
         self.unprocessed = 0
@@ -56,6 +60,10 @@ class FakeRunner:
         full = self.w.instantly_full
         return {"blocked": full, "state": "refusing" if full else "serving", "since": None,
                 "remaining_uploads": 0 if full else None, "message": "", "alerted_at": None}
+
+    def make_instantly_room(self, *, target):
+        self.w.calls.append(("rotation", target))
+        return dict(self.w.rotation)
 
     def fill_departed_units(self, *, limit):
         self.w.calls.append(("replacements", limit))
@@ -144,13 +152,14 @@ def purchases(world):
 def test_backlog_is_drained_before_any_purchase_and_never_counts_toward_the_target(monkeypatch):
     w = World(backlog=1500)
     rep = controller(w, monkeypatch).run()
-    # Deliver first (free, and it answers whether the destination has room), hand any
-    # queued departure back to the ordinary queue, then drain the backlog, and only
-    # then consider buying.
+    # Deliver first (free, and it hands over contacts already paid for), decide whether
+    # the workspace has room for what this run intends, hand any queued departure back
+    # to the ordinary queue, then drain the backlog, and only then consider buying.
     assert w.calls[0] == ("deliver",)
-    assert w.calls[1][0] == "replacements"
-    assert w.calls[2][0] == "followups"
-    assert w.calls[3] == ("cycle", False)
+    assert w.calls[1][0] == "rotation"
+    assert w.calls[2][0] == "replacements"
+    assert w.calls[3][0] == "followups"
+    assert w.calls[4] == ("cycle", False)
     assert rep.backlog_created == 1500
     assert rep.fresh_created >= 1000           # the target was met by FRESH leads, not by the 1,500 backlog
     assert purchases(w)                        # backlog alone never satisfied it
@@ -280,3 +289,26 @@ def test_clearing_only_the_delivery_caps_would_fall_back_to_the_canary_caps():
             "TGTC_CANARY_MAX_PER_CAMPAIGN": "10", "TGTC_CANARY_MAX_TOTAL": "90"}
     caps = CanaryCaps.from_env(trap)
     assert caps.enabled and caps.per_campaign == 10 and caps.total == 90
+
+
+def test_a_run_that_will_not_fit_stops_before_buying_and_says_by_how_many(monkeypatch):
+    """Rotation could not free enough, so the shortfall is named rather than bought into."""
+    w = World(backlog=0, rotation={"enabled": True, "reason": "not_enough_safe_candidates",
+                                   "deficit": 1570, "needed": 1600, "rotated": True,
+                                   "free_before": 400, "free_after": 430})
+    rep = controller(w, monkeypatch).run()
+
+    assert rep.acquisition_stop == "instantly_slots_short_by:1570"
+    assert rep.stop_reason == "target_not_reached:instantly_slots_short_by:1570"
+    assert not purchases(w), "it bought inventory that had nowhere to land"
+    assert w.calls[0] == ("deliver",), "what was already paid for was still handed over"
+
+
+def test_room_for_the_whole_run_lets_it_proceed_normally(monkeypatch):
+    """The live 2026-09-25 case: 5,451 free, nothing rotated, nothing blocked."""
+    w = World(backlog=0)
+    rep = controller(w, monkeypatch).run()
+
+    assert rep.acquisition_stop != "instantly_slots_short_by:0"
+    assert rep.rotation["reason"] == "enough_room" and rep.rotation["rotated"] is False
+    assert purchases(w)

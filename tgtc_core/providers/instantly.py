@@ -138,6 +138,17 @@ class InstantlyClient:
             params["starting_after"] = starting_after
         return self._call("GET", "/emails", params=params)
 
+    def emails_for(self, email: str, *, campaign_id: str = "", limit: int = 50) -> InstantlyResult:
+        """Every message exchanged with this address, newest first.
+
+        Used as the follow-up's receipt: a message that exists here was actually sent by
+        Instantly, which is a different claim from "we moved the contact".
+        """
+        params: Dict[str, Any] = {"lead": email, "limit": int(limit)}
+        if campaign_id:
+            params["campaign_id"] = campaign_id
+        return self._call("GET", "/emails", params=params)
+
     def get_lead(self, lead_id: str) -> InstantlyResult:
         """Read one lead back. This is how a move is confirmed rather than assumed.
 
@@ -147,6 +158,50 @@ class InstantlyClient:
         if not lead_id:
             raise ValueError("get_lead needs a lead id")
         return self._call("GET", f"/leads/{lead_id}")
+
+    def campaign_analytics(self) -> InstantlyResult:
+        """Every campaign with its stored-lead count, in ONE request.
+
+        This is the only cheap way to know how full the workspace is. The plan caps
+        STORED contacts, and the API otherwise only admits it is full by refusing a
+        create with "Lead limit reached. Remaining uploads: 0" -- which is too late to
+        act on. Summing `leads_count` here answers the question before the run spends.
+        """
+        return self._call("GET", "/campaigns/analytics")
+
+    def list_campaigns(self, *, limit: int = 100, starting_after: Optional[str] = None) -> InstantlyResult:
+        params: Dict[str, Any] = {"limit": int(limit)}
+        if starting_after:
+            params["starting_after"] = starting_after
+        return self._call("GET", "/campaigns", params=params)
+
+    def list_campaign_leads(self, campaign_id: str, *, limit: int = 100,
+                            starting_after: Optional[str] = None) -> InstantlyResult:
+        body: Dict[str, Any] = {"campaign": campaign_id, "limit": int(limit)}
+        if starting_after:
+            body["starting_after"] = starting_after
+        return self._call("POST", "/leads/list", json_body=body)
+
+    def delete_lead(self, lead_id: str) -> InstantlyResult:
+        """Remove one contact, which returns its slot to the plan (measured: ~5.5 min).
+
+        The API refuses a JSON content type on a body-less DELETE, so this sends no
+        content type at all.
+        """
+        if not lead_id:
+            raise ValueError("delete_lead needs a lead id")
+        try:
+            resp = self._t.request("DELETE", f"{self._base}/leads/{lead_id}",
+                                   headers={"Authorization": f"Bearer {self._key}"},
+                                   params=None, json_body=None, timeout=self._timeout)
+        except TransportTimeout:
+            return InstantlyResult(False, None, message="timeout", uncertain=True)
+        except TransportError as exc:
+            return InstantlyResult(False, None, message=str(exc)[:200], uncertain=True)
+        body = resp.json()
+        ok = 200 <= resp.status < 300
+        return InstantlyResult(ok, resp.status, data=body if isinstance(body, dict) else {},
+                               message="" if ok else (resp.text or "")[:300])
 
     def get_campaign(self, campaign_id: str) -> InstantlyResult:
         return self._call("GET", f"/campaigns/{campaign_id}")

@@ -183,8 +183,13 @@ def test_a_due_follow_up_moves_the_contact_into_the_one_step_campaign(conn, cloc
     assert out["moved_to_followup"] == 1 and out["verified_due"] == 0
     assert fake.moved == [{"ids": [lead_id], "from": source, "to": FOLLOWUP_CAMPAIGN}]
     assert fake.leads["x@acme0.com"]["campaign"] == FOLLOWUP_CAMPAIGN
+    # Moved is not sent. The email is the one-step campaign's to send, in its own
+    # window, so this waits for a receipt instead of calling itself finished.
+    assert out["awaiting_send"] == 1 and out["followup_sent"] == 0
     row = item(conn, approval_id)
-    assert row["state"] == "done" and row["reason"] == f"moved_to_followup:{lead_id}"
+    assert row["state"] == "waiting" and row["waiting_on"] == followups.AWAITING_SEND
+    moved = sqlall(conn, "SELECT lead_id, to_campaign, sent_at FROM followup_deliveries")
+    assert moved == [{"lead_id": lead_id, "to_campaign": FOLLOWUP_CAMPAIGN, "sent_at": None}]
 
 
 def test_the_same_follow_up_never_moves_twice(conn, clock):
@@ -314,10 +319,10 @@ def test_the_next_run_confirms_a_move_that_settled_and_does_not_repeat_it(conn, 
     out = followups.due_followups(conn, now=clock() + timedelta(days=2),
                                   instantly=instantly_client(fake), env=env)
 
-    assert out["moved_to_followup"] == 1
     assert len(fake.moved) == 1, "it moved somebody who was already there"
+    assert out["awaiting_send"] == 1, "the settled move was noticed without repeating it"
     row = item(conn, approval_id)
-    assert row["state"] == "done" and row["reason"] == "already_in_followup:L-7"
+    assert row["state"] == "waiting" and row["waiting_on"] == followups.AWAITING_SEND
 
 
 def test_a_contact_instantly_no_longer_has_is_closed_rather_than_moved(conn, clock):
@@ -386,3 +391,75 @@ def test_a_contact_whose_sequence_is_still_running_is_never_pulled_out_of_it(con
     assert fake.moved == [], "a running sequence was interrupted"
     row = item(conn, approval_id)
     assert row["state"] == "waiting" and row["waiting_on"] == followups.STILL_IN_SEQUENCE
+
+
+def test_the_follow_up_is_finished_only_by_the_email_itself(conn, clock):
+    """A moved contact is not a contacted contact. Instantly's own message id is the receipt."""
+    from tgtc_core.testing.fakes import FakeInstantly
+
+    approval_id = approve(conn, clock)
+    source = "269cd138-00b1-48c3-9093-16c36120a20e"
+    record_creation(conn, approval_id, "L-11", source)
+    queue_followup(conn, approval_id, clock() - timedelta(hours=1))
+    fake = FakeInstantly(clock=clock)
+    who = email_of(conn, approval_id)
+    fake.leads[who] = {"id": "L-11", "email": who, "campaign": source, "status": 3}
+    env = {followups.FOLLOWUP_CAMPAIGN_ENV: FOLLOWUP_CAMPAIGN}
+
+    first = followups.due_followups(conn, now=clock(), instantly=instantly_client(fake), env=env)
+    assert first["awaiting_send"] == 1 and first["followup_sent"] == 0
+    assert item(conn, approval_id)["state"] == "waiting"
+
+    # the send window opens and Instantly sends the one step
+    fake.emails[who] = [{"id": "msg-77", "ue_type": 1, "subject": "Following up",
+                         "from_address_email": "devan@example.invalid",
+                         "timestamp_created": clock().isoformat()}]
+    later = followups.due_followups(conn, now=clock() + timedelta(days=2),
+                                    instantly=instantly_client(fake), env=env)
+
+    assert later["followup_sent"] == 1
+    assert len(fake.moved) == 1, "waiting for the email must never move anybody again"
+    row = item(conn, approval_id)
+    assert row["state"] == "done" and row["reason"] == "followup_sent:msg-77"
+    receipt = sqlall(conn, "SELECT sent_message_id, sent_subject, (sent_at IS NOT NULL) AS sent "
+                           "FROM followup_deliveries")[0]
+    assert receipt == {"sent_message_id": "msg-77", "sent_subject": "Following up", "sent": True}
+
+
+def test_their_own_out_of_office_is_never_mistaken_for_our_follow_up(conn, clock):
+    from tgtc_core.testing.fakes import FakeInstantly
+
+    approval_id = approve(conn, clock)
+    source = "269cd138-00b1-48c3-9093-16c36120a20e"
+    record_creation(conn, approval_id, "L-12", source)
+    queue_followup(conn, approval_id, clock() - timedelta(hours=1))
+    fake = FakeInstantly(clock=clock)
+    who = email_of(conn, approval_id)
+    fake.leads[who] = {"id": "L-12", "email": who, "campaign": source, "status": 3}
+    fake.emails[who] = [{"id": "their-reply", "ue_type": 2, "subject": "OOO"}]
+    env = {followups.FOLLOWUP_CAMPAIGN_ENV: FOLLOWUP_CAMPAIGN}
+
+    followups.due_followups(conn, now=clock(), instantly=instantly_client(fake), env=env)
+    again = followups.due_followups(conn, now=clock() + timedelta(days=2),
+                                    instantly=instantly_client(fake), env=env)
+
+    assert again["followup_sent"] == 0 and again["awaiting_send"] == 1
+    assert item(conn, approval_id)["state"] == "waiting"
+
+
+def test_somebody_who_answered_for_themselves_is_not_followed_up(conn, clock):
+    """A real answer supersedes the auto-reply that queued this."""
+    approval_id = approve(conn, clock)
+    queue_followup(conn, approval_id, clock() - timedelta(hours=1))
+    queued_at = sql1(conn, "SELECT created_at FROM work_items WHERE kind = %s AND subject_id = %s",
+                     (WORK_KIND, approval_id))
+    conn.execute("INSERT INTO outcome_events (provider, event_type, dedupe_key, email, occurred_at) "
+                 "VALUES ('instantly', 'reply', %s, %s, %s)",
+                 ("dk-1", email_of(conn, approval_id), queued_at + timedelta(minutes=5)))
+    conn.commit()
+
+    out = followups.due_followups(conn, now=clock() + timedelta(hours=1))
+
+    assert out["replied_since"] == 1 and out["verified_due"] == 0
+    row = item(conn, approval_id)
+    assert row["state"] == "closed" and row["reason"] == "replied_since_the_out_of_office"

@@ -50,7 +50,7 @@ from .providers.apollo import ApolloClient
 from .providers.fantastic import FantasticClient
 from .providers.http import Transport
 from .providers.instantly import InstantlyClient
-from .services import followups, instantly_capacity, provider_state, replacements
+from .services import followups, instantly_capacity, provider_state, replacements, instantly_rotation
 from .services.acquisition import AcquisitionService, SOURCE_SPECS
 from .services.classification_service import classify_one, reopen_for_inference
 from .services.compliance_recheck import recheck_unknown_jurisdiction
@@ -261,6 +261,51 @@ class Runner:
             "since": str(gate.get("since")), "remaining_uploads": gate.get("remaining_uploads"),
             "message": gate.get("message", "")[:200], "consecutive_refusals": gate.get("consecutive_refusals")})
         return True
+
+    def make_instantly_room(self, *, target: int) -> Dict[str, Any]:
+        """Free slots in Instantly only if this run would otherwise not fit.
+
+        The occupancy read is one request and always happens; the expensive part --
+        paging every campaign's contacts to find safe candidates -- happens only when
+        there is genuinely not enough room, which on 2026-09-25 there was (5,451 free).
+        """
+        if self.instantly is None:
+            return {"enabled": False, "reason": "no_instantly_transport", "deficit": 0}
+
+        def campaigns() -> List[Dict[str, Any]]:
+            out, after = [], None
+            while True:
+                result = self.instantly.list_campaigns(limit=100, starting_after=after)
+                if not result.ok:
+                    break
+                items = (result.data or {}).get("items") or []
+                out.extend(i for i in items if isinstance(i, dict))
+                after = (result.data or {}).get("next_starting_after")
+                if not after or not items:
+                    break
+            return out
+
+        def leads_of(campaign_id: str):
+            after = None
+            while True:
+                result = self.instantly.list_campaign_leads(campaign_id, limit=100, starting_after=after)
+                if not result.ok:
+                    return
+                items = (result.data or {}).get("items") or []
+                for item in items:
+                    if isinstance(item, dict):
+                        yield item
+                after = (result.data or {}).get("next_starting_after")
+                if not after or not items:
+                    return
+
+        out = instantly_rotation.make_room(
+            self.conn, self.instantly, target=target, campaigns=campaigns(),
+            leads_of=leads_of, delete=self.instantly.delete_lead, env=os.environ, now=self.now())
+        self._log("rotation", "decided", {k: v for k, v in out.items() if k != "rotation"})
+        if out.get("rotation"):
+            self._log("rotation", "applied", out["rotation"])
+        return out
 
     def fill_departed_units(self, *, limit: int) -> Dict[str, int]:
         """Hand queued departures back to the ordinary contact path (bounded)."""
