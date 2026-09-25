@@ -373,6 +373,9 @@ class FakeInstantly:
     refuse_leads_with: Optional[Any] = None                          # (status, body) for every POST /leads
     requests: List[Dict[str, Any]] = field(default_factory=list)
     moved: List[Dict[str, Any]] = field(default_factory=list)
+    #: The real POST /leads/move answers 200 with a *background job*, so the lead's
+    #: campaign can still be the old one when the call returns (measured 2026-09-25).
+    move_is_async: bool = False
     clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc)
 
     def request(self, method: str, url: str, *, headers=None, params=None, json_body=None, timeout=30.0) -> Response:
@@ -401,6 +404,12 @@ class FakeInstantly:
                 return _json(200, lead)
             # 200 for an existing email, with the ORIGINAL timestamp (integration truth)
             return _json(200, existing)
+        if method == "GET" and "/leads/" in path and not path.endswith("/leads"):
+            wanted = path.rsplit("/", 1)[-1]
+            for lead in self.leads.values():
+                if str(lead.get("id")) == wanted:
+                    return _json(200, dict(lead))
+            return _json(404, {"error": "Not Found", "message": "Lead not found"})
         if path.endswith("/leads/move") and method == "POST":
             body = json_body or {}
             src, dest = str(body.get("campaign") or ""), str(body.get("to_campaign_id") or "")
@@ -412,9 +421,13 @@ class FakeInstantly:
             moved = 0
             for lead in self.leads.values():
                 if lead.get("id") in ids and lead.get("campaign") == src:
-                    lead["campaign"] = dest
+                    if not self.move_is_async:
+                        lead["campaign"] = dest
                     moved += 1
             self.moved.append({"ids": ids, "from": src, "to": dest})
+            if self.move_is_async:
+                return _json(200, {"id": "job-" + str(uuid.uuid4())[:8], "type": "move-leads",
+                                   "status": "pending", "progress": 0})
             return _json(200, {"status": "success", "moved": moved})
         if path.endswith("/campaigns/search-by-contact"):
             email = p.get("search", [""])[0].lower()

@@ -60,7 +60,7 @@ def test_a_due_follow_up_with_everything_still_true_is_verified_and_held(conn, c
 
     out = followups.due_followups(conn, now=clock())
 
-    assert (out["considered"], out["verified_due"], out["followed_up"]) == (1, 1, 0)
+    assert (out["considered"], out["verified_due"], out["moved_to_followup"]) == (1, 1, 0)
     row = item(conn, approval_id)
     assert row["state"] == "waiting" and row["waiting_on"] == NEEDS_MECHANISM
     assert row["available_at"] > clock(), "it is re-examined later, not churned every run"
@@ -175,25 +175,27 @@ def test_a_due_follow_up_moves_the_contact_into_the_one_step_campaign(conn, cloc
     record_creation(conn, approval_id, lead_id, source)
     queue_followup(conn, approval_id, clock() - timedelta(hours=1))
     fake = FakeInstantly(clock=clock)
-    fake.leads["x@acme0.com"] = {"id": lead_id, "email": "x@acme0.com", "campaign": source}
+    fake.leads["x@acme0.com"] = {"id": lead_id, "email": "x@acme0.com", "campaign": source, "status": 3}
 
     out = followups.due_followups(conn, now=clock(), instantly=instantly_client(fake),
                                   env={followups.FOLLOWUP_CAMPAIGN_ENV: FOLLOWUP_CAMPAIGN})
 
-    assert out["followed_up"] == 1 and out["verified_due"] == 0
+    assert out["moved_to_followup"] == 1 and out["verified_due"] == 0
     assert fake.moved == [{"ids": [lead_id], "from": source, "to": FOLLOWUP_CAMPAIGN}]
     assert fake.leads["x@acme0.com"]["campaign"] == FOLLOWUP_CAMPAIGN
     row = item(conn, approval_id)
-    assert row["state"] == "done" and row["reason"] == f"followed_up:{lead_id}"
+    assert row["state"] == "done" and row["reason"] == f"moved_to_followup:{lead_id}"
 
 
 def test_the_same_follow_up_never_moves_twice(conn, clock):
     from tgtc_core.testing.fakes import FakeInstantly
 
     approval_id = approve(conn, clock)
-    record_creation(conn, approval_id, "L-2", "269cd138-00b1-48c3-9093-16c36120a20e")
+    source = "269cd138-00b1-48c3-9093-16c36120a20e"
+    record_creation(conn, approval_id, "L-2", source)
     queue_followup(conn, approval_id, clock() - timedelta(hours=1))
     fake = FakeInstantly(clock=clock)
+    fake.leads["x@acme0.com"] = {"id": "L-2", "email": "x@acme0.com", "campaign": source, "status": 3}
     env = {followups.FOLLOWUP_CAMPAIGN_ENV: FOLLOWUP_CAMPAIGN}
 
     followups.due_followups(conn, now=clock(), instantly=instantly_client(fake), env=env)
@@ -217,7 +219,7 @@ def test_a_suppressed_contact_is_never_moved(conn, clock):
     out = followups.due_followups(conn, now=clock(), instantly=instantly_client(fake),
                                   env={followups.FOLLOWUP_CAMPAIGN_ENV: FOLLOWUP_CAMPAIGN})
 
-    assert out["suppressed"] == 1 and out["followed_up"] == 0
+    assert out["suppressed"] == 1 and out["moved_to_followup"] == 0
     assert fake.moved == [], "an opt-out was moved into a campaign"
 
 
@@ -249,7 +251,8 @@ def test_a_refused_move_waits_instead_of_losing_the_follow_up(conn, clock):
     from tgtc_core.testing.fakes import FakeInstantly
 
     approval_id = approve(conn, clock)
-    record_creation(conn, approval_id, "L-5", "269cd138-00b1-48c3-9093-16c36120a20e")
+    source = "269cd138-00b1-48c3-9093-16c36120a20e"
+    record_creation(conn, approval_id, "L-5", source)
     queue_followup(conn, approval_id, clock() - timedelta(hours=1))
 
     class Refusing(FakeInstantly):
@@ -259,8 +262,127 @@ def test_a_refused_move_waits_instead_of_losing_the_follow_up(conn, clock):
                 return Response(status=503, headers={}, text='{"error":"unavailable"}')
             return super().request(method, url, **kw)
 
-    out = followups.due_followups(conn, now=clock(), instantly=instantly_client(Refusing(clock=clock)),
+    refusing = Refusing(clock=clock)
+    refusing.leads["x@acme0.com"] = {"id": "L-5", "email": "x@acme0.com", "campaign": source, "status": 3}
+    out = followups.due_followups(conn, now=clock(), instantly=instantly_client(refusing),
                                   env={followups.FOLLOWUP_CAMPAIGN_ENV: FOLLOWUP_CAMPAIGN})
 
-    assert out["move_failed"] == 1 and out["followed_up"] == 0
-    assert item(conn, approval_id)["state"] == "waiting"
+    assert out["move_failed"] == 1 and out["moved_to_followup"] == 0
+    row = item(conn, approval_id)
+    assert row["state"] == "waiting" and row["waiting_on"] == followups.MOVE_FAILED
+
+
+# --- what the live probe on 2026-09-25 taught -------------------------------------
+# POST /leads/move answers 200 with a background job ("status": "pending"), so the
+# response says accepted, not done. One real contact was moved that way and the move
+# had not landed when the call returned.
+
+
+def test_an_accepted_move_that_has_not_happened_yet_is_not_called_done(conn, clock):
+    from tgtc_core.testing.fakes import FakeInstantly
+
+    approval_id = approve(conn, clock)
+    source = "269cd138-00b1-48c3-9093-16c36120a20e"
+    record_creation(conn, approval_id, "L-6", source)
+    queue_followup(conn, approval_id, clock() - timedelta(hours=1))
+    fake = FakeInstantly(clock=clock, move_is_async=True)
+    fake.leads["x@acme0.com"] = {"id": "L-6", "email": "x@acme0.com", "campaign": source, "status": 3}
+
+    out = followups.due_followups(conn, now=clock(), instantly=instantly_client(fake),
+                                  env={followups.FOLLOWUP_CAMPAIGN_ENV: FOLLOWUP_CAMPAIGN})
+
+    assert out["move_unconfirmed"] == 1 and out["moved_to_followup"] == 0
+    row = item(conn, approval_id)
+    assert row["state"] == "waiting", "a 200 was treated as a delivered follow-up"
+    assert row["waiting_on"] == followups.MOVE_UNCONFIRMED, "the wait does not say what it is waiting for"
+    assert fake.leads["x@acme0.com"]["campaign"] == source
+
+
+def test_the_next_run_confirms_a_move_that_settled_and_does_not_repeat_it(conn, clock):
+    from tgtc_core.testing.fakes import FakeInstantly
+
+    approval_id = approve(conn, clock)
+    source = "269cd138-00b1-48c3-9093-16c36120a20e"
+    record_creation(conn, approval_id, "L-7", source)
+    queue_followup(conn, approval_id, clock() - timedelta(hours=1))
+    fake = FakeInstantly(clock=clock, move_is_async=True)
+    fake.leads["x@acme0.com"] = {"id": "L-7", "email": "x@acme0.com", "campaign": source, "status": 3}
+    env = {followups.FOLLOWUP_CAMPAIGN_ENV: FOLLOWUP_CAMPAIGN}
+
+    followups.due_followups(conn, now=clock(), instantly=instantly_client(fake), env=env)
+    fake.leads["x@acme0.com"]["campaign"] = FOLLOWUP_CAMPAIGN          # the job finished
+    out = followups.due_followups(conn, now=clock() + timedelta(days=2),
+                                  instantly=instantly_client(fake), env=env)
+
+    assert out["moved_to_followup"] == 1
+    assert len(fake.moved) == 1, "it moved somebody who was already there"
+    row = item(conn, approval_id)
+    assert row["state"] == "done" and row["reason"] == "already_in_followup:L-7"
+
+
+def test_a_contact_instantly_no_longer_has_is_closed_rather_than_moved(conn, clock):
+    """Rotation removes finished contacts. There is then nobody to follow up."""
+    from tgtc_core.testing.fakes import FakeInstantly
+
+    approval_id = approve(conn, clock)
+    record_creation(conn, approval_id, "L-8", "269cd138-00b1-48c3-9093-16c36120a20e")
+    queue_followup(conn, approval_id, clock() - timedelta(hours=1))
+    fake = FakeInstantly(clock=clock)                                   # holds no leads at all
+
+    out = followups.due_followups(conn, now=clock(), instantly=instantly_client(fake),
+                                  env={followups.FOLLOWUP_CAMPAIGN_ENV: FOLLOWUP_CAMPAIGN})
+
+    assert out["lead_gone"] == 1 and fake.moved == []
+    row = item(conn, approval_id)
+    assert row["state"] == "closed" and row["reason"] == "lead_no_longer_in_instantly"
+
+
+def test_the_move_starts_from_where_instantly_says_the_contact_is_now(conn, clock):
+    """Our receipt records where we created them, which is not always where they are."""
+    from tgtc_core.testing.fakes import FakeInstantly
+
+    approval_id = approve(conn, clock)
+    record_creation(conn, approval_id, "L-9", "269cd138-00b1-48c3-9093-16c36120a20e")
+    queue_followup(conn, approval_id, clock() - timedelta(hours=1))
+    elsewhere = "aaaaaaaa-0000-0000-0000-00000000000e"
+    fake = FakeInstantly(clock=clock)
+    fake.leads["x@acme0.com"] = {"id": "L-9", "email": "x@acme0.com", "campaign": elsewhere, "status": 3}
+
+    out = followups.due_followups(conn, now=clock(), instantly=instantly_client(fake),
+                                  env={followups.FOLLOWUP_CAMPAIGN_ENV: FOLLOWUP_CAMPAIGN})
+
+    assert out["moved_to_followup"] == 1
+    assert fake.moved == [{"ids": ["L-9"], "from": elsewhere, "to": FOLLOWUP_CAMPAIGN}]
+
+
+def test_a_held_follow_up_is_looked_at_again_once_its_wait_has_passed(conn, clock):
+    """Held means later, not never."""
+    approval_id = approve(conn, clock)
+    queue_followup(conn, approval_id, clock() - timedelta(hours=1))
+
+    first = followups.due_followups(conn, now=clock())
+    assert first["verified_due"] == 1 and item(conn, approval_id)["state"] == "waiting"
+
+    later = followups.due_followups(conn, now=clock() + timedelta(days=followups.RECHECK_DAYS + 1))
+    assert later["considered"] == 1, "a held follow-up was never revisited"
+
+
+def test_a_contact_whose_sequence_is_still_running_is_never_pulled_out_of_it(conn, clock):
+    """Moving them would stop emails that are already going. The follow-up waits."""
+    from tgtc_core.testing.fakes import FakeInstantly
+
+    approval_id = approve(conn, clock)
+    source = "269cd138-00b1-48c3-9093-16c36120a20e"
+    record_creation(conn, approval_id, "L-10", source)
+    queue_followup(conn, approval_id, clock() - timedelta(hours=1))
+    fake = FakeInstantly(clock=clock)
+    fake.leads["x@acme0.com"] = {"id": "L-10", "email": "x@acme0.com", "campaign": source,
+                                 "status": followups.IN_SEQUENCE}
+
+    out = followups.due_followups(conn, now=clock(), instantly=instantly_client(fake),
+                                  env={followups.FOLLOWUP_CAMPAIGN_ENV: FOLLOWUP_CAMPAIGN})
+
+    assert out["still_in_sequence"] == 1 and out["moved_to_followup"] == 0
+    assert fake.moved == [], "a running sequence was interrupted"
+    row = item(conn, approval_id)
+    assert row["state"] == "waiting" and row["waiting_on"] == followups.STILL_IN_SEQUENCE

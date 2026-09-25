@@ -138,6 +138,16 @@ class InstantlyClient:
             params["starting_after"] = starting_after
         return self._call("GET", "/emails", params=params)
 
+    def get_lead(self, lead_id: str) -> InstantlyResult:
+        """Read one lead back. This is how a move is confirmed rather than assumed.
+
+        ``POST /leads/move`` answers 200 with a background job whose status is
+        ``pending``, so the response says the work was accepted, not that it is done.
+        """
+        if not lead_id:
+            raise ValueError("get_lead needs a lead id")
+        return self._call("GET", f"/leads/{lead_id}")
+
     def get_campaign(self, campaign_id: str) -> InstantlyResult:
         return self._call("GET", f"/campaigns/{campaign_id}")
 

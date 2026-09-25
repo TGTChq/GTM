@@ -104,18 +104,24 @@ all answer 404), so it is not part of this.
 
 ## Why a return date is not a follow-up, and what now happens instead
 
-Three things were measured against the live workspace on 2026-09-25, because together
+Four things were measured against the live workspace on 2026-09-25, because together
 they decide what this step can honestly do:
 
-* `stop_on_reply: true` means an out-of-office auto-answer **ends** the sequence. All 38
-  out-of-office repliers sit at lead status 3;
+* `stop_on_reply: true` means an out-of-office auto-answer **ends** the sequence. All 75
+  contacts who had replied across the nine campaigns sat at lead status 3, and not one
+  was still in sequence;
 * Instantly exposes **no way to resume a finished lead**: `/leads/{id}/resume` and
-  `/leads/{id}/restart` both answer "route not found";
-* the nine campaigns have **no subsequences** configured, so there is no follow-up
-  vehicle attached to them either.
+  `/leads/{id}/restart` both answer "route not found", and `PATCH /leads/{id}` answers
+  200 while silently ignoring `status`;
+* `POST /leads/subsequence/move` **does** accept a finished contact and keeps them in
+  their own campaign -- but it flips them to status 1, which puts them back in that
+  campaign's live sending pool, and nothing puts them back. The full probe, including
+  what it cost and what was put back, is in `OOO_SUBSEQUENCE_PROBE.md`;
+* so the mechanism is a campaign whose sequence is **one step**, because campaign
+  membership is a guarantee that can be checked and a status field is not.
 
-So a queued `reply_followup_when_back` item could never, by itself, cause an email --
-and 41 of them had been sitting there with nothing looking at them.
+A queued `reply_followup_when_back` item could never, by itself, cause an email -- and 41
+of them had been sitting there with nothing looking at them.
 
 `services/followups.py` now decides each one when its return date arrives, bounded by
 `TGTC_FOLLOWUPS_PER_RUN` (default 50):
@@ -124,13 +130,15 @@ and 41 of them had been sitting there with nothing looking at them.
 |---|---|
 | the address is suppressed, or the person opted out | **closed**, and never written to. An out-of-office is not an opt-out, and an opt-out is not a follow-up |
 | the approval was revoked, or the vacancy is gone | closed as `no_current_vacancy`: there is no longer a reason to write |
-| everything still true | marked **verified and due**, held for a week, and re-examined -- so a suppression that arrives later still closes it |
+| everything still true, and `TGTC_OOO_FOLLOWUP_CAMPAIGN_ID` names a one-step campaign | the contact is **moved there** -- one further message, not the four they already had. The move is confirmed against Instantly's own record of where the contact is, because `POST /leads/move` answers 200 with a background job that is still `pending`; an unconfirmed move waits and is tried again |
+| everything still true, and no such campaign is configured | marked **verified and due**, held for a week, and re-examined -- so a suppression that arrives later still closes it |
+| the contact is no longer in Instantly at all | closed as `lead_no_longer_in_instantly`: rotation or their own request removed them, and there is nobody to write to |
+| the contact's sequence is still running | **held**, never moved: moving them would stop emails that are already going out, and the follow-up is for somebody whose sequence has already ended |
 
-It sends nothing and it suppresses nothing. Turning a verified case into an actual email
-needs one of the two mechanisms Instantly does support, and both are content decisions
-rather than engineering ones: a **subsequence** attached to the campaign, which needs
-copy nobody has written, or **removing and re-adding** the contact, which replays the
-same four emails at somebody who only said they were away.
+It suppresses nothing, and it never re-enrols anybody in the four emails they already
+received. The destination is refused outright if it is one of the nine Challenger or nine
+Control campaigns. What it still needs is the one message itself, which is a copy
+decision: until that exists the setting stays unset and every due case is simply held.
 
 ## Filling the vacancy a departure leaves
 
