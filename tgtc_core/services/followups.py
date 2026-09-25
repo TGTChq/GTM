@@ -48,8 +48,9 @@ already received.
 
 from __future__ import annotations
 
+import time as _time
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 import psycopg
 
@@ -71,6 +72,12 @@ STILL_IN_SEQUENCE = "followup_contact_still_in_sequence"
 AWAITING_SEND = "followup_awaiting_send"
 #: Instantly's sent-message marker in GET /emails.
 UE_TYPE_SENT = 1
+#: A move is a background job. Measured 2026-09-25: it lands in roughly twenty seconds,
+#: but it had NOT landed when checked immediately, so four of five follow-ups were left
+#: unconfirmed for a day when they were in fact already moved. The moves are therefore
+#: issued first and confirmed afterwards, in rounds, bounded by these two numbers.
+CONFIRM_ROUNDS = 6
+CONFIRM_WAIT_SECONDS = 5.0
 #: Instantly's lead status for "in sequence".
 IN_SEQUENCE = 1
 NO_CURRENT_VACANCY = "no_current_vacancy"
@@ -225,7 +232,8 @@ def _hold(conn: psycopg.Connection, work_id: int, until: datetime,
 
 def due_followups(conn: psycopg.Connection, *, now: Optional[datetime] = None,
                   limit: int = DEFAULT_PER_RUN, instantly: Any = None,
-                  env: Optional[Dict[str, str]] = None) -> Dict[str, int]:
+                  env: Optional[Dict[str, str]] = None,
+                  sleep: Optional[Callable[[float], None]] = None) -> Dict[str, int]:
     """Decide every follow-up whose return date has arrived.
 
     With a one-step follow-up campaign configured it MOVES the contact there -- exactly
@@ -239,6 +247,7 @@ def due_followups(conn: psycopg.Connection, *, now: Optional[datetime] = None,
            "move_unconfirmed": 0, "lead_gone": 0, "still_in_sequence": 0,
            "replied_since": 0, "awaiting_send": 0, "followup_sent": 0}
     destination = followup_campaign(env)
+    issued: List[Dict[str, Any]] = []
     if limit <= 0:
         return out
     with conn.cursor() as cur:
@@ -331,21 +340,45 @@ def due_followups(conn: psycopg.Connection, *, now: Optional[datetime] = None,
             _hold(conn, work_id, moment + timedelta(days=1), MOVE_FAILED)
             out["move_failed"] += 1
             continue
-        if str((_lead_now(instantly, lead["lead_id"]) or {}).get("campaign") or "") == destination:
-            # Moved, and Instantly agrees. The email has NOT happened yet: it is the
-            # one-step campaign's to send, in its own window. So this waits for the
-            # receipt rather than calling itself finished.
-            _record_move(conn, lead_id=lead["lead_id"], approval_id=int(row["approval_id"]),
-                         email=row["email"], from_campaign=where, to_campaign=destination)
-            _hold(conn, work_id, moment + timedelta(days=1), AWAITING_SEND)
+        # Accepted, not done. Confirmation happens after every move has been issued, so
+        # the jobs settle while the rest of the batch is being sent rather than in a
+        # sleep per contact.
+        issued.append({"work_id": work_id, "lead_id": lead["lead_id"], "email": row["email"],
+                       "approval_id": int(row["approval_id"]), "from_campaign": where})
+
+    _confirm_moves(conn, instantly, issued, destination=destination, moment=moment, out=out,
+                   sleep=sleep)
+    return out
+
+
+def _confirm_moves(conn: psycopg.Connection, instantly: Any, issued: List[Dict[str, Any]], *,
+                   destination: str, moment: datetime, out: Dict[str, int],
+                   sleep: Optional[Callable[[float], None]] = None) -> None:
+    """Settle every move that was accepted, in rounds, and never on the response alone."""
+    waiting = list(issued)
+    pause = sleep if sleep is not None else _time.sleep
+    for attempt in range(CONFIRM_ROUNDS):
+        if not waiting:
+            break
+        if attempt:
+            pause(CONFIRM_WAIT_SECONDS)
+        still: List[Dict[str, Any]] = []
+        for item in waiting:
+            if str((_lead_now(instantly, item["lead_id"]) or {}).get("campaign") or "") != destination:
+                still.append(item)
+                continue
+            _record_move(conn, lead_id=item["lead_id"], approval_id=item["approval_id"],
+                         email=item["email"], from_campaign=item["from_campaign"],
+                         to_campaign=destination)
+            _hold(conn, item["work_id"], moment + timedelta(days=1), AWAITING_SEND)
             out["moved_to_followup"] += 1
             out["awaiting_send"] += 1
-        else:
-            # 200 meant the job was accepted. Only Instantly's own record of the
-            # contact settles whether it happened, and it does not say so yet.
-            _hold(conn, work_id, moment + timedelta(days=1), MOVE_UNCONFIRMED)
-            out["move_unconfirmed"] += 1
-    return out
+        waiting = still
+    for item in waiting:
+        # Instantly accepted the job and still does not say the contact is there. It is
+        # not lost: the next run finds them already in the destination and picks up.
+        _hold(conn, item["work_id"], moment + timedelta(days=1), MOVE_UNCONFIRMED)
+        out["move_unconfirmed"] += 1
 
 
 __all__ = ["due_followups", "per_run", "followup_campaign", "WORK_KIND", "NEEDS_MECHANISM",

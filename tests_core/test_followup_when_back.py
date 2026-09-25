@@ -283,7 +283,37 @@ def test_a_refused_move_waits_instead_of_losing_the_follow_up(conn, clock):
 # had not landed when the call returned.
 
 
-def test_an_accepted_move_that_has_not_happened_yet_is_not_called_done(conn, clock):
+def test_a_move_that_lands_a_moment_later_is_confirmed_in_the_same_run(conn, clock):
+    """Measured 2026-09-25: the job takes about twenty seconds, and checking immediately
+    left four of five follow-ups unconfirmed for a day when they had in fact moved."""
+    from tgtc_core.testing.fakes import FakeInstantly
+
+    approval_id = approve(conn, clock)
+    source = "269cd138-00b1-48c3-9093-16c36120a20e"
+    record_creation(conn, approval_id, "L-13", source)
+    queue_followup(conn, approval_id, clock() - timedelta(hours=1))
+    who = email_of(conn, approval_id)
+    fake = FakeInstantly(clock=clock, move_is_async=True)
+    fake.leads[who] = {"id": "L-13", "email": who, "campaign": source, "status": 3}
+
+    rounds = []
+
+    def settle(_seconds):
+        rounds.append(1)
+        if len(rounds) == 2:                       # it lands during the second wait
+            fake.leads[who]["campaign"] = FOLLOWUP_CAMPAIGN
+
+    out = followups.due_followups(conn, now=clock(), instantly=instantly_client(fake),
+                                  env={followups.FOLLOWUP_CAMPAIGN_ENV: FOLLOWUP_CAMPAIGN},
+                                  sleep=settle)
+
+    assert out["moved_to_followup"] == 1 and out["move_unconfirmed"] == 0
+    assert len(fake.moved) == 1, "waiting for a job to settle must not re-issue it"
+    assert item(conn, approval_id)["waiting_on"] == followups.AWAITING_SEND
+    assert len(rounds) <= followups.CONFIRM_ROUNDS
+
+
+def test_a_move_that_never_lands_is_bounded_and_left_for_the_next_run(conn, clock):
     from tgtc_core.testing.fakes import FakeInstantly
 
     approval_id = approve(conn, clock)
@@ -292,9 +322,12 @@ def test_an_accepted_move_that_has_not_happened_yet_is_not_called_done(conn, clo
     queue_followup(conn, approval_id, clock() - timedelta(hours=1))
     fake = FakeInstantly(clock=clock, move_is_async=True)
     fake.leads["x@acme0.com"] = {"id": "L-6", "email": "x@acme0.com", "campaign": source, "status": 3}
+    waits = []
 
     out = followups.due_followups(conn, now=clock(), instantly=instantly_client(fake),
-                                  env={followups.FOLLOWUP_CAMPAIGN_ENV: FOLLOWUP_CAMPAIGN})
+                                  env={followups.FOLLOWUP_CAMPAIGN_ENV: FOLLOWUP_CAMPAIGN},
+                                  sleep=waits.append)
+    assert len(waits) == followups.CONFIRM_ROUNDS - 1, "it must stop trying, not spin"
 
     assert out["move_unconfirmed"] == 1 and out["moved_to_followup"] == 0
     row = item(conn, approval_id)
@@ -314,7 +347,8 @@ def test_the_next_run_confirms_a_move_that_settled_and_does_not_repeat_it(conn, 
     fake.leads["x@acme0.com"] = {"id": "L-7", "email": "x@acme0.com", "campaign": source, "status": 3}
     env = {followups.FOLLOWUP_CAMPAIGN_ENV: FOLLOWUP_CAMPAIGN}
 
-    followups.due_followups(conn, now=clock(), instantly=instantly_client(fake), env=env)
+    followups.due_followups(conn, now=clock(), instantly=instantly_client(fake), env=env,
+                            sleep=lambda _s: None)
     fake.leads["x@acme0.com"]["campaign"] = FOLLOWUP_CAMPAIGN          # the job finished
     out = followups.due_followups(conn, now=clock() + timedelta(days=2),
                                   instantly=instantly_client(fake), env=env)
