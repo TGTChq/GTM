@@ -455,3 +455,43 @@ By Pacific day: 09-20 697, 09-21 1,041, 09-22 1,885, 09-23 975, **09-24 1,121**.
 
 If the CSV reconciles, it carries **5,719 rows**. Anything else is a discrepancy to
 explain, not to accept.
+
+### 18. 2026-09-25 07:55Z -- the dead run, recorded as what it was, and the gate taught the difference
+
+The pre-send check found the real blocker: run `20260924T030130.689454Z-91bada58` logged
+`daily/start` at 03:01:30Z on 24 September and stopped ten seconds later. It never logged
+an end and never can, so the readiness gate counted it as work in flight and would have
+held **every** future Friday report, not just this one.
+
+**The attributed cause did not survive checking.** It was assumed to be a container
+replacement; the nearest core deployment that day is **03:40:11Z, 38 minutes after its
+last event**, so that explanation is not supported. What is observable: its last act was
+`work/classify {"wait": 4}` -- waiting on the classifier, on the day the Anthropic balance
+was exhausted until 22:17:56Z. The incident is therefore filed as
+`terminated_without_end`, with the failed attribution written into its evidence rather
+than quietly dropped. No `daily/end` was written: the run did not finish, and recording
+that it did would be a lie a later reader could not detect.
+
+**Migration 020 (`run_incidents`)** stores the claim. The gate re-checks it every time and
+dismisses it only when all four proofs hold: a later run took the exclusive run lock and
+completed, the interrupted run has been silent since the incident was filed, nothing holds
+the lock now, and the week's receipts reconcile. Any one failing puts the block back.
+
+It is visible, not hidden: the week lists the interrupted run and raises an alert naming
+it and the run that took over.
+
+Tested, including the case it exists to exclude -- a genuinely active run still blocks
+with a settled incident on file beside it -- plus: no record at all still blocks; the run
+speaking again after filing blocks again; a week that does not reconcile is never
+dismissed by a record; and the filing refuses a run that closed itself, a successor that
+did not complete or ran earlier, and anything while the lock is held. **2,055 pass.**
+
+Deployed `23efb6d` to all three services at 07:55:09Z, crons unchanged. Migration 020 was
+applied to production **before** the deploy, so the new query could never meet a missing
+table.
+
+**Verified against production with the deployed SQL, read-only, nothing sent:** the
+incident settles, open runs minus settled leaves **zero** in flight, the lock is free,
+delivery rows for the window are zero, the reconciliation closes, the CSV row count and
+the headline figure agree exactly, and **nothing has been published for this week**. No
+rehearsal artefact was left behind.
