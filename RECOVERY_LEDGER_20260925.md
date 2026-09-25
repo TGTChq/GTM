@@ -9,8 +9,8 @@ only corrected by a later entry that says so.
 | thing | value |
 |---|---|
 | **CORE CRON** | **RESTORED to `0 3 * * *` at 02:52Z.** Next tick 2026-09-26 03:00Z |
-| core deployment in force | `b4f81e1`, deployed 2026-09-25 02:38:36Z, SUCCESS, restart NEVER |
-| run lock (advisory `1952937059`) | **held -- the recovery run is in flight** |
+| core deployment in force | `9414b58`, deployed 2026-09-25 05:53:24Z, SUCCESS, restart NEVER |
+| run lock (advisory `1952937059`) | free -- the recovery run closed 05:52:49Z |
 | last completed run | `20260924T055100.714673Z-b60f0376`, ended 2026-09-24 05:52:24Z |
 | 2026-09-25 03:00Z scheduled run | did not run; replaced by the recovery run started 02:51Z |
 | recovery run | started 2026-09-25 ~02:45-02:51Z, budget `prod-scheduled-20260925`, kind `scheduled` |
@@ -255,3 +255,123 @@ the destination. **To deploy after `daily/end`.**
 
 The five contacts are in the campaign and will each receive their single message in the
 13:00Z window regardless; what lagged was our record of it, not the email.
+
+
+### 13. 2026-09-25 05:52:49Z -- the recovery run closed, and what it actually did
+
+Run `20260925T024914.962584Z-15f2bf20`, kind `scheduled`, budget `prod-scheduled-20260925`,
+02:49:14Z to 05:52:49Z (**3h 03m**, 236 rounds). Its own verdict: `target_met: true`,
+`shortfall: 0`, `stop_reason: target_reached`.
+
+**The populations, kept apart:**
+
+| population | n |
+|---|---|
+| **produced AND created by this run** (the target) | **1,015** |
+| backlog delivered that earlier runs had approved | 106 |
+| total Instantly creations | 1,121 |
+| already existed in Instantly, not new | 3 |
+| Airtable records written | 1,121 (1,015 fresh + 106 backlog) |
+| **distinct email addresses among the 1,121** | **1,121 -- no person created twice** |
+
+Of the 1,015: 948 from newly acquired units, 67 from retries of work already paid for.
+Airtable matches Instantly exactly, which is the invariant: a record only ever follows a
+genuine creation.
+
+**Destinations** -- all 1,121 landed in the nine Challenger campaigns and nowhere else:
+OPERATIONS 546, AI & TECHNICAL 150, FINANCE 140, MARKETING 80, GTM SYSTEMS 78, CUSTOMER
+EXPERIENCE 61, PEOPLE & HR 36, PRODUCT 27, ECOMMERCE 3. **No Control campaign received
+anything.**
+
+**What was held back, by named reason:** unknown jurisdiction 512, already in another
+campaign 171, UK not a verified corporate subscriber 134, eligibility unknown 86,
+Germany 28, UAE 8, UK no lawful basis 6, Saudi Arabia 2, employer attribution conflict 1.
+Every one is a compliance or duplication gate, not a failure.
+
+**Spend, against the ceilings this run was given:**
+
+| provider | used | ceiling | note |
+|---|---|---|---|
+| Fantastic | 3,400 credits / 34 requests | 4,000 / 60 | |
+| Apollo | 1,455 credits / 9,323 requests | 1,600 / 10,000 | **1.433 credits per fresh lead**; 91% of the ceiling |
+| Anthropic | 1,260 requests | 1,500 | at the measured $0.0152 each, about **$19** |
+
+**Zero refused reservations.** Apollo at 91% of its allowance is the nearest thing to a
+constraint: another ~100 leads would have run it out.
+
+**Capacity after the run:** the rotation step recorded `enough_room` with 5,344 free and
+deleted nothing, exactly as intended.
+
+### 14. 2026-09-25 06:00Z -- replacements: 11 processed, 0 creations, and the honest reason
+
+The three things are counted separately, as they must be:
+
+* **tasks processed: 11.** One closed `no_current_vacancy` -- its posting had gone, and
+  reviving it would have been outreach with no reason behind it. Ten were handed back to
+  ordinary qualification;
+* **candidates found: 0. Genuine Instantly creations: 0.**
+
+Why, checked unit by unit rather than asserted:
+
+* **8 of the 10 already had a live contact.** At that company x function there was
+  already at least one approved, delivered, **non-suppressed** person -- a colleague
+  contacted earlier. There was nothing to replace, and not writing to anybody was the
+  right outcome;
+* **2 of the 10 (units 5005 and 8127) hold ONLY the departed, suppressed contact.** They
+  came back as `approved` with no approved person and produced nobody. Those two vacancies
+  are genuinely unfilled while the unit reads as covered.
+
+So the replacement path is **not proven end to end**: it has never produced a real
+Instantly creation. The two uncovered units are the case that would prove it, and the
+thing to look at is whether qualification treats a unit as satisfied by an approval whose
+person is suppressed. That is a change to the core contact path and is not being made
+mid-flight on the back of two rows.
+
+The departed addresses stay suppressed throughout: **13** `person_email` suppressions with
+a departure reason, and none of the ten re-openings touched them.
+
+### 15. 2026-09-25 06:20:35Z -- the exposed Postgres password, rotated
+
+Rotated in a window with nothing running: the recovery run had closed at 05:52Z, the
+Replies tick at 06:15Z had completed at 06:17:58Z, and the weekly report was six and a
+half hours away.
+
+**A correction to an earlier belief first.** The three services do NOT hold a Railway
+reference to the database; each holds a **literal** connection string of 98 characters.
+So rotating the password on the database alone would have broken all three. The rotation
+had to change four places and then prove they agree:
+
+| where | variable |
+|---|---|
+| Postgres Core | `POSTGRES_PASSWORD`, `DATABASE_URL` |
+| GTM Core Canary 1000 | `TGTC_DATABASE_URL` |
+| GTM Weekly Report | `TGTC_DATABASE_URL` |
+| GTM Replies | `TGTC_DATABASE_URL` |
+
+Order: `ALTER USER postgres WITH PASSWORD` first, because that is the real change and the
+variables are only a record of it; then the five variables; then verification. A dry run
+first confirmed all four places agreed beforehand, so a mismatch could not be blamed on
+pre-existing drift. No secret was printed at any point -- the script reads and writes the
+value in memory and prints only lengths and outcomes.
+
+**Verified, not assumed:**
+
+* `POSTGRES_PASSWORD` and `DATABASE_URL` agree, and all three consumers hold exactly that
+  same string;
+* the new URL **connects over the internal network** (`postgres-core.railway.internal`):
+  `THE NEW URL CONNECTS`;
+* the same URL with a tampered password is **refused** --
+  `password authentication failed for user "postgres"` -- so password authentication is
+  genuinely enforced on that route and the first result means something. (Inside the
+  container, local and 127.0.0.1 connections are `trust`, so testing there would have
+  proved nothing; that was checked and discarded as a method.);
+* all three services redeployed at 06:20:29-06:20:33Z, **SUCCESS**, still on `9414b58`,
+  crons unchanged: core `0 3 * * *`, weekly `0,20,40 13-20 * * *`, replies `15 * * * *`.
+
+**Still outstanding for this entry:** the end-to-end proof is a service connecting on its
+own schedule with the new credential. `instantly_replies` last served at 06:17:58Z on the
+old one; the **07:15Z tick** is the first on the new one and is being watched.
+
+**Rollback:** none is possible for the password itself -- the old one is gone. If a
+service cannot connect, the fix is forward: read `DATABASE_URL` from Postgres Core and
+re-upsert it as that service's `TGTC_DATABASE_URL`.

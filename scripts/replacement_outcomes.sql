@@ -33,11 +33,11 @@ WITH reopened AS (
 ), scored AS (
     SELECT r.id, r.state, r.close_reason,
            (SELECT count(*) FROM approvals a
-             WHERE a.opportunity_id = r.id AND a.created_at >= r.reopened_at) AS approvals_after,
+             WHERE a.opportunity_id = r.id AND a.approved_at >= r.reopened_at) AS approvals_after,
            (SELECT count(*) FROM approvals a
               JOIN delivery_outbox ob ON ob.approval_id = a.id AND ob.channel = 'instantly'
               JOIN delivery_receipts rc ON rc.outbox_id = ob.id
-             WHERE a.opportunity_id = r.id AND a.created_at >= r.reopened_at
+             WHERE a.opportunity_id = r.id AND a.approved_at >= r.reopened_at
                AND rc.channel = 'instantly' AND rc.receipt_kind = 'created') AS created_after
     FROM reopened r
 )
@@ -61,7 +61,7 @@ SELECT COALESCE(NULLIF(ob.state, ''), '(no outbox row)') AS outbox_state,
        COALESCE(NULLIF(ob.last_error, ''), '(none)') AS last_error,
        count(*) AS n
 FROM reopened r
-JOIN approvals a ON a.opportunity_id = r.id AND a.created_at >= r.reopened_at
+JOIN approvals a ON a.opportunity_id = r.id AND a.approved_at >= r.reopened_at
 LEFT JOIN delivery_outbox ob ON ob.approval_id = a.id AND ob.channel = 'instantly'
 WHERE NOT EXISTS (SELECT 1 FROM delivery_receipts rc
                   WHERE rc.outbox_id = ob.id AND rc.receipt_kind = 'created')
