@@ -429,3 +429,29 @@ assuming a quiet cron means a broken service.
 
 Replies cron restored to `15 * * * *`. All three confirmed: core `0 3 * * *`, weekly
 `0,20,40 13-20 * * *`, replies `15 * * * *`.
+
+### 17. 2026-09-25 07:35Z -- which week contains the recovery run's leads, computed before the report runs
+
+The reporting week is Friday 00:00 Pacific to Friday 00:00 Pacific. The report due today
+is `weekly-2026-09-18`, labelled **Sep 18 - Sep 24, 2026**, covering
+**2026-09-18 07:00Z -> 2026-09-25 07:00Z**.
+
+The recovery run ran 02:49:14Z to 05:52:49Z, which in Pacific time is **19:49 to 22:52 on
+Thursday 24 September**. So its output falls **inside this week's report**, with
+**67 minutes** to spare before the boundary. Had it started an hour later, the same 1,121
+contacts would have belonged to next week's report instead. Nothing is being re-dated to
+make that true -- it is simply where the real timestamps fall, and it is worth saying
+plainly because it was close.
+
+**The figure the report must publish, computed independently here so it can be checked
+rather than accepted:**
+
+| measure | value |
+|---|---|
+| **`added_to_instantly` for the window** | **5,719** |
+| of which from today's recovery run | 1,121 |
+
+By Pacific day: 09-20 697, 09-21 1,041, 09-22 1,885, 09-23 975, **09-24 1,121**.
+
+If the CSV reconciles, it carries **5,719 rows**. Anything else is a discrepancy to
+explain, not to accept.
