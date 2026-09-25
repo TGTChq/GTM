@@ -271,7 +271,8 @@ class Runner:
 
     def decide_due_followups(self, *, limit: int) -> Dict[str, int]:
         """Decide out-of-office follow-ups whose return date has arrived. Sends nothing."""
-        out = followups.due_followups(self.conn, now=self.now(), limit=limit)
+        out = followups.due_followups(self.conn, now=self.now(), limit=limit,
+                                      instantly=self.instantly, env=os.environ)
         if out.get("considered"):
             self._log("followups", "decided", out)
         return out

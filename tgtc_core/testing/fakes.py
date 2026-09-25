@@ -372,6 +372,7 @@ class FakeInstantly:
     fail_after_create_once: Optional[Any] = None                     # 'reset' | 500
     refuse_leads_with: Optional[Any] = None                          # (status, body) for every POST /leads
     requests: List[Dict[str, Any]] = field(default_factory=list)
+    moved: List[Dict[str, Any]] = field(default_factory=list)
     clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc)
 
     def request(self, method: str, url: str, *, headers=None, params=None, json_body=None, timeout=30.0) -> Response:
@@ -400,6 +401,21 @@ class FakeInstantly:
                 return _json(200, lead)
             # 200 for an existing email, with the ORIGINAL timestamp (integration truth)
             return _json(200, existing)
+        if path.endswith("/leads/move") and method == "POST":
+            body = json_body or {}
+            src, dest = str(body.get("campaign") or ""), str(body.get("to_campaign_id") or "")
+            ids = [str(i) for i in (body.get("ids") or [])]
+            if not src or not dest:
+                return _json(400, {"error": "A source campaign or list is required for bulk move operations"})
+            if src == dest:
+                return _json(400, {"error": "Source and destination campaigns cannot be the same"})
+            moved = 0
+            for lead in self.leads.values():
+                if lead.get("id") in ids and lead.get("campaign") == src:
+                    lead["campaign"] = dest
+                    moved += 1
+            self.moved.append({"ids": ids, "from": src, "to": dest})
+            return _json(200, {"status": "success", "moved": moved})
         if path.endswith("/campaigns/search-by-contact"):
             email = p.get("search", [""])[0].lower()
             lead = self.leads.get(email)

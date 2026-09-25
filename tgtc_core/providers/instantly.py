@@ -107,6 +107,21 @@ class InstantlyClient:
             raise ValueError(f"undocumented Instantly lead fields: {sorted(unknown)}")
         return self._call("POST", "/leads", json_body=payload)
 
+    def move_lead(self, lead_id: str, *, from_campaign: str, to_campaign: str) -> InstantlyResult:
+        """Move ONE lead from one campaign to another.
+
+        The destination decides what the person receives next, so this is how a
+        follow-up happens without replaying a finished sequence: the follow-up campaign
+        holds a single step. The API refuses a move whose source and destination match,
+        and refuses ``ids`` without a source, so both are always sent.
+        """
+        if not lead_id or not from_campaign or not to_campaign:
+            raise ValueError("move_lead needs a lead id, a source campaign and a destination campaign")
+        if from_campaign == to_campaign:
+            raise ValueError("refusing to move a lead into the campaign it is already in")
+        return self._call("POST", "/leads/move", json_body={"campaign": from_campaign, "ids": [lead_id],
+                                                            "to_campaign_id": to_campaign})
+
     def search_by_contact(self, email: str) -> Tuple[InstantlyResult, Tuple[str, ...]]:
         result = self._call("GET", "/campaigns/search-by-contact", params={"search": email})
         if not result.ok:
