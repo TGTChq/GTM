@@ -18,10 +18,11 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from tgtc_core.reporting import pipeline, render, slack, store
+from tgtc_core.reporting import detail, pipeline, render, slack, store
 from tgtc_core.reporting.schedule import (ACTION_FINAL, ACTION_NOTICE, ACTION_SKIP, AFTER_RETRY_WINDOW,
                                           BEFORE_DUE, IN_RETRY_WINDOW, NOT_DELIVERY_DAY, decide,
                                           delivery_state, readiness)
+from tests_core.helpers import sqlall
 from tests_core.test_weekly_report import FRIDAY_MORNING, WEEK_START, report_for, seed_lead, seed_run
 
 UTC = timezone.utc
@@ -258,26 +259,66 @@ def test_the_message_stays_short_and_leaves_the_detail_to_the_file(conn):
     assert "phone sidecar" in text
 
 
-def test_only_one_line_of_attention_reaches_the_channel(conn):
+def test_an_operational_warning_sits_at_the_end_not_under_the_figures(conn):
+    """A run that did not happen does not make the figures above wrong, and a warning
+    printed beneath them reads as if it does. It is kept -- at the end, in small type."""
     seed_run(conn, run_id="run-a", started_at=WEEK_START + timedelta(days=1, hours=3))
     seed_lead(conn, received_at=WEEK_START + timedelta(days=1, hours=4), campaign_key="product",
               campaign_id="camp-pr", run_id="run-a")
     report = report_for(conn)
-    assert len(report["alerts"]) > 1
-    text = _blocks_text(slack.blocks_for(report))
-    attention = [line for line in text.splitlines() if line.startswith(("⚠️", "🟥"))]
-    assert len(attention) == 1 and "more in the detail" in attention[0]
+    assert len(report["alerts"]) > 1 and report["integrity_alerts"] == []
+
+    blocks = slack.blocks_for(report)
+    assert [b["type"] for b in blocks] == ["header", "section", "section", "context"],         "an operational alert must not add a block between the figures and the CSV line"
+    figures = blocks[1]["text"]["text"]
+    assert not any(mark in figures for mark in ("⚠️", "🟥")), "no warning beside the four figures"
+    footer = blocks[-1]["elements"][0]["text"]
+    assert "*Runs:*" in footer and "no production run on" in footer
 
 
-def test_the_detail_is_linked_when_published_and_pending_when_not(conn):
+def test_a_failure_that_puts_the_FIGURES_in_doubt_still_sits_beside_them(conn):
+    """The distinction is the point: an integrity failure is about the numbers."""
+    report = report_for(conn)
+    report["integrity_alerts"] = ["reconciliation does not close: 3 Airtable record(s)"]
+    report["alerts"] = report["integrity_alerts"] + ["something else"]
+    text = "\n".join(b.get("text", {}).get("text", "") for b in slack.blocks_for(report)
+                     if b["type"] == "section")
+    assert "🟥 reconciliation does not close" in text
+    assert "+1 more, listed below" in text
+
+
+def test_a_csv_that_lives_in_this_channel_is_named_once_and_never_linked(conn):
+    """Measured 2026-09-25: posting a Slack file permalink SHARES the file again -- two
+    share entries 0.146s apart -- so the same CSV rendered twice. `unfurl_links: false`
+    was already set and does not prevent it. The only fix is not to put the link here."""
+    report = report_for(conn)
+    report["detail"] = {**(report.get("detail") or {}), "destination": "slack"}
+    text = _blocks_text(slack.blocks_for(report, detail_url="https://slack.example/files/F1/x.csv",
+                                         detail_rows=5719))
+    assert "https://slack.example" not in text, "the permalink would render a second file card"
+    assert text.count("Full CSV:") == 1
+    assert "5,719 rows, one per genuine creation" in text
+    assert "reconciled against *Added to Instantly*" in text
+    assert "visible to members of this channel" in text
+
+
+def test_a_csv_hosted_anywhere_else_is_still_linked(conn):
+    """Nothing outside Slack duplicates, so a private destination keeps its link."""
     report = report_for(conn)
     linked = _blocks_text(slack.blocks_for(report, detail_url="https://drive.example/file", detail_rows=3623))
     assert "<https://drive.example/file|this week's file>" in linked
-    assert "3,623 rows, one per lead" in linked and "authorised team" in linked
+    assert "3,623 rows, one per genuine creation" in linked and "authorised team" in linked
 
     pending = _blocks_text(slack.blocks_for(report, detail_rows=3623))
     assert "_pending_" in pending and "no private destination and reader list has been verified" in pending
     assert "3,623 rows" in pending and "personal data" in pending
+
+
+def test_an_unconfirmed_upload_never_claims_the_file_is_there(conn):
+    report = report_for(conn)
+    report["detail"] = {**(report.get("detail") or {}), "destination": "slack"}
+    text = _blocks_text(slack.blocks_for(report, detail_rows=5719))
+    assert "has not been confirmed" in text and "visible to members of this channel" not in text
 
 
 def test_a_day_the_database_cannot_speak_about_is_kept_in_the_detail_not_the_channel(conn):
@@ -382,7 +423,11 @@ def test_a_missing_run_is_reported_but_neither_withholds_nor_fails_the_report(co
     assert report["integrity_alerts"] == []                             # but not an integrity failure
     assert _ready(conn, report).ready is True                           # and never withheld
     assert decide(IN_RETRY_WINDOW, _ready(conn, report).ready)[0] == ACTION_FINAL
-    assert "missing run" in _blocks_text(slack.blocks_for(report))      # visible to the readers
+    # Still visible to the readers, in the footer rather than beside the figures: the
+    # day is NAMED, because "no run" and "a run that produced zero" are different facts.
+    footer = slack.blocks_for(report)[-1]["elements"][0]["text"]
+    assert "*Runs:*" in footer and "no production run on" in footer
+    assert all(day in footer for day in report["runs"]["local_days_without_a_run"])
 
     argv = ["weekly-report", "--database-url", pg_url, "--week", "last", "--now", FRIDAY_MORNING.isoformat(),
             "--print-format", "none", "--no-compare", "--fail-on", "integrity"]
@@ -675,3 +720,102 @@ def test_the_incident_is_visible_in_the_report_not_silently_dropped(conn):
     assert [i["run_id"] for i in listed] == ["run-killed"]
     assert any("was interrupted" in f and "run-recovery" in f
                for f in report["alerts"]), "the week must say an incident happened"
+
+
+# --------------------------------------------------------------------------------
+# the finished message, and what a retry may and may not do
+# --------------------------------------------------------------------------------
+# Written after 2026-09-25, the first real Friday. The figures and the CSV reconciled,
+# but the channel showed the same CSV twice and an operational warning sat where the
+# reader looks for the result.
+
+def _published_report(conn):
+    report = report_for(conn)
+    report["detail"] = {**(report.get("detail") or {}), "destination": "slack"}
+    return report
+
+
+def test_the_finished_message_reads_in_the_order_a_reader_needs(conn):
+    report = _published_report(conn)
+    blocks = slack.blocks_for(report, detail_url="https://slack.example/files/F1/x.csv", detail_rows=5719)
+
+    assert [b["type"] for b in blocks] == ["header", "section", "section", "context"]
+
+    title = blocks[0]["text"]["text"]
+    assert report["window"]["window_label"] in title
+    assert report["window"]["timezone"] in title, "the title must say which week AND in what timezone"
+
+    figures = blocks[1]["text"]["text"].split("\n")
+    assert figures[0].startswith("*Jobs:*") and "captured" in figures[0] and "reviewed" in figures[0]
+    assert figures[1].startswith("*Qualified opportunities:*")
+    assert figures[2].startswith("*Contacts found:*")
+    assert figures[3].startswith("*Added to Instantly:*")
+
+    csv_line = blocks[2]["text"]["text"]
+    assert csv_line.startswith("*Full CSV:*") and "one per genuine creation" in csv_line
+
+    footer = blocks[-1]["elements"][0]["text"]
+    assert "*Definitions:*" in footer and report["window"]["report_id"] in footer
+    assert "https://" not in "\n".join(str(b) for b in blocks), "no link may render a second file card"
+
+
+def test_an_interrupted_run_is_kept_but_never_reads_as_a_hole_in_the_total(conn):
+    """The recovery's work IS in the figures. Saying 'interrupted' without saying that
+    invites the reader to subtract something that was never missing."""
+    report = _published_report(conn)
+    report["runs"] = {**report["runs"], "interrupted_runs": [
+        {"run_id": "20260924T030130.689454Z-91bada58", "kind": "terminated_without_end",
+         "superseded_by": "20260925T024914.962584Z-15f2bf20", "note": "",
+         "recorded_at": "2026-09-25T07:54:46+00:00", "started_at": "2026-09-24T03:01:30+00:00"}]}
+
+    blocks = slack.blocks_for(report, detail_rows=10)
+    figures = blocks[1]["text"]["text"]
+    footer = blocks[-1]["elements"][0]["text"]
+
+    assert "interrupted" not in figures, "it does not belong beside the four figures"
+    assert "91bada58" in footer and "15f2bf20" in footer, "both runs stay identifiable"
+    assert "included in the figures above" in footer
+    assert "20260924T030130.689454Z" not in footer, "the full ids are too long for a line people read"
+
+
+def test_a_file_already_published_is_never_uploaded_again(conn):
+    from tgtc_core.reporting import pipeline as report_pipeline
+
+    report = _published_report(conn)
+    window = pipeline.window_for(now=FRIDAY_MORNING)
+    detail.store(conn, window, detail.build(conn, window))
+    detail.record_publication(conn, report["window"]["report_id"],
+                              url="https://slack.example/files/F1/x.csv", viewers=["#gtm-engineering"])
+
+    out = report_pipeline.publish_detail(conn, report, channel="#gtm-engineering",
+                                         env={"TGTC_REPORT_DETAIL_DESTINATION": "slack",
+                                              "SLACK_BOT_TOKEN": "xoxb-not-used"})
+    assert out["published"] is False and out["reason"] == "already_published"
+    assert out["url"] == "https://slack.example/files/F1/x.csv"
+
+
+def test_a_retry_re_sends_no_message_and_re_uploads_no_file(conn):
+    """Two ticks twenty minutes apart must leave one message and one file for the week."""
+    from tgtc_core.reporting import store as report_store
+
+    report = _published_report(conn)
+    store.save(conn, report)                      # a report is stored before it is sent
+    key = report["window"]["report_id"]
+    posts = []
+
+    def sender(channel, message):
+        posts.append(message)
+        return {"transport": "slack_api", "message_ts": f"ts-{len(posts)}"}
+
+    first = report_store.deliver_once(conn, report, sender=sender, channel="#gtm-engineering",
+                                      message={"blocks": [], "text": "t"}, kind=report_store.FINAL,
+                                      destination_basis="slack_api:C1")
+    second = report_store.deliver_once(conn, report, sender=sender, channel="#gtm-engineering",
+                                       message={"blocks": [], "text": "t"}, kind=report_store.FINAL,
+                                       destination_basis="slack_api:C1")
+
+    assert first["sent"] is True and second["sent"] is False
+    assert second["reason"] == "already_delivered"
+    assert len(posts) == 1, "a retry posted the report a second time"
+    rows = sqlall(conn, "SELECT channel, kind, attempts FROM report_deliveries WHERE report_id = %s", (key,))
+    assert rows == [{"channel": "#gtm-engineering", "kind": "final", "attempts": 1}]

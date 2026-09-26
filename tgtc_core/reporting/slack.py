@@ -101,61 +101,108 @@ def headline_lines(report: Dict[str, Any]) -> List[str]:
     return lines
 
 
-def _attention_line(report: Dict[str, Any]) -> Optional[str]:
-    """One short line, or nothing. A channel message that lists every exception stops
-    being read; the detail carries them all."""
+def _integrity_line(report: Dict[str, Any]) -> Optional[str]:
+    """Only a failure that puts the FIGURES in doubt earns a place beside them.
+
+    An operational exception -- a day whose run never happened, a run the container
+    replacement killed -- is real and is kept, but it belongs at the end: it does not
+    make the numbers above wrong, and a warning sitting under the headline reads as if
+    it does.
+    """
     integrity = report.get("integrity_alerts") or []
-    alerts = report.get("alerts") or []
-    if integrity:
-        extra = len(alerts) - 1
-        return f"🟥 {integrity[0]}" + (f" _(+{extra} more in the detail)_" if extra > 0 else "")
-    if alerts:
-        extra = len(alerts) - 1
-        return f"⚠️ {alerts[0]}" + (f" _(+{extra} more in the detail)_" if extra > 0 else "")
-    return None
+    if not integrity:
+        return None
+    rest = len(report.get("alerts") or []) - 1
+    return f"🟥 {integrity[0]}" + (f" _(+{rest} more, listed below)_" if rest > 0 else "")
+
+
+def _short_run(run_id: str) -> str:
+    """The tail of a run id: unique, and short enough to sit in a line people read."""
+    return str(run_id).rsplit("-", 1)[-1][:12] or str(run_id)[:12]
+
+
+def _operational_notes(report: Dict[str, Any]) -> List[str]:
+    """What happened to the week's production, briefly, and never as a hole in the total.
+
+    A recovered run's work IS in the figures above. Saying "interrupted" without saying
+    that invites the reader to subtract something that was never missing.
+    """
+    runs = report.get("runs") or {}
+    notes: List[str] = []
+    missing = runs.get("local_days_without_a_run") or []
+    if missing:
+        notes.append(f"no production run on {', '.join(missing)}")
+    for item in runs.get("interrupted_runs") or []:
+        notes.append(
+            f"the run started {str(item.get('started_at'))[:16].replace('T', ' ')}Z (`{_short_run(item.get('run_id'))}`) "
+            f"was interrupted and could not close itself — its work is included in the figures above, "
+            f"completed by `{_short_run(item.get('superseded_by'))}`")
+    unavailable = (report.get("coverage") or {}).get("local_days_unavailable") or []
+    if unavailable:
+        notes.append(f"no data available for {', '.join(unavailable)} (before the database's first record)")
+    counted = len(missing) + len(runs.get("interrupted_runs") or []) + (1 if unavailable else 0)
+    others = len(report.get("alerts") or []) - len(report.get("integrity_alerts") or []) - counted
+    if others > 0:
+        notes.append(f"{others} further note(s) in the run ledger")
+    return notes
+
+
+def _footer(report: Dict[str, Any]) -> str:
+    """Definitions and operational notes, at the end, in the small type."""
+    w = report["window"]
+    parts = [f"Week {w['window_start_local'][:10]} → {w['window_end_local'][:10]} {w['timezone']} "
+             f"(end exclusive) • data cutoff {w['data_cutoff_utc']} • report `{w['report_id']}`"]
+    notes = _operational_notes(report)
+    if notes:
+        parts.append("*Runs:* " + "; ".join(notes))
+    parts.append("*Definitions:* jobs captured/reviewed are the same cohort • 'contacts found' = current "
+                 "employer confirmed and work email verified • 'added' counts receipt-confirmed creations "
+                 "only, never existing contacts, Control campaigns or the phone sidecar")
+    return "\n".join(parts)
 
 
 def blocks_for(report: Dict[str, Any], *, detail_url: Optional[str] = None,
                detail_rows: Optional[int] = None, detail_hint: Optional[str] = None) -> List[Dict[str, Any]]:
-    """The weekly message: four figures, at most one line of attention, and where the
-    lead-level detail is. No personal data appears in it, by construction."""
+    """The weekly message, in the order a reader needs it: which week, the four figures,
+    where the full CSV is, and then the small print.
+
+    **Exactly one visual reference to the CSV.** When the file lives in this channel it
+    already has its own card, and repeating its permalink here does not merely unfurl --
+    posting a Slack file link SHARES the file again, which `unfurl_links: false` does not
+    prevent. Measured 2026-09-25: two share entries 0.146s apart, so the same CSV was
+    rendered twice. The link is therefore named, not linked, when Slack itself holds the
+    file; a detail hosted anywhere else is still linked, because nothing there duplicates.
+    """
     w = report["window"]
+    in_slack = (report.get("detail") or {}).get("destination") == "slack"
     blocks: List[Dict[str, Any]] = [
-        {"type": "header", "text": {"type": "plain_text", "text": f"TGTC weekly pipeline — {w['window_label']}"}},
+        {"type": "header", "text": {"type": "plain_text",
+                                    "text": f"TGTC weekly pipeline — {w['window_label']} ({w['timezone']})"}},
         _section("\n".join(headline_lines(report))),
     ]
-    attention = _attention_line(report)
-    if attention:
-        blocks.append(_section(attention))
+    integrity = _integrity_line(report)
+    if integrity:
+        blocks.append(_section(integrity))
 
-    if detail_url:
-        rows = f" — {_n(detail_rows)} rows, one per lead" if detail_rows is not None else ""
-        if (report.get("detail") or {}).get("destination") == "slack":
-            blocks.append(_section(
-                f"*Lead-level CSV:* <{detail_url}|this week's file>{rows}, reconciled against "
-                f"*Added to Instantly*. The file is visible to members of this channel."))
-        else:
-            blocks.append(_section(
-                f"*Lead-level detail (private):* <{detail_url}|this week's file>{rows}, reconciled against "
-                f"*Added to Instantly*. Access is limited to the authorised team."))
+    rows = f"{_n(detail_rows)} rows, one per genuine creation" if detail_rows is not None else "one row per genuine creation"
+    if in_slack:
+        # The file's own card in this channel is the single visual reference.
+        blocks.append(_section(
+            f"*Full CSV:* {rows}, reconciled against *Added to Instantly*."
+            + (" Posted with this report, visible to members of this channel."
+               if detail_url else
+               " _The upload to this channel has not been confirmed; the file is generated and stored._")))
+    elif detail_url:
+        blocks.append(_section(
+            f"*Lead-level detail (private):* <{detail_url}|this week's file> — {rows}, reconciled against "
+            "*Added to Instantly*. Access is limited to the authorised team."))
     else:
-        rows = f"{_n(detail_rows)} rows" if detail_rows is not None else "the file"
-        if (report.get("detail") or {}).get("destination") == "slack":
-            blocks.append(_section(
-                f"*Lead-level CSV:* _pending_ — {rows} generated and reconciled against *Added to Instantly*. "
-                "The file upload to this channel has not been confirmed."))
-        else:
-            blocks.append(_section(
-                f"*Lead-level detail:* _pending_ — {rows} generated and reconciled against *Added to Instantly*, "
-                "but not published: no private destination and reader list has been verified yet. "
-                + (detail_hint or "It is deliberately not posted here, because it contains personal data.")))
+        blocks.append(_section(
+            f"*Lead-level detail:* _pending_ — {rows}, reconciled against *Added to Instantly*, but not "
+            "published: no private destination and reader list has been verified yet. "
+            + (detail_hint or "It is deliberately not posted here, because it contains personal data.")))
 
-    blocks.append({"type": "context", "elements": [{"type": "mrkdwn", "text": (
-        f"Week {w['window_start_local'][:10]} → {w['window_end_local'][:10]} {w['timezone']} (end exclusive) • "
-        f"data cutoff {w['data_cutoff_utc']} • jobs captured/reviewed are the same cohort • "
-        f"'contacts found' = current employer confirmed + work email verified • "
-        f"'added' counts receipt-confirmed creations only, never existing contacts or the phone sidecar • "
-        f"report `{w['report_id']}`")}]})
+    blocks.append({"type": "context", "elements": [{"type": "mrkdwn", "text": _footer(report)}]})
     return blocks
 
 
