@@ -539,3 +539,37 @@ leaves `attempts` at 1.
 Deployed `0ebd7f5` to all three services at 00:05:32Z with the run lock free and no run
 open; crons unchanged. A watcher checks the 03:00Z Saturday run, because a deploy landed
 about three hours before it and a tick 55 minutes after a deploy was skipped once.
+
+### 20. 2026-09-26 03:07Z -- the out-of-office follow-up, closed with real receipts
+
+The five contacts moved into the one-step campaign on 25 September each received
+**exactly one email**, in that campaign's first send window:
+
+| sent | message id | from | subject |
+|---|---|---|---|
+| 13:32:43Z | `01a0d8c4-ad51-…` | devan.m@globaltalentpulse.com | Following up, Haley |
+| 13:32:43Z | `01a0d8c4-ad52-…` | devan.m@globaltalentstack.com | Following up, Conner |
+| 13:42:42Z | `01a0d8cd-d066-…` | devan.markus@globaltalentteamsco.com | Following up, Kathleen |
+| 13:42:42Z | `01a0d8cd-d067-…` | devan.markus@globaltalentwave.com | Following up, Eden |
+| 13:42:42Z | `01a0d8cd-d068-…` | devan.markus@globaltalentworkforce.com | Following up, Tiffany |
+
+Today's run recorded them: `followup_sent: 5`, and each work item is closed
+`followup_sent:<message id>`. `followup_deliveries` holds **6 moved, 5 with a receipt** --
+the sixth was moved this morning and waits for its window. Nobody received two, and
+nobody was re-enrolled in the four-email sequence.
+
+The "Eden" line is the contact from the subsequence probe. They were moved deliberately
+after being checked against every gate, and this is the single message they were owed.
+
+**The move-confirmation fix works in production:** `move_unconfirmed: 0`,
+`moved_to_followup: 1` in the same run. On 25 September, before the fix, four of five
+moves were left unconfirmed for a day.
+
+### 21. 2026-09-26 03:03Z -- the deploy did not cost the Saturday tick, and a note corrected
+
+The core redeployed at 00:05:32Z and the **03:00Z tick fired** as
+`20260926T030353.022534Z-072718ca`, holding the run lock. Together with the Weekly Report
+(deployed 06:20Z, its 13:00Z tick published) and Replies (deployed 06:20Z, its 07:15Z tick
+skipped), the rule is about **proximity to the tick**, not about deploying at all. The
+memory note that said a redeploy always costs the next tick was one observation
+generalised too far; it has been corrected rather than left standing.
