@@ -495,3 +495,47 @@ incident settles, open runs minus settled leaves **zero** in flight, the lock is
 delivery rows for the window are zero, the reconciliation closes, the CSV row count and
 the headline figure agree exactly, and **nothing has been published for this week**. No
 rehearsal artefact was left behind.
+
+### 19. 2026-09-26 00:05Z -- why the CSV appeared twice, and the message rebuilt around the reader
+
+**It was not a link preview.** `files.info` on the published file returns **two share
+entries for the same file in the same channel**, `1790341237.652539` and
+`1790341237.798679` -- 0.146 seconds apart, both from the app. The first is the upload
+(`files.completeUploadExternal` with `channel_id`); the second is the summary message,
+which repeated the file's permalink. Posting a Slack file link **shares the file again**;
+that is not the same mechanism as link unfurling, which is why `unfurl_links: false` --
+already set on every post since this was built -- never suppressed it.
+
+The receipts were right all along: one delivery row, `attempts = 1`, one export row with
+one `published_url`. One message and one file were published. Slack rendered the one file
+twice.
+
+So the permalink is no longer put in the message when Slack itself holds the file; the
+file's own card is the single visual reference. A detail hosted anywhere else keeps its
+link, because nothing there duplicates.
+
+**The message, rebuilt in the order a reader needs:** title with the week *and* the
+timezone; the four figures immediately below; one line for the CSV naming what a row is;
+then the small print -- window, cutoff, report id, operational notes, definitions.
+
+**The operational warning moved to the end.** A day whose run never happened, or a run
+that was interrupted, does not make the figures above wrong, and a warning printed
+beneath them reads as if it does. They are kept, named and dated, with short run ids, and
+the interrupted one now says in so many words that **its work is included in the figures
+above** -- so nobody subtracts something that was never missing. A failure that genuinely
+puts the figures in doubt still sits beside them.
+
+Untouched, deliberately: counts, window, eligibility, checksum, file permissions, and the
+single-publication guards.
+
+Measured on the rebuilt message with synthetic figures: **4 blocks, 10 lines, ~1,065
+characters, zero links that could render a card, one CSV reference.**
+
+Verified by receipt across every report so far: no week has more than one `final`
+delivery, and no week has more than one export row. **2,062 tests pass**, including the
+finished text in order, the already-published file, and a retry that posts nothing and
+leaves `attempts` at 1.
+
+Deployed `0ebd7f5` to all three services at 00:05:32Z with the run lock free and no run
+open; crons unchanged. A watcher checks the 03:00Z Saturday run, because a deploy landed
+about three hours before it and a tick 55 minutes after a deploy was skipped once.
