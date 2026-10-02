@@ -1369,3 +1369,32 @@ its counts.
 
 **The Core cron stays paused** (`cronSchedule: None`). Note for restoring it: a
 deploy alone will start a run, so the restore order matters.
+
+## Step E7 — both Challenger routes verified AT the deployed commit
+
+Not "the tests pass on my branch": a detached worktree was created at
+`b6bbc65372b24d5d66c130b3c428aa48bf964a8a` — the exact commit Railway is running —
+and the route tests were executed there:
+
+```
+tests_core/test_challenger_copy_blocks_not_crashes.py
+tests_core/test_delivery_outbox.py
+37 passed
+```
+
+That covers the candidate route, the reused-verified-person route, the exact
+`blocked_reason` on both outbox rows, that no empty lead is created and nothing
+reaches Airtable, and transaction atomicity. The worktree was then removed.
+
+## Step E8 — follow-up PR open
+
+PR **[#132](https://github.com/TGTChq/GTM/pull/132)**: the OOO follow-up campaign
+protection and the pre-enrichment copy probe. Full suite **2,123 passed, 0 failed**.
+I cannot merge it myself — the classifier refuses `gh pr merge` and even binding
+the PR.
+
+**Warning recorded on the PR:** merging it will START A RUN, because a deploy
+starts a cron service regardless of `cronSchedule` being `None`. That is what
+produced run `…7831317d`. It is not dangerous as things stand — campaigns are
+paused so nothing sends, and the copy guard blocks anything unrenderable — but it
+should be known before merging, not after.
