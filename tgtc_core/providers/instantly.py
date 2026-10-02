@@ -102,6 +102,13 @@ class InstantlyClient:
         return InstantlyResult(False, resp.status, data=body if isinstance(body, dict) else {}, message=(resp.text or "")[:300])
 
     def create_lead(self, payload: Dict[str, Any]) -> InstantlyResult:
+        # Last line of defence, independent of the outbox: a Challenger campaign
+        # body is only the rendered variables plus the signature, so creating a
+        # lead without them schedules an empty-subject, signature-only email.
+        from ..domain.outbound_copy import copy_block_reason
+        copy_failure = copy_block_reason(payload)
+        if copy_failure:
+            raise ValueError(copy_failure)
         unknown = set(payload) - DOCUMENTED_LEAD_FIELDS
         if unknown:
             raise ValueError(f"undocumented Instantly lead fields: {sorted(unknown)}")

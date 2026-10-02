@@ -26,6 +26,7 @@ import psycopg
 from ..db.connection import jsonb, transaction
 from . import instantly_capacity
 from ..domain.approval import outreach_blocked_reason
+from ..domain.outbound_copy import copy_block_reason
 from ..providers.airtable import AirtableClient
 from ..providers.instantly import ALREADY_IN_TARGET_CAMPAIGN, MEMBERSHIP_UNKNOWN, NEWLY_CREATED, InstantlyClient, classify_membership
 from .lifecycle import posting_is_active
@@ -505,6 +506,14 @@ class DeliveryService:
             self._set(item, stop[0], blocked_reason=stop[1])
             return DeliveryOutcome(item.id, "instantly", stop[0], stop[1])
         payload = item.payload
+        # A row signed before the copy contract existed carries no rendered copy,
+        # and draining it would send an empty-subject, signature-only email. It is
+        # BLOCKED with a named reason, never sent and never silently dropped, so it
+        # can be repaired from its approval and re-queued.
+        copy_failure = copy_block_reason(payload)
+        if copy_failure:
+            self._set(item, "blocked", blocked_reason=copy_failure)
+            return DeliveryOutcome(item.id, "instantly", "blocked", copy_failure)
         target = str(payload["campaign"])
         email = str(payload["email"])
         # The destination has a finite number of lead slots. While it is on record as
