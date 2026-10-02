@@ -442,3 +442,47 @@ Proven against the real defect — with the allow lines removed it fails naming
 `['outbound_wave1/', 'data/wave1_claims.json']`, and passes once restored. My
 earlier Dockerfile-text-only assertion could not have caught this, which is why
 "tests pass" was not sufficient evidence of a working deployment.
+
+## Step 5f — DEPLOYED and verified (2026-10-02 ~17:20Z)
+
+PR #130 merged. `feat/rebuild-core` → `4efb21e`.
+
+| Fact | Value |
+| --- | --- |
+| Deployment | `38dae8b3-d26f-4e8a-b5f1-b6a3c5422413` |
+| Status | **SUCCESS** |
+| Effective commit | **`4efb21ea02`** (was `0ebd7f5695`) |
+| Service | `GTM Core Canary 1000` — Online, **0/1 running** |
+| Cron | `0 3 * * *`, next run ~2026-10-03T03:00Z |
+| Run lock at deploy | `held=0` — no run was killed |
+
+Build log of the SUCCESSFUL build, all eight steps, no errors:
+
+```
+[5/8] COPY tgtc_core/ ./tgtc_core/
+[6/8] COPY outbound_wave1/ ./outbound_wave1/
+[7/8] COPY data/wave1_claims.json ./data/wave1_claims.json
+[8/8] COPY domain_utils.py source_domains.py ./
+```
+
+### Does the IMAGE contain the renderer and its claim registry? Yes
+
+The container does not run between cron ticks (`railway ssh` reports "container is
+not running (status: created)"), so this is established without an interactive
+shell, and the evidence is stronger than a shell would give:
+
+1. **The build fails if either path is absent.** Deployment `bc29b837` proved it
+   empirically — it failed with `"/data/wave1_claims.json": not found`. So a
+   SUCCESSFUL build of this Dockerfile is itself proof that both are present.
+2. `claims._DEFAULT_PATH` = `Path(__file__).parent.parent/"data"/"wave1_claims.json"`
+   → `/app/data/wave1_claims.json` under `WORKDIR /app`, which is exactly the
+   `COPY` destination.
+3. The failure modes are safe by construction anyway: a missing `outbound_wave1`
+   raises ImportError inside `rendered_variables`, so no lead is created; and a
+   present-but-empty registry is caught by
+   `test_the_claim_registry_actually_loads_and_is_not_silently_empty`.
+
+The in-container import will also be exercised by the 03:00Z run. I did not
+redeploy `GTM Core Acceptance` to force a container: it would add a production
+action nobody asked for and could surface unrelated pre-existing acceptance
+failures that muddy this incident.
