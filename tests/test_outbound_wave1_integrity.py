@@ -636,6 +636,10 @@ def test_a_proof_never_points_back_at_a_signal_that_did_not_fire():
     """GTM's proof says "the combination" and AI's ends on a bare "instead".
     Behind a degraded signal there is nothing for those to refer to, so the
     shared wording is used instead."""
+    from datetime import datetime, timezone
+
+    # Keep the August 1 fixture outside the 45-60 day T2 window on every run.
+    as_of = datetime(2026, 9, 2, tzinfo=timezone.utc)
     for bucket, role, dangling in (
         # GTM and AI now establish their own referent in the degraded friction
         # ("a mix that's common in the parts", "years on a CV"), so only a proof
@@ -645,7 +649,7 @@ def test_a_proof_never_points_back_at_a_signal_that_did_not_fire():
         fields = _campaign_fields(bucket, role)
         fields.update({"Role Focus": "", "Focus Evidence": "", "Outbound Roles": role})
         resolution = resolve_challenger(
-            fields, experiment_id=EXPERIMENT, registry=empty_registry())
+            fields, experiment_id=EXPERIMENT, registry=empty_registry(), as_of=as_of)
         assert resolution.signal_tier == "T3", (bucket, resolution.signal_tier)
         assert dangling not in resolution.rendered_email_1, (bucket, dangling)
         assert resolution.qa_pass, (bucket, resolution.qa_reasons)

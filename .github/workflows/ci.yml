@@ -20,7 +20,7 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, feat/rebuild-core, 'codex/yield-recovery-*']
   pull_request:
     branches: [main]
   workflow_dispatch:
@@ -82,7 +82,9 @@ jobs:
         # "offline" is enforced rather than intended.
         env:
           PYTHONHASHSEED: "0"
-        run: python -m pytest tests -q -p ci_no_network
+        run: |
+          python rebuild/run_offline_tests.py tests -q --junitxml=legacy-results.xml
+          python -c "from pathlib import Path; from rebuild.publish_validated_release import validate_junit; print(validate_junit(Path('legacy-results.xml'), minimum=3755, legacy=True, windows=False))"
 
       - name: Confirm no credential reached the job
         # A belt-and-braces assertion that the gate is genuinely credential-free.
@@ -92,6 +94,74 @@ jobs:
           for name in RAPIDAPI_KEY APOLLO_API_KEY HUNTER_API_KEY AIRTABLE_TOKEN \
                       INSTANTLY_API_KEY FANTASTIC_JOBS_API_KEY VALIDATION_SIGNING_KEY \
                       SLACK_WEEKLY_REPORT_WEBHOOK_URL; do
+            if [ -n "${!name:-}" ]; then
+              echo "::error::$name is set in CI; this gate must stay credential-free"
+              exit 1
+            fi
+          done
+          echo "no provider credential is present"
+
+  core:
+    # The rebuilt core (tgtc_core/) runs against a REAL PostgreSQL. `pgserver` embeds
+    # PostgreSQL 16 so the job needs no service container and no credential; the
+    # legacy `test` job above is untouched.
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            requirements-core.txt
+            requirements-core-dev.txt
+      - name: Install core dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-core-dev.txt -r requirements.txt
+      - name: Undefined names in the core
+        run: |
+          set -o pipefail
+          python -m pyflakes tgtc_core tests_core | tee pyflakes-core.txt || true
+          if grep -q "undefined name" pyflakes-core.txt; then
+            echo "::error::pyflakes found an undefined name in tgtc_core"
+            grep "undefined name" pyflakes-core.txt
+            exit 1
+          fi
+      - name: Core integrated suite (embedded PostgreSQL, simulated providers)
+        env:
+          PYTHONHASHSEED: "0"
+        run: |
+          python rebuild/run_offline_tests.py tests_core -q --junitxml=core-results.xml
+          python -c "from pathlib import Path; from rebuild.publish_validated_release import validate_junit; print(validate_junit(Path('core-results.xml'), minimum=581, legacy=False, windows=False))"
+      - name: Build isolated core image and check zero-network startup
+        run: |
+          core_dockerfile=$(python -c 'import json; print(json.load(open("railway.core.json"))["build"]["dockerfilePath"])')
+          docker build -f "$core_dockerfile" -t tgtc-core:ci .
+          docker run --rm --network none tgtc-core:ci
+          docker run --rm --network none --entrypoint python tgtc-core:ci -c \
+            "from tgtc_core.db.migrate import SCHEMA_PATH, migrations; assert SCHEMA_PATH.is_file(); assert migrations()"
+      - name: Legacy consumer compatibility (required)
+        env:
+          TGTC_REQUIRE_LEGACY_CONSUMER_TEST: "1"
+        run: |
+          python -m pip install -r requirements.txt
+          python rebuild/run_offline_tests.py tests_core/test_legacy_consumer_exclusion.py -q --junitxml=legacy-core-results.xml
+      - name: Preserve core test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: core-test-results
+          path: |
+            core-results.xml
+            legacy-core-results.xml
+      - name: Confirm no credential reached the job
+        run: |
+          for name in RAPIDAPI_KEY APOLLO_API_KEY HUNTER_API_KEY AIRTABLE_TOKEN \
+                      INSTANTLY_API_KEY FANTASTIC_JOBS_API_KEY VALIDATION_SIGNING_KEY \
+                      ANTHROPIC_API_KEY TGTC_CORE_SIGNING_KEY TGTC_DATABASE_URL; do
             if [ -n "${!name:-}" ]; then
               echo "::error::$name is set in CI; this gate must stay credential-free"
               exit 1

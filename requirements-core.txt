@@ -1,0 +1,16 @@
+# Runtime dependencies of the rebuilt core (tgtc_core/). Separate from the legacy
+# requirements.txt so the legacy image is unchanged until the cutover decision.
+requests>=2.32,<3
+tldextract==5.3.0
+psycopg[binary]>=3.2,<4
+# Semantic inference adapter (official SDK). Only imported when ANTHROPIC_API_KEY is set.
+anthropic>=1,<2
+# The IANA time zone database. The weekly report's window is defined in
+# America/Los_Angeles, and python:3.12-slim carries no system tz database: without
+# this wheel `zoneinfo` cannot resolve the zone and the report falls back to a
+# codified US rule. Pure data, no code.
+tzdata>=2024.1
+# Service-account authentication for publishing the weekly lead file to Drive. Only
+# imported when TGTC_DRIVE_SERVICE_ACCOUNT_JSON is set, so a deployment without Drive
+# configured never touches it.
+google-auth>=2.30,<3

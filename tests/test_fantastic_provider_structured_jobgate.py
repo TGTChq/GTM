@@ -12,6 +12,7 @@ LinkedIn/Fantastic contacts stuck at UNVERIFIED with Decision Reason
 from __future__ import annotations
 
 import unittest
+from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
 import config
@@ -24,6 +25,12 @@ _SHORT_DESC = "We are hiring a full-time VP of Information Technology in New Yor
 _LONG_DESC = "We are hiring a full-time VP of Information Technology in New York, United States. " * 12  # >700 chars
 
 
+def _fresh_date():
+    # These tests exercise provider provenance, not expiration. An August
+    # calendar literal silently becomes stale as the suite runs in September.
+    return (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+
+
 def _fantastic_job(desc=_SHORT_DESC, job_id="123456789", source="linkedin"):
     raw = {
         "id": job_id, "title": "VP of Information Technology",
@@ -31,7 +38,7 @@ def _fantastic_job(desc=_SHORT_DESC, job_id="123456789", source="linkedin"):
         "org_linkedin_website": "northwind.com", "domain_derived": "northwind.com",
         "url": f"https://www.linkedin.com/jobs/view/{job_id}",
         "source": source, "source_type": "jobboard",
-        "employment_type": ["FULL_TIME"], "date_posted": "2026-08-17T12:00:00Z",
+        "employment_type": ["FULL_TIME"], "date_posted": _fresh_date(),
         "countries_derived": ["United States"], "locations_derived": ["New York, NY, US"],
         "location_type": "onsite", "description_text": desc, "org_linkedin_headcount": 240,
     }
@@ -75,7 +82,7 @@ class FantasticProviderStructuredJobGateTests(unittest.TestCase):
             "organization": "Contoso Health", "domain_derived": "contosohealth.com",
             "org_linkedin_website": "contosohealth.com",
             "url": "https://www.linkedin.com/jobs/view/555", "source": "linkedin",
-            "employment_type": ["FULL_TIME"], "date_posted": "2026-08-17T12:00:00Z",
+            "employment_type": ["FULL_TIME"], "date_posted": _fresh_date(),
             "countries_derived": ["United States"], "locations_derived": ["Boston, MA, US"],
             "location_type": "onsite", "org_linkedin_headcount": 300,
             # no description_text / description
@@ -119,7 +126,7 @@ class FantasticProviderStructuredJobGateTests(unittest.TestCase):
             "id": "999", "title": "VP of Information Technology",
             "organization": "Northwind Traders", "domain_derived": "northwind.com",
             "url": "https://www.linkedin.com/jobs/view/999", "source": "linkedin",
-            "employment_type": ["PART_TIME"], "date_posted": "2026-08-17T12:00:00Z",
+            "employment_type": ["PART_TIME"], "date_posted": _fresh_date(),
             "countries_derived": ["United States"], "locations_derived": ["New York, NY, US"],
             "location_type": "onsite", "description_text": _SHORT_DESC,
         }

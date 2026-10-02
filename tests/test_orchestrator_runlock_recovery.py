@@ -409,10 +409,10 @@ class PreservedBehaviorTests(unittest.TestCase):
     def test_railway_json_does_not_define_start_command(self):
         # GTM's Start Command is service-managed (Railway UI), NOT config-as-code,
         # so it can be edited/restored (incl. a maintenance 'sleep infinity') with no
-        # Git change. railway.json must not pin it, and no acquisition flag may leak
+        # Git change. railway.legacy.json must not pin it, and no acquisition flag may leak
         # into config-as-code. A service with no Start Command falls back to the safe
         # --preflight-only image CMD, never acquisition.
-        rc = json.loads(Path("railway.json").read_text(encoding="utf-8"))
+        rc = json.loads(Path("railway.legacy.json").read_text(encoding="utf-8"))
         self.assertNotIn("startCommand", rc.get("deploy", {}))
         blob = json.dumps(rc)
         self.assertNotIn("live_acquisition_and_enrichment", blob)

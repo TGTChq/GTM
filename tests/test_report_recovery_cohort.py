@@ -41,23 +41,27 @@ def test_zero_acquisition_with_recovered_review_is_not_an_empty_pipeline():
 def test_executed_recovery_report_equals_ledger_only_after_artifact_retention(tmp_path):
     import json
     import shutil
-    from datetime import date
+    from datetime import timedelta
     from tests.test_throughput_contract import RecoveryProductionLoop
     from weekly_report.report import build_report
     from weekly_report.render import render_stakeholder_summary
-    from weekly_report.timewindow import explicit_window
+    from weekly_report.timewindow import anchored_window, parse_instant
 
     _, _, _, root = RecoveryProductionLoop().exercise(7, 3, 1000)
     entry = json.loads(next((root / "reporting_ledger").glob("*.json")).read_text())
     assert entry["metrics"]["postings_resumed"] == 7
-    window = explicit_window(date(2026, 9, 5), date(2026, 9, 12),
-                             boundary_hour=0, tz_name="America/Los_Angeles")
+    # Reports use completion time, not the fixture's date-stamped run ID.
+    # Anchor to the persisted instant so this test works on any execution date.
+    finished = parse_instant(entry["finished_at"])
+    assert finished is not None
+    window = anchored_window(finished - timedelta(seconds=1),
+                             finished + timedelta(seconds=1))
     before = build_report(window, artifact_roots=[str(root)])
     retained = tmp_path / "ledger-only"
     shutil.copytree(root, retained)
     shutil.rmtree(retained / "run_artifacts")
     after = build_report(window, artifact_roots=[str(retained)])
-    assert before.run_ids == after.run_ids
+    assert before.run_ids == after.run_ids == [entry["run_id"]]
     assert render_stakeholder_summary(before) == render_stakeholder_summary(after)
     for key, metric in before.metrics.items():
         other = after.metrics[key]

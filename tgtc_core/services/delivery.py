@@ -1,0 +1,630 @@
+"""Idempotent outbox consumers for Airtable and Instantly.
+
+Per item: exclusive claim (R06: an atomic ``pending/failed -> claimed`` transition under
+a lease; a second worker gets nothing while the lease is active) -> re-check
+suppressions, approval validity, the supporting posting's lifecycle (R11) and campaign
+availability -> reconcile by stable identity if an earlier attempt may have reached the
+provider -> attempt receipt + in_flight -> provider call outside any transaction ->
+terminal receipt + delivered.
+
+Every state change and every receipt is fenced by the lease token, so a worker that
+lost its lease can neither record a delivery nor move the item (R06). An uncertain
+outcome (timeout, connection reset, ambiguous 5xx after the request was sent -- R05)
+leaves the item in_flight; the next claim reconciles by ``Lead Key`` / email+campaign
+BEFORE any second create.
+"""
+
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
+from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
+
+import psycopg
+
+from ..db.connection import jsonb, transaction
+from . import instantly_capacity
+from ..domain.approval import outreach_blocked_reason
+from ..domain.outbound_copy import copy_block_reason
+from ..providers.airtable import AirtableClient
+from ..providers.instantly import ALREADY_IN_TARGET_CAMPAIGN, MEMBERSHIP_UNKNOWN, NEWLY_CREATED, InstantlyClient, classify_membership
+from .lifecycle import posting_is_active
+from .suppression import check as suppression_check, company_function_keys, account_keys
+
+
+@dataclass
+class DeliveryOutcome:
+    outbox_id: int
+    channel: str
+    outcome: str  # delivered | reconciled | blocked | failed | deferred | uncertain | lease_lost
+    reason: str = ""
+    external_id: str = ""
+
+
+@dataclass
+class OutboxItem:
+    id: int
+    approval_id: int
+    channel: str
+    idempotency_key: str
+    payload: Dict[str, Any]
+    state: str
+    attempts: int
+    lease_token: Any
+    version_state_before: str
+
+
+# --- suppression reason codes (2026-09-22) -----------------------------------------
+# Airtable must hold only final, good, non-duplicate leads. Measured that day: the
+# catch-up wrote 905 Airtable rows while Instantly genuinely created 872, and 201 rows
+# in all history have no genuine creation behind them. Every refusal now says which
+# rule refused it, in one vocabulary shared by the reconciliation queries.
+DUP_AIRTABLE = "duplicate_airtable"
+DUP_INSTANTLY_SAME_CAMPAIGN = "duplicate_instantly_same_campaign"
+DUP_INSTANTLY_OTHER_CAMPAIGN = "duplicate_instantly_other_campaign"
+DUP_LOCAL_HISTORY = "duplicate_local_history"
+DUP_IN_FLIGHT = "duplicate_in_flight"
+SAME_PERSON_MULTIPLE_JOBS = "same_person_multiple_jobs"
+SAME_PERSON_MULTIPLE_CAMPAIGNS = "same_person_multiple_campaigns"
+PREVIOUSLY_CONTACTED = "previously_contacted"
+FAILED_QUALITY_GATE = "failed_quality_gate"
+FAILED_COMPLIANCE_GATE = "failed_compliance_gate"
+#: Not a refusal: Instantly has not answered yet, so Airtable waits its turn.
+AWAITING_INSTANTLY = "awaiting_instantly"
+SUPPRESSION_REASONS = (DUP_AIRTABLE, DUP_INSTANTLY_SAME_CAMPAIGN, DUP_INSTANTLY_OTHER_CAMPAIGN, DUP_LOCAL_HISTORY,
+                       DUP_IN_FLIGHT, SAME_PERSON_MULTIPLE_JOBS, SAME_PERSON_MULTIPLE_CAMPAIGNS, PREVIOUSLY_CONTACTED,
+                       FAILED_QUALITY_GATE, FAILED_COMPLIANCE_GATE)
+
+
+def retired_campaign_block_reason(target, allowed_campaign_ids, env=None):
+    """Why this destination must not receive a lead, or None to proceed.
+
+    Eighteen Instantly campaigns exist: nine previous (Control) and nine
+    current (Challenger). An approval signed before the cutover carries a
+    Control id in its stored payload, and `get_campaign` cannot catch that --
+    the Control campaigns are still ACTIVE. The destination is therefore
+    re-validated against the CONFIGURED routes at send time.
+
+    Off unless the exhaustive flag is set, so the rollback path is unchanged.
+    """
+    from ..domain.exhaustive_routing import exhaustive_enabled
+    from ..policy.campaigns import KNOWN_CONTROL_CAMPAIGN_IDS
+    if not exhaustive_enabled(env):
+        return None
+    cid = str(target or "").strip()
+    if cid and cid in set(allowed_campaign_ids or ()):
+        return None
+    if cid in KNOWN_CONTROL_CAMPAIGN_IDS:
+        return "retired_control_campaign"
+    return "campaign_not_configured"
+
+
+@dataclass
+class CanaryCaps:
+    """A ceiling on the Instantly write portion, enforced in code.
+
+    The bounded production canary is at most ten eligible net-new contacts per
+    Challenger campaign and ninety in total. Putting that in a start command or
+    in an operator's attention is not a cap; this is. Disabled unless at least
+    one limit is configured, so normal production is untouched.
+
+    It is a ceiling, never a quota: nothing here tries to reach ten.
+    """
+    per_campaign: Optional[int] = None
+    total: Optional[int] = None
+    #: Per-campaign overrides (campaign_id -> limit), sized to each campaign's own
+    #: sender capacity. A campaign not listed uses ``per_campaign``.
+    by_campaign: Dict[str, int] = field(default_factory=dict)
+    _by_campaign: Dict[str, int] = field(default_factory=dict)
+    _total: int = 0
+
+    @classmethod
+    def from_env(cls, env: Optional[Mapping[str, str]]) -> "CanaryCaps":
+        env = env or {}
+        def _limit(name):
+            raw = str(env.get(name, "") or "").strip()
+            if not raw:
+                return None
+            try:
+                return int(raw)
+            except ValueError:
+                return None
+        # Production names first; the canary names remain valid on their own.
+        per_campaign = _limit("TGTC_DELIVERY_MAX_PER_CAMPAIGN")
+        total = _limit("TGTC_DELIVERY_MAX_TOTAL")
+        overrides: Dict[str, int] = {}
+        raw = str(env.get("TGTC_DELIVERY_MAX_BY_CAMPAIGN", "") or "").strip()
+        if raw:
+            try:
+                import json as _json
+                parsed = _json.loads(raw)
+                if isinstance(parsed, dict):
+                    overrides = {str(k): int(v) for k, v in parsed.items()}
+            except (ValueError, TypeError):
+                overrides = {}  # malformed: ignored, never fatal; the defaults still bind
+        return cls(
+            per_campaign=per_campaign if per_campaign is not None else _limit("TGTC_CANARY_MAX_PER_CAMPAIGN"),
+            total=total if total is not None else _limit("TGTC_CANARY_MAX_TOTAL"),
+            by_campaign=overrides,
+        )
+
+    @property
+    def enabled(self) -> bool:
+        return self.per_campaign is not None or self.total is not None or bool(self.by_campaign)
+
+    def exceeded(self, campaign_id: str) -> Optional[str]:
+        """The named reason this write must not happen, or None to proceed."""
+        if not self.enabled:
+            return None
+        if self.total is not None and self._total >= self.total:
+            return "canary_cap_total"
+        limit = self.by_campaign.get(campaign_id, self.per_campaign)
+        if limit is not None and self._by_campaign.get(campaign_id, 0) >= limit:
+            return "canary_cap_campaign"
+        return None
+
+    def seed(self, by_campaign: Mapping[str, int]) -> None:
+        """Start from writes already made today, so the ceiling is per UTC day
+        and survives new rounds, processes and restarts."""
+        for campaign_id, n in (by_campaign or {}).items():
+            self._by_campaign[campaign_id] = self._by_campaign.get(campaign_id, 0) + int(n)
+            self._total += int(n)
+
+    def record(self, campaign_id: str) -> None:
+        self._by_campaign[campaign_id] = self._by_campaign.get(campaign_id, 0) + 1
+        self._total += 1
+
+    def summary(self) -> Dict[str, Any]:
+        return {"enabled": self.enabled, "per_campaign": self.per_campaign, "total_limit": self.total,
+                "by_campaign_limits": dict(self.by_campaign),
+                "written_total": self._total, "written_by_campaign": dict(self._by_campaign)}
+
+
+class DeliveryService:
+    def __init__(self, conn: psycopg.Connection, *, airtable: Optional[AirtableClient], instantly: Optional[InstantlyClient],
+                 lease_seconds: int = 300, backoff_seconds: int = 120, max_attempts: int = 8,
+                 check_campaign_status: bool = True, max_contacts_per_opportunity: int = 1,
+                 campaign_env: Optional[Mapping[str, str]] = None,
+                 env: Optional[Mapping[str, str]] = None,
+                 now: Callable[[], datetime] = lambda: datetime.now(timezone.utc)):
+        self.conn = conn
+        self.airtable = airtable
+        self.instantly = instantly
+        self.lease_seconds = lease_seconds
+        self.backoff = backoff_seconds
+        self.max_attempts = max_attempts
+        self.check_campaign_status = check_campaign_status
+        self.max_contacts = max(1, min(3, max_contacts_per_opportunity))
+        self.allowed_campaign_ids = tuple((campaign_env or {}).values())
+        self.env = os.environ if env is None else env
+        self.now = now
+        self.canary_caps = CanaryCaps.from_env(self.env)
+        if self.canary_caps.enabled:
+            # Per UTC DAY, not per service instance. Measured 2026-09-21: run-target
+            # builds a new DeliveryService every round, so an in-process counter let
+            # OPERATIONS take 242 new leads against a ceiling of 150.
+            self.canary_caps.seed(self._instantly_created_today())
+
+    def _instantly_created_today(self) -> Dict[str, int]:
+        moment = self.now()
+        start = moment.replace(hour=0, minute=0, second=0, microsecond=0)
+        with self.conn.cursor() as cur:
+            cur.execute(
+                "SELECT external_campaign, count(*) AS n FROM delivery_receipts "
+                "WHERE channel = 'instantly' AND receipt_kind = 'created' AND received_at >= %s "
+                "AND external_campaign IS NOT NULL GROUP BY external_campaign",
+                (start,),
+            )
+            rows = {str(r["external_campaign"]): int(r["n"]) for r in cur.fetchall()}
+        self.conn.commit()
+        return rows
+
+    # --- claim (R06) ----------------------------------------------------------
+    def claim(self, channel: str, *, limit: int = 1) -> List[OutboxItem]:
+        moment = self.now()
+        with self.conn.cursor() as cur:
+            cur.execute(
+                """
+                WITH c AS (
+                    SELECT id, state FROM delivery_outbox
+                    WHERE channel = %(ch)s AND (
+                        (state IN ('pending', 'failed') AND available_at <= %(now)s
+                             AND (lease_expires_at IS NULL OR lease_expires_at <= %(now)s))
+                        OR (state IN ('claimed', 'in_flight') AND lease_expires_at IS NOT NULL AND lease_expires_at <= %(now)s))
+                    ORDER BY id FOR UPDATE SKIP LOCKED LIMIT %(lim)s)
+                UPDATE delivery_outbox o SET state = 'claimed', lease_token = gen_random_uuid(),
+                       lease_expires_at = %(now)s + make_interval(secs => %(lease)s), attempts = o.attempts + 1, updated_at = now()
+                FROM c WHERE o.id = c.id
+                RETURNING o.id, o.approval_id, o.channel, o.idempotency_key, o.payload_json, o.state, o.attempts, o.lease_token, c.state AS before
+                """,
+                {"ch": channel, "now": moment, "lim": limit, "lease": self.lease_seconds},
+            )
+            rows = cur.fetchall()
+        self.conn.commit()
+        return [OutboxItem(int(r["id"]), int(r["approval_id"]), r["channel"], r["idempotency_key"], dict(r["payload_json"]),
+                           r["state"], int(r["attempts"]), r["lease_token"], r["before"]) for r in rows]
+
+    # --- fenced state helpers ----------------------------------------------------
+    def _set(self, item: OutboxItem, state: str, *, error: str = "", blocked_reason: str = "", available_at: Optional[datetime] = None) -> bool:
+        """Move the item; only the lease holder can. Terminal/idle states release the lease."""
+        keep_lease = state in ("claimed", "in_flight")
+        with transaction(self.conn):
+            with self.conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE delivery_outbox SET state = %s, last_error = %s, blocked_reason = %s,
+                           available_at = COALESCE(%s, available_at),
+                           lease_token = CASE WHEN %s THEN lease_token ELSE NULL END,
+                           lease_expires_at = CASE WHEN %s THEN lease_expires_at ELSE NULL END, updated_at = now()
+                    WHERE id = %s AND lease_token = %s AND lease_expires_at > %s RETURNING id
+                    """,
+                    (state, error[:500] or None, blocked_reason[:200] or None, available_at, keep_lease, keep_lease, item.id, item.lease_token, self.now()),
+                )
+                return cur.fetchone() is not None
+
+    def _receipt(self, item: OutboxItem, kind: str, *, external_id: str = "", external_campaign: str = "",
+                 summary: Optional[Dict[str, Any]] = None) -> bool:
+        """A receipt is written only while the item still carries this worker's lease."""
+        with transaction(self.conn):
+            with self.conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO delivery_receipts (outbox_id, channel, receipt_kind, external_id, external_campaign, response_summary)
+                    SELECT o.id, o.channel, %s, %s, %s, %s FROM delivery_outbox o
+                    WHERE o.id = %s AND o.lease_token = %s AND o.lease_expires_at > %s
+                    FOR UPDATE OF o
+                    RETURNING id
+                    """,
+                    (kind, external_id or None, external_campaign or None, jsonb(summary or {}), item.id, item.lease_token, self.now()),
+                )
+                return cur.fetchone() is not None
+
+    def _delivered(self, item: OutboxItem, kind: str, *, external_id: str = "", external_campaign: str = "",
+                   summary: Optional[Dict[str, Any]] = None) -> bool:
+        # Receipt and terminal transition commit together. A lease loss cannot leave
+        # a terminal receipt attached to an item another worker still has to deliver.
+        with transaction(self.conn):
+            with self.conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE delivery_outbox SET state = 'delivered', lease_token = NULL, lease_expires_at = NULL, "
+                    "last_error = NULL, updated_at = now() WHERE id = %s AND lease_token = %s "
+                    "AND lease_expires_at > %s RETURNING id",
+                    (item.id, item.lease_token, self.now()),
+                )
+                if cur.fetchone() is None:
+                    return False
+                cur.execute(
+                    "INSERT INTO delivery_receipts (outbox_id, channel, receipt_kind, external_id, external_campaign, response_summary) "
+                    "VALUES (%s, %s, %s, %s, %s, %s)",
+                    (item.id, item.channel, kind, external_id or None, external_campaign or None, jsonb(summary or {})),
+                )
+                cur.execute(
+                    "UPDATE approvals SET state = 'delivered', updated_at = now() WHERE id = %s AND state = 'approved' "
+                    "AND NOT EXISTS (SELECT 1 FROM delivery_outbox WHERE approval_id = %s AND state <> 'delivered')",
+                    (item.approval_id, item.approval_id),
+                )
+        return True
+
+    def _mark_approval_delivered_if_complete(self, approval_id: int) -> None:
+        with transaction(self.conn):
+            with self.conn.cursor() as cur:
+                cur.execute("SELECT count(*) AS n FROM delivery_outbox WHERE approval_id = %s AND state <> 'delivered'", (approval_id,))
+                if int(cur.fetchone()["n"]) == 0:
+                    cur.execute("UPDATE approvals SET state = 'delivered', updated_at = now() WHERE id = %s AND state = 'approved'", (approval_id,))
+
+    def _revoke(self, approval_id: int, reason: str) -> None:
+        with transaction(self.conn):
+            with self.conn.cursor() as cur:
+                cur.execute("UPDATE approvals SET state = 'revoked', revoke_reason = %s, updated_at = now() WHERE id = %s AND state = 'approved'",
+                            (reason[:200], approval_id))
+                cur.execute("UPDATE delivery_outbox SET state = 'blocked', blocked_reason = %s, lease_token = NULL, lease_expires_at = NULL, updated_at = now() "
+                            "WHERE approval_id = %s AND state IN ('pending', 'failed', 'claimed')", (reason[:200], approval_id))
+
+    def _precheck(self, item: OutboxItem) -> Optional[Tuple[str, str]]:
+        """Return (state, reason) to stop, or None to proceed."""
+        moment = self.now()
+        with self.conn.cursor() as cur:
+            cur.execute("SELECT a.state, a.lead_json, a.outreach_eligible, a.outreach_block_reason, "
+                        "e.canonical_name, e.domain, e.linkedin_slug "
+                        "FROM approvals a JOIN employers e ON e.id = a.employer_id WHERE a.id = %s", (item.approval_id,))
+            row = cur.fetchone()
+            posting = None
+            if row:
+                pid = (row["lead_json"] or {}).get("posting_id")
+                if pid:
+                    cur.execute("SELECT id, state, date_valid_through, content_hash, description_text FROM postings WHERE id = %s", (pid,))
+                    posting = cur.fetchone()
+        self.conn.commit()
+        if not row:
+            return "blocked", "approval_missing"
+        if row["state"] == "revoked":
+            return "blocked", "approval_revoked"
+        lead = dict(row["lead_json"])
+        # R11: the supporting vacancy must still be active and unchanged since approval.
+        if posting is not None:
+            from ..domain.employer_attribution import employer_attribution_conflict
+            if employer_attribution_conflict(posting.get("description_text"),
+                                             employer_name=row["canonical_name"], employer_domain=row["domain"] or ""):
+                self._revoke(item.approval_id, "employer_attribution_conflict")
+                return "blocked", "employer_attribution_conflict"
+            active, why = posting_is_active(dict(posting), now=moment)
+            if not active:
+                self._revoke(item.approval_id, f"posting_no_longer_active:{why}")
+                return "blocked", f"posting_no_longer_active:{why}"
+            if lead.get("posting_content_hash") and posting["content_hash"] != lead.get("posting_content_hash"):
+                self._revoke(item.approval_id, "posting_evidence_changed_since_approval")
+                return "blocked", "posting_evidence_changed_since_approval"
+        # Country compliance (`tgtc-compliance/1`), checked on BOTH channels
+        # before anything leaves the process. The approval writer already
+        # created a blocked lead's outbox items in the `blocked` state, so this
+        # is the second, independent refusal rather than the only one: it
+        # catches items that were re-queued, and every approval made before
+        # these columns existed, whose NULL verdict is unknown and therefore
+        # never "yes". Same predicate as the writer, not a copy.
+        #
+        # Deliberately AFTER the R11 evidence checks above and before anything
+        # is sent. Those checks REVOKE the approval when the supporting vacancy
+        # has gone or changed hands; short-circuiting on compliance first would
+        # leave a genuinely misattributed approval un-revoked and merely
+        # unsent, which loses a data-integrity finding to a delivery decision.
+        compliance_block = outreach_blocked_reason(row)
+        if compliance_block:
+            return "blocked", compliance_block
+        hits = suppression_check(
+            self.conn, email=lead.get("email", ""),
+            company_function=company_function_keys(domain=row["domain"] or "", name=row["canonical_name"], slug=row["linkedin_slug"] or "", function_key=lead["function_key"]),
+            account=account_keys(domain=row["domain"] or "", name=row["canonical_name"]),
+            company_function_limit=self.max_contacts,
+        )
+        self.conn.commit()
+        own_keys = {f"company_function:{k}" for k in company_function_keys(domain=row["domain"] or "", name=row["canonical_name"], slug=row["linkedin_slug"] or "", function_key=lead["function_key"])}
+        external_hits = [h for h in hits if not (h in own_keys and self._own_suppression(h))]
+        if external_hits:
+            return "blocked", f"suppressed_before_delivery:{external_hits[0]}"
+        return None
+
+    def _own_suppression(self, hit: str) -> bool:
+        kind, key = hit.split(":", 1)
+        with self.conn.cursor() as cur:
+            cur.execute("SELECT source FROM suppressions WHERE kind = %s AND key = %s", (kind, key))
+            r = cur.fetchone()
+        self.conn.commit()
+        return bool(r and str(r["source"]).startswith("self:"))
+
+    def _backoff_at(self, item: OutboxItem) -> datetime:
+        return self.now() + timedelta(seconds=self.backoff * (2 ** max(0, item.attempts - 1)))
+
+    # --- Airtable ----------------------------------------------------------------
+    def airtable_gate(self, item: OutboxItem):
+        """May this approval become an Airtable record yet? ``None`` to proceed, else
+        ``(action, reason)``: Airtable follows a GENUINE Instantly creation, and one
+        person never gets a second record."""
+        if self.conn is None:
+            return None
+        with self.conn.cursor() as cur:
+            cur.execute(
+                "SELECT 1 FROM delivery_outbox o JOIN delivery_receipts r ON r.outbox_id = o.id "
+                "WHERE o.approval_id = %s AND o.channel = 'airtable' AND o.id <> %s "
+                "  AND r.receipt_kind IN ('created', 'reconciled') LIMIT 1", (item.approval_id, item.id))
+            if cur.fetchone() is not None:
+                self.conn.commit()
+                return ("block", DUP_AIRTABLE)     # this approval is already in Airtable
+            cur.execute(
+                "SELECT o.state, coalesce(o.blocked_reason, '') AS blocked_reason, "
+                " (SELECT string_agg(r.receipt_kind, ',') FROM delivery_receipts r WHERE r.outbox_id = o.id "
+                "   AND r.receipt_kind IN ('created', 'existing', 'reconciled')) AS kinds "
+                "FROM delivery_outbox o WHERE o.approval_id = %s AND o.channel = 'instantly' LIMIT 1",
+                (item.approval_id,))
+            sibling = cur.fetchone()
+            cur.execute(
+                "SELECT (a2.campaign_id IS DISTINCT FROM a.campaign_id) AS other_campaign "
+                "FROM approvals a JOIN approvals a2 ON a2.person_id = a.person_id AND a2.id <> a.id "
+                "JOIN delivery_outbox o2 ON o2.approval_id = a2.id AND o2.channel = 'airtable' "
+                "JOIN delivery_receipts r2 ON r2.outbox_id = o2.id AND r2.receipt_kind IN ('created', 'reconciled') "
+                "WHERE a.id = %s LIMIT 1", (item.approval_id,))
+            already = cur.fetchone()
+        self.conn.commit()
+        if already is not None:
+            # The same person is already in Airtable from another job or campaign: one lead.
+            return ("block", SAME_PERSON_MULTIPLE_CAMPAIGNS if already["other_campaign"] else SAME_PERSON_MULTIPLE_JOBS)
+        if sibling is None:
+            return ("block", FAILED_QUALITY_GATE)
+        kinds = {k for k in str(sibling["kinds"] or "").split(",") if k}
+        if kinds & {"created", "reconciled"}:
+            return None                                   # a genuine creation: write the record
+        if "existing" in kinds:
+            return ("block", DUP_INSTANTLY_SAME_CAMPAIGN)
+        reason = str(sibling["blocked_reason"] or "")
+        if sibling["state"] == "blocked":
+            if reason.startswith("compliance:"):
+                return ("block", FAILED_COMPLIANCE_GATE)
+            if "existing_other_campaign" in reason:
+                return ("block", DUP_INSTANTLY_OTHER_CAMPAIGN)
+            if reason in SUPPRESSION_REASONS:
+                return ("block", reason)
+            return ("block", FAILED_QUALITY_GATE)
+        return ("defer", AWAITING_INSTANTLY)
+
+    def process_airtable(self, item: OutboxItem) -> DeliveryOutcome:
+        if self.airtable is None:
+            self._set(item, "pending", available_at=self.now() + timedelta(seconds=self.backoff))
+            return DeliveryOutcome(item.id, "airtable", "deferred", "no_airtable_client")
+        stop = self._precheck(item)
+        if stop:
+            self._set(item, stop[0], blocked_reason=stop[1])
+            return DeliveryOutcome(item.id, "airtable", stop[0], stop[1])
+        gate = self.airtable_gate(item)
+        if gate:
+            action, reason = gate
+            if action == "defer":
+                self._set(item, "pending", error=reason, available_at=self.now() + timedelta(seconds=self.backoff))
+                return DeliveryOutcome(item.id, "airtable", "deferred", reason)
+            self._receipt(item, "rejected", summary={"suppressed": reason})
+            self._set(item, "blocked", blocked_reason=reason)
+            return DeliveryOutcome(item.id, "airtable", "blocked", reason)
+        lead_key = item.payload["Lead Key"]
+        # Reconcile first whenever an earlier attempt may have reached the provider (R05).
+        if item.version_state_before in ("in_flight", "claimed") or item.attempts > 1:
+            found = self.airtable.find_by_lead_key(lead_key)
+            if found.ok and found.records:
+                rec = found.records[0]
+                if self._delivered(item, "reconciled", external_id=str(rec.get("id") or ""), summary={"reconciled_by": "Lead Key"}):
+                    return DeliveryOutcome(item.id, "airtable", "reconciled", "found_by_lead_key", str(rec.get("id") or ""))
+                return DeliveryOutcome(item.id, "airtable", "lease_lost", "reconciled_but_lease_lost")
+            if not found.ok:
+                self._set(item, "failed", error=f"reconcile_failed:{found.status}:{found.error_type}", available_at=self._backoff_at(item))
+                return DeliveryOutcome(item.id, "airtable", "failed", "reconcile_lookup_failed")
+        if not self._receipt(item, "attempted", summary={"attempt": item.attempts}) or not self._set(item, "in_flight"):
+            return DeliveryOutcome(item.id, "airtable", "lease_lost", "lease_lost_before_send")
+        result = self.airtable.create_records([item.payload])
+        if result.uncertain:
+            # The request may have created the row. Stay in_flight under the lease; the
+            # next claim (after expiry) reconciles by Lead Key before any second create.
+            return DeliveryOutcome(item.id, "airtable", "uncertain", f"uncertain:{result.error_type}")
+        if result.ok and result.records:
+            rec = result.records[0]
+            if self._delivered(item, "created", external_id=str(rec.get("id") or ""), summary={"status": result.status}):
+                return DeliveryOutcome(item.id, "airtable", "delivered", "created", str(rec.get("id") or ""))
+            return DeliveryOutcome(item.id, "airtable", "lease_lost", "created_but_lease_lost", str(rec.get("id") or ""))
+        if result.status == 422:
+            self._receipt(item, "rejected", summary=result.summary())
+            self._set(item, "blocked", error=result.message, blocked_reason=f"airtable_422:{result.error_type}")
+            return DeliveryOutcome(item.id, "airtable", "blocked", f"airtable_422:{result.error_type}")
+        state = "failed" if item.attempts < self.max_attempts else "blocked"
+        self._set(item, state, error=f"{result.status}:{result.error_type}:{result.message}",
+                  blocked_reason="max_attempts" if state == "blocked" else "", available_at=self._backoff_at(item))
+        return DeliveryOutcome(item.id, "airtable", state, f"http_{result.status}")
+
+    # --- Instantly ---------------------------------------------------------------
+    def process_instantly(self, item: OutboxItem) -> DeliveryOutcome:
+        if self.instantly is None:
+            self._set(item, "pending", available_at=self.now() + timedelta(seconds=self.backoff))
+            return DeliveryOutcome(item.id, "instantly", "deferred", "no_instantly_client")
+        stop = self._precheck(item)
+        if stop:
+            self._set(item, stop[0], blocked_reason=stop[1])
+            return DeliveryOutcome(item.id, "instantly", stop[0], stop[1])
+        payload = item.payload
+        # A row signed before the copy contract existed carries no rendered copy,
+        # and draining it would send an empty-subject, signature-only email. It is
+        # BLOCKED with a named reason, never sent and never silently dropped, so it
+        # can be repaired from its approval and re-queued.
+        copy_failure = copy_block_reason(payload)
+        if copy_failure:
+            self._set(item, "blocked", blocked_reason=copy_failure)
+            return DeliveryOutcome(item.id, "instantly", "blocked", copy_failure)
+        target = str(payload["campaign"])
+        email = str(payload["email"])
+        # The destination has a finite number of lead slots. While it is on record as
+        # full, exactly one caller per interval may find out whether there is room;
+        # everybody else waits without asking, because the answer is the same for all.
+        room = instantly_capacity.reserve_probe(self.conn, env=self.env, now=self.now())
+        if not room["allowed"]:
+            self._set(item, "pending", available_at=self._capacity_retry_at(), error=instantly_capacity.DEFERRED_REASON)
+            return DeliveryOutcome(item.id, "instantly", "deferred", instantly_capacity.DEFERRED_REASON)
+        # R-cutover: the destination must still be a CONFIGURED route. A stored
+        # payload signed before the Control -> Challenger cutover names a
+        # retired campaign that is nonetheless still active in Instantly, so
+        # the status check below cannot catch it.
+        retired = retired_campaign_block_reason(target, self.allowed_campaign_ids, self.env)
+        if retired:
+            self._set(item, "blocked", blocked_reason=retired)
+            return DeliveryOutcome(item.id, "instantly", "blocked", retired)
+        # Bounded canary ceiling. The row is DEFERRED, never blocked or failed:
+        # the cap is about this run's write budget, not about the contact, so a
+        # later run drains it normally once the cap is lifted.
+        capped = self.canary_caps.exceeded(target)
+        if capped:
+            self._set(item, "pending", available_at=self.now() + timedelta(hours=1), error=capped)
+            return DeliveryOutcome(item.id, "instantly", "deferred", capped)
+        if self.check_campaign_status:
+            camp = self.instantly.get_campaign(target)
+            if not camp.ok:
+                self._set(item, "failed", available_at=self._backoff_at(item), error=f"campaign_lookup_failed:{camp.status}")
+                return DeliveryOutcome(item.id, "instantly", "failed", "campaign_lookup_failed")
+            status = camp.data.get("status")
+            if str(camp.data.get("id") or "") != target or type(status) is not int:
+                self._set(item, "failed", available_at=self._backoff_at(item), error="campaign_response_invalid")
+                return DeliveryOutcome(item.id, "instantly", "failed", "campaign_response_invalid")
+            if status != 1:
+                self._set(item, "pending", available_at=self.now() + timedelta(hours=1), error=f"campaign_status_{status}")
+                return DeliveryOutcome(item.id, "instantly", "deferred", f"campaign_not_active:{status}")
+        if item.version_state_before in ("in_flight", "claimed") or item.attempts > 1:
+            membership, campaigns = self.instantly.resolve_membership(email, target)
+            if membership == ALREADY_IN_TARGET_CAMPAIGN:
+                if self._delivered(item, "reconciled", external_campaign=target, summary={"campaigns": list(campaigns)}):
+                    return DeliveryOutcome(item.id, "instantly", "reconciled", "already_in_target_campaign")
+                return DeliveryOutcome(item.id, "instantly", "lease_lost", "reconciled_but_lease_lost")
+            if membership == MEMBERSHIP_UNKNOWN:
+                self._set(item, "failed", error="reconcile_unknown", available_at=self._backoff_at(item))
+                return DeliveryOutcome(item.id, "instantly", "failed", "reconcile_unknown")
+        if not self._receipt(item, "attempted", summary={"attempt": item.attempts}) or not self._set(item, "in_flight"):
+            return DeliveryOutcome(item.id, "instantly", "lease_lost", "lease_lost_before_send")
+        started = self.now()
+        result = self.instantly.create_lead(payload)
+        if result.uncertain:
+            return DeliveryOutcome(item.id, "instantly", "uncertain", f"uncertain:{result.message[:40]}")
+        if instantly_capacity.is_capacity_refusal(result.status, result.message):
+            # Nothing is wrong with this contact and nothing was created: the workspace
+            # is full. Keep the row pending -- failing it would age good contacts into
+            # 'blocked: max_attempts' over a few days of a wall that is not theirs.
+            instantly_capacity.record_refusal(self.conn, message=result.message, now=self.now())
+            self._set(item, "pending", available_at=self._capacity_retry_at(), error=instantly_capacity.DEFERRED_REASON)
+            return DeliveryOutcome(item.id, "instantly", "deferred", instantly_capacity.DEFERRED_REASON)
+        if result.ok:
+            instantly_capacity.record_available(self.conn, now=self.now())
+            membership, lead_id, lead_campaign, created_at = classify_membership(result.data, target_campaign=target, request_started_at=started)
+            if membership != NEWLY_CREATED:
+                membership, campaigns = self.instantly.resolve_membership(email, target)
+            if membership == NEWLY_CREATED:
+                # Counted only on a genuinely NEW enrolment acknowledged by
+                # Instantly: a reconciled existing lead is not a canary write.
+                self.canary_caps.record(target)
+                if self._delivered(item, "created", external_id=lead_id, external_campaign=lead_campaign or target, summary={"created_at": created_at}):
+                    return DeliveryOutcome(item.id, "instantly", "delivered", "created", lead_id)
+                return DeliveryOutcome(item.id, "instantly", "lease_lost", "created_but_lease_lost", lead_id)
+            if membership == ALREADY_IN_TARGET_CAMPAIGN:
+                if self._delivered(item, "existing", external_id=lead_id, external_campaign=target, summary={"created_at": created_at}):
+                    return DeliveryOutcome(item.id, "instantly", "delivered", "already_in_target_campaign", lead_id)
+                return DeliveryOutcome(item.id, "instantly", "lease_lost", "existing_but_lease_lost", lead_id)
+            self._receipt(item, "rejected", external_id=lead_id, external_campaign=lead_campaign, summary={"membership": membership})
+            self._set(item, "blocked", blocked_reason=f"not_delivered:{membership}")
+            return DeliveryOutcome(item.id, "instantly", "blocked", membership, lead_id)
+        if result.status in (400, 422):
+            self._receipt(item, "rejected", summary=result.summary())
+            self._set(item, "blocked", error=result.message, blocked_reason=f"instantly_{result.status}")
+            return DeliveryOutcome(item.id, "instantly", "blocked", f"instantly_{result.status}")
+        state = "failed" if item.attempts < self.max_attempts else "blocked"
+        self._set(item, state, error=f"{result.status}:{result.message}", blocked_reason="max_attempts" if state == "blocked" else "",
+                  available_at=self._backoff_at(item))
+        return DeliveryOutcome(item.id, "instantly", state, f"http_{result.status}")
+
+    def process(self, item: OutboxItem) -> DeliveryOutcome:
+        with self.conn.cursor() as cur:
+            cur.execute("SELECT id FROM delivery_outbox WHERE id = %s AND lease_token = %s "
+                        "AND lease_expires_at > %s AND state IN ('claimed', 'in_flight')",
+                        (item.id, item.lease_token, self.now()))
+            owned = cur.fetchone() is not None
+        self.conn.commit()
+        if not owned:
+            return DeliveryOutcome(item.id, item.channel, "lease_lost", "lease_lost_before_processing")
+        return self.process_airtable(item) if item.channel == "airtable" else self.process_instantly(item)
+
+    def _capacity_retry_at(self) -> datetime:
+        return self.now() + timedelta(hours=instantly_capacity.retry_hours(self.env))
+
+    def drain(self, channel: str, *, max_items: int = 100) -> List[DeliveryOutcome]:
+        out: List[DeliveryOutcome] = []
+        while len(out) < max_items:
+            if channel == "instantly" and not instantly_capacity.may_attempt(
+                    self.conn, env=self.env, now=self.now())["allowed"]:
+                break          # full and not due: claiming rows would only age them
+            items = self.claim(channel, limit=1)
+            if not items:
+                break
+            outcome = self.process(items[0])
+            out.append(outcome)
+            if outcome.reason == instantly_capacity.DEFERRED_REASON:
+                break          # one refusal answers for every row waiting behind it
+        return out

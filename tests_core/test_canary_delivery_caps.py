@@ -1,0 +1,139 @@
+"""Code-enforced canary caps on the Instantly write portion.
+
+The bound is at most ten eligible net-new contacts per Challenger campaign and
+ninety in total. It lives in code, not in a start command or a human's
+attention, so a deploy cannot exceed it by accident.
+
+Fewer than ten is acceptable: the cap is a ceiling, never a quota to fill.
+"""
+from __future__ import annotations
+
+from tgtc_core.services.delivery import CanaryCaps
+
+A = "8bfa0769-4b9a-4346-8e93-17ac8b726dce"
+B = "7b319c7a-cc55-4e08-8a47-7058c345d8ae"
+
+
+def test_disabled_by_default():
+    caps = CanaryCaps.from_env({})
+    assert caps.enabled is False
+    for _ in range(500):
+        assert caps.exceeded(A) is None
+        caps.record(A)
+
+
+def test_per_campaign_ceiling():
+    caps = CanaryCaps.from_env({"TGTC_CANARY_MAX_PER_CAMPAIGN": "10", "TGTC_CANARY_MAX_TOTAL": "90"})
+    assert caps.enabled is True
+    for _ in range(10):
+        assert caps.exceeded(A) is None
+        caps.record(A)
+    assert caps.exceeded(A) == "canary_cap_campaign"
+
+
+def test_one_campaign_filling_up_does_not_block_another():
+    caps = CanaryCaps.from_env({"TGTC_CANARY_MAX_PER_CAMPAIGN": "10", "TGTC_CANARY_MAX_TOTAL": "90"})
+    for _ in range(10):
+        caps.record(A)
+    assert caps.exceeded(A) == "canary_cap_campaign"
+    assert caps.exceeded(B) is None
+
+
+def test_total_ceiling_stops_everything():
+    caps = CanaryCaps.from_env({"TGTC_CANARY_MAX_PER_CAMPAIGN": "90", "TGTC_CANARY_MAX_TOTAL": "5"})
+    for _ in range(5):
+        assert caps.exceeded(A) is None
+        caps.record(A)
+    assert caps.exceeded(A) == "canary_cap_total"
+    assert caps.exceeded(B) == "canary_cap_total"
+
+
+def test_nine_campaigns_at_ten_each_is_exactly_ninety():
+    caps = CanaryCaps.from_env({"TGTC_CANARY_MAX_PER_CAMPAIGN": "10", "TGTC_CANARY_MAX_TOTAL": "90"})
+    written = 0
+    for campaign in (f"campaign-{i}" for i in range(9)):
+        while caps.exceeded(campaign) is None:
+            caps.record(campaign)
+            written += 1
+    assert written == 90
+    assert caps.exceeded("campaign-0") == "canary_cap_total"
+
+
+def test_a_tenth_campaign_cannot_push_past_the_total():
+    caps = CanaryCaps.from_env({"TGTC_CANARY_MAX_PER_CAMPAIGN": "10", "TGTC_CANARY_MAX_TOTAL": "90"})
+    for i in range(9):
+        for _ in range(10):
+            caps.record(f"campaign-{i}")
+    assert caps.exceeded("campaign-extra") == "canary_cap_total"
+
+
+def test_only_one_of_the_two_limits_set_still_enables_the_cap():
+    assert CanaryCaps.from_env({"TGTC_CANARY_MAX_TOTAL": "5"}).enabled is True
+    assert CanaryCaps.from_env({"TGTC_CANARY_MAX_PER_CAMPAIGN": "3"}).enabled is True
+
+
+def test_a_zero_or_negative_limit_blocks_every_write():
+    caps = CanaryCaps.from_env({"TGTC_CANARY_MAX_TOTAL": "0"})
+    assert caps.enabled is True
+    assert caps.exceeded(A) == "canary_cap_total"
+
+
+# --- production names ---------------------------------------------------------
+# The ceiling outlived the canary: the same code-enforced limit now governs the
+# daily production run, under production names. The canary names still work,
+# and a production name wins when both are set.
+
+
+def test_production_names_are_read():
+    caps = CanaryCaps.from_env({"TGTC_DELIVERY_MAX_PER_CAMPAIGN": "150", "TGTC_DELIVERY_MAX_TOTAL": "1100"})
+    assert (caps.per_campaign, caps.total) == (150, 1100)
+
+
+def test_production_names_win_over_canary_names():
+    caps = CanaryCaps.from_env({"TGTC_DELIVERY_MAX_PER_CAMPAIGN": "150", "TGTC_CANARY_MAX_PER_CAMPAIGN": "10",
+                                "TGTC_DELIVERY_MAX_TOTAL": "1100", "TGTC_CANARY_MAX_TOTAL": "90"})
+    assert (caps.per_campaign, caps.total) == (150, 1100)
+
+
+def test_canary_names_still_work_alone():
+    caps = CanaryCaps.from_env({"TGTC_CANARY_MAX_PER_CAMPAIGN": "10", "TGTC_CANARY_MAX_TOTAL": "90"})
+    assert (caps.per_campaign, caps.total) == (10, 90)
+
+
+# --- per-campaign ceilings ------------------------------------------------------
+# One insertion ceiling for all nine campaigns cannot match nine different sending
+# capacities. TGTC_DELIVERY_MAX_BY_CAMPAIGN (JSON campaign_id -> limit) overrides the
+# default for the campaigns it names, so each campaign accepts only what its own
+# sender accounts can carry through the whole sequence.
+
+
+def test_a_per_campaign_override_applies_only_to_that_campaign():
+    caps = CanaryCaps.from_env({"TGTC_DELIVERY_MAX_PER_CAMPAIGN": "150", "TGTC_DELIVERY_MAX_TOTAL": "2000",
+                                "TGTC_DELIVERY_MAX_BY_CAMPAIGN": '{"%s": 3}' % A})
+    for _ in range(3):
+        caps.record(A)
+    assert caps.exceeded(A) == "canary_cap_campaign"
+    for _ in range(3):
+        caps.record(B)
+    assert caps.exceeded(B) is None
+
+
+def test_an_override_can_raise_a_campaign_above_the_default():
+    caps = CanaryCaps.from_env({"TGTC_DELIVERY_MAX_PER_CAMPAIGN": "2", "TGTC_DELIVERY_MAX_TOTAL": "2000",
+                                "TGTC_DELIVERY_MAX_BY_CAMPAIGN": '{"%s": 5}' % A})
+    for _ in range(4):
+        caps.record(A)
+    assert caps.exceeded(A) is None
+
+
+def test_the_total_still_binds_over_any_override():
+    caps = CanaryCaps.from_env({"TGTC_DELIVERY_MAX_TOTAL": "2", "TGTC_DELIVERY_MAX_BY_CAMPAIGN": '{"%s": 50}' % A})
+    caps.record(A)
+    caps.record(A)
+    assert caps.exceeded(A) == "canary_cap_total"
+
+
+def test_malformed_override_json_is_ignored_not_fatal():
+    caps = CanaryCaps.from_env({"TGTC_DELIVERY_MAX_PER_CAMPAIGN": "150", "TGTC_DELIVERY_MAX_BY_CAMPAIGN": "{not json"})
+    assert caps.per_campaign == 150
+    assert caps.exceeded(A) is None

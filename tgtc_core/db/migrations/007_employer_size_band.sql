@@ -1,0 +1,11 @@
+-- Phase 2 audit task 5c (2026-09-20): the employer's declared LinkedIn size
+-- BAND (org_linkedin_size, e.g. "201-500 employees"), alongside the existing
+-- single-field headcount (employee_count, from org_linkedin_headcount). Every
+-- live company-size decision (services/opportunity.py, domain/approval.py)
+-- read employee_count alone, which cannot tell a genuine firmographic
+-- conflict between two reliable sources (Decision 2, 2026-09-19) from a
+-- confident single-source read -- measured 1,436 rows where headcount reads
+-- inside 25-1,000 while the declared band reads above it (71 the other way).
+-- NULL for every existing row: backfill is a later, explicit re-observation,
+-- never invented from employee_count.
+ALTER TABLE employers ADD COLUMN IF NOT EXISTS size_band text;

@@ -1,0 +1,221 @@
+"""Small, explicit runtime configuration for the core.
+
+Deliberately NOT a copy of the legacy ``config.py`` (2,200+ lines, dozens of
+historical switches). Every setting here has a meaning and a provenance, and
+``Settings.describe()`` prints names and presence only -- never a secret value.
+"""
+
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass, field, fields
+from typing import Any, Dict, List, Mapping, Optional
+
+from .policy.campaigns import CAMPAIGN_ENV_BY_FUNCTION, POLICY_VERSION
+from .policy.compliance import COMPLIANCE_RULE_VERSION
+
+DEFAULT_FANTASTIC_SOURCES = ("fantastic:active-jb", "fantastic:active-ats")
+
+SECRET_NAMES = (
+    "TGTC_DATABASE_URL", "FANTASTIC_JOBS_API_KEY", "APOLLO_API_KEY", "AIRTABLE_TOKEN",
+    "INSTANTLY_API_KEY", "ANTHROPIC_API_KEY", "TGTC_CORE_SIGNING_KEY",
+)
+
+
+def _int(env: Mapping[str, str], name: str, default: int) -> int:
+    raw = str(env.get(name, "") or "").strip()
+    try:
+        return int(raw) if raw else default
+    except ValueError:
+        return default
+
+
+def _bool(env: Mapping[str, str], name: str, default: bool) -> bool:
+    raw = str(env.get(name, "") or "").strip().lower()
+    if not raw:
+        return default
+    return raw in {"1", "true", "yes", "on"}
+
+
+@dataclass
+class Settings:
+    # --- storage -----------------------------------------------------------
+    database_url: str = ""
+    # --- providers (presence only is ever reported) ------------------------
+    fantastic_api_key: str = ""
+    fantastic_base_url: str = "https://data.fantastic.jobs"
+    apollo_api_key: str = ""
+    apollo_base_url: str = "https://api.apollo.io/api/v1"
+    airtable_token: str = ""
+    airtable_base_id: str = ""
+    airtable_table_name: str = "Leads"
+    airtable_base_url: str = "https://api.airtable.com/v0"
+    instantly_api_key: str = ""
+    instantly_base_url: str = "https://api.instantly.ai/api/v2"
+    anthropic_api_key: str = ""
+    anthropic_base_url: str = "https://api.anthropic.com"
+    inference_model: str = "claude-opus-5"
+    signing_key: str = ""
+    #: Immutable authorization key for the current provider-spend window.  The
+    #: identifier is not secret; its value is omitted from ``describe`` anyway.
+    spend_budget_id: str = ""
+    # --- campaign ids: env NAME -> id, read at runtime ---------------------
+    campaign_env: Dict[str, str] = field(default_factory=dict)
+    # --- limits (meaning + provenance in describe()) ------------------------
+    fantastic_page_limit: int = 100
+    fantastic_fresh_window_minutes: int = 60
+    fantastic_fresh_lag_minutes: int = 180
+    fantastic_backfill_window_hours: int = 24
+    fantastic_time_frame: str = "7d"
+    fantastic_max_pages_per_partition: int = 50
+    # Opt-in: never silently change a deployed acquisition policy on code publish.
+    acquisition_strategy: str = "legacy_v1"
+    fantastic_cycle_page_slots: int = 10
+    fantastic_min_jobs_quota_remaining: int = 90
+    fantastic_min_requests_quota_remaining: int = 20
+    #: Both contracted Fantastic feeds by default (review R02). ATS here is Fantastic's
+    #: ATS feed, not the 145 direct boards of the old system.
+    fantastic_sources: List[str] = field(default_factory=lambda: list(DEFAULT_FANTASTIC_SOURCES))
+    fantastic_quota_max_age_hours: float = 24.0
+    fantastic_availability_retry_hours: float = 6.0
+    partition_lease_seconds: int = 900
+    inference_retry_minutes: int = 15
+    apollo_people_search_max_pages: int = 2
+    # Apollo documents up to 100 results/page for People API Search.  Search is
+    # zero-credit; paid person matching remains separately budgeted.
+    apollo_people_search_page_size: int = 100
+    apollo_availability_retry_hours: float = 6.0
+    # A production target run keeps cycling until this many NEW approvals from
+    # its own run have terminal Airtable create/reconcile receipts.
+    approved_target_per_run: int = 1000
+    target_max_rounds: int = 100
+    target_stall_rounds: int = 2
+    # The user-approved volume policy permits up to three independently gated
+    # buyers for one employer/function opportunity.  Each contact still passes
+    # the complete employment, authority, territory, LinkedIn and email gates.
+    max_contacts_per_opportunity: int = 3
+    lease_seconds: int = 300
+    retry_backoff_seconds: int = 120
+    fresh_share_pct: int = 80
+    payload_retention_days: int = 30
+    person_employer_uniqueness: bool = True
+    instantly_verify_on_import: bool = False
+    inference_enabled: bool = True
+    # --- country compliance (`tgtc-compliance/1`) ---------------------------
+    # The deployment-level groundwork the UK regime requires before any outreach:
+    # a documented lawful basis and its evidence reference, and a configured
+    # privacy-notice process. Absent -- the default -- the UK gate fails closed
+    # and every UK lead is approved, retained and counted as
+    # COMPLIANCE_BLOCKED_CONDITION rather than sent. These are deployment facts
+    # a human asserts; nothing in the code can discover them, so nothing here
+    # defaults them to true.
+    outreach_legal_basis: str = ""
+    outreach_legal_basis_evidence: str = ""
+    outreach_privacy_notice_configured: bool = False
+    #: The matrix's "no later than one month after obtaining third-party data".
+    outreach_privacy_notice_days: int = 30
+
+    def __post_init__(self):
+        if self.acquisition_strategy not in {"legacy_v1", "balanced_v1"}:
+            raise ValueError("unknown_acquisition_strategy")
+        if not 5 <= self.fantastic_cycle_page_slots <= 100:
+            raise ValueError("TGTC_FANTASTIC_CYCLE_PAGE_SLOTS must be between 5 and 100")
+        if not 1 <= self.apollo_people_search_page_size <= 100:
+            raise ValueError("TGTC_APOLLO_PEOPLE_SEARCH_PAGE_SIZE must be between 1 and 100")
+        if self.approved_target_per_run < 1:
+            raise ValueError("TGTC_APPROVED_TARGET_PER_RUN must be positive")
+        if self.target_max_rounds < 1:
+            raise ValueError("TGTC_TARGET_MAX_ROUNDS must be positive")
+        if self.target_stall_rounds < 1:
+            raise ValueError("TGTC_TARGET_STALL_ROUNDS must be positive")
+        if not 1 <= self.max_contacts_per_opportunity <= 3:
+            raise ValueError("TGTC_MAX_CONTACTS_PER_OPPORTUNITY must be between 1 and 3")
+
+    @classmethod
+    def from_env(cls, env: Optional[Mapping[str, str]] = None) -> "Settings":
+        env = os.environ if env is None else env
+        campaign_env: Dict[str, str] = {}
+        for name in list(CAMPAIGN_ENV_BY_FUNCTION.values()) + ["INSTANTLY_CAMPAIGN_ID"]:
+            for suffix in ("", "_SMALL", "_MID", "_LARGE"):
+                key = f"{name}{suffix}"
+                value = str(env.get(key, "") or "").strip()
+                if value:
+                    campaign_env[key] = value
+        return cls(
+            database_url=str(env.get("TGTC_DATABASE_URL", "") or ""),
+            fantastic_api_key=str(env.get("FANTASTIC_JOBS_API_KEY", "") or ""),
+            fantastic_base_url=str(env.get("FANTASTIC_JOBS_BASE_URL", "") or "https://data.fantastic.jobs"),
+            apollo_api_key=str(env.get("APOLLO_API_KEY", "") or ""),
+            airtable_token=str(env.get("AIRTABLE_TOKEN", "") or ""),
+            airtable_base_id=str(env.get("AIRTABLE_BASE_ID", "") or ""),
+            airtable_table_name=str(env.get("AIRTABLE_TABLE_NAME", "") or "Leads"),
+            instantly_api_key=str(env.get("INSTANTLY_API_KEY", "") or ""),
+            instantly_base_url=str(env.get("INSTANTLY_BASE_URL", "") or "https://api.instantly.ai/api/v2"),
+            anthropic_api_key=str(env.get("ANTHROPIC_API_KEY", "") or ""),
+            anthropic_base_url=str(env.get("TGTC_ANTHROPIC_BASE_URL", "") or "https://api.anthropic.com"),
+            inference_model=str(env.get("TGTC_INFERENCE_MODEL", "") or "claude-opus-5"),
+            signing_key=str(env.get("TGTC_CORE_SIGNING_KEY", "") or ""),
+            spend_budget_id=str(env.get("TGTC_SPEND_BUDGET_ID", "") or ""),
+            campaign_env=campaign_env,
+            fantastic_page_limit=_int(env, "TGTC_FANTASTIC_PAGE_LIMIT", 100),
+            fantastic_fresh_window_minutes=_int(env, "TGTC_FRESH_WINDOW_MINUTES", 60),
+            fantastic_fresh_lag_minutes=_int(env, "TGTC_FRESH_LAG_MINUTES", 180),
+            fantastic_backfill_window_hours=_int(env, "TGTC_BACKFILL_WINDOW_HOURS", 24),
+            fantastic_time_frame=str(env.get("TGTC_FANTASTIC_TIME_FRAME", "") or "7d"),
+            fantastic_max_pages_per_partition=_int(env, "TGTC_FANTASTIC_MAX_PAGES_PER_PARTITION", 50),
+            acquisition_strategy=str(env.get("TGTC_ACQUISITION_STRATEGY", "") or "legacy_v1"),
+            fantastic_cycle_page_slots=int(env.get("TGTC_FANTASTIC_CYCLE_PAGE_SLOTS", "10") or "10"),
+            fantastic_min_jobs_quota_remaining=_int(env, "TGTC_FANTASTIC_MIN_JOBS_QUOTA_REMAINING", 90),
+            fantastic_min_requests_quota_remaining=_int(env, "TGTC_FANTASTIC_MIN_REQUESTS_QUOTA_REMAINING", 20),
+            fantastic_sources=[x.strip() for x in str(env.get("TGTC_FANTASTIC_SOURCES", "") or ",".join(DEFAULT_FANTASTIC_SOURCES)).split(",") if x.strip()],
+            fantastic_quota_max_age_hours=float(_int(env, "TGTC_FANTASTIC_QUOTA_MAX_AGE_HOURS", 24)),
+            fantastic_availability_retry_hours=float(_int(env, "TGTC_FANTASTIC_AVAILABILITY_RETRY_HOURS", 6)),
+            partition_lease_seconds=_int(env, "TGTC_PARTITION_LEASE_SECONDS", 900),
+            inference_retry_minutes=_int(env, "TGTC_INFERENCE_RETRY_MINUTES", 15),
+            apollo_people_search_max_pages=_int(env, "TGTC_APOLLO_PEOPLE_SEARCH_MAX_PAGES", 2),
+            apollo_people_search_page_size=_int(env, "TGTC_APOLLO_PEOPLE_SEARCH_PAGE_SIZE", 100),
+            apollo_availability_retry_hours=float(_int(env, "TGTC_APOLLO_AVAILABILITY_RETRY_HOURS", 6)),
+            approved_target_per_run=_int(env, "TGTC_APPROVED_TARGET_PER_RUN", 1000),
+            target_max_rounds=_int(env, "TGTC_TARGET_MAX_ROUNDS", 100),
+            target_stall_rounds=_int(env, "TGTC_TARGET_STALL_ROUNDS", 2),
+            max_contacts_per_opportunity=_int(env, "TGTC_MAX_CONTACTS_PER_OPPORTUNITY", 3),
+            lease_seconds=_int(env, "TGTC_LEASE_SECONDS", 300),
+            retry_backoff_seconds=_int(env, "TGTC_RETRY_BACKOFF_SECONDS", 120),
+            fresh_share_pct=_int(env, "TGTC_FRESH_SHARE_PCT", 80),
+            payload_retention_days=_int(env, "TGTC_PAYLOAD_RETENTION_DAYS", 30),
+            person_employer_uniqueness=_bool(env, "TGTC_PERSON_EMPLOYER_UNIQUENESS", True),
+            instantly_verify_on_import=_bool(env, "INSTANTLY_VERIFY_ON_IMPORT", False),
+            inference_enabled=_bool(env, "TGTC_INFERENCE_ENABLED", True),
+            outreach_legal_basis=str(env.get("TGTC_OUTREACH_LEGAL_BASIS", "") or ""),
+            outreach_legal_basis_evidence=str(env.get("TGTC_OUTREACH_LEGAL_BASIS_EVIDENCE", "") or ""),
+            outreach_privacy_notice_configured=_bool(env, "TGTC_OUTREACH_PRIVACY_NOTICE_CONFIGURED", False),
+            outreach_privacy_notice_days=_int(env, "TGTC_OUTREACH_PRIVACY_NOTICE_DAYS", 30),
+        )
+
+    def describe(self) -> Dict[str, Any]:
+        """Names, presence and limits. Never a value of a secret."""
+        out: Dict[str, Any] = {"policy_version": POLICY_VERSION, "secrets_present": {}, "limits": {}}
+        for name, attr in (
+            ("TGTC_DATABASE_URL", "database_url"), ("FANTASTIC_JOBS_API_KEY", "fantastic_api_key"),
+            ("APOLLO_API_KEY", "apollo_api_key"), ("AIRTABLE_TOKEN", "airtable_token"),
+            ("INSTANTLY_API_KEY", "instantly_api_key"), ("ANTHROPIC_API_KEY", "anthropic_api_key"),
+            ("TGTC_CORE_SIGNING_KEY", "signing_key"),
+        ):
+            out["secrets_present"][name] = bool(getattr(self, attr))
+        out["campaign_env_present"] = sorted(self.campaign_env.keys())
+        out["spend_budget_present"] = bool(self.spend_budget_id)
+        for f in fields(self):
+            if f.type in ("int", "float", "bool") or isinstance(getattr(self, f.name), (int, float, bool)):
+                if f.name not in {"campaign_env"}:
+                    out["limits"][f.name] = getattr(self, f.name)
+        out["limits"]["fantastic_sources"] = list(self.fantastic_sources)
+        out["limits"]["acquisition_strategy"] = self.acquisition_strategy
+        out["limits"]["airtable_base_id_present"] = bool(self.airtable_base_id)
+        out["limits"]["airtable_table_name"] = self.airtable_table_name
+        out["limits"]["inference_model"] = self.inference_model
+        # Presence, never the value: a lawful-basis reference is not a secret,
+        # but the manifest's job is to say whether the UK groundwork is in place.
+        out["limits"]["compliance_rule_version"] = COMPLIANCE_RULE_VERSION
+        out["limits"]["outreach_legal_basis_present"] = bool(self.outreach_legal_basis)
+        out["limits"]["outreach_legal_basis_evidence_present"] = bool(self.outreach_legal_basis_evidence)
+        return out

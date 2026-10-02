@@ -1,0 +1,23 @@
+# The acceptance build must not even receive legacy state or credentials.
+*
+!Dockerfile.core
+!requirements-core.txt
+!domain_utils.py
+!source_domains.py
+!tgtc_core/
+!tgtc_core/**
+# The frozen Challenger copy renderer, and ONLY the one static file it reads.
+# A Challenger campaign body is nothing but the rendered variables plus the
+# signature, so the image cannot build a sendable Challenger lead without these.
+# `data/` is re-emptied immediately afterwards so no other data file rides along:
+# the last matching pattern wins, so the order of these four lines matters.
+!outbound_wave1/
+!outbound_wave1/**
+!data/
+data/*
+!data/wave1_claims.json
+tgtc_core/testing/
+**/__pycache__/
+**/*.py[cod]
+**/.env
+**/.env.*

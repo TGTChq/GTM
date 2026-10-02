@@ -1,3 +1,19 @@
+# TGTC Core v2 recoverable-volume correction — September 18, 2026
+
+- Fixed multi-valued provider employment labels so `FULL_TIME` combined with
+  `CONTRACTOR`, `PART_TIME`, `INTERNSHIP`, or another incompatible type is
+  rejected downstream instead of being flattened into an unknown token.
+- Unsupported or low-confidence semantic exclusion claims no longer erase
+  independently grounded positive function and responsibility evidence.
+  Grounded hard exclusions remain terminal.
+- Reuses cached v1 semantic answers under the v2 local validation policy, so
+  reopening the affected backlog does not repeat the same model call.
+- Treats missing campaign/signing configuration as a recoverable dependency and
+  checks it before Apollo spend; Customer Success and Customer Support can use
+  either historical env name for their shared Customer Experience campaign.
+- Keeps capped Apollo buyer-search misses open for a delayed retry and reopens
+  opportunities previously closed for search/configuration-only reasons without
+  inventing a new evidence epoch.
 # READY v1.4.5 actionable review policy — July 24, 2026
 
 - Changed the Airtable boundary from fully verified only to actionable review: confirmed hard rejects remain terminal, while incomplete evidence is surfaced for human review.
