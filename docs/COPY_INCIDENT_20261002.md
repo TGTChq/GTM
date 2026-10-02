@@ -234,3 +234,76 @@ So: `PATCH /leads/{id}` with `custom_variables` set to the FULL merged payload i
 the correct mechanism (the field is replaced wholesale, which is why the merge is
 mandatory), and **a 200 is not proof** — verification must re-read after
 propagation. The batch therefore verifies every lead in a separate sweep.
+
+## Step 5b — repair running
+
+`repair_leads.py` is patching the 5,653 repairable leads, paced to the provider's
+20-requests-per-minute limit (~3.1s each, so ~4.9h end to end). It is resumable:
+each applied lead id is appended to `repair_applied.jsonl`, so a re-run continues
+rather than repeating. First 50: **HTTP 200 on all 50**, 40 payload keys sent.
+
+Nothing is deleted, no contact is re-added, no sequence is restarted, no campaign
+is modified. The merge base is the pre-repair backup payload, so no existing
+variable is dropped, and `verify_repair.py` re-reads every lead afterwards and
+compares against that backup key by key.
+
+## Step 5c — DEPLOY IS BLOCKED, deliberately
+
+PR **[#129](https://github.com/TGTChq/GTM/pull/129)** is open against
+`feat/rebuild-core` (base verified still at `0ebd7f5`, so the branch sits exactly
+on the effective production commit). Merging it was refused by this environment's
+`Merge Without Review` guardrail. I did not route around it, and I did not push
+to `feat/rebuild-core` directly, because that would reach the same outcome by
+another path.
+
+**So the fix is NOT deployed and the effective commit is still `0ebd7f5`.**
+Consequences, in order of urgency:
+
+1. The core cron `0 3 * * *` next fires **2026-10-03 03:00Z**. On the current
+   image it will create roughly another 1,000 Challenger leads with no copy.
+   They cannot SEND, because all nine campaigns are paused — the containment
+   holds — but they consume Apollo credits and Instantly lead capacity (the plan
+   ceiling is 25,000 stored contacts and the workspace has been at it before) and
+   they enlarge the cohort that later needs repairing.
+2. Verification that the IMAGE contains `outbound_wave1/` and
+   `data/wave1_claims.json` is pending, because Docker is not installed on this
+   host and the check is meant to run inside the deployed container.
+
+Either merge #129 before 03:00Z, or hold the cron. I did not change the cron
+schedule: a 2026-09-17 "park canary" variable patch is on record as having
+deleted every `INSTANTLY_CAMPAIGN_*` variable, so I am not touching Railway
+configuration that was not asked for.
+
+## Step 6 — internal test sends: prepared, not sent
+
+Resuming a campaign to test is not available: Instantly has no per-lead pause, so
+activating any campaign would also release the leads that still have no copy. A
+test therefore needs an isolated campaign holding only internal recipients.
+
+Blocked on two things only the owners can give:
+
+- **which internal addresses to use.** The only internal address anywhere in the
+  repo is `luis@globaltalent.co`; the Railway account is `brett@globaltalent.co`.
+  I will not guess recipients for real outbound email.
+- **approval to create one isolated test campaign** replicating a Challenger
+  4-step sequence, since that is a new object in the workspace.
+
+## Step 7 — resumption gate: NOT met
+
+A campaign may only resume when every sendable lead it holds is verified. **1,689
+active leads cannot be given copy at all** — no approved copy exists for them,
+because their role display fails the frozen QA gates. They are spread across the
+campaigns, so no campaign currently passes the gate.
+
+Three options, all of which are a business decision:
+
+1. Repair the underlying role/title data so the renderer accepts them, then
+   re-render. Highest effort, keeps the leads.
+2. Remove them from the sending population. Deleting contacts was explicitly
+   ruled out for this incident, and Instantly has no per-lead pause, so this
+   means moving them (the 2026-09 correction used a hold list for exactly this).
+3. Leave the affected campaigns paused.
+
+**All nine campaigns remain PAUSED.** Restoration target, to be applied only once
+the gate is met: eight to status 1 (ACTIVE) and **FINANCE to status 2 (PAUSED)**,
+because FINANCE was already paused before this work began.
