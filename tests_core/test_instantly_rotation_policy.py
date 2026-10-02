@@ -435,3 +435,32 @@ def test_moving_a_contact_to_a_list_frees_no_slot():
     assert after["stored_in_campaigns"] == before["stored_in_campaigns"] - 2
     assert after["stored"] == before["stored"], "storage is unchanged by a move"
     assert after["free"] == before["free"], "and so is the free-slot count"
+
+
+def test_the_ooo_followup_campaign_is_protected_from_rotation():
+    """It holds people who asked us to come back later. Deleting them discards a
+    deferral we promised. Four of the twelve contacts rotation actually removed
+    over 2026-09-29..10-02 came from it, because it was not protected."""
+    env = {"TGTC_OOO_FOLLOWUP_CAMPAIGN_ID": "f0665173-d46b-49e6-8f17-4e024876a5a3"}
+    protected = rot.protected_ids(env)
+    assert "f0665173-d46b-49e6-8f17-4e024876a5a3" in protected
+    # and judge refuses a finished, never-replied contact sitting in it
+    lead = {"id": "l1", "email": "x@y.com", "status": 3, "email_reply_count": 0}
+    assert rot.judge(lead, campaign_id="f0665173-d46b-49e6-8f17-4e024876a5a3",
+                     campaign_status=3, held=set(), protected=protected) == "live_campaign"
+    # an unconfigured follow-up must not add an empty id to the protected set
+    assert "" not in rot.protected_ids({})
+
+
+def test_rotation_skips_the_followup_campaign_entirely(conn, monkeypatch):
+    from tgtc_core.providers.instantly import InstantlyResult
+
+    monkeypatch.setenv("TGTC_OOO_FOLLOWUP_CAMPAIGN_ID", "camp-followup")
+    leads = [{"id": "f1", "email": "a@old.com", "status": 3, "email_reply_count": 0}]
+    campaigns = [{"id": "camp-followup", "status": 3, "name": "OOO follow-up"}]
+    deleted = []
+    out = rot.rotate(conn, None, needed=5, batch=500, campaigns=campaigns,
+                     leads_of=lambda c: list(leads),
+                     delete=lambda i: (deleted.append(i), InstantlyResult(True, 200))[1])
+    assert deleted == [], "a protected campaign must not be paged or deleted from"
+    assert out["deleted"] == 0 and out["considered"] == 0

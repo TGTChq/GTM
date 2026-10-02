@@ -516,6 +516,39 @@ def instantly_payload(lead: Dict[str, Any], *, skip_if_in_workspace: bool, verif
     return payload
 
 
+#: Placeholder contact for the pre-enrichment probe. The copy gates decide on
+#: POSTING facts -- the role display is ``open_role`` and the content gates read
+#: ``role_focus`` -- so the contact only has to be present, not real. Measured
+#: 2026-10-02 over 7,839 approvals: the probe reproduced the final guard's verdict
+#: on every one, 1,829 refusals and 0 false positives.
+_PROBE_CONTACT = {"first_name": "Probe", "last_name": "Contact",
+                  "buyer_title": "Head of Function", "email": "probe@example.invalid",
+                  "linkedin_url": "", "apollo_person_id": ""}
+
+
+def challenger_copy_refusal_from_posting(lead_facts: Dict[str, Any]) -> str:
+    """The refusal the FINAL guard would give, decided BEFORE a contact is bought.
+
+    Apollo credits are spent revealing and verifying a contact, which happens
+    before the copy gate runs at approval, so a copy-refused lead has already been
+    paid for. This answers the same question from the posting alone.
+
+    It does not re-implement the rules: it calls
+    ``instantly_payload_with_copy_state`` -- the same renderer, the same QA gates
+    and the same reason strings -- with a placeholder contact. The final guard is
+    unchanged and still runs; this only lets a caller decline to pay first.
+
+    Returns "" for a Control destination or when the copy renders.
+    """
+    if lead_facts.get("campaign_id") not in KNOWN_CHALLENGER_CAMPAIGN_IDS:
+        return ""
+    probe = dict(lead_facts)
+    probe.update(_PROBE_CONTACT)
+    refusal, _payload = instantly_payload_with_copy_state(
+        probe, skip_if_in_workspace=False, verify_on_import=False)
+    return refusal
+
+
 def instantly_payload_with_copy_state(lead: Dict[str, Any], *, skip_if_in_workspace: bool,
                                       verify_on_import: bool) -> Tuple[str, Dict[str, Any]]:
     """``(copy_refusal, payload)``; the refusal is "" when the copy is complete.
