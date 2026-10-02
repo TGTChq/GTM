@@ -191,3 +191,46 @@ real reduction in enrolment yield and is Brett's/Luis's call, not mine.
 Docker is not installed on this host, so the image was NOT built locally. The
 renderer and claim registry are verified INSIDE the deployed container instead
 (Step 5), which tests the artefact that actually runs.
+
+## Step 5a — repair plan, and the provider behaviour that decides how to verify
+
+Backed up every lead in the nine campaigns by provider id before any write:
+**8,395** leads → `C:\TGTC\copy_incident_private\backup_leads\` (+ `_cursor.json`).
+
+Joined to the 7,839 approvals that created them and rendered each one's copy from
+its own approved facts with the deployed code path:
+
+| Disposition | Leads | Lead status | Action |
+| --- | --- | --- | --- |
+| **REPAIRABLE** | **5,653** | all active | patch copy in, verify by read-back |
+| **CANNOT_RENDER** | **1,689** | all active | NO copy exists; must not send. Needs a decision |
+| ALREADY_HAS_COPY | 591 | 569 completed, 21 bounced, 1 unsubscribed | untouched (the legacy healthy cohort) |
+| TERMINAL_STATUS_LEAVE_ALONE | 462 | 336 bounced, 126 completed | untouched |
+
+`ALREADY_HAS_COPY = 591` independently matches the 591 healthy recipients found in
+the send audit — two separate measurements agreeing.
+
+`CANNOT_RENDER` reasons: `role_display_contains_unsafe_characters` 895,
+`..._carries_an_appended_qualifier` 538, `..._longer_than_48_chars` 234, buzzword
+gates 17, `..._reads_as_a_posting_headline` 3. Only statuses 1/2 are mutated, the
+rule proven by the 2026-09 outbound correction.
+
+### Canary, and a correction
+
+One lead (`01a0c236…`, ECOMMERCE, the smallest cohort) was patched first.
+
+The immediate read-back said FAILED: `PATCH` returned 200 and the lead still had
+22 payload keys and no copy. That was a **false negative**. Instantly's
+read-after-write is eventually consistent — the prior `role-display/2` migration
+documents exactly this and polls instead of failing closed. Re-read afterwards:
+
+- payload keys 22 → **42**, all five required fields present and correct
+- `rendered_subject` = `Store Manager-Bal Harbour`, bodies 343/112/235/240 chars
+- `status`, `campaign`, `email`, `timestamp_last_contact`, `email_reply_count`
+  and `status_summary` all unchanged; **no pre-existing variable lost or altered**
+- the campaign listing agrees independently
+
+So: `PATCH /leads/{id}` with `custom_variables` set to the FULL merged payload is
+the correct mechanism (the field is replaced wholesale, which is why the merge is
+mandatory), and **a 200 is not proof** — verification must re-read after
+propagation. The batch therefore verifies every lead in a separate sweep.
