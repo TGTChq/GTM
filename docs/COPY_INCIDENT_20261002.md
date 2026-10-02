@@ -552,3 +552,52 @@ rendered with formatting intact, no unresolved tokens.
 
 Together these cover the subject and all four bodies end to end, as actually
 received, not as previewed. Step 6 is **COMPLETE**.
+
+## Step 5g — repair COMPLETE and read-back VERIFIED
+
+PATCHes issued: **5,653 / 5,653, HTTP 200 on every one, 0 failures**, across three
+resumable chunks (1,988 + 2,033 + 1,632).
+
+Then every lead in all nine campaigns was re-listed from the provider and compared
+against the pre-repair backup — **8,395 leads re-read**:
+
+| Verdict | Leads |
+| --- | --- |
+| **REPAIRED_VERIFIED** | **5,653** |
+| SENDABLE_WITHOUT_COPY | 1,688 |
+| HAS_COPY_NOT_IN_PLAN (legacy healthy cohort) | 591 |
+| NO_COPY_TERMINAL_OK | 463 |
+| REPAIR_MISMATCH | **0** |
+| REPAIRED_BUT_DRIFTED | **0** |
+
+`5,653 + 1,688 + 591 + 463 = 8,395` — reconciles exactly. Every repaired lead has
+all five copy fields byte-identical to the expected render, no pre-existing
+variable lost or altered, and `status` / `campaign` / `email` /
+`timestamp_last_contact` / `email_reply_count` unchanged. No contact was deleted
+or re-added, no sequence restarted, no bulk resend.
+
+The uncopyable count moved 1,689 → 1,688 and terminal 462 → 463: one lead went
+terminal (a bounce) during the window. Expected drift, reconciles.
+
+### Resumption gate BEFORE the hold move — every campaign blocked
+
+| Campaign | verified | sendable w/o copy | terminal | safe to resume |
+| --- | --- | --- | --- | --- |
+| PRODUCT | 115 | 47 | 10 | NO |
+| OPERATIONS | 3,122 | 837 | 254 | NO |
+| FINANCE | 729 | 168 | 58 | NO |
+| PEOPLE_HR | 257 | 70 | 12 | NO |
+| ECOMMERCE | 17 | 11 | 1 | NO |
+| CUSTOMER_EXPERIENCE | 251 | 47 | 16 | NO |
+| MARKETING_CREATIVE | 417 | 126 | 34 | NO |
+| GTM_SYSTEMS | 561 | 139 | 27 | NO |
+| AI_TECHNICAL | 775 | 243 | 51 | NO |
+
+## Step 7 — hold-list move in progress
+
+Moving the 1,688 into `TGTC Copy Incident Hold 20261002` via `POST /leads/move`
+with `to_list_id`, batched 50 ids per request, each batch's background job waited
+on. A moved lead ends with NO campaign, so it cannot send; nothing is deleted.
+The same `verify_repair.py` sweep is then the final gate: those leads should no
+longer appear in any campaign, `SENDABLE_WITHOUT_COPY` should be 0, and every
+campaign should read safe to resume.
