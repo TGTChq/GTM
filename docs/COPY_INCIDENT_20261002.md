@@ -719,3 +719,137 @@ remaining follow-ups. This is not a blank email and not the incident recurring �
 but it is **not** "already-sent email recovered" either, and whether to continue
 follow-ups to the 7,777 already-touched recipients is a business decision, not a
 technical one. Recorded, not decided.
+
+## Step C2 — the held leads and the block rate, measured
+
+### The 1,688 held leads, split into the three asked-for kinds
+
+| Kind | Leads | Meaning |
+| --- | --- | --- |
+| MALFORMED, not recoverable | **1,653** | the role NAME is usable but its punctuation / length / appended qualifier is not, and `role-display/2` cannot safely reduce it |
+| INSUFFICIENT (title ambiguous) | **19** | `role-display/2` returns `hold`: competing role heads, cannot be reduced without guessing |
+| LEGITIMATE (our own copy) | **14** | the rendered copy trips a content gate (`buzzword_solution` 8, `buzzword_platform` 4, `buzzword_transform` 2) |
+| MALFORMED, recoverable | **2** | fixed — see below |
+
+Original refusal reasons: `role_display_contains_unsafe_characters` 896,
+`..._carries_an_appended_qualifier` 539, `..._longer_than_48_chars` 236,
+buzzwords 19, `..._reads_as_a_posting_headline` 3.
+
+### Two candidate fixes tried. One rejected on evidence, one applied.
+
+**REJECTED — the campaign's fallback display noun.** `Campaign.function_nouns` is
+documented as the "Display noun used when a posting has no usable title of its
+own", and substituting it makes **1,669 of 1,688** pass every automated gate. It
+was still rejected, because passing the gates is not the same as acceptable copy:
+
+- it produces subject `product role` and the body line *"Saw you're hiring for
+  product role."* — broken English
+- of the **591** pre-existing healthy leads (the approved reference), **ZERO**
+  carry a bare function noun as the subject; all 591 carry a real job title
+
+So it would change the character of approved copy. Reported, not done.
+
+**APPLIED — `role-display/2`, but only where the display gate fails.** My earlier
+measurement applied it to every lead and regressed the population (71.6% → 69.8%)
+because it also rewrote displays that already passed. Applied strictly as a
+repair it cannot regress anything. It recovers only **2** leads, because in
+1,653 cases its output is still gate-unsafe: it reduces a title only when a
+corroborated anchor exists and otherwise fails closed.
+
+Both repaired and read-back verified (`copy_matches=True`, `lost=none`,
+`still_out_of_campaign=True`). Their display `Strategic Remote Civil Engineer`
+comes from the approved `posting_title`
+(`Strategic Remote Civil Engineer - Maryland (Evergreen)`) with the location
+furniture stripped — nothing invented. They were NOT re-enrolled: moving a lead
+back into a campaign could reset its sequence position, and preserving history was
+required, so re-enrolment stays a separate decision.
+
+**1,686 remain held, each with a precise reason** in `held_still_held.jsonl`.
+
+### The "~28%" replaced with a measured figure
+
+Over **all 7,839** approvals, not a 268-row sample:
+
+| Outcome | Count | Share |
+| --- | --- | --- |
+| Enrols with complete approved copy | 6,010 | **76.67%** |
+| Refused by the copy guard | 1,829 | **23.33%** |
+
+Refusal split: malformed-not-recoverable 1,790 (22.83%), title-ambiguous 20
+(0.26%), our-copy content gate 17 (0.22%), recoverable 2 (0.03%).
+
+Block rate by function: ecommerce 39.3%, product 30.7%, gtm_revenue 28.8%,
+engineering 26.8%, marketing 25.4%, people_hr 23.3%, operations 21.9%,
+finance 21.6%, customer_success 21.0%, customer_support 16.0%.
+
+**MEASURED CEILING: ~767 enrolable per 1,000 approvals.** See Step C5.
+
+## Step C3 — pending payloads: nothing can be retried, and the guard is proven
+
+`delivery_outbox` for the Instantly channel, read now: **0 rows** in
+`pending` / `claimed` / `in_flight` / `failed`. There is no queued payload to
+retry. The 9,053 stored payloads (1,214 blocked + 7,839 delivered) all still lack
+copy — the delivered ones are history, the blocked ones are compliance refusals.
+
+Proven on **five real stored payloads**, taken from the database exactly as
+production wrote them (12 variables, no `rendered_subject`, Challenger targets):
+
+| Guard | Result |
+| --- | --- |
+| `copy_block_reason` | `challenger_copy_missing:rendered_subject` |
+| outbox `process_instantly` | `blocked`, and writes `blocked_reason=challenger_copy_missing:rendered_subject` |
+| `InstantlyClient.create_lead` | raises `challenger_copy_missing:rendered_subject` |
+| **provider `create_lead` invocations** | **0** |
+| **HTTP transport invocations** | **0** |
+
+So the refusal happens before Instantly is contacted at all, not after.
+
+### The deployed artefact contains the guard
+
+Live deployment `38dae8b3` **SUCCESS**, commit `4efb21ea02`; the previous
+deployment (`0ebd7f5`) is now `REMOVED`. Each guard verified present in that exact
+commit via `git show 4efb21ea02:<file>`:
+
+- `tgtc_core/domain/outbound_copy.py` → `def copy_block_reason` ✔
+- `tgtc_core/services/delivery.py` → `copy_failure = copy_block_reason(payload)` ✔
+- `tgtc_core/providers/instantly.py` → `copy_failure = copy_block_reason(payload)` ✔
+- `tgtc_core/domain/approval.py` → `variables.update(rendered_variables(lead` ✔
+- `Dockerfile.core` → `COPY data/wave1_claims.json` ✔
+- `Dockerfile.core.dockerignore` → `!data/wave1_claims.json` ✔
+
+## Step C4 — campaign state: "restored 9/9" explained, and a NEW change by someone else
+
+"restored 9/9" and "8 active, FINANCE paused" were the same statement: all nine
+were returned to the status recorded in the pre-incident backup, which was ACTIVE
+for eight and PAUSED for FINANCE. 9 restored = 8 activated + 1 deliberately left
+paused. Verified at 19:45Z.
+
+**Why FINANCE was paused is now evidenced, not assumed.** In the pre-incident
+backup (captured 16:21:31Z, before any write of mine) FINANCE's
+`timestamp_updated` is **2026-10-02T15:44:06Z** while the other eight read
+2026-09-25T00:09-00:10Z, and FINANCE alone has `not_sending_status=None`. So a
+person paused FINANCE about 37 minutes before this work began (16:15Z). It is
+someone's deliberate action, so it was preserved and whoever made it owns
+resuming it.
+
+### ALL NINE ARE PAUSED AGAIN — not by me
+
+Read at ~22:30Z: **9 paused, 0 active.** `timestamp_updated` runs
+22:10:30 → 22:11:44Z across the nine, including a no-op re-pause of the
+already-paused FINANCE.
+
+Evidence that this was an external, deliberate action:
+
+- my own write log holds exactly 9 pauses (16:2xZ) and 8 activates (19:45Z) and
+  **nothing after**; no script of mine wrote campaign status after 19:45Z
+- it is **targeted at exactly the nine** (plus my two test campaigns, which I
+  paused myself). Of the 56 campaigns in the workspace, the other 46 were last
+  updated between 2026-08-27 and 2026-09-25 — so this was not a workspace-wide
+  Instantly event
+- sending stopped with it: the last Challenger send is 22:09:58Z
+- re-pausing a campaign that was already paused fits a human pausing all nine
+  from a filtered list, not an automated rule
+
+**I have NOT re-activated them.** Overriding a deliberate action by someone else
+is not mine to do. The copy gate is met (0 sendable without copy), so they are
+technically ready whenever their owner wants them back on.
