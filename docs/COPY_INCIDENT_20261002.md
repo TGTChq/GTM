@@ -1398,3 +1398,73 @@ starts a cron service regardless of `cronSchedule` being `None`. That is what
 produced run `…7831317d`. It is not dangerous as things stand — campaigns are
 paused so nothing sends, and the copy guard blocks anything unrenderable — but it
 should be known before merging, not after.
+
+## Step E9 — the 363 re-renders and the 287 holds, both verified
+
+**363 concrete-title repairs: 363/363 applied, HTTP 200 on every one, 0 failures.**
+Their subject is now the real job title from the approved `posting_title` instead
+of a bare function noun — 211 via the approved `role-display/2` reducer, 152 from
+the title directly.
+
+**287 moved to the hold list: 287/287, every background job `success`, 0 failed.**
+These are the leads whose only possible subject was a generic noun and whose
+posting title cannot pass the display gates. Nothing deleted; a moved lead has no
+campaign and cannot send.
+
+The two sets were checked to be disjoint before either ran: **0 overlap** between
+the 363 and the 287, and **0 overlap** with the 1,688 already held.
+
+### Final read-back sweep, expectations updated for the re-renders
+
+Every lead still in the nine campaigns re-read from the provider and compared
+against the original repair plan OVERRIDDEN by the 363 new renders:
+
+| Verdict | Leads |
+| --- | --- |
+| **VERIFIED** | **5,366** |
+| HAS_COPY_NOT_IN_PLAN (legacy healthy cohort) | 591 |
+| NO_COPY_TERMINAL_OK | 463 |
+| **SENDABLE_WITHOUT_COPY** | **0** |
+| COPY_MISMATCH | **0** |
+| DRIFTED | **0** |
+| PARKED_BUT_STILL_IN_CAMPAIGN | **0** |
+| **bare function-noun subject on a sendable in-campaign lead** | **0** |
+
+`5,366 + 591 + 463 = 6,420` in campaigns, plus **1,975** parked (1,688 + 287)
+= **8,395** — the exact figure backed up before any write. Every campaign reads
+**SAFE TO RESUME: YES** on the copy gate alone.
+
+## Where this leaves things
+
+**Deployed and verified:** commit `b6bbc65372`, deployment `40b808aa` SUCCESS.
+Both Challenger approval routes verified AT that commit (37 tests in a detached
+worktree). Occupancy counts stored contacts, not campaign membership. Rotation
+scores deletes correctly, proven by the 263 it then removed with 0 failures, each
+sampled one confirmed absent by ID.
+
+**Paused and staying paused:** the nine campaigns (external pause of 22:10Z not
+overridden) and the Core cron (`cronSchedule: None`).
+
+**Open, and each one a decision rather than a defect:**
+
+1. **PR [#132](https://github.com/TGTChq/GTM/pull/132)** — OOO follow-up
+   protection and the pre-enrichment copy probe. Needs an owner merge; merging
+   starts a run.
+2. **The blank-thread cohort, 5,630 recipients.** Their body is repaired; their
+   thread subject cannot be. Whether to keep emailing them is a judgement about
+   the recipient relationship. No sequence restarted, nothing resent.
+3. **1,975 parked leads.** 1,688 with no renderable copy, 287 whose only subject
+   would be generic. Either the title data is cleaned and they are re-rendered, or
+   they are written off. Re-enrolling them also needs proof that a move back does
+   not reset sequence position — untested, so not attempted.
+4. **Capacity.** Rotation cleared its 263-slot deficit but consumed essentially
+   the whole safe population to do it: of the contacts remaining in rotatable
+   campaigns afterwards, `judge()` accepts only a minority (153 bounced, 146
+   replied, 120 eligible when measured post-rotation). The levers are the storage
+   add-on, the 1,500-slot reserve, the 1,000 target, or releasing parked
+   contacts. No budget was raised and no run was opened.
+5. **Restoring the cron** — note the order: a deploy alone starts a run, so merge
+   #132 first, let that run settle, then restore `0 3 * * *`.
+
+Nothing here claims the 16,875 already-sent blank emails are recovered. They are
+not.
