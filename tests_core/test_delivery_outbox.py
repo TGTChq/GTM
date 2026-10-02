@@ -93,7 +93,11 @@ def _approve(conn, clock):
 
 def test_approval_and_both_outbox_items_are_one_transaction(conn, clock, monkeypatch):
     pid, eid, oid = seed_opportunity(conn, clock)
-    monkeypatch.setattr(opp_mod, "instantly_payload", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom after approvals insert")))
+    # The seam the approval writer actually calls. It reports a copy refusal
+    # rather than raising (a raise would roll back 23.3% of real approvals), so
+    # atomicity is proved by making it throw something unexpected instead.
+    monkeypatch.setattr(opp_mod, "instantly_payload_with_copy_state",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom after approvals insert")))
     with pytest.raises(RuntimeError):
         opportunity_service(conn, apollo_for("acme.com", "Acme"), clock).process(oid)
     conn.rollback()

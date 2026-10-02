@@ -28,7 +28,7 @@ import hashlib
 import json
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import psycopg
 
@@ -126,6 +126,37 @@ def _back_up(conn: psycopg.Connection, lead: Dict[str, Any], *, campaign_id: str
             return cur.fetchone() is not None
 
 
+def _delete_outcome(response: Any) -> Tuple[int, str]:
+    """``(http_status, error_text)`` from whatever the delete callable returned.
+
+    Production passes ``InstantlyClient.delete_lead``, which answers an
+    ``InstantlyResult`` carrying ``ok``/``status``/``message`` -- it has NO
+    ``status_code`` and no ``text``. Reading ``status_code`` therefore scored every
+    delete as 0, i.e. a failure, and the three-failure circuit breaker below then
+    aborted the whole rotation after the first three contacts.
+
+    Measured consequence (2026-09-29 .. 2026-10-02): four consecutive runs
+    reported ``deleted: 0`` and stopped on ``not_enough_safe_candidates`` while the
+    slots they had actually freed showed up as the deficit falling 265, 263, 260,
+    257 -- about three real deletions a day, each recorded as a failure and each
+    leaving its backup row marked not-deleted.
+
+    Both shapes are accepted so either client can be passed.
+    """
+    status = getattr(response, "status", None)
+    if status is None:
+        status = getattr(response, "status_code", None)
+    code = int(status or 0)
+    if code == 0 and getattr(response, "ok", False):
+        code = 200          # a client that reports success without a status
+    if 200 <= code < 300:
+        return code, ""
+    message = getattr(response, "message", None)
+    if message is None:
+        message = getattr(response, "text", "")
+    return code, str(message or "")[:200]
+
+
 def _record_delete(conn: psycopg.Connection, lead_id: str, *, status: int, error: str = "") -> None:
     with transaction(conn):
         with conn.cursor() as cur:
@@ -177,9 +208,8 @@ def rotate(conn: psycopg.Connection, transport: Any, *, needed: int, batch: int,
                 continue
             out["backed_up"] += 1
             response = delete(str(lead.get("id")))
-            code = int(getattr(response, "status_code", 0) or 0)
-            _record_delete(conn, str(lead.get("id")), status=code,
-                           error="" if 200 <= code < 300 else str(getattr(response, "text", ""))[:200])
+            code, error = _delete_outcome(response)
+            _record_delete(conn, str(lead.get("id")), status=code, error=error)
             if 200 <= code < 300:
                 out["deleted"] += 1
             else:
@@ -190,11 +220,21 @@ def rotate(conn: psycopg.Connection, transport: Any, *, needed: int, batch: int,
 
 
 def occupancy(instantly: Any, *, plan_contacts: int = DEFAULT_PLAN_CONTACTS) -> Dict[str, Any]:
-    """How full the workspace is, in one request, BEFORE anything is spent.
+    """How full the workspace is, BEFORE anything is spent.
 
-    The plan caps stored contacts. `/campaigns/analytics` reports `leads_count` per
-    campaign, and the sum is the occupancy -- the only figure available before the API
-    starts refusing creates, which is too late to act on.
+    The plan caps STORED CONTACTS, which is not the same thing as campaign
+    membership. `/campaigns/analytics` reports `leads_count` per campaign, but a
+    contact parked on a lead list belongs to no campaign and so appears in none of
+    those counts -- while still occupying a stored contact.
+
+    Measured 2026-10-02: moving 1,688 contacts to a hold list dropped the campaign
+    sum from 22,757 to 21,069 and freed NOTHING; both populations still summed to
+    22,757. Counting only campaigns would have told this run it had 3,931 free
+    slots when it had 2,243, so it would have paid for contacts the provider then
+    refuses with "Lead limit reached".
+
+    Both populations are reported separately and the total is their sum. If the
+    lists cannot be read, occupancy is UNKNOWN -- never silently zero.
     """
     result = instantly.campaign_analytics()
     if not getattr(result, "ok", False):
@@ -204,9 +244,56 @@ def occupancy(instantly: Any, *, plan_contacts: int = DEFAULT_PLAN_CONTACTS) -> 
     rows = data.get("items") if isinstance(data, dict) else None
     if not isinstance(rows, list):
         rows = data if isinstance(data, list) else []
-    stored = sum(int((row or {}).get("leads_count") or 0) for row in rows if isinstance(row, dict))
+    in_campaigns = sum(int((row or {}).get("leads_count") or 0) for row in rows if isinstance(row, dict))
+
+    on_lists, lists, ok = _lead_list_occupancy(instantly)
+    if not ok:
+        return {"known": False, "stored": None, "free": None, "plan": plan_contacts,
+                "stored_in_campaigns": in_campaigns, "campaigns": len(rows),
+                "message": "lead_list_occupancy_unknown"}
+
+    stored = in_campaigns + on_lists
     return {"known": True, "stored": stored, "free": max(0, plan_contacts - stored),
-            "plan": plan_contacts, "campaigns": len(rows)}
+            "plan": plan_contacts, "campaigns": len(rows),
+            "stored_in_campaigns": in_campaigns, "stored_on_lists": on_lists,
+            "lead_lists": lists}
+
+
+def _lead_list_occupancy(instantly: Any) -> Tuple[int, int, bool]:
+    """``(contacts_on_lists, list_count, known)``. Fails closed, never guesses zero.
+
+    A client too old to enumerate lists is treated as unknown rather than empty:
+    assuming zero is exactly the undercount this function exists to prevent.
+    """
+    if not hasattr(instantly, "list_lead_lists") or not hasattr(instantly, "list_list_leads"):
+        return 0, 0, False
+    lists: List[str] = []
+    after = None
+    while True:
+        result = instantly.list_lead_lists(limit=100, starting_after=after)
+        if not getattr(result, "ok", False):
+            return 0, 0, False
+        data = getattr(result, "data", None) or {}
+        items = data.get("items") or []
+        lists.extend(str(i.get("id")) for i in items if isinstance(i, dict) and i.get("id"))
+        after = data.get("next_starting_after")
+        if not after or not items:
+            break
+
+    total = 0
+    for list_id in lists:
+        after = None
+        while True:
+            result = instantly.list_list_leads(list_id, limit=100, starting_after=after)
+            if not getattr(result, "ok", False):
+                return 0, 0, False
+            data = getattr(result, "data", None) or {}
+            items = data.get("items") or []
+            total += sum(1 for i in items if isinstance(i, dict))
+            after = data.get("next_starting_after")
+            if not after or not items:
+                break
+    return total, len(lists), True
 
 
 def room_needed(free: Optional[int], *, target: int, reserve: int) -> int:
@@ -238,7 +325,12 @@ def make_room(conn: psycopg.Connection, instantly: Any, *, target: int,
     out["stored_before"] = before.get("stored")
     if not before.get("known"):
         # We do not know how full it is, so we do not delete on a guess.
+        # Not knowing how full the workspace is is not the same as there being
+        # room. Acquisition must stop rather than pay for contacts the provider
+        # may refuse, so this is reported as its own stop condition.
         out["reason"] = "occupancy_unknown"
+        out["occupancy_unknown"] = True
+        out["message"] = str(before.get("message") or "")[:200]
         return out
     need = room_needed(before.get("free"), target=target, reserve=conf["free_slot_floor"])
     out["needed"] = need

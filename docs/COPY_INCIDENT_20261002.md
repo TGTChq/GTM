@@ -442,3 +442,755 @@ Proven against the real defect — with the allow lines removed it fails naming
 `['outbound_wave1/', 'data/wave1_claims.json']`, and passes once restored. My
 earlier Dockerfile-text-only assertion could not have caught this, which is why
 "tests pass" was not sufficient evidence of a working deployment.
+
+## Step 5f — DEPLOYED and verified (2026-10-02 ~17:20Z)
+
+PR #130 merged. `feat/rebuild-core` → `4efb21e`.
+
+| Fact | Value |
+| --- | --- |
+| Deployment | `38dae8b3-d26f-4e8a-b5f1-b6a3c5422413` |
+| Status | **SUCCESS** |
+| Effective commit | **`4efb21ea02`** (was `0ebd7f5695`) |
+| Service | `GTM Core Canary 1000` — Online, **0/1 running** |
+| Cron | `0 3 * * *`, next run ~2026-10-03T03:00Z |
+| Run lock at deploy | `held=0` — no run was killed |
+
+Build log of the SUCCESSFUL build, all eight steps, no errors:
+
+```
+[5/8] COPY tgtc_core/ ./tgtc_core/
+[6/8] COPY outbound_wave1/ ./outbound_wave1/
+[7/8] COPY data/wave1_claims.json ./data/wave1_claims.json
+[8/8] COPY domain_utils.py source_domains.py ./
+```
+
+### Does the IMAGE contain the renderer and its claim registry? Yes
+
+The container does not run between cron ticks (`railway ssh` reports "container is
+not running (status: created)"), so this is established without an interactive
+shell, and the evidence is stronger than a shell would give:
+
+1. **The build fails if either path is absent.** Deployment `bc29b837` proved it
+   empirically — it failed with `"/data/wave1_claims.json": not found`. So a
+   SUCCESSFUL build of this Dockerfile is itself proof that both are present.
+2. `claims._DEFAULT_PATH` = `Path(__file__).parent.parent/"data"/"wave1_claims.json"`
+   → `/app/data/wave1_claims.json` under `WORKDIR /app`, which is exactly the
+   `COPY` destination.
+3. The failure modes are safe by construction anyway: a missing `outbound_wave1`
+   raises ImportError inside `rendered_variables`, so no lead is created; and a
+   present-but-empty registry is caught by
+   `test_the_claim_registry_actually_loads_and_is_not_silently_empty`.
+
+The in-container import will also be exercised by the 03:00Z run. I did not
+redeploy `GTM Core Acceptance` to force a container: it would add a production
+action nobody asked for and could surface unrelated pre-existing acceptance
+failures that muddy this incident.
+
+### Internal test receipt 2 — TEST A stalled; diagnosed, not assumed
+
+TEST A (the exact live step-1 shape) had not sent 1.5h after activation while
+TEST B sent in ~4 minutes. Checked rather than waited:
+
+- campaign `status=1`, sequence correct, lead `status=1`, never contacted
+- `not_sending_status=2` — **benign**: the live PRODUCT campaign carries the same
+  value and was actively sending when it was backed up
+- the shared mailbox is NOT capped: `devan.m@globaltalentvirtual.com` sent 8 today
+  against a busiest-mailbox figure of 13
+- `stop_for_company` is unset, so that hypothesis was wrong too
+- `search-by-contact` shows the recipient in BOTH test campaigns, and TEST B has
+  already contacted that address and company
+
+Most likely duplicate-contact handling. Rather than keep guessing at Instantly's
+internals, a decisive experiment: a SECOND lead was added to the SAME TEST A
+campaign with a distinct identity — `luis+copystep1@globaltalent.co` (same
+internal inbox) rendered from a different approved lead
+(`oliverinc.com|…|customer_success`, subject `Client Services Account Manager`,
+body 357 chars). The template under test is therefore still exactly the live
+step-1 shape. No live campaign was touched.
+
+### BOTH internal receipts VERIFIED — and a correction
+
+**Correction:** the duplicate-contact explanation above was WRONG. TEST A sent to
+the original address `luis@globaltalent.co` at **2026-10-02T19:03:35Z**, ~1.9h
+after activation. The cause was simply Instantly's send pacing for a new
+campaign, not deduplication. The distinct-identity retry lead was therefore
+unnecessary; it never sent, and both test campaigns are now paused (read-back
+verified: TEST A 1→2, TEST B 3→2) so it will not email the inbox again.
+
+**Receipt A — the exact live step-1 shape, which is the precise failure mode:**
+
+```
+campaign : TGTC COPY INCIDENT TEST A step1 20261002
+sent at  : 2026-10-02T19:03:35Z   from devan.m@globaltalentvirtual.com
+to       : luis@globaltalent.co
+SUBJECT  : 'Documentation Manager'        <- was EMPTY throughout the incident
+
+Hi Luis,
+
+Your Documentation Manager opening reads like it covers Documentation request
+tracking, completion, and Import/export customs filings.
+
+The title on its own may not tell you much about who has actually run that mix.
+
+We test candidates on the actual work before they get to you.
+
+Want me to send how we test for a scope like this?
+
+Devan Marcus
+Business Development
+The Global Talent Co.
+```
+
+subject non-empty ✔ matches the rendered subject ✔ no unresolved tokens ✔
+visible body 397 chars ✔ personalised on first name, role AND role focus ✔
+paragraph breaks intact ✔ signature present once ✔
+
+**Receipt B — bodies 2, 3 and 4:** subject
+`[copy check 2-4] Documentation Manager`, 562 visible chars, all three bodies
+rendered with formatting intact, no unresolved tokens.
+
+Together these cover the subject and all four bodies end to end, as actually
+received, not as previewed. Step 6 is **COMPLETE**.
+
+## Step 5g — repair COMPLETE and read-back VERIFIED
+
+PATCHes issued: **5,653 / 5,653, HTTP 200 on every one, 0 failures**, across three
+resumable chunks (1,988 + 2,033 + 1,632).
+
+Then every lead in all nine campaigns was re-listed from the provider and compared
+against the pre-repair backup — **8,395 leads re-read**:
+
+| Verdict | Leads |
+| --- | --- |
+| **REPAIRED_VERIFIED** | **5,653** |
+| SENDABLE_WITHOUT_COPY | 1,688 |
+| HAS_COPY_NOT_IN_PLAN (legacy healthy cohort) | 591 |
+| NO_COPY_TERMINAL_OK | 463 |
+| REPAIR_MISMATCH | **0** |
+| REPAIRED_BUT_DRIFTED | **0** |
+
+`5,653 + 1,688 + 591 + 463 = 8,395` — reconciles exactly. Every repaired lead has
+all five copy fields byte-identical to the expected render, no pre-existing
+variable lost or altered, and `status` / `campaign` / `email` /
+`timestamp_last_contact` / `email_reply_count` unchanged. No contact was deleted
+or re-added, no sequence restarted, no bulk resend.
+
+The uncopyable count moved 1,689 → 1,688 and terminal 462 → 463: one lead went
+terminal (a bounce) during the window. Expected drift, reconciles.
+
+### Resumption gate BEFORE the hold move — every campaign blocked
+
+| Campaign | verified | sendable w/o copy | terminal | safe to resume |
+| --- | --- | --- | --- | --- |
+| PRODUCT | 115 | 47 | 10 | NO |
+| OPERATIONS | 3,122 | 837 | 254 | NO |
+| FINANCE | 729 | 168 | 58 | NO |
+| PEOPLE_HR | 257 | 70 | 12 | NO |
+| ECOMMERCE | 17 | 11 | 1 | NO |
+| CUSTOMER_EXPERIENCE | 251 | 47 | 16 | NO |
+| MARKETING_CREATIVE | 417 | 126 | 34 | NO |
+| GTM_SYSTEMS | 561 | 139 | 27 | NO |
+| AI_TECHNICAL | 775 | 243 | 51 | NO |
+
+## Step 7 — hold-list move in progress
+
+Moving the 1,688 into `TGTC Copy Incident Hold 20261002` via `POST /leads/move`
+with `to_list_id`, batched 50 ids per request, each batch's background job waited
+on. A moved lead ends with NO campaign, so it cannot send; nothing is deleted.
+The same `verify_repair.py` sweep is then the final gate: those leads should no
+longer appear in any campaign, `SENDABLE_WITHOUT_COPY` should be 0, and every
+campaign should read safe to resume.
+
+## Step 7 — hold move DONE, final gate PASSED
+
+**1,688 / 1,688 moved** into `TGTC Copy Incident Hold 20261002`, every background
+job `success`, 0 failures. No contact deleted or re-added.
+
+Final sweep, re-reading every lead still in the nine campaigns — **6,707 leads**
+(8,395 − 1,688, reconciles):
+
+| Verdict | Leads |
+| --- | --- |
+| REPAIRED_VERIFIED | 5,653 |
+| HAS_COPY_NOT_IN_PLAN (legacy healthy) | 591 |
+| NO_COPY_TERMINAL_OK | 463 |
+| **SENDABLE_WITHOUT_COPY** | **0** |
+| REPAIR_MISMATCH / REPAIRED_BUT_DRIFTED | **0 / 0** |
+
+`5,653 + 591 + 463 = 6,707`. Every campaign reads **SAFE TO RESUME: YES**.
+
+## Step 8 — campaigns RESTORED to pre-incident state
+
+Resumption was gated in code: `resume_campaigns.py` refuses to act unless
+sendable-without-copy + mismatched + drifted equals 0, and it restores the
+statuses recorded in the pre-incident backup manifest rather than activating
+everything.
+
+| Campaign | Action | Result |
+| --- | --- | --- |
+| PRODUCT, OPERATIONS, PEOPLE_HR, ECOMMERCE, CUSTOMER_EXPERIENCE, MARKETING_CREATIVE, GTM_SYSTEMS, AI_TECHNICAL | activate 2 → 1 | VERIFIED |
+| **FINANCE** | **none — left PAUSED** | it was already paused before this work began |
+
+**restored 9/9 verified.** For each, `sequence_identical=True` and
+`schedule_identical=True` against the pre-incident backup, so resuming changed
+status and nothing else. Write log: `status_changes.jsonl`.
+
+The two internal test campaigns are left PAUSED, not deleted, so the receipts
+stay auditable: `TEST A step1` `d500b21e…`, `TEST B bodies234` `490860b3…`.
+
+## Close-out
+
+| Deliverable | Status |
+| --- | --- |
+| Proven cause | 0 of 9,053 stored payloads carried `rendered_subject`; campaign bodies hold no literal copy |
+| Real scope | 16,875 messages, 7,777 recipients, onset 2026-09-21T13:15:59Z |
+| 14 September premise | **FALSE** — 0 broken sends before 09-21; the 1,214 export of the 17th is the healthy baseline |
+| Fix deployed | `4efb21ea02`, deployment `38dae8b3` SUCCESS |
+| Tests | 2,092 passed on real PostgreSQL; integrity manifest 35/35 |
+| Records repaired | 5,653 / 5,653, read-back verified, 0 mismatch, 0 drift |
+| Uncopyable leads neutralised | 1,688 held, 0 remain sendable without copy |
+| Internal receipts | 2 real emails verified, subject + all four bodies |
+| Campaigns | 9/9 restored to pre-incident state, FINANCE still paused |
+
+### What is NOT resolved and needs a decision
+
+1. **The 1,688 held leads have no approved copy and are now out of all
+   campaigns.** They are parked, not fixed. Their role displays fail the frozen
+   QA gates. Either the title data gets repaired and they are re-rendered and
+   re-enrolled, or they are written off.
+2. **Failing closed costs enrolment yield.** ~28% of new approvals will be refused
+   on the same role-display gates and blocked with a named reason instead of
+   enrolled. That is correct behaviour, and it is also a volume decision.
+3. The 03:00Z run is the first production exercise of the fix end to end. Worth
+   reading its creation counts and blocked reasons in the morning.
+
+---
+
+# Continuation, 2026-10-02 22:10Z
+
+## Step C1 — first REAL sends after reactivation: all clean, no pause needed
+
+Reactivation ~19:45Z. Window (Mon-Fri 08:00-18:00 America/Chicago) still open at
+22:10Z, so real sends happened. Judged only the steps that actually executed;
+nothing was advanced or forced.
+
+**125 Challenger sends at/after 17:00Z → verdict `OK` on all 125, 0 broken.**
+
+| Campaign | Sends | Verdict |
+| --- | --- | --- |
+| OPERATIONS | 92 | all OK |
+| GTM_SYSTEMS | 12 | all OK |
+| AI_TECHNICAL | 7 | all OK |
+| MARKETING_CREATIVE | 6 | all OK |
+| PEOPLE_HR | 4 | all OK |
+| CUSTOMER_EXPERIENCE | 4 | all OK |
+| PRODUCT, FINANCE, ECOMMERCE | 0 | no sends yet |
+
+Steps that executed: **1, 2 and 3**. Step 1 sample (`richard.dillard@c5mi.com`,
+22:09:26Z): subject `SAP Training Specialist I`, 334 copy chars, personalised on
+first name, role AND role focus. Step 2 and 3 samples carry their proper copy
+("Just bumping this one." / "One thing I left out.") with formatting intact.
+
+No empty body, no signature-only body, no unresolved token. **No campaign paused.**
+
+### MATERIAL RESIDUAL EFFECT — the thread subject cannot be repaired
+
+Steps 2 and 3 arrive with an **empty subject**. That is the template's design
+(steps 2-4 have `subject: ''` and inherit the thread), but Instantly builds the
+thread subject from the step-1 subject that was ACTUALLY SENT — and for the
+incident cohort that was empty. Verified directly:
+
+| Recipient | Prior sends | Post-reactivation |
+| --- | --- | --- |
+| `richard.dillard@c5mi.com` | none | step 1, subject `SAP Training Specialist I` ✔ |
+| `cvansickle@starwoodhotels.com` | step 1 on 09-29, `subject ''`, html 120 (signature only) | step 2, correct copy, subject `''` |
+| `mmarvin@pltw.org` | steps 1-2 on 09-25/09-28, `subject ''`, html 120 | step 3, correct copy, subject `''` |
+
+Measured population:
+
+- **5,630** of the 5,653 repaired leads already have a blank thread subject
+  (highest broken step reached: step 1 → 895, step 2 → 2,561, step 3 → 2,174)
+- only **23** repaired leads were never touched and will carry a full subject
+
+So the repair restores the BODY for in-flight leads but cannot retroactively give
+their thread a subject. Those recipients will likely see "(no subject)" on the
+remaining follow-ups. This is not a blank email and not the incident recurring —
+but it is **not** "already-sent email recovered" either, and whether to continue
+follow-ups to the 7,777 already-touched recipients is a business decision, not a
+technical one. Recorded, not decided.
+
+## Step C2 — the held leads and the block rate, measured
+
+### The 1,688 held leads, split into the three asked-for kinds
+
+| Kind | Leads | Meaning |
+| --- | --- | --- |
+| MALFORMED, not recoverable | **1,653** | the role NAME is usable but its punctuation / length / appended qualifier is not, and `role-display/2` cannot safely reduce it |
+| INSUFFICIENT (title ambiguous) | **19** | `role-display/2` returns `hold`: competing role heads, cannot be reduced without guessing |
+| LEGITIMATE (our own copy) | **14** | the rendered copy trips a content gate (`buzzword_solution` 8, `buzzword_platform` 4, `buzzword_transform` 2) |
+| MALFORMED, recoverable | **2** | fixed — see below |
+
+Original refusal reasons: `role_display_contains_unsafe_characters` 896,
+`..._carries_an_appended_qualifier` 539, `..._longer_than_48_chars` 236,
+buzzwords 19, `..._reads_as_a_posting_headline` 3.
+
+### Two candidate fixes tried. One rejected on evidence, one applied.
+
+**REJECTED — the campaign's fallback display noun.** `Campaign.function_nouns` is
+documented as the "Display noun used when a posting has no usable title of its
+own", and substituting it makes **1,669 of 1,688** pass every automated gate. It
+was still rejected, because passing the gates is not the same as acceptable copy:
+
+- it produces subject `product role` and the body line *"Saw you're hiring for
+  product role."* — broken English
+- of the **591** pre-existing healthy leads (the approved reference), **ZERO**
+  carry a bare function noun as the subject; all 591 carry a real job title
+
+So it would change the character of approved copy. Reported, not done.
+
+**APPLIED — `role-display/2`, but only where the display gate fails.** My earlier
+measurement applied it to every lead and regressed the population (71.6% → 69.8%)
+because it also rewrote displays that already passed. Applied strictly as a
+repair it cannot regress anything. It recovers only **2** leads, because in
+1,653 cases its output is still gate-unsafe: it reduces a title only when a
+corroborated anchor exists and otherwise fails closed.
+
+Both repaired and read-back verified (`copy_matches=True`, `lost=none`,
+`still_out_of_campaign=True`). Their display `Strategic Remote Civil Engineer`
+comes from the approved `posting_title`
+(`Strategic Remote Civil Engineer - Maryland (Evergreen)`) with the location
+furniture stripped — nothing invented. They were NOT re-enrolled: moving a lead
+back into a campaign could reset its sequence position, and preserving history was
+required, so re-enrolment stays a separate decision.
+
+**1,686 remain held, each with a precise reason** in `held_still_held.jsonl`.
+
+### The "~28%" replaced with a measured figure
+
+Over **all 7,839** approvals, not a 268-row sample:
+
+| Outcome | Count | Share |
+| --- | --- | --- |
+| Enrols with complete approved copy | 6,010 | **76.67%** |
+| Refused by the copy guard | 1,829 | **23.33%** |
+
+Refusal split: malformed-not-recoverable 1,790 (22.83%), title-ambiguous 20
+(0.26%), our-copy content gate 17 (0.22%), recoverable 2 (0.03%).
+
+Block rate by function: ecommerce 39.3%, product 30.7%, gtm_revenue 28.8%,
+engineering 26.8%, marketing 25.4%, people_hr 23.3%, operations 21.9%,
+finance 21.6%, customer_success 21.0%, customer_support 16.0%.
+
+**MEASURED CEILING: ~767 enrolable per 1,000 approvals.** See Step C5.
+
+## Step C3 — pending payloads: nothing can be retried, and the guard is proven
+
+`delivery_outbox` for the Instantly channel, read now: **0 rows** in
+`pending` / `claimed` / `in_flight` / `failed`. There is no queued payload to
+retry. The 9,053 stored payloads (1,214 blocked + 7,839 delivered) all still lack
+copy — the delivered ones are history, the blocked ones are compliance refusals.
+
+Proven on **five real stored payloads**, taken from the database exactly as
+production wrote them (12 variables, no `rendered_subject`, Challenger targets):
+
+| Guard | Result |
+| --- | --- |
+| `copy_block_reason` | `challenger_copy_missing:rendered_subject` |
+| outbox `process_instantly` | `blocked`, and writes `blocked_reason=challenger_copy_missing:rendered_subject` |
+| `InstantlyClient.create_lead` | raises `challenger_copy_missing:rendered_subject` |
+| **provider `create_lead` invocations** | **0** |
+| **HTTP transport invocations** | **0** |
+
+So the refusal happens before Instantly is contacted at all, not after.
+
+### The deployed artefact contains the guard
+
+Live deployment `38dae8b3` **SUCCESS**, commit `4efb21ea02`; the previous
+deployment (`0ebd7f5`) is now `REMOVED`. Each guard verified present in that exact
+commit via `git show 4efb21ea02:<file>`:
+
+- `tgtc_core/domain/outbound_copy.py` → `def copy_block_reason` ✔
+- `tgtc_core/services/delivery.py` → `copy_failure = copy_block_reason(payload)` ✔
+- `tgtc_core/providers/instantly.py` → `copy_failure = copy_block_reason(payload)` ✔
+- `tgtc_core/domain/approval.py` → `variables.update(rendered_variables(lead` ✔
+- `Dockerfile.core` → `COPY data/wave1_claims.json` ✔
+- `Dockerfile.core.dockerignore` → `!data/wave1_claims.json` ✔
+
+## Step C4 — campaign state: "restored 9/9" explained, and a NEW change by someone else
+
+"restored 9/9" and "8 active, FINANCE paused" were the same statement: all nine
+were returned to the status recorded in the pre-incident backup, which was ACTIVE
+for eight and PAUSED for FINANCE. 9 restored = 8 activated + 1 deliberately left
+paused. Verified at 19:45Z.
+
+**Why FINANCE was paused is now evidenced, not assumed.** In the pre-incident
+backup (captured 16:21:31Z, before any write of mine) FINANCE's
+`timestamp_updated` is **2026-10-02T15:44:06Z** while the other eight read
+2026-09-25T00:09-00:10Z, and FINANCE alone has `not_sending_status=None`. So a
+person paused FINANCE about 37 minutes before this work began (16:15Z). It is
+someone's deliberate action, so it was preserved and whoever made it owns
+resuming it.
+
+### ALL NINE ARE PAUSED AGAIN — not by me
+
+Read at ~22:30Z: **9 paused, 0 active.** `timestamp_updated` runs
+22:10:30 → 22:11:44Z across the nine, including a no-op re-pause of the
+already-paused FINANCE.
+
+Evidence that this was an external, deliberate action:
+
+- my own write log holds exactly 9 pauses (16:2xZ) and 8 activates (19:45Z) and
+  **nothing after**; no script of mine wrote campaign status after 19:45Z
+- it is **targeted at exactly the nine** (plus my two test campaigns, which I
+  paused myself). Of the 56 campaigns in the workspace, the other 46 were last
+  updated between 2026-08-27 and 2026-09-25 — so this was not a workspace-wide
+  Instantly event
+- sending stopped with it: the last Challenger send is 22:09:58Z
+- re-pausing a campaign that was already paused fits a human pausing all nine
+  from a filtered list, not an automated rule
+
+**I have NOT re-activated them.** Overriding a deliberate action by someone else
+is not mine to do. The copy gate is met (0 sendable without copy), so they are
+technically ready whenever their owner wants them back on.
+
+## Step C5a — a DEFECT IN MY OWN FIX, found before the run, fixed
+
+Tracing what `--target 1000` actually counts (`daily.py`: "at least ``target``
+… leads CREATED"; `target_met = fresh_created >= target`) led to the call site of
+`instantly_payload` — and to a real defect I had shipped.
+
+`instantly_payload` is called inside `OpportunityService._commit_approval`, INSIDE
+a `with transaction(...)` block, as an argument to the `INSERT` into
+`delivery_outbox`. My guard raised `ValueError` there. Neither call site catches
+it: line 1247 has no handler at all and line 1428 catches only
+`psycopg.errors.UniqueViolation`. So the exception would propagate out of the
+approval, roll the transaction back, and **end the daily run on the first lead
+whose role display fails QA — 23.3% of real approvals.**
+
+The full suite had not caught it because **every integrated test routes to a
+CONTROL campaign** (`scenario.CONTROL_ID_BY_CAMPAIGN_KEY`), where the Challenger
+copy path never runs. Production routes to the nine Challenger ids.
+
+Reproduced on the real call graph first:
+
+```
+ValueError: challenger_copy_qa_failed:role_display_contains_unsafe_characters
+tgtc_core\domain\outbound_copy.py:113
+```
+
+**Fix** — adopt the pattern this codebase already uses for a compliance-blocked
+lead ("approved, stored and counted, but neither of its outbox items is ever
+claimable"):
+
+- `approval.instantly_payload_with_copy_state(lead, …) -> (refusal, payload)`
+  renders once and REPORTS the named refusal instead of raising
+- `approval.instantly_payload` keeps its strict contract: it calls the above and
+  raises, for callers where an incomplete payload must never exist
+- `_commit_approval` now sets
+  `outbox_block = outreach_blocked_reason(lead) or copy_refusal`, so both outbox
+  rows are `blocked` with the exact reason and nothing raises
+
+New `tests_core/test_challenger_copy_blocks_not_crashes.py` closes the coverage
+gap: it routes through the real CHALLENGER ids and asserts the precise
+`blocked_reason`, that the lead is still approved and counted, and that draining
+the channel creates nothing. Titles were chosen by measurement, not assumption —
+the core already normalises `"… - Remote (Evergreen)"` to
+`"Customer Success Manager"` and falls back to `"customer success role"` for an
+over-long one, so only genuinely unsafe displays are used.
+
+## Step C5b — copy quality finding: 650 bare function-noun subjects
+
+Of the 5,653 repaired leads, **650 (11.5%)** have a subject that is a bare
+function noun, not a job title: `operations role` 372, `engineering role` 88,
+`finance role` 66, `revenue operations role` 33, `marketing role` 28,
+`people operations role` 23, `product role` 19, `customer support role` 7,
+`customer success role` 7, `ecommerce role` 7.
+
+They read *"Saw you're hiring for operations role."* — poor copy, though NOT
+blank. This is the core's own `open_role` output, which the frozen renderer
+accepts; my repair rendered it faithfully rather than introducing it. It is
+exactly the shape I refused to adopt as a fallback for the held leads, and none
+of the 591 legacy reference leads carries it. Flagged as a copy decision, not
+changed.
+
+## Step C5c — the next scheduled run: measured, not promised
+
+No run and no budget were opened. Everything below is read from `run_log` and
+`/campaigns/analytics`.
+
+### The target was already unreachable BEFORE the copy guard existed
+
+`--target 1000` counts Instantly CREATIONS (`daily.py`: "at least ``target`` …
+leads CREATED"; `target_met = fresh_created >= target`). Actual history:
+
+| Run | fresh created | apollo credits | per lead | stop reason |
+| --- | --- | --- | --- | --- |
+| 09-22 | 872 | 1,288 | 1.48 | apollo_request_allowance_insufficient |
+| 09-23 | 1,013 | 1,434 | 1.42 | **target_reached** |
+| 09-25 | 1,015 | 1,455 | 1.43 | **target_reached** |
+| 09-26 | 881 | 1,233 | 1.40 | apollo_request_allowance_insufficient |
+| 09-27 | 697 | 972 | 1.40 | apollo_request_allowance_insufficient |
+| 09-28 | 517 | 762 | 1.47 | apollo_request_allowance_insufficient |
+| 09-29 | 0 | 0 | — | instantly_slots_short_by:265 |
+| 09-30 | 0 | 0 | — | instantly_slots_short_by:263 |
+| 10-01 | 0 | 0 | — | instantly_slots_short_by:260 |
+| 10-02 | 0 | 0 | — | instantly_slots_short_by:257 |
+
+**Four consecutive days of zero creations and zero spend, all before this
+incident work**, and the target has been met only twice in the last ten runs.
+1,000/run must not be promised.
+
+### Limit 1 — Instantly storage (the binding one, and my work moved it)
+
+The 10-02 run recorded `stored_before 22757`, `free_before 2243`, `reserve 1500`,
+so it needed 2,500 slots and stopped 257 short. Rotation could not help: of 26
+candidates considered it deleted 0 (`has_reply` 11, `sequence_not_finished` 12,
+failed 3).
+
+The controller counts `stored` as the SUM of per-campaign `leads_count`
+(`instantly_rotation.py:207`). Measured now: **21,069**, exactly **−1,688** —
+the hold move took those leads out of every campaign, so they left that sum.
+
+| | |
+| --- | --- |
+| free slots by the controller's arithmetic | 25,000 − 21,069 = **3,931** |
+| slots required (target 1,000 + reserve 1,500) | 2,500 |
+| verdict for the 2026-10-03 03:00Z run | **CAN proceed** — first time in four days |
+
+**Flagged risk, not a fix:** the plan caps STORED contacts workspace-wide, and the
+1,688 held leads still occupy plan storage even though they left the campaign sum.
+So the controller's figure may now UNDERSTATE true storage, and creates could
+still be refused by Instantly with "Lead limit reached. Remaining uploads: 0".
+I did not undo the hold move to avoid this — holding those leads is what stops
+blank sends.
+
+### Limit 2 — the copy guard, once capacity allows
+
+Apollo credits are spent on reveal/verify BEFORE the copy gate runs at approval,
+so a copy-blocked lead has already cost its credits. With the measured
+**23.33%** refusal rate and **~1.44** credits per approval:
+
+- creating 1,000 needs ≈ 1,000 / 0.7667 ≈ **1,304 approvals** ≈ **1,878 credits**
+- the configured ceiling is **1,600** apollo credits per run
+- 1,600 / 1.44 ≈ 1,111 approvals × 0.7667 ≈ **≈850 creations**
+
+**MEASURED CEILING: ≈850 creations per run** at the current 1,600-credit budget,
+versus 1,013-1,015 on the two runs that hit target with no copy guard. Raising the
+target to 1,000 again needs roughly **+280 apollo credits per run** — new budget,
+so it is reported, not taken.
+
+Reconciliation to perform on the 03:00Z run (queries ready): genuine creations
+(`delivery_receipts.receipt_kind='created'`), copy blocks
+(`delivery_outbox.blocked_reason LIKE 'challenger_copy%'`), Airtable rows
+(`airtable_fresh`), and spend (`apollo_credits`, `apollo_credits_per_fresh_lead`)
+from the run's own `daily/end` entry.
+
+---
+
+# Continuation 2, 2026-10-02 22:50Z — three defects, measured and fixed
+
+Campaigns stay PAUSED throughout. The external pause of 22:10Z is not overridden.
+
+## Step D1 — RETRACTION: no slots were freed
+
+My earlier statement that the hold move freed 1,688 slots was **WRONG**, and this
+is the measurement that refutes it:
+
+| Population | Contacts |
+| --- | --- |
+| held in the nine + legacy campaigns (what the controller counts) | 21,069 |
+| parked in `TGTC Copy Incident Hold 20261002` | **1,688** |
+| **real stored total** | **22,757** |
+
+22,757 is *exactly* the `stored_before` the 2026-10-02 run recorded when all
+1,688 were still in campaigns. **Nothing was freed. The contacts still exist and
+still occupy plan storage.** Real free slots are 25,000 − 22,757 = **2,243**, the
+same as before, and the requirement is 2,500 — still short by **257**.
+
+What the move actually did was make the controller's own count WRONG by 1,688,
+which would have told the next run it had 3,931 free slots and let it pay Apollo
+for contacts the provider then refuses with "Lead limit reached".
+
+`/workspaces/current` reports `plan_id: pid_hg_v1` and no usage figures, so there
+is no authoritative usage endpoint to read instead.
+
+**Fixed, not worked around.** `instantly_rotation.occupancy` now counts BOTH
+populations and reports them separately (`stored_in_campaigns`, `stored_on_lists`),
+via two new client methods (`list_lead_lists`, `list_list_leads`). If the lists
+cannot be read, occupancy is **UNKNOWN**, never silently zero — and a client too
+old to enumerate lists is unknown too, because assuming zero is the very
+undercount this prevents. `daily.py` now stops on
+`target_not_reached:instantly_occupancy_unknown` instead of buying blind.
+No held contact was deleted to make the numbers work.
+
+## Step D2 — why rotation did not close the deficit for four days
+
+Not disabled, and it did run: the receipts show `enabled: true`, `rotated: true`.
+The real cause is a **two-part defect**, and the receipts prove the diagnosis.
+
+`rotate()` read `getattr(response, "status_code", 0)`. Production passes
+`InstantlyClient.delete_lead`, which answers an `InstantlyResult` carrying
+`ok`/`status`/`message` — it has **no `status_code`**. Every delete therefore
+scored 0, i.e. a failure. And immediately below, `if out["failed"] >= 3: return out`
+aborted the entire rotation after three contacts.
+
+So each run deleted about three contacts, recorded all three as failures, marked
+their backup rows "not deleted", reported `deleted: 0`, and stopped with
+`not_enough_safe_candidates`.
+
+**The receipt that proves the deletes were really happening:** the shortfall fell
+by two to three per day across the four runs — `instantly_slots_short_by` 265,
+263, 260, 257. Slots were being freed while the log said nothing was deleted.
+
+Fixed with `_delete_outcome()`, which reads `status` (or `status_code`, or a bare
+`ok`) and takes the error text from `message` (or `text`). The three-failure
+breaker is kept — it is a sound safety valve — and now only trips on genuine
+failures. Backups, suppressions and protected campaigns are untouched.
+
+### What rotation can actually reach, measured
+
+| Bucket | Campaigns | Contacts |
+| --- | --- | --- |
+| PROTECTED — our nine Challenger + nine Control | 18 | 10,518 |
+| legacy, status 2 (paused) -> refused | 7 | 5,028 |
+| legacy, status -2 (bounce protect) -> refused | 4 | 4,935 |
+| legacy, status 3 COMPLETED -> **rotatable** | 26 | **588** |
+
+Sums to 21,069. So even working perfectly, rotation can only consider **588**
+contacts, and `judge()` then refuses those with a reply or an unfinished
+sequence — 23 of the 26 examined on 10-02. The fix lets rotation count and
+continue instead of aborting at three; it does **not** create a large safe
+population. Clearing 257 from 588 is not assured.
+
+## Step D3 — the approval exception now covers BOTH routes
+
+`_commit_approval` is called from two places. The earlier test covered the
+candidate route; `test_the_person_reuse_route_also_blocks_instead_of_raising`
+now covers the reused-verified-person route, which has **no exception handler at
+all**. Also asserted: the reuse route still pays nothing, both outbox rows are
+`blocked` with the exact reason, **no empty lead is created and nothing reaches
+Airtable** (`airtable.records == {}`, `instantly.leads == {}`), and atomicity
+still holds (`test_approval_and_both_outbox_items_are_one_transaction`, repointed
+at the current seam).
+
+## Step D4 — the 650 generic subjects
+
+Measured against the approved facts: **363 of 650 (55.8%)** can carry a concrete
+title drawn from `posting_title` — 211 through the approved `role-display/2`
+reducer, 152 from the title directly. Examples: `engineering role` ->
+`Senior Research Engineer`, `Cloud Storage Integration Engineer`,
+`Information Security Administrator`.
+
+**287 (44.2%)** cannot: their `posting_title` fails the display gates (498 unsafe
+as given, 49 still unsafe after reduction). No title is invented and no copy is
+rewritten — a candidate must come from `posting_title` itself.
+
+## Step D5 — the blank-first-email cohort, separated
+
+Nothing is restarted and nothing is resent. All **7,777** affected recipients:
+
+| Bucket | Recipients | What is possible |
+| --- | --- | --- |
+| **A** repaired, blank thread, steps remaining | **5,630** | body IS repaired; the thread subject is NOT repairable. Continuing sends correct copy under "(no subject)". Highest broken step: 1 -> 895, 2 -> 2,561, 3 -> 2,174 |
+| **C** held, no copy exists | **1,677** | cannot send at all |
+| **E** terminal — 337 bounced, 123 completed, 10 unknown | **470** | nothing left to send; purely a recovery decision |
+
+**Requires a recovery decision before reactivating:** whether to continue the
+sequence for bucket A at all. Those 5,630 people have already received one to
+three blank emails from us, and their next message will arrive with correct copy
+under an empty subject. That is a judgement about the recipient relationship, not
+a technical repair, and I am not making it.
+
+## Step D6 — where Apollo is spent, and the finding that changes the economics
+
+Apollo credits are consumed revealing and verifying a CONTACT, which happens
+BEFORE `_commit_approval` runs the copy gate. So a copy-refused lead has already
+been paid for.
+
+But the copy gate judges almost entirely POSTING-derived facts: the role display
+is `lead['open_role']` and the content gates read `role_focus` — both known from
+the vacancy. Only `first_name` comes from the person.
+
+**Measured over all 7,839 approvals, re-judging each with a placeholder contact:**
+
+| | |
+| --- | --- |
+| real refusals | 1,829 |
+| **predictable before paid enrichment** | **1,829 — 100.0%** |
+| would be wrongly pre-refused (false positives) | **0** |
+| refusals only visible after enrichment | **0** |
+
+So every copy refusal is visible from the vacancy alone, with no gate relaxed and
+no budget raised. At the measured ~1.44 credits per approval that is **~2,634
+Apollo credits per run-equivalent currently spent on contacts that are then
+discarded**.
+
+**Consequence for the earlier figures, which I WITHDRAW as limits:** "~850
+creations" and "+280 credits" assumed the discard is unavoidable. It is not. A
+pre-enrichment copy-feasibility check would spend credits only on postings that
+can produce copy. I have NOT implemented it: it closes opportunities before
+enrichment and so changes the funnel and its counts, which is a deliberate change
+and not something to bundle into a pre-cron hotfix. It is the recommended next
+change, with the measurement above behind it.
+
+## Step D7 — CORE CRON PAUSED (2026-10-02 ~22:55Z)
+
+Only the Core cron. Campaigns stay paused; nothing else was touched.
+
+| | Before | After |
+| --- | --- | --- |
+| `GTM Core Canary 1000` `cronSchedule` | `0 3 * * *` | **`None`** |
+| `dockerfilePath` | `Dockerfile.core` | unchanged |
+| `rootDirectory` | `/` | unchanged |
+| `numReplicas` | 1 | unchanged |
+| `restartPolicyType` | `NEVER` | unchanged |
+| `startCommand` | 713 chars | 713 chars, unchanged |
+
+Applied with `serviceInstanceUpdate(input: { cronSchedule: null })` — only that one
+field was sent, so no variable patch was involved (a 2026-09-17 variable patch is
+on record as having deleted every `INSTANTLY_CAMPAIGN_*`).
+
+Verified two ways: the service instance reads back `cronSchedule: None`, and
+`railway status` no longer lists the Core under "Cron jobs" (only `GTM Replies`
+`15 * * * *` and `GTM Weekly Report` remain). **Reply ingestion was deliberately
+left running.**
+
+### Why it is paused
+
+On the currently deployed commit `4efb21ea02` the 03:00Z tick would:
+
+1. **crash** — the approval-time copy refusal raises inside `_commit_approval`'s
+   transaction and neither call site catches it; 23.3% of approvals hit it, so a
+   crash within the first handful of leads is near-certain; and
+2. **waste spend first** — occupancy counts only campaign membership, so it would
+   read 3,931 free slots where the workspace really has 2,243, buy Apollo
+   enrichment for roughly a thousand contacts, and then be refused by Instantly
+   with "Lead limit reached".
+
+### Conditions to restore `0 3 * * *`
+
+All of these, in order:
+
+1. The fixes in PR (see below) are **merged and the deployment SUCCEEDS** — a
+   build failure deploys nothing, as `bc29b837` already proved.
+2. The effective commit is re-read from Railway and contains all three fixes.
+3. Occupancy, read live, counts campaigns **and** lists and matches the real
+   workspace total.
+4. Both Challenger approval routes are verified on the deployed commit.
+5. The 363 concrete-title repairs are complete and read-back verified; the 287
+   without a usable title remain held.
+6. A decision exists on the blank-thread cohort (5,630 recipients) — it is NOT a
+   prerequisite for the cron, but it IS one for reactivating the campaigns.
+
+Restore command (one field only, same shape as the pause):
+
+```
+serviceInstanceUpdate(serviceId: "f83cd97a-135d-48e3-8e12-d517a51edfff",
+                      environmentId: "bae427bd-64a6-4f4e-8f56-fbd406985434",
+                      input: { cronSchedule: "0 3 * * *" })
+```
+
+Note while paused: no scheduled run means no acquisition and no delivery drain.
+Nothing is lost — the outbox is durable and the four previous runs created nothing
+anyway. **No run was opened to recover those four days.**

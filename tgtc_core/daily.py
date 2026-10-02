@@ -281,6 +281,17 @@ class DailyController:
         self.r._log("daily", "start", {"budget_id": self.budget_id, "target": self.target,
                                        "block_pages": self.block_pages, "campaign_ids": len(self.campaign_ids())})
         capacity = self.capacity_check()                      # 0: is there anywhere to put leads?
+        # Occupancy that cannot be read is not room. Stop before spending on
+        # contacts the provider may refuse (2026-10-02: counting only campaign
+        # membership understated storage by 1,688 contacts).
+        if (rp.rotation or {}).get("occupancy_unknown") and not capacity.get("blocked"):
+            rp.acquisition_stop = "instantly_occupancy_unknown"
+            rp.stop_reason = "target_not_reached:instantly_occupancy_unknown"
+            self.r._log("daily", "instantly_occupancy_unknown",
+                        {"message": (rp.rotation or {}).get("message", "")})
+            self._apply(self.measure())
+            self.r._log("daily", "end", rp.to_dict())
+            return rp
         short = int((rp.rotation or {}).get("deficit") or 0)
         if short > 0 and not capacity.get("blocked"):
             # There is room for some of this run but not for the whole of it, and

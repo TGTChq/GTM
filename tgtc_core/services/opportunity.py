@@ -39,7 +39,7 @@ from ..db import work_queue
 from ..domain.contact_ranking import organization_evidence, rank_candidates
 from ..domain.approval import (
     COMPLIANCE_LEAD_FIELDS, ApprovalRefusal, ApprovedLead, airtable_fields, build_approved_lead,
-    instantly_payload, outreach_blocked_reason,
+    instantly_payload_with_copy_state, outreach_blocked_reason,
 )
 from ..domain.jurisdiction import observe_contact_country
 from ..domain.facts import RULE_VERSION, resolve_company_size, size_corroborated, size_reject_reason
@@ -964,7 +964,16 @@ class OpportunityService:
                 # own existing terminal state for "do not deliver", and the
                 # reason comes from the SAME predicate the delivery pre-check
                 # asks, never a second copy of the rule.
-                outbox_block = outreach_blocked_reason(lead)
+                # Same shape for a second reason to withhold: a Challenger
+                # campaign body is only the rendered copy plus the signature, so a
+                # lead whose approved facts cannot produce complete copy must be
+                # stored and counted but never claimable. The refusal comes from
+                # the renderer itself, in the SAME pass that builds the payload --
+                # raising here would roll the approval back instead, which on real
+                # approvals is 23.3% of them and would end the run.
+                copy_refusal, instantly_row = instantly_payload_with_copy_state(
+                    lead, skip_if_in_workspace=self.person_uniqueness, verify_on_import=self.verify_on_import)
+                outbox_block = outreach_blocked_reason(lead) or copy_refusal
                 outbox_state = "blocked" if outbox_block else "pending"
                 cur.execute(
                     "UPDATE opportunities SET approved_person_id = COALESCE(approved_person_id, %s), "
@@ -981,7 +990,7 @@ class OpportunityService:
                     "INSERT INTO delivery_outbox (approval_id, channel, idempotency_key, payload_json, available_at, state, blocked_reason) "
                     "VALUES (%s, 'instantly', %s, %s, %s, %s, %s)",
                     (approval_id, f"instantly:{lead['campaign_id']}:{lead['email']}",
-                     jsonb(instantly_payload(lead, skip_if_in_workspace=self.person_uniqueness, verify_on_import=self.verify_on_import)),
+                     jsonb(instantly_row),
                      self.now(), outbox_state, outbox_block or None),
                 )
         return approval_id
