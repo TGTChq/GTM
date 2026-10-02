@@ -332,3 +332,39 @@ Isolated deliberately: with no per-lead pause in Instantly, activating a live
 Challenger campaign would also release the leads that still have no copy.
 
 Receipts pending — Instantly had not yet executed the step at first check.
+
+## Step 5d — bulk repair path spot-verified early
+
+Rather than wait ~4.9h to discover a systematic problem, 6 already-applied leads
+spread across the applied set were re-read individually (`spot_verify.py`):
+
+```
+01a0c117-a9e1 keys 20->40 copy_matches=True lost=none guards_ok=True OK
+01a0c24e-fdbd keys 22->42 copy_matches=True lost=none guards_ok=True OK
+01a0c335-780f keys 20->40 copy_matches=True lost=none guards_ok=True OK
+01a0c371-b54a keys 22->42 copy_matches=True lost=none guards_ok=True OK
+01a0c842-c173 keys 22->42 copy_matches=True lost=none guards_ok=True OK
+01a0c87b-838a keys 22->42 copy_matches=True lost=none guards_ok=True OK
+spot check: 6/6 fully verified
+```
+
+Each: all five required fields byte-identical to the expected render, no
+pre-existing variable lost, and `status` / `campaign` / `email` /
+`timestamp_last_contact` / `email_reply_count` unchanged.
+
+## Pre-deploy build checks done without Docker
+
+- `.dockerignore` excludes `data/raw|filtered|enriched|state/*` but **not**
+  `data/wave1_claims.json`, and does not exclude `outbound_wave1/`. Both new
+  `COPY` targets are in the build context, so the build will not fail on them.
+- `claims._DEFAULT_PATH` is `Path(__file__).parent.parent/"data"/"wave1_claims.json"`,
+  which resolves to `/app/data/wave1_claims.json` under `WORKDIR /app`. Correct.
+- `outbound_wave1` needs nothing added to `requirements-core.txt` (stdlib only).
+
+## RESUMPTION HAS A HARD PREREQUISITE: the deploy
+
+Resuming the campaigns before #129 is deployed would re-open the incident. The
+cron fires 2026-10-03 03:00Z on the current image and would create ~1,000 fresh
+copy-less leads; if the campaigns were ACTIVE by then, those would send blank.
+So the order is fixed: **merge and deploy first, verify the effective commit,
+then resume.** The campaigns stay paused until then regardless of the repair.
