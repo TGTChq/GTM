@@ -387,3 +387,58 @@ from `devan.m@globaltalentvirtual.com` to `luis@globaltalent.co`.
 This is the receipt of what Instantly actually sent after substitution, not a
 preview. Receipt 2 (`TEST A`, the exact live step-1 shape with
 `{{rendered_subject}}` as the whole subject) had not executed yet.
+
+## Step 5e — the merge deployed NOTHING: the build FAILED
+
+PR #129 was merged (`feat/rebuild-core` → `ad12703`, contains the fix), Railway
+built it as deployment `bc29b837` and the build **FAILED**:
+
+```
+error [7/8] COPY data/wave1_claims.json ./data/wave1_claims.json
+error [6/8] COPY outbound_wave1/ ./outbound_wave1/
+Build Failed: failed to compute cache key: failed to calculate checksum of ref
+  …: "/data/wave1_claims.json": not found
+```
+
+**The effective deployment is therefore still `fd5fe3de` / `0ebd7f5` — the fix is
+NOT live.** The previous container was not replaced, so nothing regressed.
+
+**Root cause of the build failure:** the repo has a per-Dockerfile ignore file,
+`Dockerfile.core.dockerignore`, and BuildKit prefers it over the generic
+`.dockerignore` that I checked. It is deny-all-then-allow:
+
+```
+*
+!Dockerfile.core
+!requirements-core.txt
+!domain_utils.py
+!source_domains.py
+!tgtc_core/
+!tgtc_core/**
+```
+
+Both files are tracked in git and neither is git-ignored, and the generic
+`.dockerignore` permits them — but this file excludes everything not explicitly
+re-admitted, so the two new `COPY` sources never entered the build context. The
+supplied patch added the `COPY` lines and did not touch this file; only a real
+build could surface it.
+
+**Fixed** by re-admitting exactly the renderer and the single static file it
+reads, then re-emptying `data/` so no other data file rides along (last matching
+pattern wins, so the order matters):
+
+```
+!outbound_wave1/
+!outbound_wave1/**
+!data/
+data/*
+!data/wave1_claims.json
+```
+
+**Guard added** so this cannot recur:
+`test_every_dockerfile_copy_source_is_allowed_into_the_build_context` parses both
+files and fails when `Dockerfile.core` copies a path the ignore file excludes.
+Proven against the real defect — with the allow lines removed it fails naming
+`['outbound_wave1/', 'data/wave1_claims.json']`, and passes once restored. My
+earlier Dockerfile-text-only assertion could not have caught this, which is why
+"tests pass" was not sufficient evidence of a working deployment.
