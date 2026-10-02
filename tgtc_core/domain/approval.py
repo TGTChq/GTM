@@ -13,7 +13,7 @@ import json
 import re
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, Mapping, Optional, Sequence
+from typing import Any, Dict, Mapping, Optional, Sequence, Tuple
 
 from ..policy.campaigns import (CAMPAIGN_BY_FUNCTION, KNOWN_CHALLENGER_CAMPAIGN_IDS,
                                KNOWN_CONTROL_CAMPAIGN_IDS, POLICY_VERSION,
@@ -503,7 +503,29 @@ def airtable_fields(lead: Dict[str, Any], fp: str) -> Dict[str, Any]:
 
 
 def instantly_payload(lead: Dict[str, Any], *, skip_if_in_workspace: bool, verify_on_import: bool) -> Dict[str, Any]:
-    """Documented lead fields, with copy that matches the destination's templates.
+    """The payload, or a RAISE when a Challenger lead has no complete copy.
+
+    The strict form, for any caller where an incomplete payload must never
+    exist. ``instantly_payload_with_copy_state`` is the form the approval
+    writer uses: it has to STORE the row and mark it unsendable, not abort.
+    """
+    refusal, payload = instantly_payload_with_copy_state(
+        lead, skip_if_in_workspace=skip_if_in_workspace, verify_on_import=verify_on_import)
+    if refusal:
+        raise ValueError(refusal)
+    return payload
+
+
+def instantly_payload_with_copy_state(lead: Dict[str, Any], *, skip_if_in_workspace: bool,
+                                      verify_on_import: bool) -> Tuple[str, Dict[str, Any]]:
+    """``(copy_refusal, payload)``; the refusal is "" when the copy is complete.
+
+    ONE renderer pass and ONE rule. The approval writer decides the outbox
+    state from the refusal, so a Challenger lead whose copy cannot be
+    rendered is approved, stored and counted while neither of its outbox
+    items is ever claimable -- exactly what the country gates already do.
+    Raising instead would abort the approval transaction: measured on real
+    approvals that is 23.3% of them, i.e. the daily run.
 
     Fix round 1, C1 (CRITICAL, independent review): ``company_size``/
     ``company_size_band`` are custom variables an outbound email TEMPLATE can
@@ -537,12 +559,16 @@ def instantly_payload(lead: Dict[str, Any], *, skip_if_in_workspace: bool, verif
     # ``{{rendered_email_N_html}}`` plus the signature, with
     # ``{{rendered_subject}}`` on step 1. Without these variables the recipient
     # gets an empty subject and a signature alone (incident 2026-10-02), so the
-    # copy is rendered from this lead's approved facts and must be COMPLETE or
-    # this raises. Control campaigns keep their live static templates.
+    # copy is rendered from this lead's approved facts. Control campaigns keep
+    # their live static templates.
+    copy_refusal = ""
     if lead["campaign_id"] in KNOWN_CHALLENGER_CAMPAIGN_IDS:
         from .outbound_copy import rendered_variables
-        variables.update(rendered_variables(lead, airtable_fields(lead, "")))
-    return {
+        try:
+            variables.update(rendered_variables(lead, airtable_fields(lead, "")))
+        except ValueError as exc:
+            copy_refusal = str(exc)[:300]
+    return copy_refusal, {
         "campaign": lead["campaign_id"],
         "email": lead["email"],
         "first_name": lead["first_name"],

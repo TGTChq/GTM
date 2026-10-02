@@ -853,3 +853,63 @@ Evidence that this was an external, deliberate action:
 **I have NOT re-activated them.** Overriding a deliberate action by someone else
 is not mine to do. The copy gate is met (0 sendable without copy), so they are
 technically ready whenever their owner wants them back on.
+
+## Step C5a — a DEFECT IN MY OWN FIX, found before the run, fixed
+
+Tracing what `--target 1000` actually counts (`daily.py`: "at least ``target``
+… leads CREATED"; `target_met = fresh_created >= target`) led to the call site of
+`instantly_payload` — and to a real defect I had shipped.
+
+`instantly_payload` is called inside `OpportunityService._commit_approval`, INSIDE
+a `with transaction(...)` block, as an argument to the `INSERT` into
+`delivery_outbox`. My guard raised `ValueError` there. Neither call site catches
+it: line 1247 has no handler at all and line 1428 catches only
+`psycopg.errors.UniqueViolation`. So the exception would propagate out of the
+approval, roll the transaction back, and **end the daily run on the first lead
+whose role display fails QA — 23.3% of real approvals.**
+
+The full suite had not caught it because **every integrated test routes to a
+CONTROL campaign** (`scenario.CONTROL_ID_BY_CAMPAIGN_KEY`), where the Challenger
+copy path never runs. Production routes to the nine Challenger ids.
+
+Reproduced on the real call graph first:
+
+```
+ValueError: challenger_copy_qa_failed:role_display_contains_unsafe_characters
+tgtc_core\domain\outbound_copy.py:113
+```
+
+**Fix** — adopt the pattern this codebase already uses for a compliance-blocked
+lead ("approved, stored and counted, but neither of its outbox items is ever
+claimable"):
+
+- `approval.instantly_payload_with_copy_state(lead, …) -> (refusal, payload)`
+  renders once and REPORTS the named refusal instead of raising
+- `approval.instantly_payload` keeps its strict contract: it calls the above and
+  raises, for callers where an incomplete payload must never exist
+- `_commit_approval` now sets
+  `outbox_block = outreach_blocked_reason(lead) or copy_refusal`, so both outbox
+  rows are `blocked` with the exact reason and nothing raises
+
+New `tests_core/test_challenger_copy_blocks_not_crashes.py` closes the coverage
+gap: it routes through the real CHALLENGER ids and asserts the precise
+`blocked_reason`, that the lead is still approved and counted, and that draining
+the channel creates nothing. Titles were chosen by measurement, not assumption —
+the core already normalises `"… - Remote (Evergreen)"` to
+`"Customer Success Manager"` and falls back to `"customer success role"` for an
+over-long one, so only genuinely unsafe displays are used.
+
+## Step C5b — copy quality finding: 650 bare function-noun subjects
+
+Of the 5,653 repaired leads, **650 (11.5%)** have a subject that is a bare
+function noun, not a job title: `operations role` 372, `engineering role` 88,
+`finance role` 66, `revenue operations role` 33, `marketing role` 28,
+`people operations role` 23, `product role` 19, `customer support role` 7,
+`customer success role` 7, `ecommerce role` 7.
+
+They read *"Saw you're hiring for operations role."* — poor copy, though NOT
+blank. This is the core's own `open_role` output, which the frozen renderer
+accepts; my repair rendered it faithfully rather than introducing it. It is
+exactly the shape I refused to adopt as a fallback for the held leads, and none
+of the 591 legacy reference leads carries it. Flagged as a copy decision, not
+changed.
