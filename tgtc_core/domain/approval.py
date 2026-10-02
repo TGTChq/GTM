@@ -15,7 +15,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Mapping, Optional, Sequence
 
-from ..policy.campaigns import (CAMPAIGN_BY_FUNCTION, KNOWN_CONTROL_CAMPAIGN_IDS, POLICY_VERSION,
+from ..policy.campaigns import (CAMPAIGN_BY_FUNCTION, KNOWN_CHALLENGER_CAMPAIGN_IDS,
+                               KNOWN_CONTROL_CAMPAIGN_IDS, POLICY_VERSION,
                                campaign_id_allowed, size_band)
 from ..policy.compliance import (
     COMPLIANCE_RULE_VERSION, ENTITY_UNKNOWN, OPT_OUT_NONE, ComplianceRecord, evaluate,
@@ -502,7 +503,7 @@ def airtable_fields(lead: Dict[str, Any], fp: str) -> Dict[str, Any]:
 
 
 def instantly_payload(lead: Dict[str, Any], *, skip_if_in_workspace: bool, verify_on_import: bool) -> Dict[str, Any]:
-    """Control-A payload shape with the exact custom-variable names production sends.
+    """Documented lead fields, with copy that matches the destination's templates.
 
     Fix round 1, C1 (CRITICAL, independent review): ``company_size``/
     ``company_size_band`` are custom variables an outbound email TEMPLATE can
@@ -532,6 +533,15 @@ def instantly_payload(lead: Dict[str, Any], *, skip_if_in_workspace: bool, verif
     variables = {k: (v if isinstance(v, (str, int, float, bool)) or v is None else str(v))
                  for k, v in variables.items() if v not in (None, "")}
     assert set(variables) <= set(_CUSTOM_VARIABLE_NAMES)
+    # A Challenger campaign body holds no literal copy -- it is only
+    # ``{{rendered_email_N_html}}`` plus the signature, with
+    # ``{{rendered_subject}}`` on step 1. Without these variables the recipient
+    # gets an empty subject and a signature alone (incident 2026-10-02), so the
+    # copy is rendered from this lead's approved facts and must be COMPLETE or
+    # this raises. Control campaigns keep their live static templates.
+    if lead["campaign_id"] in KNOWN_CHALLENGER_CAMPAIGN_IDS:
+        from .outbound_copy import rendered_variables
+        variables.update(rendered_variables(lead, airtable_fields(lead, "")))
     return {
         "campaign": lead["campaign_id"],
         "email": lead["email"],

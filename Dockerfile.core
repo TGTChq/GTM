@@ -10,6 +10,11 @@ RUN pip install --no-cache-dir -r requirements-core.txt
 
 # Explicit runtime files: no .env, historical data, tests, or legacy runner.
 COPY tgtc_core/ ./tgtc_core/
+# The frozen Challenger copy renderer and the static claim registry it reads.
+# A Challenger campaign body is only the rendered variables plus the signature,
+# so without these the image cannot produce a sendable Challenger lead at all.
+COPY outbound_wave1/ ./outbound_wave1/
+COPY data/wave1_claims.json ./data/wave1_claims.json
 COPY domain_utils.py source_domains.py ./
 
 # Starting an image must not acquire, enrich, migrate, or deliver implicitly.
