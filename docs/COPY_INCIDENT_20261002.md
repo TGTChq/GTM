@@ -913,3 +913,75 @@ accepts; my repair rendered it faithfully rather than introducing it. It is
 exactly the shape I refused to adopt as a fallback for the held leads, and none
 of the 591 legacy reference leads carries it. Flagged as a copy decision, not
 changed.
+
+## Step C5c — the next scheduled run: measured, not promised
+
+No run and no budget were opened. Everything below is read from `run_log` and
+`/campaigns/analytics`.
+
+### The target was already unreachable BEFORE the copy guard existed
+
+`--target 1000` counts Instantly CREATIONS (`daily.py`: "at least ``target`` …
+leads CREATED"; `target_met = fresh_created >= target`). Actual history:
+
+| Run | fresh created | apollo credits | per lead | stop reason |
+| --- | --- | --- | --- | --- |
+| 09-22 | 872 | 1,288 | 1.48 | apollo_request_allowance_insufficient |
+| 09-23 | 1,013 | 1,434 | 1.42 | **target_reached** |
+| 09-25 | 1,015 | 1,455 | 1.43 | **target_reached** |
+| 09-26 | 881 | 1,233 | 1.40 | apollo_request_allowance_insufficient |
+| 09-27 | 697 | 972 | 1.40 | apollo_request_allowance_insufficient |
+| 09-28 | 517 | 762 | 1.47 | apollo_request_allowance_insufficient |
+| 09-29 | 0 | 0 | — | instantly_slots_short_by:265 |
+| 09-30 | 0 | 0 | — | instantly_slots_short_by:263 |
+| 10-01 | 0 | 0 | — | instantly_slots_short_by:260 |
+| 10-02 | 0 | 0 | — | instantly_slots_short_by:257 |
+
+**Four consecutive days of zero creations and zero spend, all before this
+incident work**, and the target has been met only twice in the last ten runs.
+1,000/run must not be promised.
+
+### Limit 1 — Instantly storage (the binding one, and my work moved it)
+
+The 10-02 run recorded `stored_before 22757`, `free_before 2243`, `reserve 1500`,
+so it needed 2,500 slots and stopped 257 short. Rotation could not help: of 26
+candidates considered it deleted 0 (`has_reply` 11, `sequence_not_finished` 12,
+failed 3).
+
+The controller counts `stored` as the SUM of per-campaign `leads_count`
+(`instantly_rotation.py:207`). Measured now: **21,069**, exactly **−1,688** —
+the hold move took those leads out of every campaign, so they left that sum.
+
+| | |
+| --- | --- |
+| free slots by the controller's arithmetic | 25,000 − 21,069 = **3,931** |
+| slots required (target 1,000 + reserve 1,500) | 2,500 |
+| verdict for the 2026-10-03 03:00Z run | **CAN proceed** — first time in four days |
+
+**Flagged risk, not a fix:** the plan caps STORED contacts workspace-wide, and the
+1,688 held leads still occupy plan storage even though they left the campaign sum.
+So the controller's figure may now UNDERSTATE true storage, and creates could
+still be refused by Instantly with "Lead limit reached. Remaining uploads: 0".
+I did not undo the hold move to avoid this — holding those leads is what stops
+blank sends.
+
+### Limit 2 — the copy guard, once capacity allows
+
+Apollo credits are spent on reveal/verify BEFORE the copy gate runs at approval,
+so a copy-blocked lead has already cost its credits. With the measured
+**23.33%** refusal rate and **~1.44** credits per approval:
+
+- creating 1,000 needs ≈ 1,000 / 0.7667 ≈ **1,304 approvals** ≈ **1,878 credits**
+- the configured ceiling is **1,600** apollo credits per run
+- 1,600 / 1.44 ≈ 1,111 approvals × 0.7667 ≈ **≈850 creations**
+
+**MEASURED CEILING: ≈850 creations per run** at the current 1,600-credit budget,
+versus 1,013-1,015 on the two runs that hit target with no copy guard. Raising the
+target to 1,000 again needs roughly **+280 apollo credits per run** — new budget,
+so it is reported, not taken.
+
+Reconciliation to perform on the 03:00Z run (queries ready): genuine creations
+(`delivery_receipts.receipt_kind='created'`), copy blocks
+(`delivery_outbox.blocked_reason LIKE 'challenger_copy%'`), Airtable rows
+(`airtable_fresh`), and spend (`apollo_credits`, `apollo_credits_per_fresh_lead`)
+from the run's own `daily/end` entry.
