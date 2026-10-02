@@ -601,3 +601,66 @@ on. A moved lead ends with NO campaign, so it cannot send; nothing is deleted.
 The same `verify_repair.py` sweep is then the final gate: those leads should no
 longer appear in any campaign, `SENDABLE_WITHOUT_COPY` should be 0, and every
 campaign should read safe to resume.
+
+## Step 7 — hold move DONE, final gate PASSED
+
+**1,688 / 1,688 moved** into `TGTC Copy Incident Hold 20261002`, every background
+job `success`, 0 failures. No contact deleted or re-added.
+
+Final sweep, re-reading every lead still in the nine campaigns — **6,707 leads**
+(8,395 − 1,688, reconciles):
+
+| Verdict | Leads |
+| --- | --- |
+| REPAIRED_VERIFIED | 5,653 |
+| HAS_COPY_NOT_IN_PLAN (legacy healthy) | 591 |
+| NO_COPY_TERMINAL_OK | 463 |
+| **SENDABLE_WITHOUT_COPY** | **0** |
+| REPAIR_MISMATCH / REPAIRED_BUT_DRIFTED | **0 / 0** |
+
+`5,653 + 591 + 463 = 6,707`. Every campaign reads **SAFE TO RESUME: YES**.
+
+## Step 8 — campaigns RESTORED to pre-incident state
+
+Resumption was gated in code: `resume_campaigns.py` refuses to act unless
+sendable-without-copy + mismatched + drifted equals 0, and it restores the
+statuses recorded in the pre-incident backup manifest rather than activating
+everything.
+
+| Campaign | Action | Result |
+| --- | --- | --- |
+| PRODUCT, OPERATIONS, PEOPLE_HR, ECOMMERCE, CUSTOMER_EXPERIENCE, MARKETING_CREATIVE, GTM_SYSTEMS, AI_TECHNICAL | activate 2 → 1 | VERIFIED |
+| **FINANCE** | **none — left PAUSED** | it was already paused before this work began |
+
+**restored 9/9 verified.** For each, `sequence_identical=True` and
+`schedule_identical=True` against the pre-incident backup, so resuming changed
+status and nothing else. Write log: `status_changes.jsonl`.
+
+The two internal test campaigns are left PAUSED, not deleted, so the receipts
+stay auditable: `TEST A step1` `d500b21e…`, `TEST B bodies234` `490860b3…`.
+
+## Close-out
+
+| Deliverable | Status |
+| --- | --- |
+| Proven cause | 0 of 9,053 stored payloads carried `rendered_subject`; campaign bodies hold no literal copy |
+| Real scope | 16,875 messages, 7,777 recipients, onset 2026-09-21T13:15:59Z |
+| 14 September premise | **FALSE** — 0 broken sends before 09-21; the 1,214 export of the 17th is the healthy baseline |
+| Fix deployed | `4efb21ea02`, deployment `38dae8b3` SUCCESS |
+| Tests | 2,092 passed on real PostgreSQL; integrity manifest 35/35 |
+| Records repaired | 5,653 / 5,653, read-back verified, 0 mismatch, 0 drift |
+| Uncopyable leads neutralised | 1,688 held, 0 remain sendable without copy |
+| Internal receipts | 2 real emails verified, subject + all four bodies |
+| Campaigns | 9/9 restored to pre-incident state, FINANCE still paused |
+
+### What is NOT resolved and needs a decision
+
+1. **The 1,688 held leads have no approved copy and are now out of all
+   campaigns.** They are parked, not fixed. Their role displays fail the frozen
+   QA gates. Either the title data gets repaired and they are re-rendered and
+   re-enrolled, or they are written off.
+2. **Failing closed costs enrolment yield.** ~28% of new approvals will be refused
+   on the same role-display gates and blocked with a named reason instead of
+   enrolled. That is correct behaviour, and it is also a volume decision.
+3. The 03:00Z run is the first production exercise of the fix end to end. Worth
+   reading its creation counts and blocked reasons in the morning.
