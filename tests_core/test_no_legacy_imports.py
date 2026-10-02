@@ -76,3 +76,41 @@ def test_core_image_includes_the_shared_copy_and_claim_registry():
     text = (ROOT / "Dockerfile.core").read_text(encoding="utf-8")
     assert "COPY outbound_wave1/ ./outbound_wave1/" in text
     assert "COPY data/wave1_claims.json ./data/wave1_claims.json" in text
+
+
+def _copy_sources(dockerfile_text):
+    """Every source path the Dockerfile copies (the last token is the destination)."""
+    for raw in dockerfile_text.splitlines():
+        line = raw.strip()
+        if not line.upper().startswith("COPY "):
+            continue
+        parts = [p for p in line[5:].split() if not p.startswith("--")]
+        for src in parts[:-1]:
+            yield src
+
+
+def test_every_dockerfile_copy_source_is_allowed_into_the_build_context():
+    """`Dockerfile.core.dockerignore` denies everything (`*`) and re-admits named
+    paths, and BuildKit prefers it over the generic `.dockerignore`. So adding a
+    COPY without a matching `!` line builds a context that lacks the file and the
+    BUILD fails -- which is exactly how the 2026-10-02 copy fix first failed to
+    deploy. Checking the Dockerfile alone cannot catch that; this checks both."""
+    dockerfile = (ROOT / "Dockerfile.core").read_text(encoding="utf-8")
+    ignore_path = ROOT / "Dockerfile.core.dockerignore"
+    lines = [l.strip() for l in ignore_path.read_text(encoding="utf-8").splitlines()]
+    lines = [l for l in lines if l and not l.startswith("#")]
+    assert "*" in lines, "expected a deny-all ignore file; revisit this test if that changed"
+    allowed = {l[1:].rstrip("/") for l in lines if l.startswith("!")}
+
+    missing = []
+    for src in _copy_sources(dockerfile):
+        name = src.rstrip("/")
+        covered = name in allowed or any(
+            name == a or name.startswith(a + "/") for a in allowed if a
+        )
+        if not covered:
+            missing.append(src)
+    assert not missing, (
+        "Dockerfile.core copies paths the ignore file excludes, so the build will "
+        "fail with 'not found': %s" % missing
+    )
