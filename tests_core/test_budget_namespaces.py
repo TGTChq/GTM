@@ -110,6 +110,18 @@ def test_an_improperly_consumed_scheduled_budget_is_refused_not_silently_used(co
         claim(conn, budget_id=sched, kind="scheduled", run_id="cron-1")
 
 
+@pytest.fixture(autouse=True)
+def _open_the_run_window(monkeypatch):
+    """These tests are about BUDGET policy, not about when a run may start.
+
+    `cmd_run_daily` now declines outside the scheduled UTC hours, because a
+    deployment starts a cron service's command and must not begin a run (see
+    `test_a_deploy_must_not_start_a_run.py`). Forcing the window keeps that guard
+    from standing in for the refusal each test actually asserts.
+    """
+    monkeypatch.setenv("TGTC_RUN_FORCE", "1")
+
+
 def test_run_daily_exits_nonzero_and_logs_when_its_budget_was_consumed(conn, pg_url, monkeypatch):
     sched = budget_id_for("scheduled")
     _make(conn, sched)
