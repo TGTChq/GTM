@@ -368,3 +368,22 @@ cron fires 2026-10-03 03:00Z on the current image and would create ~1,000 fresh
 copy-less leads; if the campaigns were ACTIVE by then, those would send blank.
 So the order is fixed: **merge and deploy first, verify the effective commit,
 then resume.** The campaigns stay paused until then regardless of the repair.
+
+### Internal test receipt 1 of 2 — VERIFIED
+
+`TGTC COPY INCIDENT TEST B bodies234 20261002`, sent **2026-10-02T17:10:06Z**
+from `devan.m@globaltalentvirtual.com` to `luis@globaltalent.co`.
+
+- subject `[copy check 2-4] Documentation Manager` — non-empty and carries the
+  rendered subject
+- unresolved `{{...}}` tokens: **none**
+- visible body: **562 characters** (the incident's signature-only bodies were ~60)
+- bodies 2, 3 and 4 all rendered, with paragraph breaks intact and the signature
+  following — so the `_html` variant is formatting correctly, not collapsing into
+  one run-on block
+- body 4 personalises the role correctly: "If the Documentation Manager search is
+  already handled…"
+
+This is the receipt of what Instantly actually sent after substitution, not a
+preview. Receipt 2 (`TEST A`, the exact live step-1 shape with
+`{{rendered_subject}}` as the whole subject) had not executed yet.
