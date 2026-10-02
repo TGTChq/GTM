@@ -307,3 +307,28 @@ Three options, all of which are a business decision:
 **All nine campaigns remain PAUSED.** Restoration target, to be applied only once
 the gate is met: eight to status 1 (ACTIVE) and **FINANCE to status 2 (PAUSED)**,
 because FINANCE was already paused before this work began.
+
+## Step 6 — internal test sends ISSUED (2026-10-02 ~17:05Z)
+
+Owner decisions received: recipient **`luis@globaltalent.co`**; the leads with no
+renderable copy go to a **hold list**.
+
+Two isolated one-step campaigns were created, both replicating the live config
+(Mon-Fri 08:00-18:00 America/Chicago, `text_only`, unsubscribe header,
+`stop_on_reply`), sending from `devan.m@globaltalentvirtual.com`:
+
+| Campaign | id | Purpose |
+| --- | --- | --- |
+| TGTC COPY INCIDENT TEST A step1 20261002 | `d500b21e…` | the EXACT live step-1 shape: subject `{{rendered_subject}}`, body `{{rendered_email_1_html}}` + signature |
+| TGTC COPY INCIDENT TEST B bodies234 20261002 | `490860b3…` | bodies 2, 3 and 4 in one message, so all four are proved today instead of waiting out the 13-day sequence |
+
+Both created (200), lead added (200), activated (status 1). The copy was rendered
+through the deployed code path from a real approved lead
+(`biehlco.com|…|operations`) with the recipient substituted, so personalisation is
+genuinely exercised: `rendered_subject` = `Documentation Manager`, bodies
+455/124/247/248 chars.
+
+Isolated deliberately: with no per-lead pause in Instantly, activating a live
+Challenger campaign would also release the leads that still have no copy.
+
+Receipts pending — Instantly had not yet executed the step at first check.
