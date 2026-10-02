@@ -486,3 +486,25 @@ The in-container import will also be exercised by the 03:00Z run. I did not
 redeploy `GTM Core Acceptance` to force a container: it would add a production
 action nobody asked for and could surface unrelated pre-existing acceptance
 failures that muddy this incident.
+
+### Internal test receipt 2 — TEST A stalled; diagnosed, not assumed
+
+TEST A (the exact live step-1 shape) had not sent 1.5h after activation while
+TEST B sent in ~4 minutes. Checked rather than waited:
+
+- campaign `status=1`, sequence correct, lead `status=1`, never contacted
+- `not_sending_status=2` — **benign**: the live PRODUCT campaign carries the same
+  value and was actively sending when it was backed up
+- the shared mailbox is NOT capped: `devan.m@globaltalentvirtual.com` sent 8 today
+  against a busiest-mailbox figure of 13
+- `stop_for_company` is unset, so that hypothesis was wrong too
+- `search-by-contact` shows the recipient in BOTH test campaigns, and TEST B has
+  already contacted that address and company
+
+Most likely duplicate-contact handling. Rather than keep guessing at Instantly's
+internals, a decisive experiment: a SECOND lead was added to the SAME TEST A
+campaign with a distinct identity — `luis+copystep1@globaltalent.co` (same
+internal inbox) rendered from a different approved lead
+(`oliverinc.com|…|customer_success`, subject `Client Services Account Manager`,
+body 357 chars). The template under test is therefore still exactly the live
+step-1 shape. No live campaign was touched.
