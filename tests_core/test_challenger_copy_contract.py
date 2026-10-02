@@ -141,3 +141,15 @@ def test_pending_outbox_with_missing_copy_never_reaches_provider(monkeypatch, cl
     assert outcome.outcome == "blocked"
     assert outcome.reason.startswith("challenger_copy_")
     assert changes and changes[0][0] == "blocked"
+
+
+def test_the_claim_registry_actually_loads_and_is_not_silently_empty():
+    """A missing claims file is NOT an error to the renderer: `load_claim_registry`
+    returns a registry that licenses nothing and the copy still renders, just with
+    different proof. So checking the Dockerfile mentions the file is not enough --
+    if it ever stops shipping, copy would change quietly. This fails instead."""
+    from outbound_wave1.claims import load_claim_registry
+
+    registry = load_claim_registry()
+    assert registry.claims, "claim registry loaded no claims: wave1_claims.json missing or empty"
+    assert registry.role_pages, "claim registry loaded no role pages"
