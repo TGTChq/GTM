@@ -1,56 +1,68 @@
 # Draft reply to Brett — NOT SENT
 
-Verified facts only. Anything still open is marked as open.
+Verified facts only. Open items are marked as open.
 
 ---
 
 Hi Brett,
 
-Confirmed, and it's worse than a formatting problem. Here's what I've got.
+Confirmed, and it was worse than a formatting problem. It's fixed and contained
+now. Here's the short version.
 
 **What happened.** The nine Challenger campaigns don't hold any copy of their own.
 Every step body is just `{{rendered_email_N_html}}` plus the signature, and step
 1's subject is `{{rendered_subject}}`. When the rebuilt core started creating
-leads it never sent those variables, so recipients got an empty subject and a
-body with nothing in it but Devan's signature block.
+leads it never sent those variables, so people got an empty subject and a body
+with nothing in it but Devan's signature.
 
-**Scope.** I pulled every message actually sent between Aug 31 and today and
-classified them, so these are counts, not estimates:
+**Scope.** I classified every message we actually sent between Aug 31 and Oct 2,
+so these are counts, not estimates:
 
-- 16,875 broken messages to 7,777 distinct recipients
-- started Sep 21 at 13:15 UTC, last one went out today at 16:22 UTC
+- 16,875 broken messages to 7,777 different people
+- started Sep 21 at 13:15 UTC, last one went out Oct 2 at 16:22 UTC
 - all 252 sending mailboxes were involved
 
-**It didn't start on the 14th.** There are zero broken sends before Sep 21. The
+**It didn't start on the 14th.** There are zero broken sends before Sep 21. That
 1,214-message export from the 17th is actually a clean baseline, every one of
 those has a real subject and body. The first core-created lead landed Sep 20 at
 23:00 UTC and the 20th was a Sunday, so the first bad send was the Monday.
 
 One thing to flag so it doesn't get read as confirmation: the outbox happens to
-hold exactly 1,214 blocked rows too. Different population, same number,
-coincidence.
+hold exactly 1,214 blocked rows too. Different thing entirely, same number.
 
-**Where it stands.** All nine campaigns are paused and I confirmed the paused
-state by reading each one back. Configs were backed up first and nothing in the
-sequences or schedules changed. Finance was already paused before I touched
-anything, so it stays that way when we restore.
+**What's fixed.** The core now builds the copy from each lead's own approved
+record and refuses to create or send a Challenger lead that's missing a subject or
+any of the four bodies. Full test suite passes against real Postgres (2,092
+tests). It's deployed, commit 4efb21e.
 
-The fix is written and the full suite passes (2,092 tests against real
-Postgres). It's in PR #129 and still needs a merge before it deploys, so the
-core can't create new leads correctly yet. Campaigns being paused is what's
-holding the line until then.
+Worth knowing: the first merge didn't actually deploy. The build failed because
+there's a per-Dockerfile ignore file that was keeping the copy renderer out of the
+image. Second merge fixed it and I added a test so that can't happen again.
 
-**The part that needs a call from you.** I can rebuild the copy for 5,653 of the
-affected leads from their own approved records, and that's running now. The other
-1,689 I can't: their job titles fail the copy QA gates we already had
-(unsafe characters, trailing qualifiers, over 48 characters). There's no approved
-copy for them, so they'd send blank again.
+**Records repaired.** 5,653 leads rebuilt from their approved records, and I
+re-read every one back from Instantly to confirm it: all five copy fields correct,
+nothing else on the lead touched, no contact deleted, no sequence restarted, no
+mass resend.
 
-That means I can't cleanly resume any campaign that still holds those leads. The
-options are to fix the title data, pull those leads out, or leave the campaigns
-paused. I didn't want to pick for you.
+**Tested for real.** Two actual emails to my inbox through the live sequence
+shape. Step 1 arrived with the subject "Documentation Manager" and a personalised
+body, and a second one confirmed bodies 2, 3 and 4 render properly.
 
-Campaigns stay paused until the repair is verified lead by lead and I've sent
-myself a test through the real sequence. I'll confirm when that's done.
+**Campaigns are back on.** Eight active, Finance left paused since it was already
+paused before I started. I checked every sendable lead in all nine first, and
+there are now zero leads in them without copy.
+
+**Two things that need a call from you.**
+
+1,688 of the affected leads I couldn't rebuild. Their job titles fail the copy
+quality gates we already had, so there's no approved copy for them and they'd send
+blank again. I moved them to a hold list, so they're out of every campaign and
+can't send. They're parked, not fixed. Either we clean up the title data and
+re-render them, or we write them off.
+
+Related, and this one affects volume: about 28% of new approvals hit those same
+title gates. The pipeline now blocks those instead of enrolling them blank. I
+think that's the right call, but it does mean fewer leads per run, so you should
+know it's happening rather than find it in a number later.
 
 Luis
