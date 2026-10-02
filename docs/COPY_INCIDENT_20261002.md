@@ -508,3 +508,47 @@ internal inbox) rendered from a different approved lead
 (`oliverinc.com|…|customer_success`, subject `Client Services Account Manager`,
 body 357 chars). The template under test is therefore still exactly the live
 step-1 shape. No live campaign was touched.
+
+### BOTH internal receipts VERIFIED — and a correction
+
+**Correction:** the duplicate-contact explanation above was WRONG. TEST A sent to
+the original address `luis@globaltalent.co` at **2026-10-02T19:03:35Z**, ~1.9h
+after activation. The cause was simply Instantly's send pacing for a new
+campaign, not deduplication. The distinct-identity retry lead was therefore
+unnecessary; it never sent, and both test campaigns are now paused (read-back
+verified: TEST A 1→2, TEST B 3→2) so it will not email the inbox again.
+
+**Receipt A — the exact live step-1 shape, which is the precise failure mode:**
+
+```
+campaign : TGTC COPY INCIDENT TEST A step1 20261002
+sent at  : 2026-10-02T19:03:35Z   from devan.m@globaltalentvirtual.com
+to       : luis@globaltalent.co
+SUBJECT  : 'Documentation Manager'        <- was EMPTY throughout the incident
+
+Hi Luis,
+
+Your Documentation Manager opening reads like it covers Documentation request
+tracking, completion, and Import/export customs filings.
+
+The title on its own may not tell you much about who has actually run that mix.
+
+We test candidates on the actual work before they get to you.
+
+Want me to send how we test for a scope like this?
+
+Devan Marcus
+Business Development
+The Global Talent Co.
+```
+
+subject non-empty ✔ matches the rendered subject ✔ no unresolved tokens ✔
+visible body 397 chars ✔ personalised on first name, role AND role focus ✔
+paragraph breaks intact ✔ signature present once ✔
+
+**Receipt B — bodies 2, 3 and 4:** subject
+`[copy check 2-4] Documentation Manager`, 562 visible chars, all three bodies
+rendered with formatting intact, no unresolved tokens.
+
+Together these cover the subject and all four bodies end to end, as actually
+received, not as previewed. Step 6 is **COMPLETE**.
