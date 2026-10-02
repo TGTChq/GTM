@@ -189,6 +189,25 @@ class InstantlyClient:
             body["starting_after"] = starting_after
         return self._call("POST", "/leads/list", json_body=body)
 
+    def list_lead_lists(self, *, limit: int = 100, starting_after: Optional[str] = None) -> InstantlyResult:
+        """The workspace's lead lists. A contact parked on one has NO campaign.
+
+        Measured 2026-10-02: a lead moved to a list leaves every campaign's
+        ``leads_count`` but still occupies a stored contact on the plan, so
+        occupancy that counts only campaigns understates how full the workspace is.
+        """
+        params: Dict[str, Any] = {"limit": int(limit)}
+        if starting_after:
+            params["starting_after"] = starting_after
+        return self._call("GET", "/lead-lists", params=params)
+
+    def list_list_leads(self, list_id: str, *, limit: int = 100,
+                        starting_after: Optional[str] = None) -> InstantlyResult:
+        body: Dict[str, Any] = {"list_id": list_id, "limit": int(limit)}
+        if starting_after:
+            body["starting_after"] = starting_after
+        return self._call("POST", "/leads/list", json_body=body)
+
     def delete_lead(self, lead_id: str) -> InstantlyResult:
         """Remove one contact, which returns its slot to the plan (measured: ~5.5 min).
 

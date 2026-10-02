@@ -378,6 +378,9 @@ class FakeInstantly:
     move_is_async: bool = False
     #: email -> the messages GET /emails reports. ue_type 1 is one Instantly sent.
     emails: Dict[str, List[Dict[str, Any]]] = field(default_factory=dict)
+    #: lead-list id -> the lead ids parked on it. Those have NO campaign, so they
+    #: are invisible to per-campaign counts while still occupying plan storage.
+    lead_lists: Dict[str, List[str]] = field(default_factory=dict)
     clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc)
 
     def request(self, method: str, url: str, *, headers=None, params=None, json_body=None, timeout=30.0) -> Response:
@@ -437,6 +440,31 @@ class FakeInstantly:
                 return _json(200, {"id": "job-" + str(uuid.uuid4())[:8], "type": "move-leads",
                                    "status": "pending", "progress": 0})
             return _json(200, {"status": "success", "moved": moved})
+        if path.endswith("/lead-lists") and method == "GET":
+            # Contacts parked on a list belong to NO campaign and so appear in no
+            # campaign's leads_count, while still occupying plan storage. Occupancy
+            # reads this endpoint for exactly that reason.
+            return _json(200, {"items": [{"id": k, "name": k} for k in sorted(self.lead_lists)]})
+        if path.endswith("/leads/list") and method == "POST":
+            body = json_body or {}
+            list_id = str(body.get("list_id") or "")
+            campaign = str(body.get("campaign") or "")
+            if list_id:
+                ids = list(self.lead_lists.get(list_id, ()))
+                return _json(200, {"items": [{"id": i} for i in ids]})
+            items = [dict(l) for l in self.leads.values()
+                     if not campaign or str(l.get("campaign") or "") == campaign]
+            return _json(200, {"items": items})
+        if path.endswith("/campaigns/analytics") and method == "GET":
+            counts: Dict[str, int] = {}
+            for lead in self.leads.values():
+                cid = str(lead.get("campaign") or "")
+                if cid:
+                    counts[cid] = counts.get(cid, 0) + 1
+            for cid in self.campaign_status:
+                counts.setdefault(cid, 0)
+            return _json(200, {"items": [{"campaign_id": c, "leads_count": n}
+                                         for c, n in sorted(counts.items())]})
         if path.endswith("/campaigns/search-by-contact"):
             email = p.get("search", [""])[0].lower()
             lead = self.leads.get(email)

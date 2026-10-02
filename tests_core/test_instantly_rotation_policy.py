@@ -184,27 +184,98 @@ def test_the_protected_set_is_all_eighteen_live_ids():
 # a 1,500 reserve fits with room to spare, and nothing should be deleted.
 
 
-class Analytics:
-    """Just enough of the client for the capacity policy."""
+def _ok(data):
+    return type("R", (), {"ok": True, "status": 200, "data": data})()
 
-    def __init__(self, counts, *, fails=False):
+
+def _fail(message="unavailable"):
+    return type("R", (), {"ok": False, "status": 503, "message": message, "data": {}})()
+
+
+class Analytics:
+    """Just enough of the client for the capacity policy.
+
+    ``lists`` maps a lead-list id to the number of contacts parked on it. Those
+    belong to no campaign, so they appear in no ``leads_count`` -- and they still
+    occupy a stored contact on the plan.
+    """
+
+    def __init__(self, counts, *, fails=False, lists=None, lists_fail=False):
         self.counts, self.fails, self.calls = list(counts), fails, 0
+        self.lists = dict(lists or {})
+        self.lists_fail = lists_fail
+        self.list_calls = 0
 
     def campaign_analytics(self):
         self.calls += 1
         if self.fails:
-            return type("R", (), {"ok": False, "status": 503, "message": "unavailable", "data": {}})()
+            return _fail()
         rows = self.counts[min(self.calls - 1, len(self.counts) - 1)]
-        return type("R", (), {"ok": True, "status": 200,
-                              "data": {"items": [{"campaign_id": f"c{i}", "leads_count": n}
-                                                 for i, n in enumerate(rows)]}})()
+        return _ok({"items": [{"campaign_id": f"c{i}", "leads_count": n}
+                              for i, n in enumerate(rows)]})
+
+    def list_lead_lists(self, *, limit=100, starting_after=None):
+        self.list_calls += 1
+        if self.lists_fail:
+            return _fail("lists unavailable")
+        return _ok({"items": [{"id": k, "name": k} for k in self.lists]})
+
+    def list_list_leads(self, list_id, *, limit=100, starting_after=None):
+        self.list_calls += 1
+        if self.lists_fail:
+            return _fail("lists unavailable")
+        remaining = int(self.lists.get(list_id, 0))
+        start = int(starting_after or 0)
+        page = [{"id": f"{list_id}-{i}"} for i in range(start, min(start + limit, remaining))]
+        nxt = start + len(page)
+        data = {"items": page}
+        if nxt < remaining:
+            data["next_starting_after"] = str(nxt)
+        return _ok(data)
 
 
-def test_occupancy_is_the_sum_of_every_campaign_in_one_request():
+def test_occupancy_counts_every_campaign_in_one_analytics_request():
     client = Analytics([[2601, 501, 14361, 2086]])
     out = rot.occupancy(client, plan_contacts=25000)
     assert out["known"] is True and out["stored"] == 19549 and out["free"] == 5451
-    assert client.calls == 1, "occupancy must not page through the whole workspace"
+    assert out["stored_in_campaigns"] == 19549 and out["stored_on_lists"] == 0
+    assert client.calls == 1, "occupancy must not page through every campaign's contacts"
+
+
+def test_a_contact_parked_on_a_lead_list_still_occupies_the_plan():
+    """The 2026-10-02 regression, in numbers. Moving 1,688 contacts to a hold list
+    dropped the campaign sum from 22,757 to 21,069 and freed NOTHING. Counting only
+    campaign membership would promise 3,931 free slots where there are 2,243."""
+    client = Analytics([[21069]], lists={"hold": 1688})
+    out = rot.occupancy(client, plan_contacts=25000)
+    assert out["stored_in_campaigns"] == 21069
+    assert out["stored_on_lists"] == 1688
+    assert out["stored"] == 22757, "campaign membership is not storage"
+    assert out["free"] == 2243
+    assert rot.room_needed(out["free"], target=1000, reserve=1500) == 257
+
+
+def test_unreadable_lead_lists_make_occupancy_unknown_never_zero():
+    client = Analytics([[21069]], lists={"hold": 1688}, lists_fail=True)
+    out = rot.occupancy(client, plan_contacts=25000)
+    assert out["known"] is False and out["stored"] is None
+
+
+def test_a_client_that_cannot_enumerate_lists_is_unknown_not_empty():
+    class OldClient:
+        def campaign_analytics(self):
+            return _ok({"items": [{"campaign_id": "c0", "leads_count": 21069}]})
+
+    out = rot.occupancy(OldClient(), plan_contacts=25000)
+    assert out["known"] is False, "assuming zero list contacts is the very undercount this prevents"
+
+
+def test_unknown_occupancy_is_reported_as_its_own_stop_condition(conn):
+    client = Analytics([[21069]], lists={"hold": 1688}, lists_fail=True)
+    out = rot.make_room(conn, client, target=1000, campaigns=[], leads_of=lambda c: [],
+                        delete=lambda i: None, env={"TGTC_INSTANTLY_ROTATION_ENABLED": "1"})
+    assert out["occupancy_unknown"] is True and out["rotated"] is False
+    assert out["deficit"] == 0, "unknown is not a measured shortfall"
 
 
 def test_an_unreadable_occupancy_never_becomes_a_reason_to_delete(conn):
@@ -265,3 +336,102 @@ def test_while_rotation_is_switched_off_a_shortfall_is_reported_not_acted_on(con
                         leads_of=lambda c: [lead(1)], delete=lambda i: deleted.append(i), env={})
     assert out["reason"] == "rotation_disabled" and out["deficit"] == 2100
     assert deleted == [] and out["rotated"] is False
+
+
+# ---------------------------------------------------------------------------
+# The 2026-09-29..10-02 rotation failure: a successful delete scored as a failure.
+# ---------------------------------------------------------------------------
+
+def test_an_instantly_result_delete_is_read_as_the_success_it_is():
+    """Production passes `InstantlyClient.delete_lead`, which answers an
+    InstantlyResult: ok/status/message, with NO status_code and no text. Reading
+    status_code scored every delete 0 -- a failure -- and the three-failure
+    breaker then aborted rotation after three contacts."""
+    from tgtc_core.providers.instantly import InstantlyResult
+
+    assert rot._delete_outcome(InstantlyResult(True, 200)) == (200, "")
+    assert rot._delete_outcome(InstantlyResult(True, 204)) == (204, "")
+    code, err = rot._delete_outcome(InstantlyResult(False, 429, message="rate limited"))
+    assert code == 429 and "rate limited" in err
+    # a requests-like object still works
+    assert rot._delete_outcome(type("R", (), {"status_code": 200})()) == (200, "")
+    # ok without a status is still a success, not a zero
+    assert rot._delete_outcome(type("R", (), {"ok": True, "status": None})()) == (200, "")
+
+
+def test_rotation_counts_real_deletions_instead_of_aborting_on_three(conn):
+    """With the real result shape, rotation must delete through the available
+    candidates rather than stopping at the breaker after three."""
+    from tgtc_core.providers.instantly import InstantlyResult
+
+    leads = [{"id": f"l{i}", "email": f"p{i}@old.com", "status": 3, "email_reply_count": 0}
+             for i in range(8)]
+    campaigns = [{"id": "legacy-1", "status": 3, "name": "Legacy"}]
+    deleted = []
+
+    def delete(lead_id):
+        deleted.append(lead_id)
+        return InstantlyResult(True, 200)
+
+    out = rot.rotate(conn, None, needed=5, batch=500, campaigns=campaigns,
+                     leads_of=lambda c: list(leads), delete=delete)
+    assert out["deleted"] == 5, out
+    assert out["failed"] == 0, out
+    assert len(deleted) == 5
+    assert rot.pending_backups(conn) == 0, "every backup must be marked deleted"
+
+
+def test_a_genuinely_failing_delete_still_trips_the_breaker(conn):
+    from tgtc_core.providers.instantly import InstantlyResult
+
+    leads = [{"id": f"l{i}", "email": f"p{i}@old.com", "status": 3, "email_reply_count": 0}
+             for i in range(8)]
+    campaigns = [{"id": "legacy-1", "status": 3, "name": "Legacy"}]
+    out = rot.rotate(conn, None, needed=5, batch=500, campaigns=campaigns,
+                     leads_of=lambda c: list(leads),
+                     delete=lambda i: InstantlyResult(False, 500, message="boom"))
+    assert out["deleted"] == 0 and out["failed"] == 3, out
+    assert rot.pending_backups(conn) == 3, "failed deletes stay flagged for a human"
+
+
+def test_occupancy_through_the_REAL_client_counts_a_contact_parked_on_a_list():
+    """Not the stub: the real InstantlyClient against the simulated provider, so
+    the endpoint shapes are exercised too. A contact moved to a list must still
+    count, or the controller promises slots the plan does not have."""
+    from tgtc_core.providers.instantly import InstantlyClient
+    from tgtc_core.testing.fakes import FakeInstantly
+
+    fake = FakeInstantly(campaign_status={"c-live": 1})
+    fake.leads = {f"p{i}@acme.com": {"id": f"l{i}", "email": f"p{i}@acme.com",
+                                     "campaign": "c-live"} for i in range(4)}
+    fake.lead_lists = {"hold": ["h1", "h2", "h3"]}
+    client = InstantlyClient(fake, base_url="https://api.instantly.ai/api/v2", api_key="sim")
+
+    out = rot.occupancy(client, plan_contacts=10)
+    assert out["known"] is True
+    assert out["stored_in_campaigns"] == 4
+    assert out["stored_on_lists"] == 3
+    assert out["stored"] == 7 and out["free"] == 3
+
+
+def test_moving_a_contact_to_a_list_frees_no_slot():
+    """The 2026-10-02 mistake, as behaviour: taking contacts out of campaigns
+    changes WHERE they are, not HOW MANY are stored."""
+    from tgtc_core.providers.instantly import InstantlyClient
+    from tgtc_core.testing.fakes import FakeInstantly
+
+    fake = FakeInstantly(campaign_status={"c-live": 1})
+    fake.leads = {f"p{i}@acme.com": {"id": f"l{i}", "email": f"p{i}@acme.com",
+                                     "campaign": "c-live"} for i in range(4)}
+    client = InstantlyClient(fake, base_url="https://api.instantly.ai/api/v2", api_key="sim")
+    before = rot.occupancy(client, plan_contacts=10)
+
+    # park two of them on a list, exactly as the hold move did
+    for lead in list(fake.leads.values())[:2]:
+        lead["campaign"] = ""
+    fake.lead_lists = {"hold": ["l0", "l1"]}
+    after = rot.occupancy(client, plan_contacts=10)
+
+    assert after["stored_in_campaigns"] == before["stored_in_campaigns"] - 2
+    assert after["stored"] == before["stored"], "storage is unchanged by a move"
+    assert after["free"] == before["free"], "and so is the free-slot count"

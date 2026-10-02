@@ -100,3 +100,53 @@ def test_a_blocked_copy_lead_can_never_be_drained(conn, clock):
     assert all(o.outcome != "delivered" for o in outcomes), outcomes
     created = sqlall(conn, "SELECT count(*) AS n FROM delivery_receipts WHERE receipt_kind = 'created'")
     assert created[0]["n"] == 0
+
+
+def test_the_person_reuse_route_also_blocks_instead_of_raising(conn, clock):
+    """The SECOND approval route. `_commit_approval` is called from two places and
+    this one (the reused-verified-person branch) has no exception handler at all,
+    so a raise here would end the run outright."""
+    from tests_core.seed import good_buyer
+
+    domain, org = "acme.com", "Acme"
+    coo = good_buyer(domain, org, "operations", id="p-coo", email="coo@acme.com")
+    coo["title"] = "COO"
+    _p, _e, o_ops = seed_opportunity(conn, clock, function_key="operations",
+                                     domain=domain, org_name=org, title="Operations Manager")
+    fake = apollo_for(domain, org, people=[coo])
+    svc = lambda: opportunity_service(conn, fake, clock, campaign_env=challenger_env())
+    assert svc().process(o_ops).outcome == "approved"
+    paid_before = fake.served_paid
+    with conn.cursor() as cur:
+        cur.execute("UPDATE approvals SET state = 'revoked', revoke_reason = 'test'")
+    conn.commit()
+
+    # a second opportunity at the same employer, whose title cannot render
+    _p, _e, o_fin = seed_opportunity(conn, clock, function_key="finance", domain=domain,
+                                     org_name=org, job_id="fin-1", title="Manager, Finance")
+    out = svc().process(o_fin)
+
+    assert out.outcome == "approved" and out.reason == "reused_verified_person", out
+    assert fake.served_paid == paid_before, "the reuse route must not pay for enrichment"
+    rows = sqlall(conn, "SELECT channel, state, blocked_reason FROM delivery_outbox "
+                        "WHERE approval_id = (SELECT max(id) FROM approvals) ORDER BY channel")
+    assert [r["state"] for r in rows] == ["blocked", "blocked"], rows
+    for r in rows:
+        assert (r["blocked_reason"] or "").startswith("challenger_copy_qa_failed:"), r
+
+
+def test_a_copy_blocked_lead_is_never_written_to_airtable(conn, clock):
+    """No Instantly creation, so no CRM row either -- the standing invariant."""
+    from tgtc_core.testing.fakes import FakeAirtable, FakeInstantly
+    from tests_core.helpers import delivery_service
+
+    _out, _approvals, outbox = _approve(conn, clock, "Manager, Customer Success")
+    assert [r["state"] for r in outbox] == ["blocked", "blocked"]
+
+    airtable = FakeAirtable()
+    instantly = FakeInstantly(campaign_status={CHALLENGER_ID_BY_CAMPAIGN_KEY["customer_experience"]: 1})
+    svc = delivery_service(conn, airtable, instantly, clock)
+    svc.drain("instantly")
+    svc.drain("airtable")
+    assert airtable.records == {}, "a lead with no sendable copy must not reach the CRM"
+    assert instantly.leads == {}, "and no empty lead may be created"

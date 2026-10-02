@@ -985,3 +985,151 @@ Reconciliation to perform on the 03:00Z run (queries ready): genuine creations
 (`delivery_outbox.blocked_reason LIKE 'challenger_copy%'`), Airtable rows
 (`airtable_fresh`), and spend (`apollo_credits`, `apollo_credits_per_fresh_lead`)
 from the run's own `daily/end` entry.
+
+---
+
+# Continuation 2, 2026-10-02 22:50Z — three defects, measured and fixed
+
+Campaigns stay PAUSED throughout. The external pause of 22:10Z is not overridden.
+
+## Step D1 — RETRACTION: no slots were freed
+
+My earlier statement that the hold move freed 1,688 slots was **WRONG**, and this
+is the measurement that refutes it:
+
+| Population | Contacts |
+| --- | --- |
+| held in the nine + legacy campaigns (what the controller counts) | 21,069 |
+| parked in `TGTC Copy Incident Hold 20261002` | **1,688** |
+| **real stored total** | **22,757** |
+
+22,757 is *exactly* the `stored_before` the 2026-10-02 run recorded when all
+1,688 were still in campaigns. **Nothing was freed. The contacts still exist and
+still occupy plan storage.** Real free slots are 25,000 − 22,757 = **2,243**, the
+same as before, and the requirement is 2,500 — still short by **257**.
+
+What the move actually did was make the controller's own count WRONG by 1,688,
+which would have told the next run it had 3,931 free slots and let it pay Apollo
+for contacts the provider then refuses with "Lead limit reached".
+
+`/workspaces/current` reports `plan_id: pid_hg_v1` and no usage figures, so there
+is no authoritative usage endpoint to read instead.
+
+**Fixed, not worked around.** `instantly_rotation.occupancy` now counts BOTH
+populations and reports them separately (`stored_in_campaigns`, `stored_on_lists`),
+via two new client methods (`list_lead_lists`, `list_list_leads`). If the lists
+cannot be read, occupancy is **UNKNOWN**, never silently zero — and a client too
+old to enumerate lists is unknown too, because assuming zero is the very
+undercount this prevents. `daily.py` now stops on
+`target_not_reached:instantly_occupancy_unknown` instead of buying blind.
+No held contact was deleted to make the numbers work.
+
+## Step D2 — why rotation did not close the deficit for four days
+
+Not disabled, and it did run: the receipts show `enabled: true`, `rotated: true`.
+The real cause is a **two-part defect**, and the receipts prove the diagnosis.
+
+`rotate()` read `getattr(response, "status_code", 0)`. Production passes
+`InstantlyClient.delete_lead`, which answers an `InstantlyResult` carrying
+`ok`/`status`/`message` — it has **no `status_code`**. Every delete therefore
+scored 0, i.e. a failure. And immediately below, `if out["failed"] >= 3: return out`
+aborted the entire rotation after three contacts.
+
+So each run deleted about three contacts, recorded all three as failures, marked
+their backup rows "not deleted", reported `deleted: 0`, and stopped with
+`not_enough_safe_candidates`.
+
+**The receipt that proves the deletes were really happening:** the shortfall fell
+by two to three per day across the four runs — `instantly_slots_short_by` 265,
+263, 260, 257. Slots were being freed while the log said nothing was deleted.
+
+Fixed with `_delete_outcome()`, which reads `status` (or `status_code`, or a bare
+`ok`) and takes the error text from `message` (or `text`). The three-failure
+breaker is kept — it is a sound safety valve — and now only trips on genuine
+failures. Backups, suppressions and protected campaigns are untouched.
+
+### What rotation can actually reach, measured
+
+| Bucket | Campaigns | Contacts |
+| --- | --- | --- |
+| PROTECTED — our nine Challenger + nine Control | 18 | 10,518 |
+| legacy, status 2 (paused) -> refused | 7 | 5,028 |
+| legacy, status -2 (bounce protect) -> refused | 4 | 4,935 |
+| legacy, status 3 COMPLETED -> **rotatable** | 26 | **588** |
+
+Sums to 21,069. So even working perfectly, rotation can only consider **588**
+contacts, and `judge()` then refuses those with a reply or an unfinished
+sequence — 23 of the 26 examined on 10-02. The fix lets rotation count and
+continue instead of aborting at three; it does **not** create a large safe
+population. Clearing 257 from 588 is not assured.
+
+## Step D3 — the approval exception now covers BOTH routes
+
+`_commit_approval` is called from two places. The earlier test covered the
+candidate route; `test_the_person_reuse_route_also_blocks_instead_of_raising`
+now covers the reused-verified-person route, which has **no exception handler at
+all**. Also asserted: the reuse route still pays nothing, both outbox rows are
+`blocked` with the exact reason, **no empty lead is created and nothing reaches
+Airtable** (`airtable.records == {}`, `instantly.leads == {}`), and atomicity
+still holds (`test_approval_and_both_outbox_items_are_one_transaction`, repointed
+at the current seam).
+
+## Step D4 — the 650 generic subjects
+
+Measured against the approved facts: **363 of 650 (55.8%)** can carry a concrete
+title drawn from `posting_title` — 211 through the approved `role-display/2`
+reducer, 152 from the title directly. Examples: `engineering role` ->
+`Senior Research Engineer`, `Cloud Storage Integration Engineer`,
+`Information Security Administrator`.
+
+**287 (44.2%)** cannot: their `posting_title` fails the display gates (498 unsafe
+as given, 49 still unsafe after reduction). No title is invented and no copy is
+rewritten — a candidate must come from `posting_title` itself.
+
+## Step D5 — the blank-first-email cohort, separated
+
+Nothing is restarted and nothing is resent. All **7,777** affected recipients:
+
+| Bucket | Recipients | What is possible |
+| --- | --- | --- |
+| **A** repaired, blank thread, steps remaining | **5,630** | body IS repaired; the thread subject is NOT repairable. Continuing sends correct copy under "(no subject)". Highest broken step: 1 -> 895, 2 -> 2,561, 3 -> 2,174 |
+| **C** held, no copy exists | **1,677** | cannot send at all |
+| **E** terminal — 337 bounced, 123 completed, 10 unknown | **470** | nothing left to send; purely a recovery decision |
+
+**Requires a recovery decision before reactivating:** whether to continue the
+sequence for bucket A at all. Those 5,630 people have already received one to
+three blank emails from us, and their next message will arrive with correct copy
+under an empty subject. That is a judgement about the recipient relationship, not
+a technical repair, and I am not making it.
+
+## Step D6 — where Apollo is spent, and the finding that changes the economics
+
+Apollo credits are consumed revealing and verifying a CONTACT, which happens
+BEFORE `_commit_approval` runs the copy gate. So a copy-refused lead has already
+been paid for.
+
+But the copy gate judges almost entirely POSTING-derived facts: the role display
+is `lead['open_role']` and the content gates read `role_focus` — both known from
+the vacancy. Only `first_name` comes from the person.
+
+**Measured over all 7,839 approvals, re-judging each with a placeholder contact:**
+
+| | |
+| --- | --- |
+| real refusals | 1,829 |
+| **predictable before paid enrichment** | **1,829 — 100.0%** |
+| would be wrongly pre-refused (false positives) | **0** |
+| refusals only visible after enrichment | **0** |
+
+So every copy refusal is visible from the vacancy alone, with no gate relaxed and
+no budget raised. At the measured ~1.44 credits per approval that is **~2,634
+Apollo credits per run-equivalent currently spent on contacts that are then
+discarded**.
+
+**Consequence for the earlier figures, which I WITHDRAW as limits:** "~850
+creations" and "+280 credits" assumed the discard is unavoidable. It is not. A
+pre-enrichment copy-feasibility check would spend credits only on postings that
+can produce copy. I have NOT implemented it: it closes opportunities before
+enrichment and so changes the funnel and its counts, which is a deliberate change
+and not something to bundle into a pre-cron hotfix. It is the recommended next
+change, with the measurement above behind it.
