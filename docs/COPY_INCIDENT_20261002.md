@@ -1133,3 +1133,64 @@ can produce copy. I have NOT implemented it: it closes opportunities before
 enrichment and so changes the funnel and its counts, which is a deliberate change
 and not something to bundle into a pre-cron hotfix. It is the recommended next
 change, with the measurement above behind it.
+
+## Step D7 — CORE CRON PAUSED (2026-10-02 ~22:55Z)
+
+Only the Core cron. Campaigns stay paused; nothing else was touched.
+
+| | Before | After |
+| --- | --- | --- |
+| `GTM Core Canary 1000` `cronSchedule` | `0 3 * * *` | **`None`** |
+| `dockerfilePath` | `Dockerfile.core` | unchanged |
+| `rootDirectory` | `/` | unchanged |
+| `numReplicas` | 1 | unchanged |
+| `restartPolicyType` | `NEVER` | unchanged |
+| `startCommand` | 713 chars | 713 chars, unchanged |
+
+Applied with `serviceInstanceUpdate(input: { cronSchedule: null })` — only that one
+field was sent, so no variable patch was involved (a 2026-09-17 variable patch is
+on record as having deleted every `INSTANTLY_CAMPAIGN_*`).
+
+Verified two ways: the service instance reads back `cronSchedule: None`, and
+`railway status` no longer lists the Core under "Cron jobs" (only `GTM Replies`
+`15 * * * *` and `GTM Weekly Report` remain). **Reply ingestion was deliberately
+left running.**
+
+### Why it is paused
+
+On the currently deployed commit `4efb21ea02` the 03:00Z tick would:
+
+1. **crash** — the approval-time copy refusal raises inside `_commit_approval`'s
+   transaction and neither call site catches it; 23.3% of approvals hit it, so a
+   crash within the first handful of leads is near-certain; and
+2. **waste spend first** — occupancy counts only campaign membership, so it would
+   read 3,931 free slots where the workspace really has 2,243, buy Apollo
+   enrichment for roughly a thousand contacts, and then be refused by Instantly
+   with "Lead limit reached".
+
+### Conditions to restore `0 3 * * *`
+
+All of these, in order:
+
+1. The fixes in PR (see below) are **merged and the deployment SUCCEEDS** — a
+   build failure deploys nothing, as `bc29b837` already proved.
+2. The effective commit is re-read from Railway and contains all three fixes.
+3. Occupancy, read live, counts campaigns **and** lists and matches the real
+   workspace total.
+4. Both Challenger approval routes are verified on the deployed commit.
+5. The 363 concrete-title repairs are complete and read-back verified; the 287
+   without a usable title remain held.
+6. A decision exists on the blank-thread cohort (5,630 recipients) — it is NOT a
+   prerequisite for the cron, but it IS one for reactivating the campaigns.
+
+Restore command (one field only, same shape as the pause):
+
+```
+serviceInstanceUpdate(serviceId: "f83cd97a-135d-48e3-8e12-d517a51edfff",
+                      environmentId: "bae427bd-64a6-4f4e-8f56-fbd406985434",
+                      input: { cronSchedule: "0 3 * * *" })
+```
+
+Note while paused: no scheduled run means no acquisition and no delivery drain.
+Nothing is lost — the outbox is durable and the four previous runs created nothing
+anyway. **No run was opened to recover those four days.**
