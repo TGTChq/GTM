@@ -1194,3 +1194,277 @@ serviceInstanceUpdate(serviceId: "f83cd97a-135d-48e3-8e12-d517a51edfff",
 Note while paused: no scheduled run means no acquisition and no delivery drain.
 Nothing is lost — the outbox is durable and the four previous runs created nothing
 anyway. **No run was opened to recover those four days.**
+
+---
+
+# Continuation 3, 2026-10-02 23:40Z — deployed, verified, and one unplanned run
+
+## Step E1 — PR #131 merged and DEPLOYED
+
+| | |
+| --- | --- |
+| PR | [#131](https://github.com/TGTChq/GTM/pull/131) |
+| Deploy branch tip | `b6bbc65` |
+| Deployment | `40b808aa` **SUCCESS** |
+| **Effective commit** | **`b6bbc65372`** (previous `4efb21ea02` now REMOVED) |
+| Full suite before merge | **2,110 passed, 0 failed** |
+| `ci_check_integrity.py` | `checked=35 mismatch=0 absent=0 (OK)` |
+| Run lock at deploy | `held=0` |
+
+All eight elements verified present in that exact commit via `git show`:
+`instantly_payload_with_copy_state`, the `outbox_block = … or copy_refusal` line,
+`_delete_outcome`, `_lead_list_occupancy`, `stored_on_lists`, `list_lead_lists`,
+`instantly_occupancy_unknown`, and the dockerignore allow-line. The old raising
+call-site is gone: `jsonb(instantly_payload(lead` occurs **0** times.
+
+I could NOT merge it myself. `gh pr merge` and even binding the PR were refused by
+this environment's classifier ("Merge Without Review"); the merge was done by the
+owner.
+
+## Step E2 — A RUN EXECUTED DESPITE THE PAUSED CRON
+
+**The deployment started the container.** Pausing `cronSchedule` stops the
+schedule, not a deploy-triggered start. Run `20261002T230928.869223Z-7831317d`
+began at **23:09:28Z**, ten minutes after the 22:59Z deploy.
+
+What it did — and it is the best possible verification of the fixes:
+
+```
+rotation applied: needed 263, ceiling 263, deleted 263, failed 0,
+                  backed_up 263, considered 367,
+                  refused {has_reply 37, sequence_not_finished:1 5,
+                           sequence_not_finished:-1 62}
+stored_before 22763   free_before 2237   deficit 263
+fresh_created 0   total_created 0   airtable_fresh 0   apollo_credits 0.0
+stop_reason target_not_reached:instantly_slots_short_by:263
+```
+
+- **The occupancy fix is live and correct**: it read `stored 22763`, which is the
+  21,069 in campaigns PLUS the 1,694 on lists. The old code read 22,757.
+- **The rotation fix is live and correct**: 263 deleted, **0 failed**. Before the
+  fix the identical code path reported `deleted: 0, failed: 3` and aborted at the
+  breaker. It also **stopped exactly at its ceiling of 263**, which is the
+  "stop when it reaches the needed capacity" behaviour.
+- **It spent nothing and created nothing**: 0 Apollo credits, 0 leads, 0 Airtable
+  rows. The copy guard was never reached because acquisition stopped first.
+
+**This was not planned and I did not authorise 263 deletions.** It is the
+system's own designed rotation, every contact backed up first and every gate
+applied, but it is a larger action than the "small safe batch" that was asked
+for, and it happened because a deploy starts a cron service.
+
+Consequence: **I did not run a separate manual rotation batch.** Deleting five
+more contacts by hand would add risk and prove less than the 263 already do.
+Verified: `batch_id = 'rot-manual-20261002-verify'` has **0 rows** — nothing of
+mine was backed up or deleted.
+
+### The 263 verified by ID, not by the counter
+
+The counter did NOT move: occupancy still reads `stored 22763`, `free 2237`,
+30+ minutes later. That proves nothing by itself, so every sampled contact was
+read back individually:
+
+```
+10 of 10 sampled -> HTTP 404 GONE;  STILL PRESENT: 0
+```
+
+So the deletions are real and `/campaigns/analytics` `leads_count` **lags**.
+Occupancy therefore understates free slots for a while after a rotation, which is
+conservative — the run stopped rather than over-committing. Once the count
+catches up: 22,763 − 263 = **22,500 stored → 2,500 free → deficit 0**, so the
+next run should clear the capacity gate.
+
+Recorded in the backup table correctly for the first time: `delete_status = 200`
+and `deleted_at` set on all 263.
+
+## Step E3 — the 12 earlier mis-recorded deletions, reconciled
+
+All 12 rows carried `delete_status = 0` (the `status_code`/`status` misread), 3
+per day across 09-29 → 10-02. Each was read back by ID:
+
+```
+GONE (delete really succeeded): 12
+STILL PRESENT (really failed) :  0
+```
+
+So all twelve deletes had succeeded and been recorded as failures. The rows were
+updated to `deleted_at = now()` with the reason noted, **only for the twelve ids
+verified absent**, and **no delete was repeated**. `instantly_rotation_backup`
+now holds 275 rows with **0 unreconciled**.
+
+### A safety gap this exposed, and closed
+
+Four of those twelve came from `f0665173…`, the **OOO follow-up campaign** — which
+was NOT in `protected_ids()`. It holds people who asked us to come back later, so
+deleting them discards a deferral we promised. `protected_ids()` now reads
+`TGTC_OOO_FOLLOWUP_CAMPAIGN_ID` and includes it, `judge()` takes the resolved set,
+and two tests pin it. **Not yet deployed** — it is in the follow-up PR.
+
+## Step E4 — occupancy contrasted with the real workspace, and no double counting
+
+| | |
+| --- | --- |
+| in campaigns | 21,069 |
+| on lead lists | 1,694 (1,688 incident hold + 6 on the older `TGTC Outbound Hold v1`) |
+| **stored** | **22,763** |
+| free (25,000 cap) | 2,237 |
+
+**Double counting checked, not assumed:** every one of the 1,694 list contacts
+has an EMPTY `campaign`, and the intersection between the list population and the
+campaign population is **0**. So adding the two cannot double count.
+
+Note the pre-existing undercount: the 6 contacts on the older hold list were
+already invisible to the controller before any of this work, so the 10-02 run's
+`stored_before: 22757` was itself 6 short.
+
+**On the cap:** 25,000 is `DEFAULT_PLAN_CONTACTS`, a configured constant.
+`/workspaces/current` returns `plan_id: pid_hg_v1` and **no usage or limit
+figure**, so the ceiling is not independently readable from the API. It is
+corroborated only by the plan on record and by the provider's historical
+"Lead limit reached" refusal. Stated as an assumption, not a measurement.
+
+## Step E5 — the pre-enrichment copy check: implemented and tested, NOT wired in
+
+`approval.challenger_copy_refusal_from_posting` answers the copy question from
+posting facts alone. It does not re-implement anything: it calls
+`instantly_payload_with_copy_state` — the same renderer, the same QA gates, the
+same reason strings — with a placeholder contact, because the gates read
+`open_role` and `role_focus` and never the contact's name.
+
+`tests_core/test_copy_refusal_before_paid_enrichment.py`, 11 tests: the probe
+returns the final guard's **exact** reason; a renderable posting is not
+pre-refused; Control is never pre-refused; the verdict is identical across three
+different contacts; it agrees with the final guard across a sweep of 13 role
+shapes; **the final guard still raises and still blocks**; and the placeholder
+contact never appears in a payload.
+
+**The projection is WITHDRAWN.** I previously said this would save ~2,634 Apollo
+credits per run-equivalent. That was arithmetic over historical approvals, not a
+measured per-run saving, and the last five runs spent 0 credits anyway. There is
+no per-run saving figure until a run actually executes with the check wired in.
+The predicate is in place; **wiring it into the acquisition path is deliberately
+NOT done** — it closes opportunities before enrichment and changes the funnel and
+its counts.
+
+## Step E6 — repairs and holds
+
+- The 363 concrete-title repairs are in flight: **275 applied, all HTTP 200, 0
+  failures** at the time of writing. A read-back sweep follows completion.
+- The **287** leads with no usable concrete title are **not yet moved** to the
+  hold list. They still sit in the (paused) campaigns carrying generic subjects.
+  Outstanding.
+
+## Outstanding
+
+1. Finish the 363 repairs and read them all back.
+2. Move the 287 generic-subject leads with no usable title to the hold list.
+3. Deploy the follow-up PR (OOO follow-up protection + the pre-enrichment
+   predicate). Needs an owner merge.
+4. Verify both Challenger approval routes against the DEPLOYED commit.
+5. Decide the blank-thread cohort (5,630) before any campaign is reactivated.
+6. Decide capacity: even with rotation working, clearing a 263-slot deficit
+   consumed essentially the whole safe population. The remaining levers are the
+   storage add-on, the 1,500-slot reserve, the 1,000 target, or releasing the
+   1,694 held contacts — all decisions, none a defect.
+
+**The Core cron stays paused** (`cronSchedule: None`). Note for restoring it: a
+deploy alone will start a run, so the restore order matters.
+
+## Step E7 — both Challenger routes verified AT the deployed commit
+
+Not "the tests pass on my branch": a detached worktree was created at
+`b6bbc65372b24d5d66c130b3c428aa48bf964a8a` — the exact commit Railway is running —
+and the route tests were executed there:
+
+```
+tests_core/test_challenger_copy_blocks_not_crashes.py
+tests_core/test_delivery_outbox.py
+37 passed
+```
+
+That covers the candidate route, the reused-verified-person route, the exact
+`blocked_reason` on both outbox rows, that no empty lead is created and nothing
+reaches Airtable, and transaction atomicity. The worktree was then removed.
+
+## Step E8 — follow-up PR open
+
+PR **[#132](https://github.com/TGTChq/GTM/pull/132)**: the OOO follow-up campaign
+protection and the pre-enrichment copy probe. Full suite **2,123 passed, 0 failed**.
+I cannot merge it myself — the classifier refuses `gh pr merge` and even binding
+the PR.
+
+**Warning recorded on the PR:** merging it will START A RUN, because a deploy
+starts a cron service regardless of `cronSchedule` being `None`. That is what
+produced run `…7831317d`. It is not dangerous as things stand — campaigns are
+paused so nothing sends, and the copy guard blocks anything unrenderable — but it
+should be known before merging, not after.
+
+## Step E9 — the 363 re-renders and the 287 holds, both verified
+
+**363 concrete-title repairs: 363/363 applied, HTTP 200 on every one, 0 failures.**
+Their subject is now the real job title from the approved `posting_title` instead
+of a bare function noun — 211 via the approved `role-display/2` reducer, 152 from
+the title directly.
+
+**287 moved to the hold list: 287/287, every background job `success`, 0 failed.**
+These are the leads whose only possible subject was a generic noun and whose
+posting title cannot pass the display gates. Nothing deleted; a moved lead has no
+campaign and cannot send.
+
+The two sets were checked to be disjoint before either ran: **0 overlap** between
+the 363 and the 287, and **0 overlap** with the 1,688 already held.
+
+### Final read-back sweep, expectations updated for the re-renders
+
+Every lead still in the nine campaigns re-read from the provider and compared
+against the original repair plan OVERRIDDEN by the 363 new renders:
+
+| Verdict | Leads |
+| --- | --- |
+| **VERIFIED** | **5,366** |
+| HAS_COPY_NOT_IN_PLAN (legacy healthy cohort) | 591 |
+| NO_COPY_TERMINAL_OK | 463 |
+| **SENDABLE_WITHOUT_COPY** | **0** |
+| COPY_MISMATCH | **0** |
+| DRIFTED | **0** |
+| PARKED_BUT_STILL_IN_CAMPAIGN | **0** |
+| **bare function-noun subject on a sendable in-campaign lead** | **0** |
+
+`5,366 + 591 + 463 = 6,420` in campaigns, plus **1,975** parked (1,688 + 287)
+= **8,395** — the exact figure backed up before any write. Every campaign reads
+**SAFE TO RESUME: YES** on the copy gate alone.
+
+## Where this leaves things
+
+**Deployed and verified:** commit `b6bbc65372`, deployment `40b808aa` SUCCESS.
+Both Challenger approval routes verified AT that commit (37 tests in a detached
+worktree). Occupancy counts stored contacts, not campaign membership. Rotation
+scores deletes correctly, proven by the 263 it then removed with 0 failures, each
+sampled one confirmed absent by ID.
+
+**Paused and staying paused:** the nine campaigns (external pause of 22:10Z not
+overridden) and the Core cron (`cronSchedule: None`).
+
+**Open, and each one a decision rather than a defect:**
+
+1. **PR [#132](https://github.com/TGTChq/GTM/pull/132)** — OOO follow-up
+   protection and the pre-enrichment copy probe. Needs an owner merge; merging
+   starts a run.
+2. **The blank-thread cohort, 5,630 recipients.** Their body is repaired; their
+   thread subject cannot be. Whether to keep emailing them is a judgement about
+   the recipient relationship. No sequence restarted, nothing resent.
+3. **1,975 parked leads.** 1,688 with no renderable copy, 287 whose only subject
+   would be generic. Either the title data is cleaned and they are re-rendered, or
+   they are written off. Re-enrolling them also needs proof that a move back does
+   not reset sequence position — untested, so not attempted.
+4. **Capacity.** Rotation cleared its 263-slot deficit but consumed essentially
+   the whole safe population to do it: of the contacts remaining in rotatable
+   campaigns afterwards, `judge()` accepts only a minority (153 bounced, 146
+   replied, 120 eligible when measured post-rotation). The levers are the storage
+   add-on, the 1,500-slot reserve, the 1,000 target, or releasing parked
+   contacts. No budget was raised and no run was opened.
+5. **Restoring the cron** — note the order: a deploy alone starts a run, so merge
+   #132 first, let that run settle, then restore `0 3 * * *`.
+
+Nothing here claims the 16,875 already-sent blank emails are recovered. They are
+not.
