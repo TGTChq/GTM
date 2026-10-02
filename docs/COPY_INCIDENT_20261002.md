@@ -664,3 +664,58 @@ stay auditable: `TEST A step1` `d500b21e…`, `TEST B bodies234` `490860b3…`.
    enrolled. That is correct behaviour, and it is also a volume decision.
 3. The 03:00Z run is the first production exercise of the fix end to end. Worth
    reading its creation counts and blocked reasons in the morning.
+
+---
+
+# Continuation, 2026-10-02 22:10Z
+
+## Step C1 — first REAL sends after reactivation: all clean, no pause needed
+
+Reactivation ~19:45Z. Window (Mon-Fri 08:00-18:00 America/Chicago) still open at
+22:10Z, so real sends happened. Judged only the steps that actually executed;
+nothing was advanced or forced.
+
+**125 Challenger sends at/after 17:00Z → verdict `OK` on all 125, 0 broken.**
+
+| Campaign | Sends | Verdict |
+| --- | --- | --- |
+| OPERATIONS | 92 | all OK |
+| GTM_SYSTEMS | 12 | all OK |
+| AI_TECHNICAL | 7 | all OK |
+| MARKETING_CREATIVE | 6 | all OK |
+| PEOPLE_HR | 4 | all OK |
+| CUSTOMER_EXPERIENCE | 4 | all OK |
+| PRODUCT, FINANCE, ECOMMERCE | 0 | no sends yet |
+
+Steps that executed: **1, 2 and 3**. Step 1 sample (`richard.dillard@c5mi.com`,
+22:09:26Z): subject `SAP Training Specialist I`, 334 copy chars, personalised on
+first name, role AND role focus. Step 2 and 3 samples carry their proper copy
+("Just bumping this one." / "One thing I left out.") with formatting intact.
+
+No empty body, no signature-only body, no unresolved token. **No campaign paused.**
+
+### MATERIAL RESIDUAL EFFECT — the thread subject cannot be repaired
+
+Steps 2 and 3 arrive with an **empty subject**. That is the template's design
+(steps 2-4 have `subject: ''` and inherit the thread), but Instantly builds the
+thread subject from the step-1 subject that was ACTUALLY SENT — and for the
+incident cohort that was empty. Verified directly:
+
+| Recipient | Prior sends | Post-reactivation |
+| --- | --- | --- |
+| `richard.dillard@c5mi.com` | none | step 1, subject `SAP Training Specialist I` ✔ |
+| `cvansickle@starwoodhotels.com` | step 1 on 09-29, `subject ''`, html 120 (signature only) | step 2, correct copy, subject `''` |
+| `mmarvin@pltw.org` | steps 1-2 on 09-25/09-28, `subject ''`, html 120 | step 3, correct copy, subject `''` |
+
+Measured population:
+
+- **5,630** of the 5,653 repaired leads already have a blank thread subject
+  (highest broken step reached: step 1 → 895, step 2 → 2,561, step 3 → 2,174)
+- only **23** repaired leads were never touched and will carry a full subject
+
+So the repair restores the BODY for in-flight leads but cannot retroactively give
+their thread a subject. Those recipients will likely see "(no subject)" on the
+remaining follow-ups. This is not a blank email and not the incident recurring —
+but it is **not** "already-sent email recovered" either, and whether to continue
+follow-ups to the 7,777 already-touched recipients is a business decision, not a
+technical one. Recorded, not decided.
