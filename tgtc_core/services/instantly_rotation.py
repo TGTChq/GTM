@@ -53,6 +53,9 @@ FLOOR_ENV = "TGTC_INSTANTLY_FREE_SLOT_FLOOR"
 BATCH_ENV = "TGTC_INSTANTLY_ROTATION_BATCH"
 
 
+#: Instantly campaign statuses. 1 is sending; the others are not.
+CAMPAIGN_ACTIVE = 1
+
 class RotationRefused(RuntimeError):
     """The batch was not safe to run. Nothing was deleted."""
 
@@ -122,6 +125,23 @@ def judge(lead: Dict[str, Any], *, campaign_id: str, campaign_status: Any, held:
     """'' when this contact may be removed, otherwise why not. One place, one rule set."""
     if campaign_id in (protected if protected is not None else protected_ids()):
         return "live_campaign"
+    # Any campaign that is ACTIVE is a live campaign, whether or not we recognise its id.
+    # Measured 2026-10-03: three campaigns were sending that are in none of our known
+    # sets -- "Customer Success - Other", "Customer Success 50 - 500" and "MARKETING &
+    # CREATIVE" -- so a protection built only from ids we hard-code would have offered
+    # their contacts up for deletion. Protecting by id alone is protection against the
+    # campaigns we remembered.
+    #
+    # This is NOT the rule that was removed on 2026-10-03. That one refused a lead
+    # because its campaign was not COMPLETED, which hid 3,220 finished, silent,
+    # unsuppressed leads in paused campaigns. This one refuses only where the campaign
+    # can still send.
+    try:
+        if int(campaign_status) == CAMPAIGN_ACTIVE:
+            return "active_campaign"
+    except (TypeError, ValueError):
+        # An unreadable status is not evidence of safety.
+        return "campaign_status_unknown"
     # The CAMPAIGN's status is the wrong question about an individual contact, and asking
     # it hid almost all of the safe inventory. Measured 2026-10-03: 10,282 leads sit in
     # unprotected campaigns and only 269 of them are in a COMPLETED one, so this rule

@@ -129,6 +129,48 @@ class InstantlyClient:
         return self._call("POST", "/leads/move", json_body={"campaign": from_campaign, "ids": [lead_id],
                                                             "to_campaign_id": to_campaign})
 
+    def move_lead_from(self, lead_id: str, *, source_kind: str, source_id: str,
+                       to_campaign: str) -> InstantlyResult:
+        """Move ONE lead into a campaign, from a campaign OR from a lead list.
+
+        ``/leads/move`` names its source differently depending on where the lead sits --
+        ``campaign`` for one in a campaign, ``list_id`` for one parked on a list -- and
+        the two are not interchangeable. Both were verified against production
+        2026-10-03, in each direction, with our own mailbox.
+
+        It relocates rather than copies: measured on that probe, the destination campaign
+        went 1 -> 0 and the list 1,975 -> 1,976 while the total stayed the same, and the
+        lead kept its id, its address and its data. That is why 5,892 of the 5,934
+        recipients owed the repair email need no new storage.
+
+        A 200 is an ACCEPTED background job, not a finished move. The caller must read the
+        lead back before believing it.
+        """
+        if not lead_id or not source_id or not to_campaign:
+            raise ValueError("move_lead_from needs a lead id, a source and a destination")
+        if source_id == to_campaign:
+            raise ValueError("refusing to move a lead into the campaign it is already in")
+        body: Dict[str, Any] = {"ids": [lead_id], "to_campaign_id": to_campaign}
+        if source_kind == "list":
+            body["list_id"] = source_id
+        elif source_kind == "campaign":
+            body["campaign"] = source_id
+        else:
+            raise ValueError(f"unknown move source kind: {source_kind!r}")
+        return self._call("POST", "/leads/move", json_body=body)
+
+    def update_lead(self, lead_id: str, patch: Dict[str, Any]) -> InstantlyResult:
+        """Change one lead. ``custom_variables`` REPLACES the whole set, never merges.
+
+        So a caller that wants to add one variable must send every variable it intends to
+        keep. Read-after-write is eventually consistent here: a 200 followed by an
+        immediate GET can show the old value, so a disagreement right after the write is
+        not evidence the write failed.
+        """
+        if not lead_id:
+            raise ValueError("update_lead needs a lead id")
+        return self._call("PATCH", f"/leads/{lead_id}", json_body=patch)
+
     def search_by_contact(self, email: str) -> Tuple[InstantlyResult, Tuple[str, ...]]:
         result = self._call("GET", "/campaigns/search-by-contact", params={"search": email})
         if not result.ok:

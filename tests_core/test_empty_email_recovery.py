@@ -33,8 +33,18 @@ class FakeInstantly:
     """Enough of the client to exercise the paths, and it records what it was asked."""
 
     def __init__(self, *, stored=1000, allowance_error=False, emails_sent=0,
-                 drop_variables=False, subject=None, on_lists=0, rate_limited=False):
+                 drop_variables=False, subject=None, on_lists=0, rate_limited=False,
+                 move_fails=False, patch_fails=False, move_never_settles=False,
+                 prefix="L"):
         self.rate_limited = rate_limited
+        self.move_fails = move_fails
+        self.patch_fails = patch_fails
+        self.move_never_settles = move_never_settles
+        self.moved: list = []
+        self.patched: list = []
+        # Its own id space, so a helper's client and a test's client cannot both mint
+        # "L1" and collide on the unique index that binds one lead to one recipient.
+        self.prefix = prefix
         self.stored = stored
         self.on_lists = on_lists
         self.deleted: list = []
@@ -75,6 +85,36 @@ class FakeInstantly:
              "emails_sent_count": self.emails_sent},
         ]})
 
+    # --- the move route
+    def move_lead_from(self, lead_id, *, source_kind, source_id, to_campaign):
+        if lead_id not in self.leads:
+            return Result(False, 404, message="not found")
+        if self.move_fails:
+            return Result(False, 500, message="upstream error")
+        self.moved.append({"lead": lead_id, "from_kind": source_kind,
+                           "from": source_id, "to": to_campaign})
+        if not self.move_never_settles:
+            self.leads[lead_id]["campaign"] = to_campaign
+            # A move clears the sequence position. That is authorised here and is the
+            # point: they receive this one email and nothing else.
+            self.leads[lead_id]["status_summary"] = {}
+        return Result(data={"id": "job-%d" % len(self.moved), "status": "pending"})
+
+    def update_lead(self, lead_id, patch):
+        if lead_id not in self.leads:
+            return Result(False, 404, message="not found")
+        if self.patch_fails:
+            return Result(False, 500, message="upstream error")
+        self.patched.append({"lead": lead_id, "patch": patch})
+        variables = patch.get("custom_variables")
+        if isinstance(variables, dict):
+            # The real API REPLACES the set; the fake does the same so a caller that
+            # forgets to merge loses data here too.
+            kept = {k: v for k, v in self.leads[lead_id]["payload"].items()
+                    if k in ("email", "campaign")}
+            self.leads[lead_id]["payload"] = {**kept, **variables}
+        return Result(data={"id": lead_id})
+
     # --- create and read back
     def create_lead(self, payload):
         from tgtc_core.domain.outbound_copy import copy_block_reason
@@ -88,14 +128,26 @@ class FakeInstantly:
             return Result(False, 429, message="Too many requests")
         if self.allowance_error:
             return Result(False, 403, message='{"message":"Lead limit reached. Remaining uploads: 0"}')
-        lead_id = "L%d" % (len(self.created) + 1)
+        lead_id = "%s%d" % (self.prefix, len(self.created) + 1)
         self.created.append(dict(payload))
         variables = {} if self.drop_variables else dict(payload["custom_variables"])
-        self.leads[lead_id] = {"id": lead_id, "email": payload["email"],
-                               "campaign": payload["campaign"],
-                               "payload": {"custom_variables": variables,
-                                           "first_name": payload["first_name"]}}
+        self.leads[lead_id] = {
+            "id": lead_id, "email": payload["email"], "campaign": payload["campaign"],
+            "status": 1, "status_summary": {},
+            # Flattened, which is where Instantly really keeps them.
+            "payload": {"email": payload["email"], "campaign": payload["campaign"],
+                        "firstName": payload["first_name"], **variables}}
         return Result(data={"id": lead_id})
+
+    def seed_existing(self, lead_id, *, email, campaign, first="Ana", status=1,
+                      variables=None):
+        """A lead that already exists in Instantly, as the affected contacts do."""
+        self.leads[lead_id] = {
+            "id": lead_id, "email": email, "campaign": campaign, "status": status,
+            "status_summary": {"step": 1},
+            "payload": {"email": email, "campaign": campaign, "firstName": first,
+                        "signal_tier": "keep-me", **(variables or {})}}
+        return lead_id
 
     def get_lead(self, lead_id):
         if lead_id not in self.leads:
@@ -107,6 +159,23 @@ class FakeInstantly:
         if email in self.messages:
             return Result(data={"items": [self.messages[email]]})
         return Result(data={"items": []})
+
+    def delivered(self, email, *, first="Ana", role="Tax Accountant", **over):
+        """The message a correct send produces, rendered the way Instantly renders it."""
+        html = ("Hi {first},<br><br>An earlier email from us went out without its "
+                "message&mdash;sorry about that.<br><br>I wanted to reach out about your "
+                "{role} opening. The Global Talent Co. helps companies hire vetted "
+                "international professionals matched to the role.<br><br>Would it be "
+                "useful to see a few relevant profiles?<br><br><div>Devan Markus</div>"
+                "<div>Business Development</div><div>The Global Talent Co.</div>"
+                ).format(first=first, role=role)
+        message = {"message_id": "M-%s" % email, "subject": "Your %s opening" % role,
+                   "body": {"html": html}, "lead": email,
+                   "to_address_email_list": email, "step": "0_0_0",
+                   "from_address_email": "rep@gtcglobalteams.com"}
+        message.update(over)
+        self.messages[email] = message
+        return message
 
     def pause_campaign(self, campaign_id):
         self.paused.append(campaign_id)
@@ -139,17 +208,21 @@ def load(conn, n=3, *, gate_open=True, **kw):
     return report
 
 
-def pass_the_internal_test(conn):
-    """A received test message with the approved subject: what the gate asks for."""
+def pass_the_internal_test(conn, client=None):
+    """Put the gate through the REAL path: enrol our own address, then receive the email.
+
+    Deliberately not a hand-written evidence blob. The gate asks whether a whole received
+    message checked out, so a helper that asserts that by fiat would let the tests pass
+    while the thing they exist to protect was broken.
+    """
+    own = client or FakeInstantly(prefix="QA")
     rec.load_queue(conn, [dict(queue_row(0), email="qa@tgtc.test", is_internal_test=True)])
-    with conn.cursor() as cur:
-        cur.execute(
-            "UPDATE empty_email_recovery SET state = 'sent', sent_at = now(), "
-            "message_id = 'TEST', evidence = evidence || "
-            "'{\"sent_subject\": \"Your Tax Accountant opening\", "
-            "  \"subject_as_approved\": true}'::jsonb "
-            "WHERE email = 'qa@tgtc.test'")
-    conn.commit()
+    rec.enrol(conn, own, limit=1, env=dict(NO_PACE))
+    own.delivered("qa@tgtc.test", first="Ana", role="Tax Accountant")
+    rec.record_receipts(conn, own, pace=CountingPace(0))
+    gate = rec.internal_test_passed(conn)
+    assert gate["passed"], gate
+    return own
 
 
 def suppress(conn, email, *, source, reason="opt_out", at=None):
@@ -276,17 +349,15 @@ def test_an_enrolled_contact_is_only_sent_when_instantly_shows_a_message(conn):
     assert set(states(conn).values()) == {"enrolled"}
 
     # Nothing has been sent yet, so nothing may claim it was.
-    assert rec.record_receipts(conn, client)["sent"] == 0
+    assert rec.record_receipts(conn, client, pace=CountingPace(0))["sent"] == 0
     assert set(states(conn).values()) == {"enrolled"}
 
-    client.messages["p1@employer.test"] = {
-        "message_id": "M1", "subject": "Your Tax Accountant opening",
-        "from_address_email": "rep@tgtc.test"}
-    report = rec.record_receipts(conn, client)
-    assert report["sent"] == 1 and report["subject_not_as_approved_count"] == 0
+    client.delivered("p1@employer.test")
+    report = rec.record_receipts(conn, client, pace=CountingPace(0))
+    assert report["sent"] == 1 and report["not_as_approved_count"] == 0
     row = sqlall(conn, "SELECT state, message_id, evidence FROM empty_email_recovery "
                        "WHERE email = 'p1@employer.test'")[0]
-    assert row["state"] == "sent" and row["message_id"] == "M1"
+    assert row["state"] == "sent" and row["message_id"] == "M-p1@employer.test"
     assert row["evidence"]["subject_as_approved"] is True
     assert states(conn)["p2@employer.test"] == "enrolled"
 
@@ -296,9 +367,13 @@ def test_a_blank_subject_that_got_out_is_recorded_and_pauses_the_campaign(conn):
     load(conn, 1)
     client = FakeInstantly()
     rec.enrol(conn, client, limit=10, env=dict(NO_PACE))
-    client.messages["p1@employer.test"] = {"message_id": "M1", "subject": ""}
-    report = rec.record_receipts(conn, client)
-    assert report["subject_not_as_approved_count"] == 1
+    client.delivered("p1@employer.test", subject="",
+                     body={"html": "<div>Devan Markus</div><div>The Global Talent Co.</div>"})
+    report = rec.record_receipts(conn, client, pace=CountingPace(0))
+    assert report["not_as_approved_count"] == 1
+    failed = set(report["not_as_approved"][0]["failed"])
+    assert {"subject_is_the_approved_one", "body_arrived_at_all",
+            "every_approved_sentence_is_there", "greeting_carries_their_name"} <= failed
 
     guard = rec.guard(conn, client)
     assert client.paused == [CAMPAIGN]
@@ -371,9 +446,8 @@ def test_somebody_who_was_already_suppressed_elsewhere_before_the_send_is_a_guar
     client = FakeInstantly()
     rec.enrol(conn, client, limit=10, env=dict(NO_PACE))
     suppress(conn, "p1@employer.test", source="reply_workflow", reason="unsubscribe")
-    client.messages["p1@employer.test"] = {"message_id": "M1",
-                                           "subject": "Your Tax Accountant opening"}
-    rec.record_receipts(conn, client)
+    client.delivered("p1@employer.test")
+    rec.record_receipts(conn, client, pace=CountingPace(0))
     guard = rec.guard(conn, client)
     assert "sent_to_an_excluded_recipient" in guard["campaign_paused_because"]
 
@@ -485,9 +559,8 @@ def test_a_recovered_contact_is_not_net_new_and_opens_no_second_airtable_row(con
     load(conn, 3)
     client = FakeInstantly()
     rec.enrol(conn, client, limit=10, env=dict(NO_PACE))
-    client.messages["p1@employer.test"] = {"message_id": "M1",
-                                           "subject": "Your Tax Accountant opening"}
-    rec.record_receipts(conn, client)
+    client.delivered("p1@employer.test")
+    rec.record_receipts(conn, client, pace=CountingPace(0))
     for table in ("approvals", "delivery_outbox", "delivery_receipts", "candidate_attempts",
                   "work_items", "credit_events"):
         assert sql1(conn, "SELECT count(*) AS n FROM %s" % table) == 0, table
@@ -531,9 +604,8 @@ def test_the_ledger_is_one_row_per_recipient_and_accounts_for_all_of_them(conn):
     rec.revalidate(conn)
     client = FakeInstantly()
     rec.enrol(conn, client, limit=2, env=dict(NO_PACE))
-    client.messages["p2@employer.test"] = {"message_id": "M1",
-                                           "subject": "Your Tax Accountant opening"}
-    rec.record_receipts(conn, client)
+    client.delivered("p2@employer.test")
+    rec.record_receipts(conn, client, pace=CountingPace(0))
     led = rec.ledger(conn)
     assert led["recipients"] == 7          # six affected plus the internal test row
     assert sum(led["by_state"].values()) == 7
@@ -583,14 +655,14 @@ def test_an_alert_fires_on_harm_and_stays_quiet_on_a_healthy_queue(conn):
     load(conn, 2)
     client = FakeInstantly()
     rec.enrol(conn, client, limit=10, env=dict(NO_PACE))
-    client.messages["p1@employer.test"] = {"message_id": "M1",
-                                           "subject": "Your Tax Accountant opening"}
-    rec.record_receipts(conn, client)
+    client.delivered("p1@employer.test")
+    rec.record_receipts(conn, client, pace=CountingPace(0))
     healthy = health_alerts.check_empty_email_recovery(conn, now=NOW)
     assert healthy is None or healthy["severity"] != "high"
 
-    client.messages["p2@employer.test"] = {"message_id": "M2", "subject": ""}
-    rec.record_receipts(conn, client)
+    client.delivered("p2@employer.test", subject="",
+                     body={"html": "<div>The Global Talent Co.</div>"})
+    rec.record_receipts(conn, client, pace=CountingPace(0))
     alert = health_alerts.check_empty_email_recovery(conn, now=NOW)
     assert alert["severity"] == "high"
     assert alert["detail"]["unapproved_subject_sent"] == 1
@@ -648,8 +720,8 @@ def test_an_enrolled_test_is_not_a_passed_test(conn):
     rec.enrol(conn, client, limit=10, env=dict(NO_PACE))
     assert rec.internal_test_passed(conn)["passed"] is False
 
-    client.messages["qa@tgtc.test"] = {"message_id": "T1", "subject": "wrong subject"}
-    rec.record_receipts(conn, client)
+    client.delivered("qa@tgtc.test", subject="wrong subject")
+    rec.record_receipts(conn, client, pace=CountingPace(0))
     assert rec.internal_test_passed(conn)["passed"] is False,         "a message with the wrong subject must not open the gate"
 
 
@@ -658,9 +730,8 @@ def test_the_gate_opens_only_on_a_received_message_with_the_approved_subject(con
                           dict(queue_row(9), email="qa@tgtc.test", is_internal_test=True)])
     client = FakeInstantly()
     rec.enrol(conn, client, limit=10, env=dict(NO_PACE))
-    client.messages["qa@tgtc.test"] = {"message_id": "T1",
-                                       "subject": "Your Tax Accountant opening"}
-    rec.record_receipts(conn, client)
+    client.delivered("qa@tgtc.test")
+    rec.record_receipts(conn, client, pace=CountingPace(0))
     gate = rec.internal_test_passed(conn)
     assert gate["passed"] is True and gate["address"] == "qa@tgtc.test"
 
@@ -721,3 +792,301 @@ def test_the_pace_can_be_turned_off_for_a_one_off_run(conn):
     pace = CountingPace(0)
     rec.enrol(conn, client, limit=10, env={rec.PACE_SECONDS_ENV: "0"}, pace=pace)
     assert pace.waits == 0
+
+
+# ------------------------------------------------------- moving what already exists
+
+ORIGINAL = "8bfa0769-4b9a-4346-8e93-17ac8b726dce"      # a paused Challenger campaign
+HOLD_LIST = "c5eb1163-0061-4125-9e62-aa68a8793f57"      # the incident hold list
+
+
+def movable(conn, client, i=1, *, kind="campaign", status=1, source=None, role="Tax Accountant"):
+    """One authorised recipient who is ALREADY stored in Instantly."""
+    email = "p%d@employer.test" % i
+    lead_id = client.seed_existing("EXIST%d" % i, email=email,
+                                  campaign=(source or ORIGINAL) if kind == "campaign" else "",
+                                  status=status)
+    rec.load_queue(conn, [dict(queue_row(i, role=role), source_kind=kind,
+                               source_id=source or (ORIGINAL if kind == "campaign" else HOLD_LIST),
+                               instantly_lead_id=lead_id, source_lead_status=status)])
+    return email, lead_id
+
+
+def test_an_existing_record_is_moved_and_not_created_again(conn):
+    """5,892 of the 5,934 are already stored. Creating them again would be the bug."""
+    pass_the_internal_test(conn)
+    client = FakeInstantly()
+    email, lead_id = movable(conn, client, 1)
+
+    report = rec.enrol(conn, client, limit=10, env=dict(NO_PACE))
+
+    assert report["moved_existing_records"] == 1
+    assert report["created_new_records"] == 0
+    assert client.created == [], "nothing may be created for somebody already stored"
+    assert client.moved[0]["lead"] == lead_id
+    assert client.moved[0]["to"] == CAMPAIGN and client.moved[0]["from"] == ORIGINAL
+    assert states(conn)[email] == "enrolled"
+    # The same record, not a copy.
+    assert sqlall(conn, "SELECT instantly_lead_id FROM empty_email_recovery "
+                        "WHERE email = %s", (email,))[0]["instantly_lead_id"] == lead_id
+
+
+def test_a_move_from_a_hold_list_names_the_list_not_a_campaign(conn):
+    """/leads/move takes `campaign` or `list_id`, and they are not interchangeable."""
+    pass_the_internal_test(conn)
+    client = FakeInstantly()
+    movable(conn, client, 1, kind="list")
+    rec.enrol(conn, client, limit=10, env=dict(NO_PACE))
+    assert client.moved[0]["from_kind"] == "list"
+    assert client.moved[0]["from"] == HOLD_LIST
+
+
+def test_the_role_is_written_before_the_move_never_after(conn):
+    """The campaign is ACTIVE. A lead arriving without its role could be sent
+    "Your  opening" inside the next window -- the incident, caused by the repair."""
+    pass_the_internal_test(conn)
+    client = FakeInstantly()
+    movable(conn, client, 1)
+    rec.enrol(conn, client, limit=10, env=dict(NO_PACE))
+    assert client.patched, "the role must be written"
+    assert client.patched[0]["patch"]["custom_variables"]["verified_role"] == "Tax Accountant"
+    # Both happened, and the patch came first.
+    assert client.patched and client.moved
+
+
+def test_the_patch_merges_because_the_api_replaces(conn):
+    """PATCH custom_variables REPLACES the set, so what the lead already had must be
+    sent back with it or it is silently thrown away."""
+    pass_the_internal_test(conn)
+    client = FakeInstantly()
+    email, lead_id = movable(conn, client, 1)
+    rec.enrol(conn, client, limit=10, env=dict(NO_PACE))
+    sent_variables = client.patched[0]["patch"]["custom_variables"]
+    assert sent_variables["verified_role"] == "Tax Accountant"
+    assert sent_variables.get("signal_tier") == "keep-me", "existing provenance kept"
+    assert rec.lead_variables(client.leads[lead_id])["signal_tier"] == "keep-me"
+
+
+def test_the_record_is_backed_up_to_the_database_before_it_is_touched(conn):
+    """A move has to be reversible from production, not only from a file on a laptop."""
+    pass_the_internal_test(conn)
+    client = FakeInstantly()
+    email, lead_id = movable(conn, client, 1)
+    rec.enrol(conn, client, limit=10, env=dict(NO_PACE))
+    row = sqlall(conn, "SELECT source_backup, source_lead_status FROM empty_email_recovery "
+                       "WHERE email = %s", (email,))[0]
+    assert row["source_backup"]["id"] == lead_id
+    assert row["source_backup"]["campaign"] == ORIGINAL, "where it came from"
+    assert row["source_backup"]["status_summary"] == {"step": 1}, "and where it had got to"
+    assert row["source_lead_status"] == 1
+
+
+def test_their_old_sequence_is_abandoned_and_they_are_never_moved_back(conn):
+    """Authorised, and the point: this one email and nothing else."""
+    pass_the_internal_test(conn)
+    client = FakeInstantly()
+    email, lead_id = movable(conn, client, 1)
+    rec.enrol(conn, client, limit=10, env=dict(NO_PACE))
+    assert client.leads[lead_id]["status_summary"] == {}, "the position is gone"
+    assert client.leads[lead_id]["campaign"] == CAMPAIGN
+
+    # A second tick must not move them anywhere, least of all back.
+    again = rec.enrol(conn, client, limit=10, env=dict(NO_PACE))
+    assert again["enrolled"] == 0
+    assert len(client.moved) == 1
+    assert ORIGINAL not in [m["to"] for m in client.moved]
+
+
+@pytest.mark.parametrize("status,reason", [(-1, "provider_bounced"),
+                                           (-2, "provider_unsubscribed")])
+def test_the_providers_own_verdict_on_a_lead_withholds_it(conn, status, reason):
+    """246 of the authorised recipients turned out to be BOUNCED in Instantly.
+
+    Our outcome_events did not know: the bounce was recorded by the provider, not by us.
+    The first email never arrived at those addresses, and writing again spends our own
+    deliverability for nothing.
+    """
+    pass_the_internal_test(conn)
+    client = FakeInstantly()
+    email, _ = movable(conn, client, 1, status=status)
+    report = rec.enrol(conn, client, limit=10, env=dict(NO_PACE))
+    assert report["enrolled"] == 0 and report["withheld"] == 1
+    assert client.moved == [] and client.patched == []
+    row = sqlall(conn, "SELECT state, state_reason FROM empty_email_recovery "
+                       "WHERE email = %s", (email,))[0]
+    assert row["state"] == "withheld" and row["state_reason"] == reason
+
+
+def test_a_lead_id_that_belongs_to_somebody_else_is_withheld(conn):
+    """The one way a move could email the wrong person. It is refused, not retried."""
+    pass_the_internal_test(conn)
+    client = FakeInstantly()
+    client.seed_existing("EXIST1", email="someone@else.test", campaign=ORIGINAL)
+    rec.load_queue(conn, [dict(queue_row(1), source_kind="campaign", source_id=ORIGINAL,
+                               instantly_lead_id="EXIST1")])
+    report = rec.enrol(conn, client, limit=10, env=dict(NO_PACE))
+    assert report["withheld"] == 1 and client.moved == []
+    assert sqlall(conn, "SELECT state_reason FROM empty_email_recovery WHERE email = %s",
+                  ("p1@employer.test",))[0]["state_reason"] == "lead_id_belongs_to_another_address"
+
+
+def test_a_record_rotation_removed_goes_back_to_the_queue_as_a_creation(conn):
+    """A route can go stale between being recorded and being used."""
+    pass_the_internal_test(conn)
+    client = FakeInstantly()
+    rec.load_queue(conn, [dict(queue_row(1), source_kind="campaign", source_id=ORIGINAL,
+                               instantly_lead_id="GONE")])
+    report = rec.enrol(conn, client, limit=10, env=dict(NO_PACE))
+    assert report["enrolled"] == 0
+    row = sqlall(conn, "SELECT state, last_error FROM empty_email_recovery "
+                       "WHERE email = %s", ("p1@employer.test",))[0]
+    assert row["state"] == "authorised"
+    assert row["last_error"] == "record_gone_needs_creation"
+
+
+def test_a_move_that_does_not_settle_is_not_an_enrolment(conn):
+    """/leads/move answers 200 with a PENDING job. Accepted is not done."""
+    pass_the_internal_test(conn)
+    client = FakeInstantly(move_never_settles=True)
+    email, _ = movable(conn, client, 1)
+    report = rec.enrol(conn, client, limit=10, env=dict(NO_PACE))
+    assert report["enrolled"] == 0
+    row = sqlall(conn, "SELECT state, last_error FROM empty_email_recovery "
+                       "WHERE email = %s", (email,))[0]
+    assert row["state"] == "authorised" and row["last_error"] == "move_not_settled"
+
+
+def test_a_failed_move_or_patch_leaves_them_sendable(conn):
+    pass_the_internal_test(conn)
+    failing_move = FakeInstantly(move_fails=True)
+    email, _ = movable(conn, failing_move, 1)
+    rec.enrol(conn, failing_move, limit=10, env=dict(NO_PACE))
+    assert sqlall(conn, "SELECT state, last_error FROM empty_email_recovery "
+                        "WHERE email = %s", (email,))[0]["state"] == "authorised"
+
+    failing_patch = FakeInstantly(patch_fails=True)
+    email2, _ = movable(conn, failing_patch, 2)
+    rec.enrol(conn, failing_patch, limit=10, env=dict(NO_PACE))
+    row = sqlall(conn, "SELECT state, last_error FROM empty_email_recovery "
+                       "WHERE email = %s", (email2,))[0]
+    assert row["state"] == "authorised" and row["last_error"].startswith("patch_failed")
+
+
+# ----------------------------------------------------- capacity, and what it bounds
+
+
+def test_a_full_workspace_still_moves_everybody_it_can(conn):
+    """The correction this measurement forced: a move needs no slot, so a tight
+    workspace must not stop 5,892 of the 5,934."""
+    pass_the_internal_test(conn)
+    client = FakeInstantly(stored=24999)        # nothing free at all
+    email, _ = movable(conn, client, 1)
+    report = rec.enrol(conn, client, limit=10, env=dict(NO_PACE))
+    assert report["moved_existing_records"] == 1
+    assert report["capacity"]["measured"] is None, "it was not even consulted"
+    assert states(conn)[email] == "enrolled"
+
+
+def test_only_a_creation_waits_for_a_slot(conn):
+    pass_the_internal_test(conn)
+    client = FakeInstantly(stored=24999)
+    movable(conn, client, 1)                                        # needs no slot
+    rec.load_queue(conn, [dict(queue_row(2), source_kind="absent")])  # needs one
+    report = rec.enrol(conn, client, limit=10, env=dict(NO_PACE))
+    assert report["moved_existing_records"] == 1
+    assert report["created_new_records"] == 0
+    assert report["held_for_storage"] == 1
+    assert states(conn)["p2@employer.test"] == "authorised"
+
+
+def test_the_two_routes_are_counted_separately_and_never_confused(conn):
+    pass_the_internal_test(conn)
+    client = FakeInstantly()
+    movable(conn, client, 1)
+    movable(conn, client, 2, kind="list")
+    rec.load_queue(conn, [dict(queue_row(3), source_kind="absent")])
+    report = rec.enrol(conn, client, limit=10, env=dict(NO_PACE))
+    assert report["moved_existing_records"] == 2
+    assert report["created_new_records"] == 1
+    assert report["enrolled"] == 3
+    assert len(client.created) == 1, "exactly one new record, for the one with none"
+    assert len(client.moved) == 2
+
+
+def test_a_route_is_only_set_on_somebody_still_waiting(conn):
+    rec.load_queue(conn, [queue_row(1), queue_row(2)])
+    with conn.cursor() as cur:
+        cur.execute("UPDATE empty_email_recovery SET state = 'sent', sent_at = now() "
+                    "WHERE email = 'p1@employer.test'")
+    conn.commit()
+    out = rec.set_route(conn, [
+        {"email": "p1@employer.test", "source_kind": "campaign", "source_id": ORIGINAL,
+         "instantly_lead_id": "X1"},
+        {"email": "p2@employer.test", "source_kind": "campaign", "source_id": ORIGINAL,
+         "instantly_lead_id": "X2"},
+        {"email": "p3@employer.test", "source_kind": "campaign"},      # no lead id
+    ])
+    assert out == {"routed": 1, "not_waiting_any_more": 1, "refused": 1}
+    assert sqlall(conn, "SELECT source_kind FROM empty_email_recovery "
+                        "WHERE email = %s", ("p1@employer.test",))[0]["source_kind"] == "unknown"
+
+
+def test_a_claimed_move_route_must_name_its_lead_and_source(conn):
+    """The database refuses a route that cannot be executed."""
+    rec.load_queue(conn, [queue_row(1)])
+    with pytest.raises(psycopg.errors.CheckViolation):
+        with conn.cursor() as cur:
+            cur.execute("UPDATE empty_email_recovery SET source_kind = 'campaign' "
+                        "WHERE email = 'p1@employer.test'")
+    conn.rollback()
+
+
+# ------------------------------------------------- the gate asks for the whole email
+
+
+def test_a_send_record_alone_does_not_open_the_gate(conn):
+    """Neither does a matching subject. The incident was a correct-looking send."""
+    rec.load_queue(conn, [dict(queue_row(0), email="qa@tgtc.test", is_internal_test=True)])
+    client = FakeInstantly()
+    rec.enrol(conn, client, limit=1, env=dict(NO_PACE))
+
+    # A message exists and its subject is exactly right, but the body is the incident.
+    client.delivered("qa@tgtc.test",
+                     body={"html": "<div>Devan Markus</div><div>The Global Talent Co.</div>"})
+    rec.record_receipts(conn, client, pace=CountingPace(0))
+    gate = rec.internal_test_passed(conn)
+    assert gate["passed"] is False
+    assert "body_arrived_at_all" in gate["failed"]
+    assert "every_approved_sentence_is_there" in gate["failed"]
+
+
+def test_a_pending_variable_in_the_internal_email_keeps_the_gate_shut(conn):
+    rec.load_queue(conn, [dict(queue_row(0), email="qa@tgtc.test", is_internal_test=True)])
+    client = FakeInstantly()
+    rec.enrol(conn, client, limit=1, env=dict(NO_PACE))
+    message = client.delivered("qa@tgtc.test")
+    message["body"]["html"] = message["body"]["html"].replace("Hi Ana,", "Hi {{firstName}},")
+    rec.record_receipts(conn, client, pace=CountingPace(0))
+    gate = rec.internal_test_passed(conn)
+    assert gate["passed"] is False
+    assert "no_variable_is_still_pending" in gate["failed"]
+
+
+def test_an_email_that_went_to_the_wrong_address_keeps_the_gate_shut(conn):
+    rec.load_queue(conn, [dict(queue_row(0), email="qa@tgtc.test", is_internal_test=True)])
+    client = FakeInstantly()
+    rec.enrol(conn, client, limit=1, env=dict(NO_PACE))
+    client.delivered("qa@tgtc.test", lead="someone@else.test",
+                     to_address_email_list="someone@else.test")
+    rec.record_receipts(conn, client, pace=CountingPace(0))
+    assert "went_to_the_right_person" in rec.internal_test_passed(conn)["failed"]
+
+
+def test_the_whole_received_email_is_kept_as_evidence(conn):
+    """So a human can read what actually arrived, not a boolean about it."""
+    client = pass_the_internal_test(conn)
+    row = sqlall(conn, "SELECT evidence FROM empty_email_recovery WHERE is_internal_test")[0]
+    checks = row["evidence"]["received_checks"]
+    assert all(checks.values()), checks
+    assert "An earlier email from us went out without its message" in row["evidence"]["received_body"]
+    assert row["evidence"]["sent_subject"] == "Your Tax Accountant opening"

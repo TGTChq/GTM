@@ -500,9 +500,15 @@ def test_a_finished_contact_in_a_PAUSED_campaign_is_eligible(conn):
 
     A lead with status 3 is done: resuming that paused campaign cannot send to it, so
     removing it costs no email. Protection, an unfinished sequence, a reply and our own
-    suppressions all still refuse."""
+    suppressions all still refuse.
+
+    ACTIVE is the exception, and it is NOT a return of the rule this test was written
+    against. That rule refused anything whose campaign was not COMPLETED, which is what
+    hid the 3,220. This one refuses only a campaign that can still send -- and it has to,
+    because protection by id is protection against the campaigns we remembered: measured
+    2026-10-03, three campaigns were sending whose ids are in none of our known sets."""
     leads_of, delete, deleted = world({OLD: [lead(1), lead(2)]})
-    for status, label in ((2, "PAUSED"), (-2, "BOUNCE_PROTECT"), (1, "ACTIVE"), (0, "DRAFT")):
+    for status, label in ((2, "PAUSED"), (-2, "BOUNCE_PROTECT"), (0, "DRAFT")):
         deleted.clear()
         with conn.cursor() as cur:
             cur.execute("DELETE FROM instantly_rotation_backup")
@@ -513,6 +519,26 @@ def test_a_finished_contact_in_a_PAUSED_campaign_is_eligible(conn):
         assert out["deleted"] == 2, (label, out)
         assert sorted(deleted) == ["L1", "L2"], label
         assert len(backup_rows(conn)) == 2, "the record must be backed up first, " + label
+
+
+def test_a_campaign_that_is_still_SENDING_is_protected_even_if_we_do_not_know_its_id(conn):
+    """Protection by id alone protects the campaigns we remembered, not the live ones.
+
+    Measured 2026-10-03: "Customer Success - Other", "Customer Success 50 - 500" and
+    "MARKETING & CREATIVE" were ACTIVE and are in none of our known sets, so their
+    contacts were on offer. A status we cannot read is not evidence of safety either.
+    """
+    leads_of, delete, deleted = world({OLD: [lead(1), lead(2)]})
+    for status, expected in ((1, "active_campaign"), (None, "campaign_status_unknown"),
+                             ("", "campaign_status_unknown")):
+        deleted.clear()
+        out = rot.rotate(conn, None, needed=10, batch=10,
+                         campaigns=[{"id": OLD, "status": status, "name": "Someone else's"}],
+                         leads_of=leads_of, delete=delete)
+        assert out["deleted"] == 0, (status, out)
+        assert deleted == [], status
+        assert rot.judge(lead(1), campaign_id=OLD, campaign_status=status,
+                         held=set()) == expected
 
 
 def test_protection_still_wins_whatever_the_campaign_status(conn):
