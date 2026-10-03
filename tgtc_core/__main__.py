@@ -675,14 +675,20 @@ def cmd_replies_poll(args) -> int:
     # to every message already sent from the nine originals -- 16,875 of them went out,
     # and a person who answers one next week deserves the same handling as anyone else.
     # A paused campaign sends nothing but its old threads still receive. So: every
-    # Challenger id this build knows (originals and v2 alike), the configured routes, and
-    # the OOO follow-up, which has sent mail of its own.
-    from .policy.campaigns import KNOWN_CHALLENGER_CAMPAIGN_IDS
+    # Challenger id this build knows (originals and v2 alike), the configured routes, the
+    # OOO follow-up, and the empty-copy recovery campaign -- which is deliberately NOT a
+    # Challenger id, so it would otherwise be the one campaign we send from and never
+    # listen to. It writes to 5,934 people who were already badly emailed once; a reply
+    # from one of them has to revoke the rest of their authorisation, and it cannot do
+    # that if nothing reads it.
+    from .policy.campaigns import (EMPTY_EMAIL_RECOVERY_CAMPAIGN_ID,
+                                   KNOWN_CHALLENGER_CAMPAIGN_IDS)
     from .services.instantly_rotation import FOLLOWUP_CAMPAIGN_ENV
 
     configured = {v for v in (s.campaign_env or {}).values() if v}
     followup = str(os.environ.get(FOLLOWUP_CAMPAIGN_ENV, "") or "").strip()
     campaign_ids = sorted(configured | set(KNOWN_CHALLENGER_CAMPAIGN_IDS)
+                          | {EMPTY_EMAIL_RECOVERY_CAMPAIGN_ID}
                           | ({followup} if followup else set()))
     if not configured:
         print("replies-poll refused: no INSTANTLY_CAMPAIGN_* ids are configured on this service", file=sys.stderr)

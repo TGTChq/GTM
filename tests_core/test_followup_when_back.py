@@ -497,3 +497,38 @@ def test_somebody_who_answered_for_themselves_is_not_followed_up(conn, clock):
     assert out["replied_since"] == 1 and out["verified_due"] == 0
     row = item(conn, approval_id)
     assert row["state"] == "closed" and row["reason"] == "replied_since_the_out_of_office"
+
+
+def test_a_recovery_recipient_can_never_receive_the_ooo_follow_up(conn, clock):
+    """One email means one. The incident suppression is what keeps it true everywhere.
+
+    The 7,777 people owed the repair email still have their ORIGINAL approvals, so an
+    out-of-office reply to the repair would otherwise queue an OOO follow-up against that
+    approval and move their old lead into the one-step OOO campaign -- a second email,
+    from a campaign nobody authorised for them.
+
+    The recovery is a per-contact exception to that suppression consulted ONLY by the
+    recovery enroller, for its own campaign. Every other path still sees the suppression,
+    and this is the path where that matters most.
+    """
+    from tgtc_core.services import empty_email_recovery as rec
+
+    approval_id = approve(conn, clock)
+    address = email_of(conn, approval_id)
+    conn.execute("INSERT INTO suppressions (kind, key, reason, source) "
+                 "VALUES ('person_email', %s, %s, %s)",
+                 (address, "blank_copy_incident", rec.INCIDENT_SUPPRESSION_SOURCE))
+    conn.commit()
+    rec.load_queue(conn, [{"email": address, "first_name": "Ana",
+                           "verified_role": "Operations Manager",
+                           "function_key": "operations"}])
+    queue_followup(conn, approval_id, clock() - timedelta(hours=1))
+
+    out = followups.due_followups(conn, now=clock())
+
+    assert out["suppressed"] == 1 and out["moved_to_followup"] == 0
+    row = item(conn, approval_id)
+    assert row["state"] == "closed" and row["reason"].startswith("suppressed:")
+    # And the recovery still intends to write to them exactly once.
+    assert sql1(conn, "SELECT state FROM empty_email_recovery WHERE email = %s",
+                (address,)) == "authorised"
