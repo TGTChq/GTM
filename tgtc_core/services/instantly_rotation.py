@@ -108,8 +108,18 @@ def judge(lead: Dict[str, Any], *, campaign_id: str, campaign_status: Any, held:
     """'' when this contact may be removed, otherwise why not. One place, one rule set."""
     if campaign_id in (protected if protected is not None else protected_ids()):
         return "live_campaign"
-    if campaign_status != CAMPAIGN_COMPLETED:
-        return f"campaign_not_completed:{campaign_status}"
+    # The CAMPAIGN's status is the wrong question about an individual contact, and asking
+    # it hid almost all of the safe inventory. Measured 2026-10-03: 10,282 leads sit in
+    # unprotected campaigns and only 269 of them are in a COMPLETED one, so this rule
+    # refused 3,220 leads whose OWN sequence is finished, who never replied and who are
+    # not suppressed -- while the run was blocked for want of 22 slots.
+    #
+    # What matters is the lead: status 3 means Instantly is done with it. Even if someone
+    # resumed that paused campaign tomorrow, a finished lead receives nothing more, so
+    # removing it cannot cost an email. The checks that do protect a relationship -- a
+    # protected campaign, an unfinished sequence, a reply, one of our own suppressions or
+    # a pending delivery -- are all still here, and the caller still backs the record up
+    # durably before anything is deleted.
     if lead.get("status") != LEAD_FINISHED:
         return f"sequence_not_finished:{lead.get('status')}"
     if lead.get("timestamp_last_reply") or int(lead.get("email_reply_count") or 0):
@@ -207,7 +217,11 @@ def rotate(conn: psycopg.Connection, transport: Any, *, needed: int, batch: int,
             break
         cid = str(campaign.get("id") or "")
         status = campaign.get("status")
-        if cid in protected or status != CAMPAIGN_COMPLETED:
+        # Only PROTECTION decides whether a campaign is off limits. The campaign's own
+        # status is left to `judge`, which asks about the lead instead -- see the note
+        # there. Skipping non-COMPLETED campaigns here is what kept 3,220 safe
+        # candidates out of reach while the run was blocked for 22 slots.
+        if cid in protected:
             continue
         for lead in leads_of(cid):
             if out["deleted"] >= ceiling:
