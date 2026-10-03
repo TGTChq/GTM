@@ -1679,3 +1679,113 @@ rotation population largely spent.
 Lock is free (`held=0`), service `Completed`, cron still `None`. PR
 **[#134](https://github.com/TGTChq/GTM/pull/134)** holds the per-day execution
 claim; full suite **2,155 passed**, integrity 35/35.
+
+## Step F7 — the protection DEPLOYED and verified live
+
+PR #134 merged. Deploy tip `8242de2`, deployment **`a5ce3b40` SUCCESS**, effective
+commit **`8242de24ad`**, schema migration version now **21**.
+
+### The deploy declined to start a run — in production, with the log to prove it
+
+```
+Starting Container
+run kind=scheduled budget=prod-scheduled-20261003
+run-daily declined: outside_scheduled_window:00Z_not_in_03-05
+  (a deploy must not start a run; set TGTC_RUN_FORCE=1 for a deliberate manual run)
+```
+
+Corroborated three ways rather than taken from the log alone:
+
+| Check | Result |
+| --- | --- |
+| `daily/start` events in the following 70 minutes | **none** |
+| rows in `scheduled_executions` | **0** — the day was never claimed |
+| run lock | `held=0` |
+
+The two previous deploys each started a full run; this one did not. The budget row
+`prod-scheduled-20261003` was defined (ceilings only, `used: {}`, expires
+2026-10-04T00:54:46Z) — that is the `budget` CLI step, not a claim and not spend.
+
+### Duplicate prevention verified against the PRODUCTION table
+
+Run on a synthetic day `19700101`, which can never collide with a real execution
+day, inside one transaction and removed afterwards:
+
+| Step | Result |
+| --- | --- |
+| first start claims the day | `probe-a` |
+| second SIMULTANEOUS start | `INSERT 0 0` — nothing |
+| state while running | unfinished, `attempt=1` |
+| holder closes the day | `UPDATE 1` |
+| a start AFTER `daily/end` | nothing |
+| a NON-holder tries to close | `UPDATE 0` |
+| cleanup | row removed, **0 rows left**, 0 probe rows |
+
+So the table's atomicity and the holder rule hold in production, not only in the
+32 unit tests.
+
+## Step F8 — CRON RESTORED
+
+| | Before | After |
+| --- | --- | --- |
+| `cronSchedule` | `None` | **`0 3 * * *`** |
+| `startCommand` | 713 chars | 713 chars, unchanged |
+| `dockerfilePath` / `rootDirectory` / `numReplicas` / `restartPolicyType` | | all unchanged |
+
+`railway status`: `GTM Core Canary 1000: ● Completed · 0 3 * * * · next run in 2 hours`.
+Run lock was `held=0` at the moment of restore.
+
+### Which day each execution belongs to
+
+| Execution day | Budget | Executions | Origin |
+| --- | --- | --- | --- |
+| **20261002** | `prod-scheduled-20261002` (`runs=3`) | `…708d7ea4` 03:00:39Z, `…7831317d` 23:09:28Z, `…b7478fc9` 23:33:22Z | cron tick, **deployment**, **deployment** |
+| **20261003** | `prod-scheduled-20261003` (defined 00:54Z, **unclaimed**) | none yet; the 03:00Z tick will be the day's ONE authorised execution | cron tick |
+
+From now on the day's execution is claimed durably, so a second start on 20261003
+— whether from the cron firing twice or from a deploy inside 03:00-05:59Z — is
+refused before anything is spent.
+
+## Close-out
+
+### Resolved, with receipts
+
+| Item | Evidence |
+| --- | --- |
+| Cause | campaign bodies hold no literal copy; 0 of 9,053 stored payloads carried `rendered_subject` |
+| Scope | 16,875 messages to 7,777 recipients, onset 2026-09-21T13:15:59Z, from 24,300 classified sends; two independent indicators agreeing on 100% |
+| Fix deployed | `8242de24ad`; copy refused at payload build, in the outbox and in the provider client |
+| Guard proven in production | 10 copy refusals recorded with precise reasons and the run continued |
+| Records repaired | 5,653 read-back verified + 363 re-rendered with concrete titles; 0 mismatched, 0 drifted |
+| Parked | 1,975 out of every campaign, nothing deleted |
+| Final sweep | 6,420 in-campaign leads, **0 sendable without copy**, 0 bare-noun subjects |
+| Occupancy | counts campaigns AND lists (22,763 → 22,500 after rotation), no double counting |
+| Rotation | 263 deleted, 0 failed, each sampled one confirmed absent by ID; 12 historical mis-records reconciled |
+| OOO follow-up campaign | now protected from rotation |
+| Deploy cannot start a run | declined live at 00:54Z |
+| One execution per day | verified on the production table |
+| Cron | restored to `0 3 * * *` |
+
+### Pending DECISIONS — not defects, and not mine
+
+1. **The blank-thread cohort, 5,630 recipients.** Body repaired; the thread
+   subject cannot be. Nothing resent, no sequence restarted. **All nine campaigns
+   remain PAUSED** until this is decided.
+2. **1,975 parked leads.** Clean the title data and re-render, or write off.
+   Re-enrolment also needs proof that a move back preserves sequence position,
+   which is untested.
+3. **Capacity is NOT sustainable.** Rotation freed exactly one run's 263 slots and
+   the safe population is largely spent. Levers: the storage add-on, the
+   1,500-slot reserve, the 1,000 target, or releasing parked contacts.
+4. **The Apollo REQUEST allowance is the real throughput ceiling** whenever
+   capacity allows — 09-26, 09-27, 09-28 and 10-02 all stopped on it while credits
+   stayed far below ceiling. No per-run figure is projected from the 10-02 run,
+   which bought no inventory and ground a four-day-old backlog.
+5. **The pre-enrichment copy check is built and tested but NOT wired in.** Wiring
+   it changes the funnel and its counts.
+
+### Not claimed
+
+The 16,875 already-sent blank emails are **not** recovered. The parked leads are
+**not** fixed. Capacity is **not** sustainable. No budget was raised and no run was
+opened to recover the four lost days.
