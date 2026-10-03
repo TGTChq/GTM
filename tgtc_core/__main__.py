@@ -611,8 +611,21 @@ def cmd_replies_poll(args) -> int:
     from .services import replies as reply_service
 
     s = _settings()
-    campaign_ids = sorted({v for v in (s.campaign_env or {}).values() if v})
-    if not campaign_ids:
+    # Not just the CONFIGURED routes. On 2026-10-03 routing moved to the v2 campaigns,
+    # and reading only the configured ids would have silently stopped ingesting replies
+    # to every message already sent from the nine originals -- 16,875 of them went out,
+    # and a person who answers one next week deserves the same handling as anyone else.
+    # A paused campaign sends nothing but its old threads still receive. So: every
+    # Challenger id this build knows (originals and v2 alike), the configured routes, and
+    # the OOO follow-up, which has sent mail of its own.
+    from .policy.campaigns import KNOWN_CHALLENGER_CAMPAIGN_IDS
+    from .services.instantly_rotation import FOLLOWUP_CAMPAIGN_ENV
+
+    configured = {v for v in (s.campaign_env or {}).values() if v}
+    followup = str(os.environ.get(FOLLOWUP_CAMPAIGN_ENV, "") or "").strip()
+    campaign_ids = sorted(configured | set(KNOWN_CHALLENGER_CAMPAIGN_IDS)
+                          | ({followup} if followup else set()))
+    if not configured:
         print("replies-poll refused: no INSTANTLY_CAMPAIGN_* ids are configured on this service", file=sys.stderr)
         return 1
     if not s.instantly_api_key:

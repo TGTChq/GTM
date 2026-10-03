@@ -45,9 +45,16 @@ def _one(conn, sql: str, params: tuple = ()) -> Any:
 def check_pending_deliveries(conn, *, now: datetime) -> Optional[Dict[str, Any]]:
     """Approved work nothing is draining."""
     cutoff = now - timedelta(hours=PENDING_STUCK_HOURS)
+    # A row deferred because its campaign is not active is HELD, not stuck: FINANCE v2 is
+    # deliberately kept out of sending, so its approvals pile up by design and would
+    # otherwise fire this alert every hour until someone stopped believing it. Every other
+    # reason still counts, including a campaign that is unexpectedly inactive, because
+    # those rows carry a different last_error.
     rows = _rows(conn,
                  "SELECT channel, count(*) AS n, min(available_at) AS oldest "
                  "FROM delivery_outbox WHERE state = 'pending' AND available_at <= %s "
+                 "AND coalesce(last_error, '') NOT LIKE 'campaign_status_%%' "
+                 "AND coalesce(last_error, '') <> 'awaiting_instantly' "
                  "GROUP BY channel ORDER BY channel", (cutoff,))
     if not rows:
         return None
