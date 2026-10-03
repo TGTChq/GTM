@@ -211,7 +211,37 @@ Two defects behind that, both fixed in #136 and neither live yet:
    recorded at exactly 900.0, the ceiling, so Apollo was asking for **at least** that
    and we came back early.
 
-## The 25 pending deliveries
+## The 25 pending deliveries — RECOVERED on 2026-10-03
+
+Resolved under authorisation, by `recover-deliveries --withhold 18122 --withhold 18150`
+run as a deployment command inside Railway, holding the production run lock.
+
+| | Instantly | Airtable |
+| --- | --- | --- |
+| delivered | **22** | **22** |
+| blocked | **20** | **20** |
+| total for the run | **42** | **42** |
+
+* **2 withheld as instructed** — outbox 18122 (`customer support role`) and 18150
+  (`operations role`), both recorded as `recovery_hold:withheld_by_operator`.
+* **22 created and every one verified by reading the lead back by its provider id**:
+  all exist, all in the campaign expected, all five copy fields present, 0 unresolved
+  tokens, 0 generic subjects, all `active`, and **0 contacted** — nothing was sent.
+* **1 refused by the duplicate guard** — outbox 18120, `crystal@wspartners.com`,
+  `not_delivered:instantly_existing_other_campaign`: already in a different campaign,
+  so enrolling would have duplicated a person. Reported as unverified rather than
+  counted.
+* **0 Apollo credits and 0 Apollo requests**: `request_attempts` is unchanged across
+  the recovery, because the payload was already stored on the row.
+* The nine campaigns stayed PAUSED throughout, and **FINANCE received nothing**.
+
+Distribution of the 22: OPERATIONS 12, GTM_SYSTEMS 4, CUSTOMER_EXPERIENCE 2,
+AI_TECHNICAL 2, ECOMMERCE 1, MARKETING_CREATIVE 1.
+
+So the run that closed with **0** confirmed creations now stands at **22 confirmed
+Instantly creations and 22 Airtable rows** from its 42 approvals.
+
+### The original diagnosis, for the record
 
 | | |
 | --- | --- |

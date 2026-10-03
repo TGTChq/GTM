@@ -2728,3 +2728,142 @@ the next scheduled tick is 2026-10-04 03:00Z.
 
 Nothing here is a judgement call left open. The commands are fixed; only the clock
 gates step 4.
+
+## Step GR — #136 merged, and the protection held
+
+| | |
+| --- | --- |
+| merge commit | **`93e7d489`** on `feat/rebuild-core` |
+| deployment | `1eb37537`, 2026-10-03T03:49:11Z, SUCCESS |
+| every commit of mine in the deploy branch | yes (`git merge-base --is-ancestor`) |
+| `recover-deliveries` present at the deployed commit | yes |
+
+The deployment's **entire** log:
+
+```
+Starting Container
+TGTC_CORE_INERT: deployment start suppressed for the copy-incident merge
+no migrate, no budget, no run-daily
+```
+
+Database at 03:49Z: `scheduled_executions` **0 rows**, `run_log` **0** entries and
+`request_attempts` **0** after 03:45Z, `prod-scheduled-20261003` **0** reservations and
+**0** claims, outbox still 25 + 25 pending, run lock `held=0`. A merge inside the
+03:00–05:59Z window started nothing, which is what the inert start was for.
+
+## Step GS — the 23 authorised deliveries, reconciled
+
+Run as a deployment command (`58afe7d4`, 03:50:41Z) because the database is only
+reachable from inside Railway. `recover-deliveries --withhold 18122 --withhold 18150`.
+
+The report, verbatim from `run_log` (`stage=recover`, `event=deliveries`):
+
+| | |
+| --- | --- |
+| withheld by operator | **18122**, **18150** — both `recovery_hold:withheld_by_operator` |
+| revalidated | **23** |
+| Instantly drain | **22 delivered**, 1 blocked |
+| receipts | **22 × `created`**, each with a provider lead id |
+| verified by reading the lead back by id | **22** |
+| unverified | **1** — outbox 18120, `no_genuine_receipt` |
+| Airtable drain | **22 delivered**, 3 blocked |
+
+**The one that did not deliver, and why that is correct.** Outbox **18120**,
+`crystal@wspartners.com`, subject `Packaging Team Member 2nd Shift`, was blocked by
+`DeliveryService` with `not_delivered:instantly_existing_other_campaign`: that person
+is already in a different campaign, so enrolling them would have been a duplicate.
+Its Airtable sibling took `duplicate_instantly_other_campaign`. The recovery reported
+it as `unverified / no_genuine_receipt` rather than counting it, which is the intended
+behaviour — the guard refused, and nothing was invented to cover it.
+
+### Independent verification against the provider
+
+Re-read all 22 from outside Railway. **22 of 22 verified, 0 problems:**
+
+* every lead exists by id, in the campaign the report said
+* all five copy fields present, **0** unresolved tokens, **0** generic subjects
+* all `status = active`
+* **0 contacted** — `timestamp_last_contact` null on every one
+
+| campaign | leads added | status |
+| --- | --- | --- |
+| OPERATIONS | 12 | PAUSED |
+| GTM_SYSTEMS | 4 | PAUSED |
+| CUSTOMER_EXPERIENCE | 2 | PAUSED |
+| AI_TECHNICAL | 2 | PAUSED |
+| ECOMMERCE | 1 | PAUSED |
+| MARKETING_CREATIVE | 1 | PAUSED |
+| PRODUCT / PEOPLE_HR / **FINANCE** | 0 | PAUSED |
+
+**Nine of nine still paused, nothing sent, and FINANCE received nothing.**
+
+### The closed run, fully reconciled
+
+| | Instantly | Airtable |
+| --- | --- | --- |
+| delivered | **22** | **22** |
+| blocked | **20** | **20** |
+| total | **42** | **42** |
+
+The 20 blocked, identically on both channels: 10 copy QA (4 unsafe characters, 3
+appended qualifier, 3 longer than 48 characters), 7 compliance (6 unknown
+jurisdiction, 1 UK), 2 withheld by operator, 1 duplicate in another campaign.
+
+So run `20261002T233322.605777Z-b7478fc9` finally stands at **22 confirmed Instantly
+creations and 22 Airtable rows**, from 42 approvals — not the 0 it closed with. No
+enrichment was repeated: `request_attempts` is unchanged across the recovery, so this
+cost **0 Apollo credits and 0 Apollo requests**.
+
+## Step GT — command and cron restored; the Core is NOT yet fully restored
+
+| | |
+| --- | --- |
+| `TGTC_DELIVER_INTO_PAUSED_CAMPAIGNS` | **deleted** (it is off by default in code; leaving it set would change future behaviour) |
+| start command | **restored byte for byte**, 713 of 713 characters, compared against the saved original |
+| `cronSchedule` | **`0 3 * * *`** |
+| `TGTC_RUN_FORCE` | absent |
+| `TGTC_RUN_WINDOW_UTC` | **still `closed`** |
+
+A Windows detail worth recording: the `railway.CMD` wrapper mangles quotes, so passing
+the 713-character command through `subprocess` produced
+`Syntax Error: Unterminated string`. Restoring it byte for byte needed the mutation
+generated in Python with `json.dumps` and then executed through Bash with the command
+single-quoted. Verified by equality against the saved original, not by eye.
+
+### The restored controller was exercised and it declined
+
+Forced a redeploy (`7980cbf4`) so the real controller ran under the closed window. Its
+log shows `run kind=scheduled budget=prod-scheduled-20261003` — the start command
+genuinely ran — and the database proves `run-daily` then refused:
+
+| check | value |
+| --- | --- |
+| `scheduled_executions` rows | **0** |
+| `run_log` entries after 03:56Z | **0** |
+| provider attempts after 03:56Z | **0** |
+| reservations / claims on `prod-scheduled-20261003` | **0 / 0** |
+| approvals after 03:56Z | **0** |
+| outbox pending | **0** |
+
+Railway's log for a short-lived container did not carry the `run-daily declined:` line
+itself, so the decline is asserted from the database rather than from the log, and that
+is said plainly here rather than quoting a line that was not retrieved.
+
+### Why the Core is not finished, and the persistent follow-up
+
+While `TGTC_RUN_WINDOW_UTC=closed` is set the Core **cannot start at all**, including
+the 03:00Z tick. It is deliberately still there: removing it triggers a redeploy, and
+inside 03:00–05:59Z that start would have been *allowed* and would have begun a full
+acquisition run. At or after 06:00Z the hour guard declines it.
+
+Persistent follow-up left for that step: scheduled task
+`tgtc-core-finish-restore-remove-closed-window`, firing once at **2026-10-03T06:05:00Z**.
+It re-checks the clock and refuses to act inside the window, confirms the lock is free
+before replacing the container, deletes the variable, reads the redeploy's log for the
+decline, and verifies 0 claims, 0 requests, 0 reservations and no pending outbox rows.
+It is instructed not to start a run, not to set `TGTC_RUN_FORCE`, not to touch any
+campaign, and to report rather than repair anything unexpected. It runs while the app
+is open; if the app is closed at 06:05Z it runs on next launch.
+
+**Until that task has run, the Core is restored in command and cron but still gated
+shut.** That is stated as the state, not as completion.
