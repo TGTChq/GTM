@@ -2867,3 +2867,115 @@ is open; if the app is closed at 06:05Z it runs on next launch.
 
 **Until that task has run, the Core is restored in command and cron but still gated
 shut.** That is stated as the state, not as completion.
+
+## Step GU — the restoration COMPLETED, not left scheduled
+
+The closed-window guard was removed at 04:10:37Z, inside the 03:00–05:59Z window,
+without waiting for 06:00Z and without risking a run — by using the mutual-exclusion
+guard instead of the clock.
+
+`cmd_run_daily` checks the hour window, then the spend acknowledgement, then budget
+policy, and *then* `acquire_run_lock`. The lock therefore refuses a start **before**
+the budget claim, the day claim and any spend. So the production run lock was held from
+inside Railway for the duration:
+
+```
+railway ssh -s <Postgres Core> "psql ... -c \"SELECT pg_advisory_lock(1952937059); SELECT pg_sleep(600);\""
+```
+
+`1952937059` is `0x74677463`, the `RUN_LOCK_KEY` read from
+`tgtc_core/db/connection.py` rather than assumed. Sequence, with the lock confirmed
+`held=1` at 04:10:19Z **before** anything was changed:
+
+| at | action | result |
+| --- | --- | --- |
+| 04:10:19Z | `run_lock_status.sh` | `held=1` |
+| 04:10:37Z | delete `TGTC_RUN_WINDOW_UTC` | accepted; **no deployment** (a delete does not redeploy, unlike an upsert) |
+| 04:12:22Z | `serviceInstanceRedeploy` | deployment `8b6771cf`, SUCCESS |
+| 04:13Z | database | 0 claims, 0 `run_log`, 0 provider attempts, 0 reservations, 0 approvals |
+| 04:20:33Z | lock released by its own session | `held=0` |
+
+The deploy-started run was refused with nothing spent. Railway's log for `8b6771cf`
+had not been retrievable by the time of writing, so for that container the refusal is
+asserted from the database, not quoted. The equivalent earlier deployment did yield its
+line verbatim once the log caught up, and it is worth recording because it is the exact
+sentence the guard prints:
+
+```
+run-daily declined: window_unreadable:'closed' (a deploy must not start a run; set TGTC_RUN_FORCE=1 for a deliberate manual run)
+```
+
+### Final state, each value read back
+
+| | |
+| --- | --- |
+| start command | **identical to the saved original**, 713 of 713 characters |
+| `cronSchedule` | **`0 3 * * *`** |
+| `TGTC_RUN_WINDOW_UTC` | **absent** |
+| `TGTC_RUN_FORCE` | absent |
+| `TGTC_DELIVER_INTO_PAUSED_CAMPAIGNS` | absent |
+| `MAINTENANCE_ONLY` | absent |
+| run lock | `held=0` |
+| nine Challenger campaigns | **9/9 PAUSED** |
+
+**The Core is fully restored.** The scheduled follow-up
+`tgtc-core-finish-restore-remove-closed-window` was deleted, because it would have
+fired at 06:05Z against a variable that no longer exists; its prompt remains on disk.
+
+## Step GV — capacity after the 22 recoveries: the next tick will NOT produce
+
+This corrects an earlier statement of mine that there was room for one more tick.
+
+| | |
+| --- | --- |
+| plan limit | 25,000 stored contacts |
+| stored | **22,522** = 20,541 in campaigns + 1,981 on lists |
+| free | **2,478** |
+| the tick requires | target 1,000 + reserve 1,500 = **2,500** |
+| **deficit** | **22** |
+| leads in unprotected COMPLETED campaigns | 269 |
+| of those, sequence not finished | 134 |
+| of those, replied | 124 |
+| **genuinely eligible to rotate** | **11** |
+| after rotating all 11 | **still short by 11** |
+
+The arithmetic ties to the recovery exactly: stored was 22,500 before, the recovery
+created 22 leads, 22,500 + 22 = 22,522, and free fell 2,500 → 2,478 — precisely 22
+below the threshold. So the 22 recovered creations consumed the entire headroom.
+
+The tick will stop at `instantly_slots_short_by` **before spending**, which is a clean
+pre-spend refusal rather than a failure, but it means zero production until a decision
+is taken. The levers, all decisions:
+
+* the storage add-on
+* lowering the 1,500-slot reserve
+* lowering the 1,000/night target
+* releasing parked contacts — the hold list alone holds **1,975** slots, which is 90x
+  the 22 needed, and is explicitly off limits
+
+No capacity was bought, no reserve reduced, nothing deleted.
+
+## Step GW — generic subjects recorded as a SEPARATE technical quality item
+
+Logged in the closeout under its own heading, deliberately apart from the empty-copy
+incident, because they are different defects: the incident was copy that was *absent*
+(16,875 messages with no subject and no body, now fixed and guarded); this is copy that
+is *present, complete and says nothing*.
+
+| outbox | approval | subject | the employer's posting title |
+| --- | --- | --- | --- |
+| 18122 | 9070 | `customer support role` | `ISSM / IT Support` |
+| 18150 | 9084 | `operations role` | `TELLER/CUSTOMER SERVICE REP` |
+
+Both were created on **2026-10-02**, after the copy fix went live, so this is current
+behaviour and not incident residue. `role_display_send_safe` checks length, characters,
+appended qualifiers and headlines; the buzzword gates read the rendered copy; **none of
+them objects to a bare function noun.** The 363 subjects re-rendered earlier were a
+repair on existing records, not a gate, so they prevent nothing.
+
+The refusal exists only in `delivery_recovery`
+(`recovery_hold:subject_is_a_bare_function_noun`) and deliberately not in
+`DeliveryService`: moving it there would reject approvals production currently accepts,
+converting an unmeasured share of daily approvals into blocked rows. Closing it needs a
+measured rate first, then a decision between refusing and re-rendering. Flagged, not
+changed; the two rows are held, which is a hold on two rows and not a fix.

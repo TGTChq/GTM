@@ -320,11 +320,90 @@ The budget namespace `prod-scheduled-20261003` is unused.
 **No recovery was launched.** A recovery must name itself through `TGTC_RUN_RECOVER`
 and would spend that day's remaining allowance; that is a decision, not a default.
 
+## Open technical item — generic subjects are accepted by production
+
+**This is NOT the incident above, and it is recorded separately on purpose.** The
+incident was *empty* copy: no subject and no body, 16,875 messages, now fixed and
+guarded. This is a *quality* defect in copy that is present and complete: the pipeline
+can produce a subject line that is a bare function noun, and nothing refuses it.
+
+### What was measured
+
+Two of the 25 rows approved by the 2026-10-02 run carried these subjects:
+
+| outbox | approval | subject | the employer's own posting title |
+| --- | --- | --- | --- |
+| 18122 | 9070 | `customer support role` | `ISSM / IT Support` |
+| 18150 | 9084 | `operations role` | `TELLER/CUSTOMER SERVICE REP` |
+
+Both were **created on 2026-10-02**, after the copy fix was live, so this is current
+behaviour and not incident residue. Both are now withheld as
+`recovery_hold:withheld_by_operator`, which is a hold on two rows, not a fix.
+
+### Why nothing stops them
+
+`role_display_send_safe` checks length (48 characters), unsafe characters, an appended
+qualifier and a posting headline. The buzzword gates read the rendered copy. **None of
+them objects to `operations role`.** It is complete, resolved, in-length, character-safe
+copy that simply says nothing.
+
+The 363 subjects re-rendered earlier in this incident were a **repair** applied to
+records that already existed. They were not a gate, so they do not prevent the next one.
+
+### What the recovery does, and why that is not the fix
+
+`tgtc_core/services/delivery_recovery.py` refuses a bare function noun with
+`recovery_hold:subject_is_a_bare_function_noun` — deliberately in the recovery and
+**not** in `DeliveryService`. Putting it in the delivery path would reject approvals
+that production currently accepts, which changes the funnel: it would convert some
+share of daily approvals into blocked rows, and nobody has measured that share or
+agreed to lose it.
+
+### What closing it would take
+
+1. measure how many approvals per run currently carry such a subject (the 2 of 25 seen
+   here is a single sample, not a rate)
+2. decide whether the right outcome is to refuse them, or to re-render them from the
+   posting title the way the 363 were
+3. the evidence from this incident says re-rendering usually works: for the parked
+   population, a concrete title was recoverable as a literal substring of the
+   employer's own posting title for **1,490 of 1,973**. Both subjects above have a
+   candidate — but `ISSM / IT Support` and `TELLER/CUSTOMER SERVICE REP` read badly,
+   which is exactly why this needs a decision rather than an automatic rewrite
+
+Flagged, not changed.
+
 ## Open, and needing a decision rather than a fix
 
-- **Capacity.** 11 safe rotation candidates remain. Enough for one tick, then a wall.
-  The levers are the storage add-on, the 1,500-slot reserve, the 1,000/night target, or
-  releasing the parked contacts. All four are decisions.
+- **Capacity: the next tick will NOT produce.** Re-measured after the 22 recoveries,
+  and this corrects an earlier claim of mine that there was room for one more tick.
+
+  | | |
+  | --- | --- |
+  | plan limit | 25,000 stored contacts |
+  | stored now | **22,522** (20,541 in campaigns + 1,981 on lists) |
+  | free | **2,478** |
+  | the tick needs | target 1,000 + reserve 1,500 = **2,500** |
+  | **short by** | **22** |
+  | rotation candidates that are genuinely eligible | **11** |
+  | after rotating all 11 | **still short by 11** |
+
+  The 22 recovered leads consumed exactly the headroom: free slots went 2,500 → 2,478,
+  which is 22 below what the tick requires. Of 269 leads in unprotected COMPLETED
+  campaigns, 134 have an unfinished sequence and 124 have replied, leaving **11**
+  eligible — fewer than the 22 needed. So the next tick stops at
+  `instantly_slots_short_by` **before spending anything**. That is a clean refusal, not
+  a failure, but it means zero production until a decision is made.
+
+  The levers, all decisions and none of them a fix: the storage add-on; lowering the
+  1,500-slot reserve; lowering the 1,000/night target; or releasing parked contacts —
+  the hold list alone occupies **1,975** slots, far more than the 22 needed, which is
+  why it is the largest lever and also the one explicitly off limits.
+- **The Core is fully restored** as of 2026-10-03T04:20Z: original start command (713
+  of 713 characters, compared against the saved copy), `cronSchedule` `0 3 * * *`, and
+  none of `TGTC_RUN_WINDOW_UTC`, `TGTC_RUN_FORCE`,
+  `TGTC_DELIVER_INTO_PAUSED_CAMPAIGNS` or `MAINTENANCE_ONLY` set. Run lock free. The
+  next scheduled tick is 2026-10-04 03:00Z.
 - **A deploy inside 03:00–05:59Z on an unclaimed day still starts a run.** The hour
   window only refuses starts outside those hours and the day claim only refuses a
   *second* start, so inside the window the first start wins whoever triggered it — and
