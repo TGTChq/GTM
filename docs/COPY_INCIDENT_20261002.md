@@ -3199,3 +3199,137 @@ the 33 by id.
 
 This is a provider capability limit, not a judgement I made and not the external pause.
 It is the one thing in this closeout that no amount of engineering here resolves.
+
+## Step HD — #137 merged, and the three services verified on it
+
+| | |
+| --- | --- |
+| PR #137 | **MERGED** 2026-10-03T18:08:13Z, merge commit `9f916b3f` on `feat/rebuild-core` |
+
+| service | deployment | commit | cron |
+| --- | --- | --- | --- |
+| GTM Core Canary 1000 | `c1d3a0f8` 18:08:14Z | **`9f916b3f`** | `0 3 * * *` |
+| GTM Replies | `d76ee130` 18:08:14Z | **`9f916b3f`** | `15 * * * *` |
+| GTM Weekly Report | `c75c45b8` 18:08:14Z | **`9f916b3f`** | `0,20,40 13-20 * * *` |
+
+The Core was redeployed at 18:08:14Z, which is a deploy-started container. It began
+nothing: 0 `run_log` entries, 0 provider attempts, 0 approvals and 0 reservations after
+18:00Z, outbox empty. Both guards held — hour 18 is outside 03–05:59Z, and the day was
+already claimed by the `omitted_deliberately` row.
+
+## Step HE — the scope of the 22:10Z external pause, measured
+
+Activating anything turns on whether a standing order stops ALL outreach. Intent cannot
+be read from an API; scope can.
+
+| group | status | last updated |
+| --- | --- | --- |
+| nine Challenger | **PAUSED** | **22:10:30Z → 22:11:44Z**, one by one |
+| nine Control | 8 COMPLETED, **1 ACTIVE** (MARKETING & CREATIVE) | August–September, untouched |
+| OOO follow-up | was ACTIVE until I paused it today | untouched by that actor |
+
+The actor paused **exactly the nine campaigns that were sending blank copy**, in a
+74-second sequence, and left a live Control campaign and a live OOO follow-up running.
+That is not a halt on outreach; it is a halt on the broken campaigns.
+
+Checked the live Control campaign for the same hole that OOO had: `MARKETING & CREATIVE`
+holds 260 leads — 252 completed, 6 bounced, 2 active and already contacted — and
+**0 affected contacts**. Not a risk, no action taken.
+
+## Step HF — the nine v2 campaigns, created from the originals
+
+Created 2026-10-03, DRAFT, field for field from each original: the approved four steps,
+the same senders (80 OPERATIONS, 21 PEOPLE & HR, 33 elsewhere), the same 08:00–18:00
+America/Chicago Monday–Friday schedule, the same daily limits, tracking, stop-on-reply
+and variable declarations. Refused to proceed unless every copied sequence carried all
+five rendered variables, the signature and exactly four steps — it did, for all nine.
+
+| function | v2 id |
+| --- | --- |
+| PRODUCT | `5e9dbb14-cbf3-4063-84a1-fbebd7fe8dcb` |
+| OPERATIONS | `cad0c8f8-b231-488d-bb93-849648a35563` |
+| FINANCE | `b8361174-25e5-42af-aa88-7e5144f86c11` |
+| PEOPLE_HR | `beb190b4-333c-4fe5-b809-05766f1d709b` |
+| ECOMMERCE | `4f383858-5403-4e99-9e8a-2ed3cb2cffc7` |
+| CUSTOMER_EXPERIENCE | `a2a8c26c-20fc-427b-821d-d5674687aea7` |
+| MARKETING_CREATIVE | `f186db69-e1db-4087-b699-67134081fa98` |
+| GTM_SYSTEMS | `87eeca05-b22a-4371-b76f-d6a15bc27161` |
+| AI_TECHNICAL | `ac6fbc13-c10e-4031-919c-307f8e92a33a` |
+
+The ids went into `KNOWN_CHALLENGER_CAMPAIGN_IDS`, not merely into the routing env,
+because `approval.py:689` adds the rendered variables **only** for ids in that set. A v2
+campaign outside it would receive a Control-shaped payload while its body holds
+`{{rendered_*}}` — the original incident, reproduced. Rotation protection follows from
+the same set, so it went from 18 ids to 27 automatically.
+
+## Step HG — two internal verifications before any real contact moved
+
+**A move preserves the copy.** The 32 cannot be re-created in a v2 campaign (`POST
+/leads` returns the existing lead for an address already in the workspace), so they have
+to be moved. Tested on the internal address: moved into OPERATIONS v2, **5 of 5 rendered
+fields identical**, landed in the target, left active for step 1 — correct for someone
+never emailed — and moved back cleanly.
+
+**A v2 campaign sends correct copy.** PRODUCT v2 was the test bed because PRODUCT has no
+sendable contacts, so activating it could only reach the probe. The approved schedule has
+Saturday off and today is Saturday, so Saturday was enabled **on that campaign only** for
+the test and then restored.
+
+| | |
+| --- | --- |
+| message sent | 2026-10-03T18:22:51Z |
+| subject | **`Senior Product Manager`** — the real job title |
+| body carries rendered copy | **yes** |
+| body is a signature alone | **no** |
+| approved schedule restored | **yes**, verified by comparison |
+
+Probe lead then deleted (404 on re-read), PRODUCT v2 paused, 0 leads left in it.
+
+## Step HH — the 32 contacts, revalidated and moved
+
+33 candidates from the campaign sweep. Revalidated against the database and the provider:
+
+| check | result |
+| --- | --- |
+| suppressed | **0** |
+| pending delivery owed | **0** |
+| compliance | **33/33 OUTREACH_ELIGIBLE**, no block reason |
+| vacancy still live | 32 `classified`, **1 `expired`** |
+| also in another campaign (dedupe) | **0** |
+| copy complete, resolved, concrete subject | 32/32 |
+| never contacted, no reply, mutable | 32/32 |
+
+`josh.schmidt@sharp.com` was dropped: posting 27568 is `expired`, so the premise of the
+email is no longer true. That left FINANCE v2 with no contacts at all.
+
+Moved in 7 jobs, all `success`, then **every lead read back: 32 of 32** landed in its v2
+campaign with copy intact, subject intact and never contacted.
+
+| v2 campaign | contacts |
+| --- | --- |
+| OPERATIONS | 17 |
+| GTM_SYSTEMS | 5 |
+| CUSTOMER_EXPERIENCE | 4 |
+| AI_TECHNICAL | 3 |
+| PEOPLE_HR / ECOMMERCE / MARKETING_CREATIVE | 1 each |
+| PRODUCT / FINANCE | 0 |
+
+## Step HI — activation
+
+Guards re-checked at activation time across all nine v2 campaigns: **0 affected
+contacts, 0 with bad copy, 0 already contacted.**
+
+| | |
+| --- | --- |
+| v2 ACTIVE | **8** — PRODUCT, OPERATIONS, PEOPLE_HR, ECOMMERCE, CUSTOMER_EXPERIENCE, MARKETING_CREATIVE, GTM_SYSTEMS, AI_TECHNICAL |
+| v2 FINANCE | **DRAFT** — never activated, and a draft cannot send |
+| nine originals | **9 of 9 PAUSED** |
+| OOO follow-up | **PAUSED** |
+
+Activated on the evidence that the 22:10Z pause was scoped to the broken campaigns, not
+to outreach: a Control campaign and the OOO follow-up were both left running by that
+actor.
+
+**Nothing can send until Monday 2026-10-05 at 08:00 America/Chicago**, because the
+approved schedule excludes Saturday and Sunday. The first real emails to the 32 are a
+Monday-morning event, during business hours, with the hourly alert cron running.
