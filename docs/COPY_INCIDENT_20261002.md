@@ -3669,7 +3669,7 @@ in an ACTIVE campaign is no longer rotatable.
 | storage the full recovery needs | **42** slots, 978 available |
 | variables set on Replies | `TGTC_OOO_FOLLOWUP_CAMPAIGN_ID`, `TGTC_RECOVERY_MAY_ROTATE=1`, `TGTC_INSTANTLY_ROTATION_ENABLED=1` |
 | a live gap that closed | without the OOO id on this service, the hourly poll was reading neither that campaign's replies nor protecting its contacts from rotation |
-| the 22:15Z tick | eaten by the 22:11:33Z redeploy, which is known behaviour and not a fault; next tick 23:15Z |
+| the 22:15Z tick | RAN, finishing 22:18:21Z. An earlier line here said the 22:11:33Z redeploy had eaten it; that was wrong and the reason is worth keeping -- the check was made at 22:16, while the tick was still running, and an absent write was read as an absent tick. A redeploy does skip a tick, but it did not skip this one. |
 | emails actually sent | **0** |
 
 ## Still ahead
