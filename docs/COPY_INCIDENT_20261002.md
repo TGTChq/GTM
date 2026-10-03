@@ -3479,9 +3479,13 @@ the reason it was obvious is that all nine were identical.
 | floor kept for the daily run | 1,500 |
 | **available to the recovery now** | **978** |
 
-So the queue does not fit, and it was never going to. It drains in batches of up to 500 —
-500 of the 5,040 daily sends, leaving production the rest of the budget it shares — and
-the provider's own "Lead limit reached" parks the remainder instead of losing it. Reading
+So the queue does not fit, and it was never going to. It drains in batches of 150 per
+hourly tick — sized for the hour, because each contact costs two provider calls against a
+key that allows 20 a minute, and the Instantly client has no rate handling of its own —
+while the campaign's own `daily_max_leads` of 500 paces the actual sending: 500 of the
+5,040 daily sends, leaving production the rest of the budget it shares. A 429 stops the
+batch and a "Lead limit reached" parks the remainder; in both cases every row stays
+sendable. Reading
 only the campaign view would have believed in 2,013 slots that do not exist and taken
 them out of the floor; storage is therefore read through the rotation's `occupancy`, which
 counts both populations and refuses to treat an unreadable workspace as an empty one.
@@ -3514,7 +3518,7 @@ letting them through — and none of them carries anybody else's.
 | sequence | 1 sequence, 1 step, 1 variant, delay 0 — no follow-up exists to send |
 | senders | the same 252 mailboxes, so the send budget is the one already shared with v2 |
 | window | 08:00–18:00 America/Chicago, Monday to Friday, weekends off |
-| pace | daily_max_leads 500 |
+| pace | `daily_max_leads` 500 sends a day; enrolment 150 a tick at 3 s a call |
 | settings | text only, stop on reply, unsubscribe header on, open tracking off |
 | queue in production | 5,934 authorised + 1 internal test, all authorised |
 | roles blank, unresolved or corrupt | 0, 0, 0 |
