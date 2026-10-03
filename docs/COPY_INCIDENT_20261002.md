@@ -1789,3 +1789,450 @@ refused before anything is spent.
 The 16,875 already-sent blank emails are **not** recovered. The parked leads are
 **not** fixed. Capacity is **not** sustainable. No budget was raised and no run was
 opened to recover the four lost days.
+
+---
+
+# Continuation 5 — reconciliation, pre-enrichment gate, Apollo diagnosis, reactivation prep
+
+## Step G1 — final reconciliation of run `…b7478fc9`
+
+**Closure state: ENDED** 2026-10-03T00:17:38Z. Lock free, service `Completed`.
+
+| Measure | Value |
+| --- | --- |
+| stop_reason | `target_not_reached:apollo_request_allowance_insufficient` |
+| approvals | **42** |
+| **genuine Instantly creations** (`receipt_kind`) | **0** — every one of the 42 has `(no receipt)` |
+| Airtable rows written | **0** |
+| instantly outbox | 25 `pending`, 17 `blocked` (10 copy + 7 compliance) |
+| airtable outbox | **identical**: 25 `pending`, the SAME 17 blocked |
+| Apollo credits | 56 / 1,600 |
+| Apollo requests | 7,407 / 10,000 |
+| Fantastic requests | 0 |
+| capacity remaining | stored 22,500, free **2,500** |
+
+The Airtable outbox carrying the identical 10 copy-blocked rows is the invariant
+holding in production: **a copy refusal produces no Instantly lead AND no CRM row.**
+
+## Step G2 — the copy check now runs BEFORE paid enrichment
+
+Wired into `OpportunityService.process()` at the existing
+"refuse to spend Apollo credits when the output route cannot produce a lead" gate —
+before `_ensure_employer_facts`, before any contact is bought.
+
+It restates no rule. `challenger_copy_refusal_before_enrichment` builds the lead
+the real flow would build, through `build_approved_lead` with a PROBE contact that
+satisfies the person gates, and then asks
+`instantly_payload_with_copy_state` exactly what approval asks it. It returns ""
+unless the refusal is specifically about copy, so a refusal for any other reason is
+left to the real flow — it can only ever decline to BUY.
+
+**The final guard is untouched and still raises.**
+
+`tests_core/test_copy_refused_before_apollo_is_spent.py`, 10 tests:
+
+- an unrenderable posting is **closed with 0 paid Apollo calls**, no approval row,
+  no outbox row
+- nothing reaches Instantly or Airtable for it (`instantly.leads == {}`,
+  `airtable.records == {}`)
+- a renderable posting **still proceeds and still pays** — the gate declines to
+  buy, it does not stop the pipeline
+- a Control destination is never pre-refused
+- pre-check and final guard return the **identical reason** across five role shapes
+- the final guard still raises when reached directly
+
+One behaviour this changed: an unrenderable posting is now CLOSED before
+enrichment instead of approved-with-blocked-outbox. The approval-time guard
+becomes the backstop. `test_challenger_copy_blocks_not_crashes.py` therefore
+disables the earlier gate explicitly, so each file exercises one gate rather than
+the earlier one standing in for the later.
+
+## Step G3 — the Apollo request limit, diagnosed and the controllable part fixed
+
+Requests are counted as `count(*)` over all reservations **regardless of status**
+(`budget_status`), so a refused call consumes allowance exactly like a served one.
+
+| Operation / status | 10-02 (0 creations) | 09-28 (517 creations) |
+| --- | --- | --- |
+| `people_search` served | **6,000** (0 credits) | 8,714 |
+| `people_search` **refused** | **1,351** | 32 |
+| `person_match` served | 55 (55 credits) | 742 (742 credits) |
+| `organization_enrich` | 1 | 16 served + 4 failed |
+
+Three findings:
+
+1. **`people_search` consumes 99.3% of the request allowance and costs no
+   credits.** The ceiling that binds is requests, not credits — 56 of 1,600
+   credits were used.
+2. **Search-to-match conversion collapsed**: 0.9% (55/6,000) against 8.5%
+   (742/8,714) on 09-28. The run bought no inventory (`fantastic_requests: 0`) and
+   searched a four-day-old backlog where the contacts are not findable. That is
+   the "exhausted backlog" effect, and it is a data condition, not a bug.
+3. **1,351 refused searches were avoidable, and that IS a bug.** `refused` maps
+   from `CREDIT_EXHAUSTED`, `UNAUTHORIZED` and `RATE_LIMITED`; no credits were
+   spent, so they were rate limits. `_handle_global` raised `ProviderWait` for the
+   opportunity in hand on RATE_LIMITED but **recorded nothing** — unlike credit
+   exhaustion and 401, which both call `provider_state.record_refusal`. So the next
+   opportunity's `_guard_provider` saw `serving`, searched, and hit the same limit
+   again, 1,351 times, burning **18% of the day's allowance** for nothing.
+   `Outcome.RATE_LIMITED.global_stop` already existed and **was read nowhere**.
+
+**Fix:** a per-run latch, bounded by the provider's own retry-after (capped at
+900s). Once Apollo says it is throttling, no further Apollo call is issued until
+that instant passes — free searches included, since the throttle is on the
+endpoint. Deliberately NOT `record_refusal`: that would turn a 60-second throttle
+into a six-hour outage, and an existing test asserts "a throttle is not a
+refusal", which still passes.
+
+7 tests, including that the second opportunity does not rediscover the limit, that
+the latch releases exactly when the provider said, that a day-long retry-after is
+capped, and that credit exhaustion and 401 still persist in `provider_state`
+because those outlive one run.
+
+No budget raised, no validation skipped, no cache invented where the evidence did
+not support one: the repeated-search waste here was the rate-limit storm, not
+duplicate queries.
+
+## Step G4 — capacity for the next tick, and rotation headroom
+
+| | |
+| --- | --- |
+| stored | **22,500** (20,519 in campaigns + 1,981 on lists) |
+| free | **2,500** |
+| `room_needed` (target 1,000 + reserve 1,500) | **0** |
+| safe rotation candidates remaining | **11** (134 bounced, 124 replied) |
+
+So the tick does **not** need to rotate and will **not** be rejected for capacity.
+But the rotation safety net is effectively spent: 11 candidates against a future
+deficit that will be ~1,000 once this tick consumes its slots. **Capacity is good
+for ONE tick and then hits a wall.** Nothing was deleted, no reserve reduced, no
+capacity bought.
+
+## Step G5 — selective reactivation: the healthy group is ELEVEN
+
+Classified every one of the **6,376** leads now in the nine campaigns. Healthy
+requires all of: five copy fields present and resolved, a CONCRETE subject (a bare
+function noun is not one), mutable status, no reply, not suppressed, **and never
+contacted** — so the first email it ever receives carries a real subject.
+
+| Bucket | Leads |
+| --- | --- |
+| **HEALTHY** | **11** |
+| BLANK_THREAD, already contacted | **5,352** |
+| INVALID_COPY | 419 |
+| EXCLUDED terminal (completed 551 / bounced 22 / unsubscribed 1) | 574 |
+| EXCLUDED replied | 20 |
+
+Per campaign the healthy are: OPERATIONS 5, CUSTOMER_EXPERIENCE 2, FINANCE 1,
+PEOPLE_HR 1, GTM_SYSTEMS 1, AI_TECHNICAL 1; PRODUCT, ECOMMERCE and
+MARKETING_CREATIVE have none. Sample subjects: `Home Equity Closer`,
+`IT Specialist II`, `Sample Coordinator` — concrete titles.
+
+Consistency check on the 419 INVALID_COPY, because it looked like it contradicted
+the earlier "0 sendable without copy": **all 419 are terminal** (337 bounced, 82
+completed) and **0 have a mutable status**. No contradiction.
+
+## Step G6 — moving a lead out and back DESTROYS its sequence position
+
+Tested on the internal contact, never on a recipient, in a paused campaign.
+Subject: the TEST A lead (`luis@globaltalent.co`) which had executed step 1.
+
+| Field | Before | After move OUT | After move BACK |
+| --- | --- | --- | --- |
+| `status_summary` | `lastStep stepID 0_0_0` | **`{}`** | **`{}`** |
+| `status` | 3 completed | 3 | **1 active** |
+| `campaign` | TEST A | **null** | TEST A |
+| `timestamp_last_contact` | 19:03:36Z | kept | **null** |
+| **sequence position** | `0_0_0` | — | **None** |
+
+**The history is wiped on the way OUT, and the lead returns as a fresh ACTIVE lead
+that would receive step 1 again.** Three consequences:
+
+1. The **1,975 parked leads cannot be returned** to their campaigns without
+   restarting their sequences — every one would be emailed from step 1 again.
+   "Recovering" them means re-contacting them from scratch, which is a business
+   decision, not a technical repair.
+2. Excluding the blank-thread cohort by moving them out is a **one-way door**: safe
+   as an exclusion (nothing deleted, nothing can send) but not reversible.
+3. Therefore selective reactivation **cannot** be done by emptying the existing
+   campaigns of the affected cohort.
+
+### The configuration that DOES work, prepared and not executed
+
+Put the **11 healthy, never-contacted** leads into a NEW campaign carrying the
+same approved 4-step sequence. They have never been emailed, so starting at step 1
+is correct for them and there is no history to lose. The nine existing campaigns
+stay PAUSED and untouched, so the 5,352 blank-thread leads keep their position
+while that decision is pending.
+
+Prepared: `healthy_contacts.jsonl` (11 ids with campaign, email, status, subject),
+`blank_thread_in_campaign.jsonl` (5,352), `invalid_copy_in_campaign.jsonl` (419),
+`excluded_other.jsonl` (594). **FINANCE keeps its prior pause regardless.**
+
+Not executed: no campaign created, no lead moved, nothing activated.
+
+## Step G7 — the 1,975 parked leads against the ORIGINAL sources
+
+role-display/2 recovered only 2 of them, so this asked a different question: does
+the original posting title still CONTAIN a usable title? Most were refused for the
+SHAPE of the whole string, not for the absence of a title:
+
+| original source | refused because | title sitting inside it |
+| --- | --- | --- |
+| `Senior Product Manager, Ad Monetization` | unsafe character (the comma) | Senior Product Manager |
+| `Customer Success Manager - EMEA` | appended qualifier | Customer Success Manager |
+| `Enterprise Solution Architect - Manufacturing Planning` | longer than 48 chars | Enterprise Solution Architect |
+
+Guardrails, so nothing is fabricated:
+
+* every candidate is a **literal, contiguous substring** of the approved
+  `posting_title` or `open_role`, obtained by splitting on separators only. No word
+  is added, reordered or inflected — asserted in code, and re-checked afterwards:
+  **0 of 1,309 displays fail to be a literal substring of their source.**
+* a candidate is accepted only if it ENDS in a role noun **measured** from the
+  6,027 displays that already pass every gate (159 terminal nouns at >=3 uses), so
+  `OLS` and `128501` cannot become a subject. The vocabulary is derived from the
+  population, not written by hand.
+* a bare function noun is never a candidate (0 of 1,309 end in a generic word).
+* every candidate then goes through the real renderer and every QA and content
+  gate. Nothing relaxed.
+
+**Result: 1,309 of 1,686 (77.6%) have a concrete recoverable title.** 650 distinct
+displays; 0 single-word; 0 unresolved tokens; subject == display in all 1,309.
+
+| parked for | recovered | not recovered |
+| --- | --- | --- |
+| unsafe characters | 642 | 230 |
+| appended qualifier | 485 | 53 |
+| longer than 48 chars | 163 | 77 |
+| rd2 ambiguous hold | 19 | 0 |
+| buzzword content gate | 0 | 14 |
+| reads as a posting headline | 0 | 3 |
+
+The 377 that stay parked: 306 have no segment that reads as a title, 66 have no
+candidate segment at all, 5 fail a content gate afterwards. Those are **legitimate**
+refusals — there is no title in the source to recover.
+
+Honesty about quality: 1,120 of the 1,309 end in a noun that terminates **10 or
+more** already-live passing displays. The other **189** are rarer tails
+(`management` 29 vs 4 live, `services` 21 vs 8, `development` 18 vs 8) and read more
+like a department than a person's title — `Promotional Review Operations`,
+`Learning Experience Design and Innovation`. Real text from the employer's own
+posting, but weaker. They are flagged, not silently mixed in.
+
+## Step G8 — the finding that decides it: the parked leads were ALREADY emailed
+
+The pre-hold snapshot only carried campaign/email/lead_id/status, so it could not
+answer this; reading the hold list fresh could.
+
+| | |
+| --- | --- |
+| leads on the hold list | **1,975** |
+| `timestamp_last_contact` set | **1,962** |
+| never contacted | **13** |
+| sequence position surviving | **0** (the move out wiped `status_summary`, exactly as the internal test showed) |
+
+Cross-checked independently against the classified send record: **1,961 of the
+1,975 received at least one `BROKEN_NO_COPY` message**, and **14 have no sent
+message on record**. The two methods agree within one lead (a lead contacted at a
+timestamp with no matching message row).
+
+So the title recovery is real but it does **not** make them resumable:
+
+* they have already received a blank-subject email, and
+* returning them restarts the sequence at step 1 (proved, Step G6).
+
+Of the 1,309 with a recovered title, **1,300 already received a broken email** and
+only **9** did not.
+
+### The 9 clean ones repaired, read-back verified
+
+| email | recovered display |
+| --- | --- |
+| janet.villalobos@sharp.com | Compensation Analyst |
+| juresse.mbambi@wpromote.com | Senior Software Engineer I |
+| robyn.wolf@cpc.com | Scientist II |
+| mags_tierney@harvard.edu | Senior Coordinator |
+| tivy@ccsfundraising.com | Faith-Based Fundraising Consultant |
+| kat.morris@wgu.edu | AI and ML Engineering |
+| amy.meagher@cgoncology.com | Promotional Review Operations |
+| calvin.lai@cgoncology.com | Promotional Review Operations |
+| elizabeth.egel@cgoncology.com | Promotional Review Operations |
+
+9 PATCHed, **9/9 verified identical on read-back**, 0 field mismatch, 0 drift
+(still on the hold list, no campaign, status active, 0 replies), 0 unresolved
+tokens. The last four are the weaker department-like tail and are marked as such.
+
+Nothing was deleted, no reserve reduced, no capacity bought. The remaining
+**1,300** stay parked with a prepared, verified repair set
+(`recovered_from_sources.jsonl`) that is **not applied**, because applying it
+changes nothing until there is a decision about re-contacting people who already
+received a blank email.
+
+## Step G9 — the two red CI checks: both pre-existing on main, both root-caused
+
+PR #135 opened red on `core` and `test`. **The same two failures are present on
+main at 687dd20e (2026-10-02 23:32Z, before this commit)** — main's first CI run
+since 2026-09-09 — so neither came from this change. Both were diagnosed to the
+mechanism and fixed rather than waved through.
+
+### `core` — `test_shared_copy_renderer_has_no_legacy_or_network_dependencies`
+
+`AssertionError: {'requests'}`. It did not reproduce locally
+(`leaked: none`), and the log carried the clue:
+`PytestAssertRewriteWarning: ... ci_no_network`.
+
+`rebuild/run_offline_tests.py` writes a `sitecustomize.py` into a temp directory and
+puts it on `PYTHONPATH` so descendants install the network guard. That
+`sitecustomize` imports `ci_no_network`, which imports `requests.adapters` to refuse
+outbound HTTP. **So every descendant interpreter starts with `requests` already in
+`sys.modules`**, and the test's `python -c` child failed on a module the renderer
+never touched.
+
+Reproduced locally under the harness (`1 failed, 4 passed`), and the fix makes it
+pass under the same harness (`5 passed`, with the `ci_no_network` warning still
+present, so the guard is genuinely active). The fix pins the child's `PYTHONPATH`
+to the repository and sets `PYTHONNOUSERSITE`, **and** measures what the import
+ADDS to `sys.modules`, so a future preload cannot make the check vacuous in either
+direction. The invariant is unchanged; it is now measured correctly. This matters to
+this incident directly: that renderer is what produces the copy.
+
+### `test` — `test_scenario_5_other_governor_limit_still_blocks`
+
+Reproduced locally, so not environmental. First guess (a stale ledger `cycle_key`)
+was **wrong** — the fix did not help. Instrumenting the governor gave the answer:
+
+```
+cycle_rolled    true
+ledger          cycle_key "2026-10-01", cycle_reset_at "2026-10-01T23:39:15.948851+00:00"
+decision        run_budget 3266, reason "pace", days_remaining 30.0
+```
+
+The ledger's cycle came from the **provider header**, overriding the seed. The
+fixture's `x-api-next-billing-date` is the captured `2026-10-01`, which is now in
+the **past**, so every refresh reports a fresh cycle key, the governor rolls the
+cycle and **discards the seeded spend** — and the scenario stopped exercising a
+spent daily allowance, asserting instead against a healed budget of 3,266.
+
+A "next billing date" cannot be a pinned literal. `BILLING_DATE` is now derived at
+import time. The captured value is kept verbatim as `CAPTURED_BILLING_DATE` and
+still feeds `PROVIDER_HEADERS`, because every unit-level use pins `now=NOW`
+(2026-09-03), against which 2026-10-01 IS in the future — those tests are
+time-independent and stay on the real captured evidence.
+
+60 passed, 105 subtests passed. Integrity manifest OK (35 checked, 0 mismatch).
+
+## Step GA — selective reactivation: what is ready and what is missing
+
+### The clean group is 20 contacts
+
+| | |
+| --- | --- |
+| in the nine campaigns, never contacted, copy complete and concrete | **11** |
+| parked, never contacted, title recovered and verified | **9** |
+| **total clean** | **20** |
+
+Everyone else is in one of two cohorts that a technical repair cannot fix:
+**5,352** in-campaign leads already received the blank first email and their thread
+subject cannot be changed; **1,966** parked leads already received a broken email
+and cannot be returned without restarting their sequence.
+
+### Prepared, not executed
+
+The only non-destructive path is a NEW campaign carrying the same approved 4-step
+sequence, holding those 20. They have never been emailed, so starting at step 1 is
+correct and there is no history to lose. The nine existing campaigns stay PAUSED and
+untouched, so the 5,352 keep their position while that decision is pending, and
+**FINANCE keeps its prior pause** regardless of what is decided about the rest.
+
+Files: `healthy_contacts.jsonl` (11), `clean_parked_repair.jsonl` + `clean_parked_verify.json` (9),
+`blank_thread_in_campaign.jsonl` (5,352), `recovered_from_sources.jsonl` (1,309 prepared, 9 applied),
+`unrecoverable_parked.jsonl` (377).
+
+No campaign created. No lead moved. Nothing activated.
+
+## Step GB — the recovery extended to the other 287, and two rules tightened
+
+The first pass covered the 1,686 parked for a `role_display_*` reason. The other
+**287**, parked for `posting_title_cannot_pass_the_gates`, carry the same kind of
+evidence, so the same pass was run on them: **189 of 287 (65.9%)** have a
+recoverable concrete title, 98 do not.
+
+Reviewing the output found two ways a separator split can cut INSIDE a noun phrase,
+and both were narrowed rather than left in:
+
+* **`/` removed from the separator set.** A slash joins alternatives within a
+  phrase: `Principal OT Cybersecurity / ICS Security Architect`. It cost 21 of the
+  287 cohort's recoveries, which were fragments, and 0 of the 1,686 cohort.
+* **a coordination truncated to its first element is rejected.** Measured on
+  `Executive Director and Assistant, Associate or Professor of Medicine, Student
+  Health Services`, whose comma split produced `Executive Director and Assistant`.
+  The guard fires only when the conjunction sits immediately before the final word,
+  so `Legal Coordinator & Executive Assistant` is untouched. It cost 8 of the 1,686.
+
+Final counts, with both guards in force:
+
+| cohort | parked | recoverable | no usable title |
+| --- | --- | --- | --- |
+| `role_display_*` refusals | 1,686 | **1,301** | 385 |
+| `posting_title_cannot_pass_the_gates` | 287 | **189** | 98 |
+| **total** | **1,973** (+2 repaired earlier) | **1,490** | **483** |
+
+All 9 displays already applied were re-checked against the tightened rules:
+**9 unchanged, 0 affected.**
+
+### The clean group is 23
+
+3 more parked leads that were never contacted turned out to have a recoverable
+title in the 287 cohort. Applied and read-back verified: **3/3 identical, 0 field
+mismatch, 0 drift, 0 unresolved tokens**.
+
+| email | recovered display | note |
+| --- | --- | --- |
+| jim.detore@cgoncology.com | Associate Director | |
+| kibay@radialentertainment.com | Senior Director | |
+| jaclyn.velez@ucf.edu | Student Health Services | department-like, flagged |
+
+| | |
+| --- | --- |
+| in the nine campaigns, never contacted, copy complete and concrete | 11 |
+| parked, never contacted, title recovered and verified | **12** |
+| **total clean** | **23** |
+
+2 of the 14 never-contacted parked leads still have no usable title
+(`nichole.downes@wonderful.com`, `jwiedemann@devonbank.com`) and stay parked.
+
+Flagged as department-like rather than a person's title, repaired but marked:
+`Promotional Review Operations` (x3), `AI and ML Engineering`,
+`Student Health Services`. 5 of the 12.
+
+## Step GC — both red CI checks fixed and both suites green through the CI harness
+
+| suite, run exactly as CI runs it | result |
+| --- | --- |
+| `rebuild/run_offline_tests.py tests_core -q` | **2172 passed** |
+| `rebuild/run_offline_tests.py tests -q` | **3754 passed, 1 skipped** (a Windows-only skip; CI's `minimum=3755` counts it) |
+| `ci_check_integrity.py` | 35 checked, 0 mismatch, 0 absent |
+| pyflakes on both touched files | clean |
+
+## Step GD — production state at the close
+
+| | |
+| --- | --- |
+| cron | `0 3 * * *` (restored) |
+| start command | carries the hour guard; last deploy 00:54:22Z `SUCCESS`, start declined |
+| `scheduled_executions` | migration 21 applied, **0 rows** — 2026-10-03 unclaimed, so the 03:00Z tick can claim and run |
+| run lock | `held=0` |
+| nine campaigns | PAUSED, FINANCE keeps its prior pause |
+| next tick capacity | stored 22,500 / free 2,500 / `room_needed` 0 — it can acquire |
+| safe rotation candidates left | 11 |
+
+PR #135 holds the pre-enrichment copy gate, the Apollo rate-limit latch and the two
+CI fixes. It is **not merged**, so none of it is live yet.
+
+### Timing note for the merge
+
+A merge redeploys GTM Core Canary, and a redeploy has been observed to consume the
+following cron tick. Merging well before 03:00Z or after about 03:30Z keeps the tick;
+merging in the few minutes before it risks losing it. Either way the hour guard and
+the day claim stop the deploy itself from starting a run.
