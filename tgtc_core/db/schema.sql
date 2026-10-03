@@ -733,6 +733,13 @@ CREATE TABLE IF NOT EXISTS empty_email_recovery (
         state IN ('withheld', 'revoked') OR length(btrim(first_name)) > 0)
 );
 
+-- Defensive, and not redundant: a database that already held this table from before the
+-- gate existed would never get the column from the CREATE TABLE above, because
+-- IF NOT EXISTS skips the whole statement. ALTER ... IF NOT EXISTS is the idiom that
+-- actually reaches an existing table, and re-running it is free.
+ALTER TABLE empty_email_recovery
+    ADD COLUMN IF NOT EXISTS is_internal_test boolean NOT NULL DEFAULT false;
+
 CREATE INDEX IF NOT EXISTS empty_email_recovery_state_idx
     ON empty_email_recovery (state, authorised_at);
 -- One Instantly lead belongs to at most one recipient, so a mis-bound id is a loud
