@@ -160,33 +160,51 @@ def check_empty_email_recovery(conn, *, now: datetime) -> Optional[Dict[str, Any
     harm = _rows(conn,
                  "SELECT count(*) FILTER (WHERE state = 'sent' "
                  "    AND (evidence->>'subject_as_approved') IS DISTINCT FROM 'true') AS wrong_subject, "
+                 # A second line, not the protection: the table's own CHECK makes a
+                 # sendable row without a role impossible, and that is asserted. This
+                 # stays because a future migration could relax the constraint without
+                 # anybody noticing the subject line depends on it.
                  "count(*) FILTER (WHERE state IN ('reserved', 'enrolled') "
                  "    AND length(btrim(verified_role)) = 0) AS roleless "
                  "FROM empty_email_recovery")[0]
     wrong = int(harm["wrong_subject"] or 0)
     roleless = int(harm["roleless"] or 0)
     waiting = by_state.get("authorised", 0) + by_state.get("reserved", 0)
-    stale = _one(conn,
-                 "SELECT count(*) FROM empty_email_recovery WHERE state = 'enrolled' "
-                 "AND enrolled_at <= %s", (now - timedelta(hours=72),))
-    if not wrong and not roleless and not waiting and not stale:
-        return None
-    severity = "high" if (wrong or roleless) else "medium"
+    stale = int(_one(conn,
+                     "SELECT count(*) FROM empty_email_recovery WHERE state = 'enrolled' "
+                     "AND enrolled_at <= %s", (now - timedelta(hours=72),)) or 0)
+
+    # A queue waiting behind the internal test is the design working, not a condition to
+    # report. It would otherwise fire every hour from Friday night until the Monday
+    # window opens -- about 60 identical alerts, which is how people learn to ignore the
+    # channel. The same applies to a weekend: nothing can send, so nothing is stuck.
+    gate_shut = not bool(_one(
+        conn, "SELECT count(*) FROM empty_email_recovery WHERE is_internal_test "
+              "AND state = 'sent' AND (evidence->>'subject_as_approved') = 'true'"))
+
     if wrong or roleless:
-        summary = ("the recovery campaign shows harm: %d message(s) with an unapproved "
-                   "subject, %d contact(s) enrolled with no role" % (wrong, roleless))
-    elif stale:
+        severity = "high"
+        summary = ("the recovery campaign shows harm: %d message(s) that did not match "
+                   "the approved email, %d contact(s) enrolled with no role"
+                   % (wrong, roleless))
+    elif stale and not gate_shut:
+        severity = "medium"
         summary = ("%d recovery contacts have been enrolled for more than 72h with no "
-                   "message recorded" % int(stale or 0))
-    else:
+                   "message recorded" % stale)
+    elif waiting and not gate_shut:
+        severity = "medium"
         summary = "%d recovery contacts are still waiting to be enrolled" % waiting
+    else:
+        return None
+
     return {
         "check": "empty_email_recovery",
         "severity": severity,
         "summary": summary,
         "detail": {"by_state": by_state, "unapproved_subject_sent": wrong,
                    "enrolled_without_a_role": roleless,
-                   "enrolled_over_72h_with_no_message": int(stale or 0)},
+                   "enrolled_over_72h_with_no_message": stale,
+                   "waiting_behind_the_internal_test": gate_shut},
         "why_it_matters": "this campaign exists to repair 16,875 blank messages; a fault in it would repeat them",
     }
 
