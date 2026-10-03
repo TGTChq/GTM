@@ -3333,3 +3333,52 @@ actor.
 **Nothing can send until Monday 2026-10-05 at 08:00 America/Chicago**, because the
 approved schedule excludes Saturday and Sunday. The first real emails to the 32 are a
 Monday-morning event, during business hours, with the hourly alert cron running.
+
+## Step HJ — #139 merged, routing switched, final state
+
+| | |
+| --- | --- |
+| PR #139 | **MERGED** 2026-10-03T18:38:56Z, merge commit **`818d8893`** |
+| CI | `test` and `core` **success** |
+| Core / Replies / Weekly Report | all on `818d8893`, deployments `07bd9b0c` / `79426ccc` / `881c194c` |
+
+My own omission, recorded: after #137 merged at 18:08Z I kept committing to the same
+branch and never opened a PR for the four commits that followed, then asked for a merge
+that had nothing to merge. #139 is that PR.
+
+**Routing switched**, in one collection upsert so the service redeployed once rather than
+ten times. Done only after `818d8893` was live, because the running code must recognise a
+v2 id as Challenger or `approval.py:689` gives it a Control-shaped payload against a body
+of `{{rendered_*}}`:
+
+| | |
+| --- | --- |
+| variables now pointing at a v2 campaign | **10 of 10** |
+| still pointing at an original | **0** |
+| previous values saved for rollback | `routing_before_v2.json` |
+
+Neither deploy-started container began anything: 0 `run_log`, 0 provider attempts, 0
+approvals, 0 reservations after 18:36Z, outbox empty.
+
+### The state this intervention leaves
+
+| | |
+| --- | --- |
+| v2 campaigns ACTIVE | **8 of 9** (FINANCE v2 left DRAFT) |
+| contacts in the v2 campaigns | **32** |
+| **affected contacts in any v2 campaign** | **0** |
+| nine originals | **9 of 9 PAUSED**, still holding 5,762 affected contacts between them |
+| OOO follow-up | **PAUSED**, 50 leads, all 50 affected |
+| suppressions in force | 7,781 |
+| Core cron / start command | `0 3 * * *`, original, no window override |
+| run lock | free |
+| monitoring | hourly on GTM Replies, observed reporting `"alerts": []` at 18:18:59Z |
+
+### What is genuinely still ahead, and cannot be done from here
+
+* **Sunday 2026-10-04 03:00Z** — the next scheduled run. It now routes new creations to
+  the v2 campaigns. Rotation, capacity actually freed, genuine creations, Airtable and
+  spend are to be checked against that run.
+* **Monday 2026-10-05 08:00 America/Chicago** — the first real emails. The approved
+  schedule excludes the weekend, so nothing can send before then. Until that is observed,
+  the operation is not recovered.
