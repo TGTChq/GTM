@@ -1468,3 +1468,214 @@ overridden) and the Core cron (`cronSchedule: None`).
 
 Nothing here claims the 16,875 already-sent blank emails are recovered. They are
 not.
+
+---
+
+# Continuation 4 — closing the deploy-start hole properly
+
+## Step F1 — the hour window was necessary but NOT sufficient
+
+Correctly pointed out: a redeploy between 03:00 and 05:59Z is INSIDE the window,
+so the window alone still permits a second run. The run lock does not help either
+— it stops an OVERLAP, not a second execution that starts after the first
+released it. Both of 2026-10-02's unplanned runs were sequential, not concurrent.
+
+## Step F2 — a durable, atomic per-day execution claim
+
+`tgtc_core/services/scheduled_execution.py` + migration
+`021_scheduled_executions.sql`.
+
+The day's execution is claimed with
+`INSERT … ON CONFLICT (execution_day) DO NOTHING`, so the PRIMARY KEY arbitrates
+rather than timing, and the claim OUTLIVES the process so a later start sees it.
+
+Three states, told apart **before anything is spent**:
+
+| State | Meaning | Outcome |
+| --- | --- | --- |
+| `claimed` | first start of the day | proceeds |
+| `already_completed` | the day reached `daily/end` | **refused** as a duplicate |
+| `interrupted_needs_authorisation` | a claim with no `finished_at` — the container died mid-run | **refused** unless a recovery is named |
+| `recovery_token_mismatch` | the token names a different day or run | **refused** |
+| `recovering` | explicitly authorised recovery | proceeds, `attempt+1`, `recovery_of` recorded |
+
+**A recovery is explicit and auditable:** `TGTC_RUN_RECOVER=<day>:<interrupted_run_id>`
+must name exactly the interrupted run. It cannot sit in production as a blanket
+permission — once that execution finishes the day reads `already_completed`, so the
+same token authorises nothing (tested).
+
+**`TGTC_RUN_FORCE=1` opens only the hour window, never the duplicate guard.**
+Also tested, because a force flag that also bypassed the day claim would re-open
+the hole.
+
+**The recovery uses the right day's remaining budget:** `day_of()` uses the same
+basis as `budget_policy.budget_id_for("scheduled")` (plain UTC date), and a test
+pins that correspondence, so a recovery claims `prod-scheduled-<that day>` and
+spends what is left of it rather than opening a second allowance.
+
+Placement: after the run lock, **before** spend acknowledgement and before the
+budget claim. The day is closed only at `daily/end`, so a process that dies leaves
+it `interrupted`, never `completed`.
+
+### Tested scenarios (32 tests across two files)
+
+- a **redeploy inside the window** after the day completed → refused
+- **two simultaneous starts** → exactly one claim, the other refused
+- a **start after `daily/end`** → refused as a duplicate
+- an **authorised recovery after a failure** → proceeds, audited, `attempt=2`
+- an interrupted run is **not** mistaken for a completed one, nor for a free day
+- a stale recovery token → inert
+- only the holder may close the day, and only once
+- both real 2026-10-02 deploy-started runs (23:09:28Z, 23:33:22Z) → would be refused
+- the 03:00Z tick → still allowed
+
+## Step F3 — the effective start command, verified against the guard
+
+Read live from the service instance:
+
+```
+cronSchedule: None
+KIND=${TGTC_RUN_KIND:-}; if [ -z "$KIND" ]; then H=$(date -u +%H);
+  if [ "$H" -ge 3 ] && [ "$H" -le 5 ]; then KIND=scheduled; else KIND=manual; fi; fi
+```
+
+So the start command's own inference is hours **3, 4, 5** → `scheduled`, and the
+guard's default window is **`3-5`**. They agree, and a test asserts the agreement
+for all 24 hours rather than by eye.
+
+**One nuance that matters:** `TGTC_RUN_KIND` is SET in the environment, so the
+`if [ -z "$KIND" ]` branch never executes — the start command always declares
+`scheduled` whatever the hour. The hour basis it was written for was therefore
+dormant. The guard restores that basis as an ENFORCED gate rather than a label,
+which is why the labelling and the gating now have to be read as two separate
+things.
+
+## Step F4 — the three executions against one budget
+
+All three share `prod-scheduled-20261002` (`budget_claims.runs = 3`), ceilings
+Apollo 1,600 credits / 10,000 requests, Fantastic 4,000 / 60, Anthropic 1,500
+requests, expiring 2026-10-03T03:00:38Z.
+
+| Run | origin | approvals | confirmed Instantly creations | apollo credits |
+| --- | --- | --- | --- | --- |
+| `…708d7ea4` 03:00Z | cron tick | 0 | 0 | 0 |
+| `…7831317d` 23:09Z | **deployment start** | 0 | 0 | 0 |
+| `…b7478fc9` 23:33Z | **deployment start** | 28 (in flight) | **0 so far** | — |
+| shared budget total | | | | **39 of 1,600** (4,262 calls) |
+
+Approvals and confirmed creations are reported separately and deliberately: 28
+approvals is not 28 leads. Confirmed creations come from
+`delivery_receipts.receipt_kind = 'created'`, and that is still 0.
+
+### The copy guard firing in production, without ending the run
+
+```
+challenger_copy_qa_failed:role_display_contains_unsafe_characters     2
+challenger_copy_qa_failed:role_display_longer_than_48_chars           2
+challenger_copy_qa_failed:role_display_carries_an_appended_qualifier  1
+```
+
+Five refusals recorded with precise reasons, five compliance blocks beside them,
+and the run continued. On the pre-fix code the first of those would have raised
+inside `_commit_approval` and rolled the approval back, ending the run. This is
+the approval-exception fix verified in production rather than in a test.
+
+## Still pending, in order
+
+1. The run closes (not killed, not redeployed over).
+2. Reconcile: confirmed creations, Airtable, copy refusals, spend, remaining
+   capacity; read back the new leads' five copy fields.
+3. Deploy this protection **with the lock free**.
+4. Verify the deployment and the duplicate prevention live — a deploy outside
+   03-05Z must decline, and a second start must be refused by the day claim.
+5. Only then restore `cronSchedule = 0 3 * * *`, recording which day each
+   execution belongs to.
+
+Campaigns stay paused. The 1,975 held leads are untouched. Capacity is still NOT
+sustainable: rotation freed exactly this run's 263 slots.
+
+## Step F5 — the run closed: reconciliation
+
+Run `20261002T233322.605777Z-b7478fc9`, origin **deployment start**, kind
+`scheduled`, budget `prod-scheduled-20261002` (shared, `runs=3`). Lock now free.
+
+| Measure | Value |
+| --- | --- |
+| stop_reason | `target_not_reached:apollo_request_allowance_insufficient` |
+| rounds | 4 |
+| **confirmed Instantly creations** (`receipt_kind='created'`) | **0** |
+| `fresh_instantly_created` | 0 |
+| Airtable rows written | **0** |
+| approvals written | **42** |
+| Apollo credits | **56** of 1,600 |
+| Apollo requests | **7,407** of 10,000 |
+| Fantastic requests | **0** — it bought no new inventory |
+| capacity at start | stored 22,500, free 2,500, deficit 0 (`enough_room`) |
+
+Outbox rows this run wrote, all 42 accounted for:
+
+| State | Reason | Rows |
+| --- | --- | --- |
+| pending | — | **25** |
+| blocked | `compliance:unknown_jurisdiction:absent` | 6 |
+| blocked | `challenger_copy_qa_failed:role_display_contains_unsafe_characters` | 4 |
+| blocked | `challenger_copy_qa_failed:role_display_carries_an_appended_qualifier` | 3 |
+| blocked | `challenger_copy_qa_failed:role_display_longer_than_48_chars` | 3 |
+| blocked | `compliance:uk:not_a_verified_corporate_subscriber` | 1 |
+
+**10 copy refusals, and the run did not die.** On the pre-fix code the first one
+would have raised inside `_commit_approval`, rolled the approval back and ended
+the run. This is the approval-exception fix confirmed in production.
+
+### The five copy fields, verified — with an honest limit
+
+There are **no new Instantly leads to read back**, because the run created none
+(0 confirmed creations, delivery never drained before the allowance stopped it).
+So the read-back was done on what does exist, the 25 stored pending payloads:
+
+```
+pending_rows 25 | has_subject 25 | has_b1 25 | has_b2 25 | has_b3 25 | has_b4 25
+unresolved tokens 0
+```
+
+Samples: subject `Microsoft Cloud Engineer` (body1 338 / body4 242),
+`Experience Server` (384 / 236), `Customer Experience Manager` (353 / 244) —
+real job titles, not function nouns. Those 25 are queued for the next run's
+delivery drain; they are approvals, **not** leads, and are counted as such.
+
+### Why it produced nothing, measured against history
+
+| Budget day | Apollo calls / limit | credits | creations | stop |
+| --- | --- | --- | --- | --- |
+| `…20260928` | 9,508 / 10,000 | 762 | 517 | apollo request allowance |
+| `…20260929` | 0 | 0 | 0 | instantly slots short |
+| `…20260930` | 0 | 0 | 0 | instantly slots short |
+| `…20261001` | 0 | 0 | 0 | instantly slots short |
+| `…20261002` | 7,407 / 10,000 | 56 | **0** | apollo request allowance |
+
+Two things follow, and neither is about the copy fix:
+
+1. **The Apollo REQUEST allowance, not credits, is the binding constraint
+   whenever capacity allows.** 09-26, 09-27, 09-28 and now 10-02 all stopped on
+   it, while credits stayed far below their ceiling (56 of 1,600 this time).
+2. **This run bought no new inventory** (`fantastic_requests: 0`) and ground the
+   existing `qualify_opportunity` backlog instead, at roughly **176 Apollo
+   requests per approval** against about **18 per creation** on 09-28. That ratio
+   is what working a four-day-old backlog costs, not what a healthy run costs.
+
+So the throughput picture is NOT "the copy guard reduced output". Output was 0
+because the request allowance ran out while reworking stale inventory. I am not
+projecting a per-run figure from this.
+
+### Capacity after the run
+
+Still **not** sustainable, and I am not calling it so. Rotation freed exactly
+this run's 263 slots; the run then consumed none of them (0 creations), so free
+capacity is unchanged at about 2,500 — enough for one run, with the safe
+rotation population largely spent.
+
+## Step F6 — ready to deploy the duplicate protection
+
+Lock is free (`held=0`), service `Completed`, cron still `None`. PR
+**[#134](https://github.com/TGTChq/GTM/pull/134)** holds the per-day execution
+claim; full suite **2,155 passed**, integrity 35/35.
