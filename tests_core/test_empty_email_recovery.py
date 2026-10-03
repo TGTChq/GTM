@@ -672,10 +672,57 @@ def test_a_queue_that_has_stopped_moving_is_visible_without_being_an_emergency(c
     from tgtc_core.reporting import health_alerts
     from tests_core.conftest import NOW
 
-    load(conn, 3)
+    load(conn, 3)        # the gate is open, so a waiting queue is worth seeing
     alert = health_alerts.check_empty_email_recovery(conn, now=NOW)
     assert alert["severity"] == "medium"
     assert alert["detail"]["by_state"]["authorised"] == 3
+
+
+def test_a_queue_waiting_behind_the_internal_test_is_not_an_alert(conn):
+    """It would fire every hour from Friday night to Monday: about sixty identical
+    alerts, which is how people learn to ignore the channel."""
+    from tgtc_core.reporting import health_alerts
+    from tests_core.conftest import NOW
+
+    rec.load_queue(conn, [queue_row(i) for i in range(1, 4)])
+    assert rec.internal_test_passed(conn)["passed"] is False
+    assert health_alerts.check_empty_email_recovery(conn, now=NOW) is None
+
+    # Harm still speaks, gate or no gate.
+    client = FakeInstantly()
+    rec.enrol(conn, client, limit=1, env=dict(NO_PACE))          # only the test row moves
+    with conn.cursor() as cur:
+        cur.execute("UPDATE empty_email_recovery SET state = 'enrolled', "
+                    "enrolled_at = now() WHERE email = %s", ("p1@employer.test",))
+    conn.commit()
+    client.delivered("p1@employer.test", subject="",
+                     body={"html": "<div>The Global Talent Co.</div>"})
+    rec.record_receipts(conn, client, pace=CountingPace(0))
+    alert = health_alerts.check_empty_email_recovery(conn, now=NOW)
+    assert alert["severity"] == "high"
+    assert alert["detail"]["unapproved_subject_sent"] == 1
+
+
+def test_the_database_makes_a_roleless_enrolment_impossible(conn):
+    """So the alert's roleless counter is a second line, not the protection.
+
+    Worth asserting rather than assuming: the subject is "Your <role> opening", and the
+    constraint is what guarantees nobody reaches a sendable state without one.
+    """
+    rec.load_queue(conn, [queue_row(1)])
+    for state in ("authorised", "reserved", "enrolled"):
+        with pytest.raises(psycopg.errors.CheckViolation):
+            with conn.cursor() as cur:
+                cur.execute("UPDATE empty_email_recovery SET state = %s, "
+                            "verified_role = '' WHERE email = %s",
+                            (state, "p1@employer.test"))
+        conn.rollback()
+    # Only a row nobody will write to may lose its role.
+    with conn.cursor() as cur:
+        cur.execute("UPDATE empty_email_recovery SET state = 'withheld', "
+                    "verified_role = '' WHERE email = %s", ("p1@employer.test",))
+    conn.commit()
+    assert states(conn)["p1@employer.test"] == "withheld"
 
 
 def test_an_enrolment_nothing_has_sent_for_three_days_is_surfaced(conn):
