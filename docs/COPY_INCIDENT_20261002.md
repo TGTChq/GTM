@@ -3382,3 +3382,154 @@ approvals, 0 reservations after 18:36Z, outbox empty.
 * **Monday 2026-10-05 08:00 America/Chicago** — the first real emails. The approved
   schedule excludes the weekend, so nothing can send before then. Until that is observed,
   the operation is not recovered.
+
+---
+
+# The one repair email, 2026-10-03
+
+A separate single-step campaign for every affected recipient we can revalidate. Not a
+pilot, not a limited batch, and not a thing somebody has to run. The nine originals and
+the OOO follow-up stay paused, the v2 campaigns keep taking new production, and FINANCE
+stays out of this while its own pause holds.
+
+## The copy, and the one deviation from it
+
+Subject `Your {{verified_role}} opening`, and five paragraphs ending in exactly one
+`{{accountSignature}}`. Read back from Instantly and compared against the approved text
+byte for byte: 324 characters, the em dash a real U+2014, no U+FFFD anywhere — which
+matters, because a replacement character had already reached titles earlier in this
+incident and this one would have been printed to a stranger in a subject line.
+
+The deviation, recorded rather than quiet: the greeting variable is written
+`{{firstName}}`, not `{{first_name}}`. `firstName` is Instantly's own name for that field
+and the only form proven to render in this workspace; `{{first_name}}` would be read as a
+custom variable and arrive empty. The words a recipient reads are unchanged.
+
+`verified_role` comes from `display_role`, the production renderer, applied to the title
+of a posting that is open NOW at that employer. It is always a literal piece of the
+employer's own posting text, never a function noun, an area or a subject line we
+invented. 5,966 of the roles come from the original vacancy and 673 from another vacancy
+still open at the same employer. A sample of what will actually go out:
+
+```
+Your Regional Sales Manager opening        Reliable Respiratory
+Your Human Resources Specialist opening    Viking Coca-Cola
+Your CL Servicing Specialist I opening     Fortera Credit Union
+Your Sr ICAM Engineer opening              Easy Dynamics Corp
+Your Product Marketing Engineer opening    ACS Motion Control
+```
+
+## Who is in, who is out, and why
+
+7,777 affected recipients evaluated; the ledger is one row per recipient and accounts for
+every one of them. Two addresses carried two `people` rows each, which would have become
+two enrolments and two emails for one person — deduplicated before anything was loaded,
+and the ledger now asserts 5,934 + 1,843 = 7,777 with no address in both halves.
+
+| | |
+| --- | --- |
+| affected recipients evaluated | **7,777** |
+| **authorised for the one email** | **5,934** |
+| excluded or held | **1,843** |
+
+Excluded, by the reason that decided it:
+
+| reason | n |
+| --- | --- |
+| held: FINANCE is paused, and they are NOT diverted to another function | 704 |
+| email not on the employer's own domain | 518 |
+| no concrete role derivable from any open vacancy | 482 |
+| no vacancy still open at that employer | 66 |
+| compliance: unknown jurisdiction | 51 |
+| suppressed by something other than this incident | 17 |
+| replied since | 6 |
+| duplicate people row for the same address | 1 |
+
+## The backup, taken before anything was created
+
+Every affected lead as Instantly holds it — data, campaign membership, where the sequence
+got to, the whole status_summary — written once and never overwritten. This is the only
+copy of what "the way it was" means.
+
+| | |
+| --- | --- |
+| leads backed up from the nine originals | 6,366 (5,762 of them affected) |
+| leads backed up from the two hold lists | 1,981 (1,961 of them affected) |
+| **affected recipients with a backup** | **7,723 of 7,777** |
+| no longer stored in Instantly at all | 54, of which 42 are in the queue |
+
+The 54 cannot be backed up because there is nothing to copy: rotation removed them. They
+get a fresh lead with no prior state to preserve, which is stated here rather than
+discovered later.
+
+Finding this required a correction. `/leads/list` honours a `campaign` key and silently
+ignores `campaign_id`, returning the whole workspace instead. A count taken with the
+wrong key came back as 22,522 for each of nine campaigns at once — obviously wrong, and
+the reason it was obvious is that all nine were identical.
+
+## Storage: the number that decides the pace
+
+| | |
+| --- | --- |
+| stored contacts, measured | **22,522** |
+| sum of leads_count over all 56 campaigns | 20,509 |
+| the difference, on two hold lists of ours | 2,013 |
+| plan allowance | 25,000 |
+| **genuinely free** | **2,478** |
+| floor kept for the daily run | 1,500 |
+| **available to the recovery now** | **978** |
+
+So the queue does not fit, and it was never going to. It drains in batches of up to 500 —
+500 of the 5,040 daily sends, leaving production the rest of the budget it shares — and
+the provider's own "Lead limit reached" parks the remainder instead of losing it. Reading
+only the campaign view would have believed in 2,013 slots that do not exist and taken
+them out of the floor; storage is therefore read through the rotation's `occupancy`, which
+counts both populations and refuses to treat an unreadable workspace as an empty one.
+
+Rotation can supply more room, but only behind `TGTC_RECOVERY_MAY_ROTATE` and only through
+the already-authorised `make_room` — the same guards, the same durable backup before each
+delete, no second deletion path. It is off for now, so the queue waits at the floor and
+the hourly alert says so.
+
+## What makes a second blank email impossible
+
+| hazard | what refuses it |
+| --- | --- |
+| a second email to the same person | the queue's key is the RECIPIENT, and migration 022's trigger refuses to clear sent_at or walk a sent row back to a sendable state. Proved against production and rolled back: "was already sent, cannot become authorised" |
+| an empty variable | `copy_block_reason` refuses the payload inside the provider client, and every created lead is read BACK by id and compared |
+| a revoked authorisation | a reply, unsubscribe, bounce, departure, opt-out or any suppression from another source. Revalidation runs before every batch, after the reply poll has recorded that hour's events |
+| strangers as the test | one of our own mailboxes is enrolled first and alone; real recipients wait until that row is SENT and its subject reads back as the approved one |
+| nobody noticing | a guard that PAUSES the campaign on an unapproved subject, on more messages than recipients, or on somebody reached whose authorisation had already been revoked |
+
+The authorisation itself is recorded on all 5,935 rows, per contact and per campaign: what
+it grants, what it excepts, what it does **not** except, and what revokes it. All 5,934
+affected recipients still carry the incident suppression — the exception is the only thing
+letting them through — and none of them carries anybody else's.
+
+## Live state
+
+| | |
+| --- | --- |
+| campaign | `6288f23d-1a51-4c69-a08c-0b2fb4ccf695`, **ACTIVE**, 0 leads at activation |
+| sequence | 1 sequence, 1 step, 1 variant, delay 0 — no follow-up exists to send |
+| senders | the same 252 mailboxes, so the send budget is the one already shared with v2 |
+| window | 08:00–18:00 America/Chicago, Monday to Friday, weekends off |
+| pace | daily_max_leads 500 |
+| settings | text only, stop on reply, unsubscribe header on, open tracking off |
+| queue in production | 5,934 authorised + 1 internal test, all authorised |
+| roles blank, unresolved or corrupt | 0, 0, 0 |
+| what the first revalidation would revoke | 0 |
+| rotation protection | 28 campaigns, this one included; every queued recipient held |
+| automation | `recover-empty-emails` on GTM Replies, hourly at :15, after the reply poll and before the alert |
+
+## What is still ahead
+
+* **The merge of [#140](https://github.com/TGTChq/GTM/pull/140).** The command is already
+  in the hourly start command, but the deployed image does not have it yet and the
+  database is not reachable from a workstation, so the first execution is the first :15
+  tick after that deploy.
+* **Monday 2026-10-05, 08:00 America/Chicago.** The internal test sends, the following
+  tick reads its subject back, and only then does the first real batch enrol. Nothing can
+  send before then: the approved schedule has the weekend off.
+* Until a real message has been received and read, this is implemented and armed, not
+  proved. Enrolling is not sending, and 2026-09-21 is what it costs to confuse them.
