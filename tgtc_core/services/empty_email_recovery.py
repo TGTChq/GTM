@@ -100,6 +100,28 @@ def _now(now: Optional[datetime] = None) -> datetime:
 # --------------------------------------------------------------------------- queue
 
 
+def internal_test_passed(conn: psycopg.Connection) -> Dict[str, Any]:
+    """Has one of our own addresses received this email, with the approved subject?
+
+    The gate real recipients wait behind. It is deliberately a question about a RECEIVED
+    message, not about an enrolment: the incident consisted entirely of enrolments that
+    looked fine. Until the answer is yes, ``enrol`` will only enrol test rows.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT email, sent_at, evidence->>'sent_subject' AS subject "
+            "FROM empty_email_recovery WHERE is_internal_test AND state = 'sent' "
+            "AND (evidence->>'subject_as_approved') = 'true' ORDER BY sent_at LIMIT 1")
+        row = cur.fetchone()
+        cur.execute("SELECT count(*) AS n FROM empty_email_recovery WHERE is_internal_test")
+        tests = int(cur.fetchone()["n"])
+    conn.commit()
+    if not row:
+        return {"passed": False, "test_rows": tests}
+    return {"passed": True, "test_rows": tests, "address": row["email"],
+            "sent_at": row["sent_at"], "subject": row["subject"]}
+
+
 def load_queue(conn: psycopg.Connection, rows: Iterable[Mapping[str, Any]]) -> Dict[str, int]:
     """Record the authorised queue. Idempotent, and it never walks a row backwards.
 
@@ -121,8 +143,9 @@ def load_queue(conn: psycopg.Connection, rows: Iterable[Mapping[str, Any]]) -> D
                     INSERT INTO empty_email_recovery
                         (email, person_id, first_name, last_name, employer, employer_domain,
                          function_key, verified_role, posting_id, posting_title,
-                         posting_is_original, original_campaign_id, evidence)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                         posting_is_original, original_campaign_id, evidence,
+                         is_internal_test)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     ON CONFLICT (email) DO NOTHING
                     """,
                     (email, row.get("person_id"), first, row.get("last_name"),
@@ -133,7 +156,8 @@ def load_queue(conn: psycopg.Connection, rows: Iterable[Mapping[str, Any]]) -> D
                      str(row.get("original_campaign_id") or "") or None,
                      jsonb({"employment_evidence": row.get("employment_evidence"),
                             "employment_verified_at": str(row.get("employment_verified_at") or ""),
-                            "posting_last_active": str(row.get("posting_last_active") or "")})))
+                            "posting_last_active": str(row.get("posting_last_active") or "")}),
+                     bool(row.get("is_internal_test"))))
                 if cur.rowcount:
                     inserted += 1
                 else:
@@ -320,17 +344,31 @@ def enrol(conn: psycopg.Connection, client, *, limit: Optional[int] = None,
         return {"stage": "capacity", "enrolled": 0, "capacity": capacity,
                 "rotation": rotation, "stopped": "storage_floor_reached"}
 
+    # The internal test comes first and alone. Until one of our own addresses has
+    # RECEIVED this email with the approved subject, no stranger is enrolled -- which is
+    # the check that was missing on 2026-09-21, when 7,777 people became the test.
+    gate = internal_test_passed(conn)
     with conn.cursor() as cur:
-        cur.execute(
-            "SELECT * FROM empty_email_recovery WHERE state = ANY(%s) "
-            "ORDER BY authorised_at, email LIMIT %s", (list(SENDABLE_STATES), room))
+        if gate["passed"]:
+            cur.execute(
+                "SELECT * FROM empty_email_recovery WHERE state = ANY(%s) "
+                "ORDER BY is_internal_test DESC, authorised_at, email LIMIT %s",
+                (list(SENDABLE_STATES), room))
+        else:
+            cur.execute(
+                "SELECT * FROM empty_email_recovery WHERE state = ANY(%s) "
+                "AND is_internal_test ORDER BY authorised_at, email LIMIT %s",
+                (list(SENDABLE_STATES), room))
         rows = [dict(r) for r in cur.fetchall()]
     conn.commit()
     if not rows:
-        return {"stage": "enrol", "enrolled": 0, "capacity": capacity, "stopped": "queue_empty"}
+        return {"stage": "enrol", "enrolled": 0, "capacity": capacity,
+                "internal_test": gate,
+                "stopped": "queue_empty" if gate["passed"] else "awaiting_internal_test"}
     if dry_run:
         return {"stage": "plan", "enrolled": 0, "would_enrol": len(rows),
-                "capacity": capacity, "sample": [r["email"] for r in rows[:5]]}
+                "capacity": capacity, "internal_test": gate,
+                "sample": [r["email"] for r in rows[:5]]}
 
     created = refused = failed = 0
     stopped = ""
@@ -389,7 +427,7 @@ def enrol(conn: psycopg.Connection, client, *, limit: Optional[int] = None,
                        "WHERE email = %s", (moment, lead_id, row["email"]))
     return {"stage": "enrol", "attempted": len(rows), "enrolled": created,
             "withheld": refused, "failed": failed, "capacity": capacity,
-            "stopped": stopped, "reasons": reasons}
+            "internal_test": gate, "stopped": stopped, "reasons": reasons}
 
 
 # ----------------------------------------------------------------------- receipts
@@ -549,12 +587,14 @@ def ledger(conn: psycopg.Connection) -> Dict[str, Any]:
         why = {str(r["state_reason"])[:80]: int(r["n"]) for r in cur.fetchall()}
     conn.commit()
     return {"recipients": sum(by_state.values()), "by_state": by_state,
+            "internal_test": internal_test_passed(conn),
             "remaining_to_enrol": by_state.get("authorised", 0) + by_state.get("reserved", 0),
             "sent_with_an_unapproved_subject": wrong_subject,
             "withheld_or_revoked_reasons": why}
 
 
 __all__ = ["load_queue", "revalidate", "free_slots", "enrol", "record_receipts",
+           "internal_test_passed",
            "guard", "ledger", "GUARD_PAUSE_REASONS",
            "EMPTY_EMAIL_RECOVERY_CAMPAIGN_ID", "INCIDENT_SUPPRESSION_SOURCE",
            "REVOKING_EVENTS", "STORAGE_FLOOR_ENV", "BATCH_ENV", "PLAN_ALLOWANCE_ENV",

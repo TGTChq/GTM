@@ -115,8 +115,24 @@ def queue_row(i, *, role="Tax Accountant", first="Ana"):
             "original_campaign_id": "269cd138-00b1-48c3-9093-16c36120a20e"}
 
 
-def load(conn, n=3, **kw):
-    return rec.load_queue(conn, [queue_row(i, **kw) for i in range(1, n + 1)])
+def load(conn, n=3, *, gate_open=True, **kw):
+    report = rec.load_queue(conn, [queue_row(i, **kw) for i in range(1, n + 1)])
+    if gate_open:
+        pass_the_internal_test(conn)
+    return report
+
+
+def pass_the_internal_test(conn):
+    """A received test message with the approved subject: what the gate asks for."""
+    rec.load_queue(conn, [dict(queue_row(0), email="qa@tgtc.test", is_internal_test=True)])
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE empty_email_recovery SET state = 'sent', sent_at = now(), "
+            "message_id = 'TEST', evidence = evidence || "
+            "'{\"sent_subject\": \"Your Tax Accountant opening\", "
+            "  \"subject_as_approved\": true}'::jsonb "
+            "WHERE email = 'qa@tgtc.test'")
+    conn.commit()
 
 
 def suppress(conn, email, *, source, reason="opt_out", at=None):
@@ -135,8 +151,15 @@ def event(conn, email, kind):
 
 
 def states(conn):
+    """The affected recipients only: the internal test row is not one of them."""
     return {r["email"]: r["state"] for r in
-            sqlall(conn, "SELECT email, state FROM empty_email_recovery ORDER BY email")}
+            sqlall(conn, "SELECT email, state FROM empty_email_recovery "
+                         "WHERE NOT is_internal_test ORDER BY email")}
+
+
+def affected_rows(conn, columns):
+    return sqlall(conn, "SELECT %s FROM empty_email_recovery WHERE NOT is_internal_test "
+                        "ORDER BY email" % columns)
 
 
 # ------------------------------------------------------------------ one per person
@@ -144,7 +167,7 @@ def states(conn):
 
 def test_a_sent_recipient_can_never_become_sendable_again(conn):
     """The database refuses it, so a replayed enroller cannot send a second email."""
-    load(conn, 1)
+    load(conn, 1, gate_open=False)
     with conn.cursor() as cur:
         cur.execute("UPDATE empty_email_recovery SET state = 'sent', sent_at = now(), "
                     "message_id = 'M1' WHERE email = 'p1@employer.test'")
@@ -164,7 +187,7 @@ def test_a_sent_recipient_can_never_become_sendable_again(conn):
 
 
 def test_reloading_the_queue_does_not_re_authorise_anybody(conn):
-    load(conn, 2)
+    load(conn, 2, gate_open=False)
     with conn.cursor() as cur:
         cur.execute("UPDATE empty_email_recovery SET state = 'sent', sent_at = now() "
                     "WHERE email = 'p1@employer.test'")
@@ -172,7 +195,7 @@ def test_reloading_the_queue_does_not_re_authorise_anybody(conn):
                     "revoked_at = now(), state_reason = 'later_outcome:reply' "
                     "WHERE email = 'p2@employer.test'")
     conn.commit()
-    again = load(conn, 2)
+    again = load(conn, 2, gate_open=False)
     assert again["inserted"] == 0 and again["already_present"] == 2
     assert states(conn) == {"p1@employer.test": "sent", "p2@employer.test": "revoked"}
 
@@ -212,7 +235,7 @@ def test_a_lead_whose_role_vanished_on_the_way_out_is_withheld_not_sent(conn):
     report = rec.enrol(conn, client, limit=10, env={})
     assert report["enrolled"] == 0 and report["withheld"] == 1
     assert client.created == []
-    row = sqlall(conn, "SELECT state, state_reason FROM empty_email_recovery")[0]
+    row = affected_rows(conn, "state, state_reason")[0]
     assert row["state"] == "withheld"
     assert row["state_reason"] == "recovery_copy_unresolved:verified_role"
 
@@ -223,8 +246,7 @@ def test_a_created_lead_that_reads_back_without_its_role_is_not_enrolled(conn):
     client = FakeInstantly(drop_variables=True)
     report = rec.enrol(conn, client, limit=10, env={})
     assert report["enrolled"] == 0 and report["failed"] == 1
-    row = sqlall(conn, "SELECT state, last_error, instantly_lead_id "
-                       "FROM empty_email_recovery")[0]
+    row = affected_rows(conn, "state, last_error, instantly_lead_id")[0]
     assert row["state"] == "authorised"             # it stays sendable, once the data is fixed
     assert row["last_error"] == "verified_missing:verified_role"
     assert row["instantly_lead_id"] == "L1"         # recorded, so the lead is not orphaned
@@ -271,7 +293,7 @@ def test_more_messages_than_recipients_is_a_second_email_and_stops_the_campaign(
     load(conn, 2)
     client = FakeInstantly()
     rec.enrol(conn, client, limit=10, env={})
-    client.emails_sent = 3                          # two people, three messages
+    client.emails_sent = 4   # two affected plus the test row, and a fourth message
     guard = rec.guard(conn, client)
     assert "second_email_sent" in guard["campaign_paused_because"]
     assert client.paused == [CAMPAIGN]
@@ -496,11 +518,12 @@ def test_the_ledger_is_one_row_per_recipient_and_accounts_for_all_of_them(conn):
                                            "subject": "Your Tax Accountant opening"}
     rec.record_receipts(conn, client)
     led = rec.ledger(conn)
-    assert led["recipients"] == 6
-    assert sum(led["by_state"].values()) == 6
+    assert led["recipients"] == 7          # six affected plus the internal test row
+    assert sum(led["by_state"].values()) == 7
     assert led["by_state"]["revoked"] == 1
-    assert led["by_state"]["sent"] == 1
+    assert led["by_state"]["sent"] == 2     # the test, and the one with a message
     assert led["remaining_to_enrol"] == 3
+    assert led["internal_test"]["passed"] is True
 
 
 def test_a_dry_run_creates_nothing(conn):
@@ -532,7 +555,7 @@ def test_an_enrolment_that_is_interrupted_leaves_the_row_claimed(conn):
 
     with pytest.raises(KeyboardInterrupt):
         rec.enrol(conn, Crash(), limit=10, env={})
-    row = sqlall(conn, "SELECT state, attempts FROM empty_email_recovery")[0]
+    row = affected_rows(conn, "state, attempts")[0]
     assert row["state"] == "reserved" and row["attempts"] == 1
 
 
@@ -575,3 +598,55 @@ def test_an_enrolment_nothing_has_sent_for_three_days_is_surfaced(conn):
     rec.enrol(conn, client, limit=10, env={}, now=NOW - timedelta(hours=96))
     alert = health_alerts.check_empty_email_recovery(conn, now=NOW)
     assert alert["detail"]["enrolled_over_72h_with_no_message"] == 1
+
+
+# -------------------------------------------------------------- the internal test
+
+
+def test_no_stranger_is_enrolled_before_one_of_our_own_has_received_it(conn):
+    """On 2026-09-21 the 7,777 recipients WERE the test. Not again."""
+    rec.load_queue(conn, [queue_row(i) for i in range(1, 4)])
+    client = FakeInstantly()
+    report = rec.enrol(conn, client, limit=10, env={})
+    assert report["stopped"] == "awaiting_internal_test"
+    assert report["internal_test"]["passed"] is False
+    assert client.created == []
+    assert set(states(conn).values()) == {"authorised"}
+
+
+def test_the_internal_test_itself_is_enrolled_while_the_gate_is_shut(conn):
+    rec.load_queue(conn, [queue_row(1),
+                          dict(queue_row(9), email="qa@tgtc.test", is_internal_test=True)])
+    client = FakeInstantly()
+    report = rec.enrol(conn, client, limit=10, env={})
+    assert report["enrolled"] == 1
+    assert [c["email"] for c in client.created] == ["qa@tgtc.test"]
+    assert states(conn)["p1@employer.test"] == "authorised"
+
+
+def test_an_enrolled_test_is_not_a_passed_test(conn):
+    """Enrolling is not sending, and sending is not the approved subject arriving."""
+    rec.load_queue(conn, [dict(queue_row(9), email="qa@tgtc.test", is_internal_test=True)])
+    client = FakeInstantly()
+    rec.enrol(conn, client, limit=10, env={})
+    assert rec.internal_test_passed(conn)["passed"] is False
+
+    client.messages["qa@tgtc.test"] = {"message_id": "T1", "subject": "wrong subject"}
+    rec.record_receipts(conn, client)
+    assert rec.internal_test_passed(conn)["passed"] is False,         "a message with the wrong subject must not open the gate"
+
+
+def test_the_gate_opens_only_on_a_received_message_with_the_approved_subject(conn):
+    rec.load_queue(conn, [queue_row(1),
+                          dict(queue_row(9), email="qa@tgtc.test", is_internal_test=True)])
+    client = FakeInstantly()
+    rec.enrol(conn, client, limit=10, env={})
+    client.messages["qa@tgtc.test"] = {"message_id": "T1",
+                                       "subject": "Your Tax Accountant opening"}
+    rec.record_receipts(conn, client)
+    gate = rec.internal_test_passed(conn)
+    assert gate["passed"] is True and gate["address"] == "qa@tgtc.test"
+
+    report = rec.enrol(conn, client, limit=10, env={})
+    assert report["enrolled"] == 1
+    assert "p1@employer.test" in [c["email"] for c in client.created]

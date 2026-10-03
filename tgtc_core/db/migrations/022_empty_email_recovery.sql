@@ -47,6 +47,11 @@ CREATE TABLE IF NOT EXISTS empty_email_recovery (
     attempts             integer NOT NULL DEFAULT 0,
     last_error           text NOT NULL DEFAULT '',
     evidence             jsonb NOT NULL DEFAULT '{}'::jsonb,
+    -- One of our own addresses, enrolled first and alone. Real recipients are not
+    -- enrolled until a test row has been SENT and its subject read back as the approved
+    -- one, so "we checked the copy" is a state the code can require rather than a step a
+    -- person is trusted to have done.
+    is_internal_test     boolean NOT NULL DEFAULT false,
     updated_at           timestamptz NOT NULL DEFAULT now(),
     CONSTRAINT empty_email_recovery_state_ck CHECK (
         state IN ('authorised', 'reserved', 'enrolled', 'sent', 'withheld', 'revoked')),
