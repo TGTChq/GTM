@@ -38,7 +38,7 @@ from __future__ import annotations
 import os
 import time
 from datetime import datetime, timezone
-from typing import Any, Dict, Iterable, List, Mapping, Optional
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
 
 import psycopg
 
@@ -98,6 +98,25 @@ DEFAULT_PLAN_ALLOWANCE = 25000
 #: alert reports.
 MAY_ROTATE_ENV = "TGTC_RECOVERY_MAY_ROTATE"
 
+#: The approved copy, as sentences a RECEIVED message must actually contain.
+#:
+#: Not a template to render from -- the campaign holds the words and Instantly renders
+#: them. This is the other direction: what has to be true of the message that came back,
+#: so "we checked the copy" is a measurement rather than a belief. Kept as the approved
+#: text, with the two per-recipient values substituted where the copy puts them.
+APPROVED_GREETING = "Hi {first_name},"
+APPROVED_SENTENCES = (
+    u"An earlier email from us went out without its message\u2014sorry about that.",
+    u"I wanted to reach out about your {verified_role} opening. The Global Talent Co. "
+    u"helps companies hire vetted international professionals matched to the role.",
+    u"Would it be useful to see a few relevant profiles?",
+)
+APPROVED_SUBJECT = "Your {verified_role} opening"
+
+#: The signature renders to the sender's own block; this is the part of it that is the
+#: same whoever sends, so its presence is checkable without pinning one mailbox's name.
+SIGNATURE_MARKER = "The Global Talent Co."
+
 SENDABLE_STATES = ("authorised", "reserved")
 OPEN_STATES = ("authorised", "reserved", "enrolled")
 
@@ -156,17 +175,27 @@ def internal_test_passed(conn: psycopg.Connection) -> Dict[str, Any]:
     """
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT email, sent_at, evidence->>'sent_subject' AS subject "
+            "SELECT email, sent_at, evidence->>'sent_subject' AS subject, "
+            "       evidence->'received_checks' AS checks, "
+            "       evidence->'received_failed' AS failed "
             "FROM empty_email_recovery WHERE is_internal_test AND state = 'sent' "
-            "AND (evidence->>'subject_as_approved') = 'true' ORDER BY sent_at LIMIT 1")
+            "ORDER BY sent_at LIMIT 1")
         row = cur.fetchone()
         cur.execute("SELECT count(*) AS n FROM empty_email_recovery WHERE is_internal_test")
         tests = int(cur.fetchone()["n"])
     conn.commit()
     if not row:
-        return {"passed": False, "test_rows": tests}
+        return {"passed": False, "test_rows": tests, "why": "no internal test has been sent"}
+    checks = row["checks"] if isinstance(row["checks"], dict) else {}
+    failed = sorted(k for k, ok in checks.items() if not ok)
+    # Every check, not a majority and not the subject alone. A missing checks object is a
+    # failure too: it means the message was recorded by code that did not read the body.
+    if not checks or failed:
+        return {"passed": False, "test_rows": tests, "address": row["email"],
+                "failed": failed or ["the received email was never checked"],
+                "why": "the internal test email did not pass every check"}
     return {"passed": True, "test_rows": tests, "address": row["email"],
-            "sent_at": row["sent_at"], "subject": row["subject"]}
+            "sent_at": row["sent_at"], "subject": row["subject"], "checks": checks}
 
 
 def load_queue(conn: psycopg.Connection, rows: Iterable[Mapping[str, Any]]) -> Dict[str, int]:
@@ -191,8 +220,10 @@ def load_queue(conn: psycopg.Connection, rows: Iterable[Mapping[str, Any]]) -> D
                         (email, person_id, first_name, last_name, employer, employer_domain,
                          function_key, verified_role, posting_id, posting_title,
                          posting_is_original, original_campaign_id, evidence,
-                         is_internal_test)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                         is_internal_test, source_kind, source_id, instantly_lead_id,
+                         source_lead_status)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                            %s, %s, %s, %s)
                     ON CONFLICT (email) DO NOTHING
                     """,
                     (email, row.get("person_id"), first, row.get("last_name"),
@@ -204,12 +235,54 @@ def load_queue(conn: psycopg.Connection, rows: Iterable[Mapping[str, Any]]) -> D
                      jsonb({"employment_evidence": row.get("employment_evidence"),
                             "employment_verified_at": str(row.get("employment_verified_at") or ""),
                             "posting_last_active": str(row.get("posting_last_active") or "")}),
-                     bool(row.get("is_internal_test"))))
+                     bool(row.get("is_internal_test")),
+                     str(row.get("source_kind") or "unknown"),
+                     str(row.get("source_id") or "") or None,
+                     str(row.get("instantly_lead_id") or "") or None,
+                     row.get("source_lead_status")))
                 if cur.rowcount:
                     inserted += 1
                 else:
                     skipped += 1
     return {"inserted": inserted, "already_present": skipped, "refused_incomplete": refused}
+
+
+def set_route(conn: psycopg.Connection, routes: Iterable[Mapping[str, Any]]) -> Dict[str, Any]:
+    """Record how each recipient reaches the campaign, for rows that do not say yet.
+
+    Separate from ``load_queue`` because the queue was loaded before the measurement that
+    showed a move costs no storage, and because a route can go stale: rotation can remove
+    a lead between the route being recorded and the move being attempted, which the move
+    itself detects and sends back here as a create.
+
+    Only ever sets a route on a row that is still waiting. A row already enrolled or sent
+    has been through its route and must not have it rewritten underneath it.
+    """
+    updated = skipped = refused = 0
+    with transaction(conn) as tx:
+        with tx.cursor() as cur:
+            for route in routes:
+                email = str(route.get("email") or "").strip().lower()
+                kind = str(route.get("source_kind") or "").strip()
+                if kind not in ("campaign", "list", "absent"):
+                    refused += 1
+                    continue
+                lead_id = str(route.get("instantly_lead_id") or "") or None
+                source_id = str(route.get("source_id") or "") or None
+                if kind in ("campaign", "list") and not (lead_id and source_id):
+                    refused += 1
+                    continue
+                cur.execute(
+                    "UPDATE empty_email_recovery SET source_kind = %s, source_id = %s, "
+                    "instantly_lead_id = %s, source_lead_status = %s "
+                    "WHERE email = %s AND state = ANY(%s)",
+                    (kind, source_id, lead_id, route.get("source_lead_status"), email,
+                     list(SENDABLE_STATES)))
+                if cur.rowcount:
+                    updated += 1
+                else:
+                    skipped += 1
+    return {"routed": updated, "not_waiting_any_more": skipped, "refused": refused}
 
 
 def revalidate(conn: psycopg.Connection, *, now: Optional[datetime] = None) -> Dict[str, Any]:
@@ -312,6 +385,76 @@ def _make_room(conn: psycopg.Connection, client, *, want: int,
         env=dict(env), now=now)
 
 
+def verify_received(message: Mapping[str, Any], row: Mapping[str, Any]) -> Dict[str, Any]:
+    """Judge the email that ARRIVED against the approved copy, check by check.
+
+    This is the gate's real question, and it is deliberately not "did Instantly record a
+    send" or "does the subject match". The incident was 16,875 messages whose enrolment,
+    status and delivery were all fine and whose body was a signature; a send record would
+    have reported every one of them as a success.
+
+    So: the recipient, the whole subject, the whole body, the greeting carrying this
+    person's name, the role carrying their vacancy, the signature rendered rather than
+    left as a placeholder, and not one variable still unresolved. Returns every check by
+    name, because "it failed" is not actionable and "which one failed" is.
+    """
+    from ..domain.outbound_copy import _visible
+
+    first = str(row.get("first_name") or "").strip()
+    role = str(row.get("verified_role") or "").strip()
+    address = str(row.get("email") or "").strip().lower()
+
+    subject = str(message.get("subject") or "")
+    body_field = message.get("body")
+    html = ""
+    if isinstance(body_field, dict):
+        html = str(body_field.get("html") or body_field.get("text") or "")
+    elif isinstance(body_field, str):
+        html = body_field
+    text = _visible(html)
+    recipients = {str(message.get("lead") or "").strip().lower()}
+    recipients |= {a.strip().lower() for a in
+                   str(message.get("to_address_email_list") or "").split(",") if a.strip()}
+
+    greeting = APPROVED_GREETING.format(first_name=first)
+    sentences = [t.format(verified_role=role) for t in APPROVED_SENTENCES]
+    # The signature follows the last approved sentence, so anything after it is what
+    # rendered in place of the placeholder.
+    tail = ""
+    if sentences[-1] in text:
+        tail = text.split(sentences[-1], 1)[1].strip()
+
+    checks = {
+        "went_to_the_right_person": bool(address) and address in recipients,
+        "subject_is_the_approved_one": subject.strip() == APPROVED_SUBJECT.format(
+            verified_role=role),
+        "body_arrived_at_all": len(text) >= 120,
+        "greeting_carries_their_name": bool(first) and greeting in text,
+        "role_is_in_the_subject": bool(role) and role in subject,
+        "role_is_in_the_body": bool(role) and role in text,
+        "every_approved_sentence_is_there": all(t in text for t in sentences),
+        "nothing_was_added_after_the_signature": True,   # refined below
+        "the_signature_rendered": bool(tail) and SIGNATURE_MARKER in tail,
+        "exactly_one_signature": tail.count(SIGNATURE_MARKER) == 1,
+        "no_variable_is_still_pending": ("{{" not in subject and "}}" not in subject
+                                         and "{{" not in text and "}}" not in text),
+        "no_placeholder_name_leaked": not any(
+            token in (subject + " " + text)
+            for token in ("accountSignature", "verified_role", "firstName", "first_name")),
+        "it_came_from_one_of_our_mailboxes": "@" in str(message.get("from_address_email") or ""),
+        "it_is_the_first_step": str(message.get("step") or "0_0_0").startswith("0_"),
+    }
+    # The signature is the last thing in the message: nothing may follow it.
+    if checks["the_signature_rendered"]:
+        after = tail.split(SIGNATURE_MARKER, 1)[1].strip()
+        checks["nothing_was_added_after_the_signature"] = len(after) <= 80
+
+    failed = sorted(k for k, ok in checks.items() if not ok)
+    return {"passed": not failed, "failed": failed, "checks": checks,
+            "subject": subject[:300], "body_text": text[:1200],
+            "recipients": sorted(r for r in recipients if r)}
+
+
 def _payload(row: Mapping[str, Any]) -> Dict[str, Any]:
     """The lead exactly as the campaign's literal copy needs it.
 
@@ -336,6 +479,31 @@ def _payload(row: Mapping[str, Any]) -> Dict[str, Any]:
     return payload
 
 
+def lead_variables(lead: Mapping[str, Any]) -> Dict[str, Any]:
+    """A lead's variables as Instantly really stores them: FLATTENED into ``payload``.
+
+    Measured 2026-10-03. A lead created with ``custom_variables: {verified_role: ...}``
+    reads back as::
+
+        payload = {"firstName": "Devan", "lastName": "M", "companyName": "...",
+                   "email": "...", "campaign": "...", "verified_role": "Operations Manager"}
+
+    There is no ``payload.custom_variables``. Looking for one returns nothing, which an
+    earlier version of this module treated as "the variable is missing" -- it would have
+    refused every single enrolment and the recovery would have reported a clean,
+    consistent, total failure. Hence a named function with the measurement attached.
+    """
+    payload = lead.get("payload")
+    if isinstance(payload, dict):
+        out = dict(payload)
+    else:
+        out = {}
+    nested = out.get("custom_variables")
+    if isinstance(nested, dict):                 # tolerated, never relied on
+        out.update(nested)
+    return out
+
+
 def _verify_created(client, lead_id: str, row: Mapping[str, Any]) -> str:
     """Read the lead back and compare. '' when it is what we meant to create."""
     result = client.get_lead(lead_id)
@@ -346,23 +514,126 @@ def _verify_created(client, lead_id: str, row: Mapping[str, Any]) -> str:
         return "verified_wrong_campaign"
     if str(data.get("email") or "").strip().lower() != str(row["email"]).strip().lower():
         return "verified_wrong_address"
-    # Variables are read from ``payload`` on a lead, which is where Instantly keeps them;
-    # a 200 on the create says nothing about what was stored.
-    stored = data.get("payload")
-    if not isinstance(stored, dict):
-        stored = data
-    variables = stored.get("custom_variables")
-    if not isinstance(variables, dict):
-        return "verified_no_variables"
+    variables = lead_variables(data)
     for key in EMPTY_EMAIL_RECOVERY_REQUIRED_VARIABLES:
         value = str(variables.get(key) or "").strip()
         if not value:
             return "verified_missing:%s" % key
         if value != str(row["verified_role"] or "").strip():
             return "verified_changed:%s" % key
-    if not str(stored.get("first_name") or data.get("first_name") or "").strip():
+    if not str(variables.get("firstName") or data.get("first_name") or "").strip():
         return "verified_missing:first_name"
     return ""
+
+
+#: Instantly's own verdict on a lead, and what it means for a repair email.
+LEAD_BOUNCED = -1
+LEAD_UNSUBSCRIBED = -2
+#: Statuses that end the authorisation on sight. A bounced address never received the
+#: blank email either, and writing to it again spends deliverability for nothing.
+REFUSING_LEAD_STATUSES = {LEAD_BOUNCED: "provider_bounced",
+                          LEAD_UNSUBSCRIBED: "provider_unsubscribed"}
+
+
+def _settle(client, lead_id: str, *, want_campaign: str, tries: int = 10,
+            sleep=None) -> Dict[str, Any]:
+    """Wait for a move to actually land. ``/leads/move`` answers 200 with a pending job.
+
+    A 200 here means accepted, not done -- the response is a background job whose status
+    is ``pending``. So the lead is read back until it reports the campaign we asked for,
+    and an exhausted wait returns what it last saw rather than pretending.
+    """
+    import time
+
+    nap = sleep or time.sleep
+    last: Dict[str, Any] = {}
+    for attempt in range(tries):
+        result = client.get_lead(lead_id)
+        if result.ok and isinstance(result.data, dict):
+            last = result.data
+            if str(last.get("campaign") or "") == want_campaign:
+                return last
+        if attempt < tries - 1:
+            nap(3)
+    return last
+
+
+def _bring_across(conn: psycopg.Connection, client, row: Mapping[str, Any], *,
+                  moment: datetime, clock) -> Tuple[str, str]:
+    """Move one existing record into the recovery campaign. Returns (state, reason).
+
+    Order matters and is the whole point. The recovery campaign is ACTIVE, so a lead that
+    arrived without its role could be sent "Your  opening" inside the next window -- the
+    incident, reproduced by the repair. So the role is written and READ BACK first, and
+    only a lead that already carries it is moved.
+
+    The lead's own record is backed up to the database before anything changes it, so a
+    move is reversible from production rather than only from a file on a workstation.
+
+    Their old sequence is abandoned: a move clears ``status_summary``, which is authorised
+    and is the point -- they are to receive this one email and nothing else. They are
+    never moved back, and their four original steps are never restarted.
+    """
+    lead_id = str(row["instantly_lead_id"] or "")
+    source_kind = str(row["source_kind"] or "")
+    source_id = str(row["source_id"] or "")
+    role = str(row["verified_role"] or "").strip()
+
+    clock.wait()
+    current = client.get_lead(lead_id)
+    if not current.ok:
+        if current.status == 404:
+            # Rotation removed it since the route was recorded. It needs a create, and a
+            # create needs a slot, so it goes back to the queue saying so.
+            return "authorised", "record_gone_needs_creation"
+        return "authorised", "unreadable:%s" % (current.status or "error")
+    lead = current.data if isinstance(current.data, dict) else {}
+
+    status = lead.get("status")
+    try:
+        status = int(status)
+    except (TypeError, ValueError):
+        status = None
+    if status in REFUSING_LEAD_STATUSES:
+        return "withheld", REFUSING_LEAD_STATUSES[status]
+    if str(lead.get("email") or "").strip().lower() != str(row["email"]).strip().lower():
+        return "withheld", "lead_id_belongs_to_another_address"
+
+    with transaction(conn) as tx:
+        tx.execute("UPDATE empty_email_recovery SET source_backup = %s, "
+                   "source_lead_status = %s WHERE email = %s AND source_backup IS NULL",
+                   (jsonb(lead), status, row["email"]))
+
+    variables = lead_variables(lead)
+    if str(variables.get("verified_role") or "").strip() != role:
+        # A PATCH with custom_variables REPLACES the whole set, so the existing payload is
+        # merged rather than overwritten; dropping what is already there would strip the
+        # provenance these leads carry.
+        merged = {k: v for k, v in variables.items()
+                  if k not in ("email", "campaign") and v is not None}
+        merged["verified_role"] = role
+        clock.wait()
+        patched = client.update_lead(lead_id, {"custom_variables": merged})
+        if not patched.ok:
+            return "authorised", "patch_failed:%s" % (patched.status or "error")
+        # Read-after-write here is eventually consistent, so this is checked after the
+        # move rather than immediately, where a correct write reads back as a failure.
+
+    clock.wait()
+    moved = client.move_lead_from(lead_id, source_kind=source_kind, source_id=source_id,
+                                 to_campaign=EMPTY_EMAIL_RECOVERY_CAMPAIGN_ID)
+    if not moved.ok:
+        return "authorised", "move_failed:%s" % (moved.status or "error")
+
+    settled = _settle(client, lead_id, want_campaign=EMPTY_EMAIL_RECOVERY_CAMPAIGN_ID)
+    if str(settled.get("campaign") or "") != EMPTY_EMAIL_RECOVERY_CAMPAIGN_ID:
+        return "authorised", "move_not_settled"
+    after = lead_variables(settled)
+    if str(after.get("verified_role") or "").strip() != role:
+        return "authorised", "moved_without_its_role"
+    if not str(after.get("firstName") or settled.get("first_name") or "").strip():
+        return "authorised", "moved_without_a_name"
+    return "enrolled", ""
 
 
 def enrol(conn: psycopg.Connection, client, *, limit: Optional[int] = None,
@@ -370,54 +641,86 @@ def enrol(conn: psycopg.Connection, client, *, limit: Optional[int] = None,
           dry_run: bool = False, pace: Optional[_Pace] = None) -> Dict[str, Any]:
     """Create one batch of recovery contacts, and verify each one by id.
 
-    Returns what happened, never a bare success. A contact is only ``enrolled`` once it
-    has been read back from Instantly carrying the role its subject line needs.
+    Two routes, and the difference is the whole capacity question. 5,892 of the 5,934
+    recipients are already stored -- in the nine paused campaigns or on the incident hold
+    list -- so they are MOVED, which was measured to cost no storage at all. Only the 42
+    whose record rotation already removed are CREATED, and only a create needs a slot.
+
+    Returns what happened, never a bare success, and reports the two routes separately so
+    a move is never mistaken for a new creation. A contact is only ``enrolled`` once it
+    has been read back from Instantly, in this campaign, carrying the role its subject
+    line needs and a name for its greeting.
     """
     environ = env if env is not None else os.environ
     moment = _now(now)
     batch = limit if limit is not None else _int_env(environ, BATCH_ENV, DEFAULT_BATCH)
 
-    capacity = free_slots(client, env=environ)
-    if not capacity.get("measured"):
-        return {"stage": "capacity", "enrolled": 0, "capacity": capacity,
-                "stopped": "capacity_unknown"}
-    room = min(batch, int(capacity.get("available") or 0))
-    rotation = None
-    if room <= 0 and str(environ.get(MAY_ROTATE_ENV, "")).strip() in ("1", "true", "True"):
-        rotation = _make_room(conn, client, want=batch, env=environ, now=moment)
-        capacity = free_slots(client, env=environ)
-        room = min(batch, int(capacity.get("available") or 0))
-    if room <= 0:
-        return {"stage": "capacity", "enrolled": 0, "capacity": capacity,
-                "rotation": rotation, "stopped": "storage_floor_reached"}
-
-    # The internal test comes first and alone. Until one of our own addresses has
-    # RECEIVED this email with the approved subject, no stranger is enrolled -- which is
-    # the check that was missing on 2026-09-21, when 7,777 people became the test.
+    # The internal test comes first and alone. Until one of our own addresses has RECEIVED
+    # this email and all of it checked out, no stranger is enrolled -- which is the check
+    # that was missing on 2026-09-21, when 7,777 people became the test.
     gate = internal_test_passed(conn)
     with conn.cursor() as cur:
-        if gate["passed"]:
-            cur.execute(
-                "SELECT * FROM empty_email_recovery WHERE state = ANY(%s) "
-                "ORDER BY is_internal_test DESC, authorised_at, email LIMIT %s",
-                (list(SENDABLE_STATES), room))
-        else:
-            cur.execute(
-                "SELECT * FROM empty_email_recovery WHERE state = ANY(%s) "
-                "AND is_internal_test ORDER BY authorised_at, email LIMIT %s",
-                (list(SENDABLE_STATES), room))
+        sql = ("SELECT * FROM empty_email_recovery WHERE state = ANY(%s) "
+               + ("" if gate["passed"] else "AND is_internal_test ")
+               # Movable recipients first: they cost no storage, so a tight workspace
+               # never stops the bulk of the recovery.
+               + "ORDER BY is_internal_test DESC, (source_kind = 'absent'), "
+                 "authorised_at, email LIMIT %s")
+        cur.execute(sql, (list(SENDABLE_STATES), batch))
         rows = [dict(r) for r in cur.fetchall()]
     conn.commit()
+
+    movable = [r for r in rows if str(r["source_kind"]) in ("campaign", "list")]
+    wanted_create = [r for r in rows if str(r["source_kind"]) not in ("campaign", "list")]
+
+    # Capacity constrains the CREATES only. A move relocates a contact the plan already
+    # counts, measured 2026-10-03, so it needs no slot and must not be made to wait for
+    # one. Claiming the whole recovery needs 5,934 slots would be wrong by 5,892.
+    rotation = None
+    held_for_storage = 0
+    if not wanted_create:
+        capacity = {"measured": None, "available": 0,
+                    "reason": "not consulted: nothing in this batch needs a slot"}
+        needs_create = []
+    else:
+        capacity = free_slots(client, env=environ)
+        if not capacity.get("measured"):
+            needs_create = []
+        else:
+            room = int(capacity.get("available") or 0)
+            # Rotation deletes contacts. It is authorised, but it does not run on behalf
+            # of a repair that has not yet proved it can send a correct email: the
+            # internal test comes first, then capacity is made for real recipients.
+            may_rotate = (gate["passed"]
+                          and str(environ.get(MAY_ROTATE_ENV, "")).strip()
+                          in ("1", "true", "True"))
+            if room < len(wanted_create) and may_rotate:
+                rotation = _make_room(conn, client, want=len(wanted_create), env=environ,
+                                      now=moment)
+                capacity = free_slots(client, env=environ)
+                room = int(capacity.get("available") or 0)
+            needs_create = wanted_create[:max(0, room)]
+        held_for_storage = len(wanted_create) - len(needs_create)
+
+    rows = movable + needs_create
     if not rows:
+        if not gate["passed"]:
+            stopped = "awaiting_internal_test"
+        elif held_for_storage:
+            stopped = ("capacity_unknown" if not capacity.get("measured")
+                       else "storage_floor_reached")
+        else:
+            stopped = "queue_empty"
         return {"stage": "enrol", "enrolled": 0, "capacity": capacity,
-                "internal_test": gate,
-                "stopped": "queue_empty" if gate["passed"] else "awaiting_internal_test"}
+                "internal_test": gate, "rotation": rotation,
+                "held_for_storage": held_for_storage, "stopped": stopped}
     if dry_run:
         return {"stage": "plan", "enrolled": 0, "would_enrol": len(rows),
-                "capacity": capacity, "internal_test": gate,
-                "sample": [r["email"] for r in rows[:5]]}
+                "would_move": len(movable), "would_create": len(needs_create),
+                "held_for_storage": held_for_storage, "capacity": capacity,
+                "internal_test": gate, "sample": [r["email"] for r in rows[:5]]}
 
-    created = refused = failed = 0
+    created = refused = failed = moved = 0
     stopped = ""
     reasons: Dict[str, int] = {}
     clock = pace if pace is not None else _Pace(
@@ -429,6 +732,29 @@ def enrol(conn: psycopg.Connection, client, *, limit: Optional[int] = None,
         with transaction(conn) as tx:
             tx.execute("UPDATE empty_email_recovery SET state = 'reserved', reserved_at = %s, "
                        "attempts = attempts + 1 WHERE email = %s", (moment, row["email"]))
+        if str(row["source_kind"]) in ("campaign", "list"):
+            state, reason = _bring_across(conn, client, row, moment=moment, clock=clock)
+            if state == "enrolled":
+                moved += 1
+                with transaction(conn) as tx:
+                    tx.execute(
+                        "UPDATE empty_email_recovery SET state = 'enrolled', "
+                        "enrolled_at = %s, last_error = '', state_reason = '' "
+                        "WHERE email = %s", (moment, row["email"]))
+            else:
+                if state == "withheld":
+                    refused += 1
+                else:
+                    failed += 1
+                reasons[reason] = reasons.get(reason, 0) + 1
+                with transaction(conn) as tx:
+                    tx.execute(
+                        "UPDATE empty_email_recovery SET state = %s, state_reason = %s, "
+                        "last_error = %s WHERE email = %s",
+                        (state, reason if state == "withheld" else "",
+                         "" if state == "withheld" else reason, row["email"]))
+            continue
+
         payload = _payload(row)
         clock.wait()
         try:
@@ -485,8 +811,10 @@ def enrol(conn: psycopg.Connection, client, *, limit: Optional[int] = None,
             tx.execute("UPDATE empty_email_recovery SET state = 'enrolled', enrolled_at = %s, "
                        "instantly_lead_id = %s, last_error = '', state_reason = '' "
                        "WHERE email = %s", (moment, lead_id, row["email"]))
-    return {"stage": "enrol", "attempted": len(rows), "enrolled": created,
+    return {"stage": "enrol", "attempted": len(rows), "enrolled": created + moved,
+            "moved_existing_records": moved, "created_new_records": created,
             "withheld": refused, "failed": failed, "capacity": capacity,
+            "rotation": rotation, "held_for_storage": held_for_storage,
             "internal_test": gate, "stopped": stopped, "reasons": reasons}
 
 
@@ -514,8 +842,9 @@ def record_receipts(conn: psycopg.Connection, client, *, limit: int = 200,
     """
     moment = _now(now)
     with conn.cursor() as cur:
-        cur.execute("SELECT email, verified_role FROM empty_email_recovery "
-                    "WHERE state = 'enrolled' ORDER BY enrolled_at LIMIT %s", (limit,))
+        cur.execute("SELECT email, first_name, verified_role, is_internal_test "
+                    "FROM empty_email_recovery WHERE state = 'enrolled' "
+                    "ORDER BY is_internal_test DESC, enrolled_at LIMIT %s", (limit,))
         rows = [dict(r) for r in cur.fetchall()]
     conn.commit()
 
@@ -538,23 +867,27 @@ def record_receipts(conn: psycopg.Connection, client, *, limit: int = 200,
                 break
         if not message:
             continue
-        subject = str(message.get("subject") or "")
-        expected = "Your %s opening" % str(row["verified_role"] or "").strip()
-        as_approved = subject.strip() == expected
-        if not as_approved:
-            unapproved.append(row["email"])
+        verdict = verify_received(message, row)
+        if not verdict["passed"]:
+            unapproved.append({"email": row["email"], "failed": verdict["failed"]})
         sent += 1
         with transaction(conn) as tx:
             tx.execute(
                 "UPDATE empty_email_recovery SET state = 'sent', sent_at = %s, "
                 "message_id = %s, evidence = evidence || %s WHERE email = %s",
                 (moment, str(message.get("message_id") or message.get("id") or "")[:200],
-                 jsonb({"sent_subject": subject[:300], "subject_as_approved": as_approved,
+                 jsonb({"sent_subject": verdict["subject"],
+                        # The name is historical: it is now the verdict on the WHOLE
+                        # received email, not on its subject line.
+                        "subject_as_approved": verdict["passed"],
+                        "received_checks": verdict["checks"],
+                        "received_failed": verdict["failed"],
+                        "received_body": verdict["body_text"],
                         "from": str(message.get("from_address_email") or "")[:200]}),
                  row["email"]))
     return {"stage": "receipts", "checked": len(rows), "sent": sent,
-            "subject_not_as_approved": unapproved[:20],
-            "subject_not_as_approved_count": len(unapproved)}
+            "not_as_approved": unapproved[:20],
+            "not_as_approved_count": len(unapproved)}
 
 
 # -------------------------------------------------------------------------- guard
@@ -587,7 +920,7 @@ def guard(conn: psycopg.Connection, client, *, pause: bool = True) -> Dict[str, 
     with conn.cursor() as cur:
         cur.execute(
             "SELECT count(*) AS n FROM empty_email_recovery "
-            "WHERE state = 'sent' AND (evidence->>'subject_as_approved') = 'false'")
+            "WHERE state = 'sent' AND (evidence->>'subject_as_approved') IS DISTINCT FROM 'true'")
         wrong = int(cur.fetchone()["n"])
         cur.execute("SELECT count(*) AS n FROM empty_email_recovery WHERE state = 'sent'")
         sent_rows = int(cur.fetchone()["n"])
@@ -667,9 +1000,11 @@ def ledger(conn: psycopg.Connection) -> Dict[str, Any]:
             "withheld_or_revoked_reasons": why}
 
 
-__all__ = ["load_queue", "revalidate", "free_slots", "enrol", "record_receipts",
+__all__ = ["load_queue", "set_route", "revalidate", "free_slots", "enrol", "record_receipts",
            "internal_test_passed",
-           "guard", "ledger", "GUARD_PAUSE_REASONS",
+           "guard", "ledger", "GUARD_PAUSE_REASONS", "verify_received",
+           "APPROVED_SENTENCES", "APPROVED_SUBJECT", "APPROVED_GREETING",
+           "SIGNATURE_MARKER",
            "EMPTY_EMAIL_RECOVERY_CAMPAIGN_ID", "INCIDENT_SUPPRESSION_SOURCE",
            "REVOKING_EVENTS", "STORAGE_FLOOR_ENV", "BATCH_ENV", "PLAN_ALLOWANCE_ENV",
            "MAY_ROTATE_ENV", "PACE_SECONDS_ENV", "DEFAULT_PACE_SECONDS",

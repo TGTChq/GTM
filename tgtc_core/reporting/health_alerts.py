@@ -159,7 +159,7 @@ def check_empty_email_recovery(conn, *, now: datetime) -> Optional[Dict[str, Any
         return None
     harm = _rows(conn,
                  "SELECT count(*) FILTER (WHERE state = 'sent' "
-                 "    AND (evidence->>'subject_as_approved') = 'false') AS wrong_subject, "
+                 "    AND (evidence->>'subject_as_approved') IS DISTINCT FROM 'true') AS wrong_subject, "
                  "count(*) FILTER (WHERE state IN ('reserved', 'enrolled') "
                  "    AND length(btrim(verified_role)) = 0) AS roleless "
                  "FROM empty_email_recovery")[0]
