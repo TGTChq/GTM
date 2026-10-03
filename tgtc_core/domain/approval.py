@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Mapping, Optional, Sequence, Tuple
 
+from .role_title import concrete_title
 from ..policy.campaigns import (CAMPAIGN_BY_FUNCTION, KNOWN_CHALLENGER_CAMPAIGN_IDS,
                                KNOWN_CONTROL_CAMPAIGN_IDS, POLICY_VERSION,
                                campaign_id_allowed, size_band)
@@ -61,19 +62,51 @@ def _clean(text: Optional[str]) -> str:
     return " ".join(str(text or "").split())
 
 
+def display_safe_title(text: str) -> bool:
+    """The display test this module has always applied, named so the posting-derived
+    title is held to exactly the same bar."""
+    return bool(text) and len(text) <= 60 and not re.search(
+        r"[|/{}<>@#]|\d{4,}|\bhiring\b|\burgent\b|\$", text) and len(text.split()) <= 7
+
+
 def display_role(title: Optional[str], function_key: str) -> str:
-    """Conversational role noun for copy. The title is used when it is display-safe;
-    otherwise the function noun. Never empty for a known function."""
+    """The employer's own words for the job, or "" — never a function noun.
+
+    This used to fall back to ``campaign.function_nouns`` whenever the title failed the
+    display test, which is what produced subject lines like ``operations role`` and
+    ``customer support role``. Measured on the 7,839 approvals exported 2026-10-03,
+    **691 (8.8%)** came out that way, and two reached the outbox on 2026-10-02 — after
+    the empty-copy fix was live, so it was current behaviour. No gate objected: the
+    copy was complete, in-length and character-safe, and simply said nothing.
+
+    So a title that fails the display test is now re-derived from the posting's OWN
+    words (``role_title.concrete_title``: a literal substring, ending in a role noun
+    production already accepts, ranked by how often it accepts it). When nothing
+    survives, this returns "" and ``build_approved_lead`` refuses with
+    ``copy_fields_incomplete`` — a refusal that is reachable BEFORE any contact is
+    bought. Nothing is invented and no approved copy is rewritten.
+
+    The derived title must pass the display test AND ``role_display_send_safe``, so
+    approval applies the same rule delivery does rather than approving something the
+    renderer will refuse later.
+    """
     t = _clean(title)
     t = re.sub(r"\s*[\(\[\-–—|/]\s*(?:remote|hybrid|on-?site|us|usa|united states|[a-z ]*,\s*[A-Z]{2}).*$", "", t, flags=re.I)
     t = re.sub(r"\b(?:remote|hybrid|work from home|wfh)\b", "", t, flags=re.I)
     t = re.sub(r"\s{2,}", " ", t).strip(" -–—|/,")
-    if t and len(t) <= 60 and not re.search(r"[|/{}<>@#]|\d{4,}|\bhiring\b|\burgent\b|\$", t) and len(t.split()) <= 7:
+    def accepts(candidate: str) -> bool:
+        if not display_safe_title(candidate):
+            return False
+        from outbound_wave1.qa import role_display_send_safe
+        return bool(role_display_send_safe(candidate)[0])
+
+    # The SAME gate on the title itself, not only on the derived candidates. Without
+    # this, "Senior Product Manager, Ad Monetization" passed the display test, was
+    # approved verbatim, and was then refused by the renderer for its comma -- a real
+    # job title lost to punctuation. Now it yields "Senior Product Manager".
+    if accepts(t):
         return t
-    campaign = CAMPAIGN_BY_FUNCTION.get(function_key)
-    if campaign:
-        return campaign.function_nouns.get(function_key, f"{function_key.replace('_', ' ')} role")
-    return ""
+    return concrete_title(t or _clean(title), accepts)
 
 
 def role_focus_text(phrases: Sequence[str]) -> str:
@@ -220,6 +253,17 @@ def build_approved_lead(
         return ApprovalRefusal("email_not_verified", {"status": person.get("email_status")})
 
     open_role = display_role(posting.get("title"), function_key)
+    if not open_role and campaign_id not in KNOWN_CHALLENGER_CAMPAIGN_IDS:
+        # CONTROL keeps the old function-noun fallback, on purpose. The defect being
+        # fixed is a generic SUBJECT LINE reaching a recipient, and that can only happen
+        # on Challenger, whose step 1 subject is `{{rendered_subject}}`. A Control
+        # campaign carries its own literal subject and body, so `Outbound Role` is never
+        # a subject there -- refusing those leads would shrink the experiment's control
+        # arm for a defect it cannot exhibit.
+        campaign = CAMPAIGN_BY_FUNCTION.get(function_key)
+        if campaign:
+            open_role = campaign.function_nouns.get(
+                function_key, f"{function_key.replace('_', ' ')} role")
     focus = role_focus_text(responsibilities)
     if not open_role or not focus:
         return ApprovalRefusal("copy_fields_incomplete", {"open_role": open_role, "role_focus": focus})
@@ -562,7 +606,14 @@ def challenger_copy_refusal_before_enrichment(
         function_key=function_key, campaign_id=campaign_id,
         allowed_campaign_ids=allowed_campaign_ids, signing_key=signing_key, now=now, env=env)
     if not isinstance(built, ApprovedLead):
-        return ""
+        # `copy_fields_incomplete` IS a copy refusal, and since display_role stopped
+        # inventing a function noun it is the one a title with no usable job title in it
+        # now produces. Surfacing it here is what keeps those from costing a contact:
+        # measured over the 7,839 exported approvals, 803 (10.2%) land here, against
+        # ~1,121 that used to be paid for and then blocked by the renderer. Any OTHER
+        # refusal still returns "" and is left for the real flow after enrichment.
+        reason = getattr(built, "reason", "")
+        return reason if reason == "copy_fields_incomplete" else ""
     return challenger_copy_refusal_from_posting(built.lead)
 
 
