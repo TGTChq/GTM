@@ -106,7 +106,14 @@ def classify(resp: Response) -> ApolloResult:
     if ra:
         try:
             parsed_retry = float(ra)
-            retry_after = min(parsed_retry, 900.0) if math.isfinite(parsed_retry) and parsed_retry >= 0 else None
+            # The provider's wait is preserved IN FULL. It used to be clamped to 900s
+            # here, and every one of the 1,351 rate-limited calls on 2026-10-02 was
+            # recorded at exactly 900.0 -- the ceiling -- so Apollo was asking for at
+            # least that and the clamp was shortening what we honoured. The only
+            # consumer is the per-run Apollo latch, which is never persisted, so a long
+            # wait ends Apollo for that run without spending instead of causing a
+            # cross-run outage.
+            retry_after = parsed_retry if math.isfinite(parsed_retry) and parsed_retry >= 0 else None
         except ValueError:
             retry_after = None
     if resp.status >= 400 and any(m in lowered for m in CREDIT_MARKERS):

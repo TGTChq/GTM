@@ -1679,3 +1679,1052 @@ rotation population largely spent.
 Lock is free (`held=0`), service `Completed`, cron still `None`. PR
 **[#134](https://github.com/TGTChq/GTM/pull/134)** holds the per-day execution
 claim; full suite **2,155 passed**, integrity 35/35.
+
+## Step F7 — the protection DEPLOYED and verified live
+
+PR #134 merged. Deploy tip `8242de2`, deployment **`a5ce3b40` SUCCESS**, effective
+commit **`8242de24ad`**, schema migration version now **21**.
+
+### The deploy declined to start a run — in production, with the log to prove it
+
+```
+Starting Container
+run kind=scheduled budget=prod-scheduled-20261003
+run-daily declined: outside_scheduled_window:00Z_not_in_03-05
+  (a deploy must not start a run; set TGTC_RUN_FORCE=1 for a deliberate manual run)
+```
+
+Corroborated three ways rather than taken from the log alone:
+
+| Check | Result |
+| --- | --- |
+| `daily/start` events in the following 70 minutes | **none** |
+| rows in `scheduled_executions` | **0** — the day was never claimed |
+| run lock | `held=0` |
+
+The two previous deploys each started a full run; this one did not. The budget row
+`prod-scheduled-20261003` was defined (ceilings only, `used: {}`, expires
+2026-10-04T00:54:46Z) — that is the `budget` CLI step, not a claim and not spend.
+
+### Duplicate prevention verified against the PRODUCTION table
+
+Run on a synthetic day `19700101`, which can never collide with a real execution
+day, inside one transaction and removed afterwards:
+
+| Step | Result |
+| --- | --- |
+| first start claims the day | `probe-a` |
+| second SIMULTANEOUS start | `INSERT 0 0` — nothing |
+| state while running | unfinished, `attempt=1` |
+| holder closes the day | `UPDATE 1` |
+| a start AFTER `daily/end` | nothing |
+| a NON-holder tries to close | `UPDATE 0` |
+| cleanup | row removed, **0 rows left**, 0 probe rows |
+
+So the table's atomicity and the holder rule hold in production, not only in the
+32 unit tests.
+
+## Step F8 — CRON RESTORED
+
+| | Before | After |
+| --- | --- | --- |
+| `cronSchedule` | `None` | **`0 3 * * *`** |
+| `startCommand` | 713 chars | 713 chars, unchanged |
+| `dockerfilePath` / `rootDirectory` / `numReplicas` / `restartPolicyType` | | all unchanged |
+
+`railway status`: `GTM Core Canary 1000: ● Completed · 0 3 * * * · next run in 2 hours`.
+Run lock was `held=0` at the moment of restore.
+
+### Which day each execution belongs to
+
+| Execution day | Budget | Executions | Origin |
+| --- | --- | --- | --- |
+| **20261002** | `prod-scheduled-20261002` (`runs=3`) | `…708d7ea4` 03:00:39Z, `…7831317d` 23:09:28Z, `…b7478fc9` 23:33:22Z | cron tick, **deployment**, **deployment** |
+| **20261003** | `prod-scheduled-20261003` (defined 00:54Z, **unclaimed**) | none yet; the 03:00Z tick will be the day's ONE authorised execution | cron tick |
+
+From now on the day's execution is claimed durably, so a second start on 20261003
+— whether from the cron firing twice or from a deploy inside 03:00-05:59Z — is
+refused before anything is spent.
+
+## Close-out
+
+### Resolved, with receipts
+
+| Item | Evidence |
+| --- | --- |
+| Cause | campaign bodies hold no literal copy; 0 of 9,053 stored payloads carried `rendered_subject` |
+| Scope | 16,875 messages to 7,777 recipients, onset 2026-09-21T13:15:59Z, from 24,300 classified sends; two independent indicators agreeing on 100% |
+| Fix deployed | `8242de24ad`; copy refused at payload build, in the outbox and in the provider client |
+| Guard proven in production | 10 copy refusals recorded with precise reasons and the run continued |
+| Records repaired | 5,653 read-back verified + 363 re-rendered with concrete titles; 0 mismatched, 0 drifted |
+| Parked | 1,975 out of every campaign, nothing deleted |
+| Final sweep | 6,420 in-campaign leads, **0 sendable without copy**, 0 bare-noun subjects |
+| Occupancy | counts campaigns AND lists (22,763 → 22,500 after rotation), no double counting |
+| Rotation | 263 deleted, 0 failed, each sampled one confirmed absent by ID; 12 historical mis-records reconciled |
+| OOO follow-up campaign | now protected from rotation |
+| Deploy cannot start a run | declined live at 00:54Z |
+| One execution per day | verified on the production table |
+| Cron | restored to `0 3 * * *` |
+
+### Pending DECISIONS — not defects, and not mine
+
+1. **The blank-thread cohort, 5,630 recipients.** Body repaired; the thread
+   subject cannot be. Nothing resent, no sequence restarted. **All nine campaigns
+   remain PAUSED** until this is decided.
+2. **1,975 parked leads.** Clean the title data and re-render, or write off.
+   Re-enrolment also needs proof that a move back preserves sequence position,
+   which is untested.
+3. **Capacity is NOT sustainable.** Rotation freed exactly one run's 263 slots and
+   the safe population is largely spent. Levers: the storage add-on, the
+   1,500-slot reserve, the 1,000 target, or releasing parked contacts.
+4. **The Apollo REQUEST allowance is the real throughput ceiling** whenever
+   capacity allows — 09-26, 09-27, 09-28 and 10-02 all stopped on it while credits
+   stayed far below ceiling. No per-run figure is projected from the 10-02 run,
+   which bought no inventory and ground a four-day-old backlog.
+5. **The pre-enrichment copy check is built and tested but NOT wired in.** Wiring
+   it changes the funnel and its counts.
+
+### Not claimed
+
+The 16,875 already-sent blank emails are **not** recovered. The parked leads are
+**not** fixed. Capacity is **not** sustainable. No budget was raised and no run was
+opened to recover the four lost days.
+
+---
+
+# Continuation 5 — reconciliation, pre-enrichment gate, Apollo diagnosis, reactivation prep
+
+## Step G1 — final reconciliation of run `…b7478fc9`
+
+**Closure state: ENDED** 2026-10-03T00:17:38Z. Lock free, service `Completed`.
+
+| Measure | Value |
+| --- | --- |
+| stop_reason | `target_not_reached:apollo_request_allowance_insufficient` |
+| approvals | **42** |
+| **genuine Instantly creations** (`receipt_kind`) | **0** — every one of the 42 has `(no receipt)` |
+| Airtable rows written | **0** |
+| instantly outbox | 25 `pending`, 17 `blocked` (10 copy + 7 compliance) |
+| airtable outbox | **identical**: 25 `pending`, the SAME 17 blocked |
+| Apollo credits | 56 / 1,600 |
+| Apollo requests | 7,407 / 10,000 |
+| Fantastic requests | 0 |
+| capacity remaining | stored 22,500, free **2,500** |
+
+The Airtable outbox carrying the identical 10 copy-blocked rows is the invariant
+holding in production: **a copy refusal produces no Instantly lead AND no CRM row.**
+
+## Step G2 — the copy check now runs BEFORE paid enrichment
+
+Wired into `OpportunityService.process()` at the existing
+"refuse to spend Apollo credits when the output route cannot produce a lead" gate —
+before `_ensure_employer_facts`, before any contact is bought.
+
+It restates no rule. `challenger_copy_refusal_before_enrichment` builds the lead
+the real flow would build, through `build_approved_lead` with a PROBE contact that
+satisfies the person gates, and then asks
+`instantly_payload_with_copy_state` exactly what approval asks it. It returns ""
+unless the refusal is specifically about copy, so a refusal for any other reason is
+left to the real flow — it can only ever decline to BUY.
+
+**The final guard is untouched and still raises.**
+
+`tests_core/test_copy_refused_before_apollo_is_spent.py`, 10 tests:
+
+- an unrenderable posting is **closed with 0 paid Apollo calls**, no approval row,
+  no outbox row
+- nothing reaches Instantly or Airtable for it (`instantly.leads == {}`,
+  `airtable.records == {}`)
+- a renderable posting **still proceeds and still pays** — the gate declines to
+  buy, it does not stop the pipeline
+- a Control destination is never pre-refused
+- pre-check and final guard return the **identical reason** across five role shapes
+- the final guard still raises when reached directly
+
+One behaviour this changed: an unrenderable posting is now CLOSED before
+enrichment instead of approved-with-blocked-outbox. The approval-time guard
+becomes the backstop. `test_challenger_copy_blocks_not_crashes.py` therefore
+disables the earlier gate explicitly, so each file exercises one gate rather than
+the earlier one standing in for the later.
+
+## Step G3 — the Apollo request limit, diagnosed and the controllable part fixed
+
+Requests are counted as `count(*)` over all reservations **regardless of status**
+(`budget_status`), so a refused call consumes allowance exactly like a served one.
+
+| Operation / status | 10-02 (0 creations) | 09-28 (517 creations) |
+| --- | --- | --- |
+| `people_search` served | **6,000** (0 credits) | 8,714 |
+| `people_search` **refused** | **1,351** | 32 |
+| `person_match` served | 55 (55 credits) | 742 (742 credits) |
+| `organization_enrich` | 1 | 16 served + 4 failed |
+
+Three findings:
+
+1. **`people_search` consumes 99.3% of the request allowance and costs no
+   credits.** The ceiling that binds is requests, not credits — 56 of 1,600
+   credits were used.
+2. **Search-to-match conversion collapsed**: 0.9% (55/6,000) against 8.5%
+   (742/8,714) on 09-28. The run bought no inventory (`fantastic_requests: 0`) and
+   searched a four-day-old backlog where the contacts are not findable. That is
+   the "exhausted backlog" effect, and it is a data condition, not a bug.
+3. **1,351 refused searches were avoidable, and that IS a bug.** `refused` maps
+   from `CREDIT_EXHAUSTED`, `UNAUTHORIZED` and `RATE_LIMITED`; no credits were
+   spent, so they were rate limits. `_handle_global` raised `ProviderWait` for the
+   opportunity in hand on RATE_LIMITED but **recorded nothing** — unlike credit
+   exhaustion and 401, which both call `provider_state.record_refusal`. So the next
+   opportunity's `_guard_provider` saw `serving`, searched, and hit the same limit
+   again, 1,351 times, burning **18% of the day's allowance** for nothing.
+   `Outcome.RATE_LIMITED.global_stop` already existed and **was read nowhere**.
+
+**Fix:** a per-run latch, bounded by the provider's own retry-after (capped at
+900s). Once Apollo says it is throttling, no further Apollo call is issued until
+that instant passes — free searches included, since the throttle is on the
+endpoint. Deliberately NOT `record_refusal`: that would turn a 60-second throttle
+into a six-hour outage, and an existing test asserts "a throttle is not a
+refusal", which still passes.
+
+7 tests, including that the second opportunity does not rediscover the limit, that
+the latch releases exactly when the provider said, that a day-long retry-after is
+capped, and that credit exhaustion and 401 still persist in `provider_state`
+because those outlive one run.
+
+No budget raised, no validation skipped, no cache invented where the evidence did
+not support one: the repeated-search waste here was the rate-limit storm, not
+duplicate queries.
+
+## Step G4 — capacity for the next tick, and rotation headroom
+
+| | |
+| --- | --- |
+| stored | **22,500** (20,519 in campaigns + 1,981 on lists) |
+| free | **2,500** |
+| `room_needed` (target 1,000 + reserve 1,500) | **0** |
+| safe rotation candidates remaining | **11** (134 bounced, 124 replied) |
+
+So the tick does **not** need to rotate and will **not** be rejected for capacity.
+But the rotation safety net is effectively spent: 11 candidates against a future
+deficit that will be ~1,000 once this tick consumes its slots. **Capacity is good
+for ONE tick and then hits a wall.** Nothing was deleted, no reserve reduced, no
+capacity bought.
+
+## Step G5 — selective reactivation: the healthy group is ELEVEN
+
+Classified every one of the **6,376** leads now in the nine campaigns. Healthy
+requires all of: five copy fields present and resolved, a CONCRETE subject (a bare
+function noun is not one), mutable status, no reply, not suppressed, **and never
+contacted** — so the first email it ever receives carries a real subject.
+
+| Bucket | Leads |
+| --- | --- |
+| **HEALTHY** | **11** |
+| BLANK_THREAD, already contacted | **5,352** |
+| INVALID_COPY | 419 |
+| EXCLUDED terminal (completed 551 / bounced 22 / unsubscribed 1) | 574 |
+| EXCLUDED replied | 20 |
+
+Per campaign the healthy are: OPERATIONS 5, CUSTOMER_EXPERIENCE 2, FINANCE 1,
+PEOPLE_HR 1, GTM_SYSTEMS 1, AI_TECHNICAL 1; PRODUCT, ECOMMERCE and
+MARKETING_CREATIVE have none. Sample subjects: `Home Equity Closer`,
+`IT Specialist II`, `Sample Coordinator` — concrete titles.
+
+Consistency check on the 419 INVALID_COPY, because it looked like it contradicted
+the earlier "0 sendable without copy": **all 419 are terminal** (337 bounced, 82
+completed) and **0 have a mutable status**. No contradiction.
+
+## Step G6 — moving a lead out and back DESTROYS its sequence position
+
+Tested on the internal contact, never on a recipient, in a paused campaign.
+Subject: the TEST A lead (`luis@globaltalent.co`) which had executed step 1.
+
+| Field | Before | After move OUT | After move BACK |
+| --- | --- | --- | --- |
+| `status_summary` | `lastStep stepID 0_0_0` | **`{}`** | **`{}`** |
+| `status` | 3 completed | 3 | **1 active** |
+| `campaign` | TEST A | **null** | TEST A |
+| `timestamp_last_contact` | 19:03:36Z | kept | **null** |
+| **sequence position** | `0_0_0` | — | **None** |
+
+**The history is wiped on the way OUT, and the lead returns as a fresh ACTIVE lead
+that would receive step 1 again.** Three consequences:
+
+1. The **1,975 parked leads cannot be returned** to their campaigns without
+   restarting their sequences — every one would be emailed from step 1 again.
+   "Recovering" them means re-contacting them from scratch, which is a business
+   decision, not a technical repair.
+2. Excluding the blank-thread cohort by moving them out is a **one-way door**: safe
+   as an exclusion (nothing deleted, nothing can send) but not reversible.
+3. Therefore selective reactivation **cannot** be done by emptying the existing
+   campaigns of the affected cohort.
+
+### The configuration that DOES work, prepared and not executed
+
+Put the **11 healthy, never-contacted** leads into a NEW campaign carrying the
+same approved 4-step sequence. They have never been emailed, so starting at step 1
+is correct for them and there is no history to lose. The nine existing campaigns
+stay PAUSED and untouched, so the 5,352 blank-thread leads keep their position
+while that decision is pending.
+
+Prepared: `healthy_contacts.jsonl` (11 ids with campaign, email, status, subject),
+`blank_thread_in_campaign.jsonl` (5,352), `invalid_copy_in_campaign.jsonl` (419),
+`excluded_other.jsonl` (594). **FINANCE keeps its prior pause regardless.**
+
+Not executed: no campaign created, no lead moved, nothing activated.
+
+## Step G7 — the 1,975 parked leads against the ORIGINAL sources
+
+role-display/2 recovered only 2 of them, so this asked a different question: does
+the original posting title still CONTAIN a usable title? Most were refused for the
+SHAPE of the whole string, not for the absence of a title:
+
+| original source | refused because | title sitting inside it |
+| --- | --- | --- |
+| `Senior Product Manager, Ad Monetization` | unsafe character (the comma) | Senior Product Manager |
+| `Customer Success Manager - EMEA` | appended qualifier | Customer Success Manager |
+| `Enterprise Solution Architect - Manufacturing Planning` | longer than 48 chars | Enterprise Solution Architect |
+
+Guardrails, so nothing is fabricated:
+
+* every candidate is a **literal, contiguous substring** of the approved
+  `posting_title` or `open_role`, obtained by splitting on separators only. No word
+  is added, reordered or inflected — asserted in code, and re-checked afterwards:
+  **0 of 1,309 displays fail to be a literal substring of their source.**
+* a candidate is accepted only if it ENDS in a role noun **measured** from the
+  6,027 displays that already pass every gate (159 terminal nouns at >=3 uses), so
+  `OLS` and `128501` cannot become a subject. The vocabulary is derived from the
+  population, not written by hand.
+* a bare function noun is never a candidate (0 of 1,309 end in a generic word).
+* every candidate then goes through the real renderer and every QA and content
+  gate. Nothing relaxed.
+
+**Result: 1,309 of 1,686 (77.6%) have a concrete recoverable title.** 650 distinct
+displays; 0 single-word; 0 unresolved tokens; subject == display in all 1,309.
+
+| parked for | recovered | not recovered |
+| --- | --- | --- |
+| unsafe characters | 642 | 230 |
+| appended qualifier | 485 | 53 |
+| longer than 48 chars | 163 | 77 |
+| rd2 ambiguous hold | 19 | 0 |
+| buzzword content gate | 0 | 14 |
+| reads as a posting headline | 0 | 3 |
+
+The 377 that stay parked: 306 have no segment that reads as a title, 66 have no
+candidate segment at all, 5 fail a content gate afterwards. Those are **legitimate**
+refusals — there is no title in the source to recover.
+
+Honesty about quality: 1,120 of the 1,309 end in a noun that terminates **10 or
+more** already-live passing displays. The other **189** are rarer tails
+(`management` 29 vs 4 live, `services` 21 vs 8, `development` 18 vs 8) and read more
+like a department than a person's title — `Promotional Review Operations`,
+`Learning Experience Design and Innovation`. Real text from the employer's own
+posting, but weaker. They are flagged, not silently mixed in.
+
+## Step G8 — the finding that decides it: the parked leads were ALREADY emailed
+
+The pre-hold snapshot only carried campaign/email/lead_id/status, so it could not
+answer this; reading the hold list fresh could.
+
+| | |
+| --- | --- |
+| leads on the hold list | **1,975** |
+| `timestamp_last_contact` set | **1,962** |
+| never contacted | **13** |
+| sequence position surviving | **0** (the move out wiped `status_summary`, exactly as the internal test showed) |
+
+Cross-checked independently against the classified send record: **1,961 of the
+1,975 received at least one `BROKEN_NO_COPY` message**, and **14 have no sent
+message on record**. The two methods agree within one lead (a lead contacted at a
+timestamp with no matching message row).
+
+So the title recovery is real but it does **not** make them resumable:
+
+* they have already received a blank-subject email, and
+* returning them restarts the sequence at step 1 (proved, Step G6).
+
+Of the 1,309 with a recovered title, **1,300 already received a broken email** and
+only **9** did not.
+
+### The 9 clean ones repaired, read-back verified
+
+| email | recovered display |
+| --- | --- |
+| janet.villalobos@sharp.com | Compensation Analyst |
+| juresse.mbambi@wpromote.com | Senior Software Engineer I |
+| robyn.wolf@cpc.com | Scientist II |
+| mags_tierney@harvard.edu | Senior Coordinator |
+| tivy@ccsfundraising.com | Faith-Based Fundraising Consultant |
+| kat.morris@wgu.edu | AI and ML Engineering |
+| amy.meagher@cgoncology.com | Promotional Review Operations |
+| calvin.lai@cgoncology.com | Promotional Review Operations |
+| elizabeth.egel@cgoncology.com | Promotional Review Operations |
+
+9 PATCHed, **9/9 verified identical on read-back**, 0 field mismatch, 0 drift
+(still on the hold list, no campaign, status active, 0 replies), 0 unresolved
+tokens. The last four are the weaker department-like tail and are marked as such.
+
+Nothing was deleted, no reserve reduced, no capacity bought. The remaining
+**1,300** stay parked with a prepared, verified repair set
+(`recovered_from_sources.jsonl`) that is **not applied**, because applying it
+changes nothing until there is a decision about re-contacting people who already
+received a blank email.
+
+## Step G9 — the two red CI checks: both pre-existing on main, both root-caused
+
+PR #135 opened red on `core` and `test`. **The same two failures are present on
+main at 687dd20e (2026-10-02 23:32Z, before this commit)** — main's first CI run
+since 2026-09-09 — so neither came from this change. Both were diagnosed to the
+mechanism and fixed rather than waved through.
+
+### `core` — `test_shared_copy_renderer_has_no_legacy_or_network_dependencies`
+
+`AssertionError: {'requests'}`. It did not reproduce locally
+(`leaked: none`), and the log carried the clue:
+`PytestAssertRewriteWarning: ... ci_no_network`.
+
+`rebuild/run_offline_tests.py` writes a `sitecustomize.py` into a temp directory and
+puts it on `PYTHONPATH` so descendants install the network guard. That
+`sitecustomize` imports `ci_no_network`, which imports `requests.adapters` to refuse
+outbound HTTP. **So every descendant interpreter starts with `requests` already in
+`sys.modules`**, and the test's `python -c` child failed on a module the renderer
+never touched.
+
+Reproduced locally under the harness (`1 failed, 4 passed`), and the fix makes it
+pass under the same harness (`5 passed`, with the `ci_no_network` warning still
+present, so the guard is genuinely active). The fix pins the child's `PYTHONPATH`
+to the repository and sets `PYTHONNOUSERSITE`, **and** measures what the import
+ADDS to `sys.modules`, so a future preload cannot make the check vacuous in either
+direction. The invariant is unchanged; it is now measured correctly. This matters to
+this incident directly: that renderer is what produces the copy.
+
+### `test` — `test_scenario_5_other_governor_limit_still_blocks`
+
+Reproduced locally, so not environmental. First guess (a stale ledger `cycle_key`)
+was **wrong** — the fix did not help. Instrumenting the governor gave the answer:
+
+```
+cycle_rolled    true
+ledger          cycle_key "2026-10-01", cycle_reset_at "2026-10-01T23:39:15.948851+00:00"
+decision        run_budget 3266, reason "pace", days_remaining 30.0
+```
+
+The ledger's cycle came from the **provider header**, overriding the seed. The
+fixture's `x-api-next-billing-date` is the captured `2026-10-01`, which is now in
+the **past**, so every refresh reports a fresh cycle key, the governor rolls the
+cycle and **discards the seeded spend** — and the scenario stopped exercising a
+spent daily allowance, asserting instead against a healed budget of 3,266.
+
+A "next billing date" cannot be a pinned literal. `BILLING_DATE` is now derived at
+import time. The captured value is kept verbatim as `CAPTURED_BILLING_DATE` and
+still feeds `PROVIDER_HEADERS`, because every unit-level use pins `now=NOW`
+(2026-09-03), against which 2026-10-01 IS in the future — those tests are
+time-independent and stay on the real captured evidence.
+
+60 passed, 105 subtests passed. Integrity manifest OK (35 checked, 0 mismatch).
+
+## Step GA — selective reactivation: what is ready and what is missing
+
+### The clean group is 20 contacts
+
+| | |
+| --- | --- |
+| in the nine campaigns, never contacted, copy complete and concrete | **11** |
+| parked, never contacted, title recovered and verified | **9** |
+| **total clean** | **20** |
+
+Everyone else is in one of two cohorts that a technical repair cannot fix:
+**5,352** in-campaign leads already received the blank first email and their thread
+subject cannot be changed; **1,966** parked leads already received a broken email
+and cannot be returned without restarting their sequence.
+
+### Prepared, not executed
+
+The only non-destructive path is a NEW campaign carrying the same approved 4-step
+sequence, holding those 20. They have never been emailed, so starting at step 1 is
+correct and there is no history to lose. The nine existing campaigns stay PAUSED and
+untouched, so the 5,352 keep their position while that decision is pending, and
+**FINANCE keeps its prior pause** regardless of what is decided about the rest.
+
+Files: `healthy_contacts.jsonl` (11), `clean_parked_repair.jsonl` + `clean_parked_verify.json` (9),
+`blank_thread_in_campaign.jsonl` (5,352), `recovered_from_sources.jsonl` (1,309 prepared, 9 applied),
+`unrecoverable_parked.jsonl` (377).
+
+No campaign created. No lead moved. Nothing activated.
+
+## Step GB — the recovery extended to the other 287, and two rules tightened
+
+The first pass covered the 1,686 parked for a `role_display_*` reason. The other
+**287**, parked for `posting_title_cannot_pass_the_gates`, carry the same kind of
+evidence, so the same pass was run on them: **189 of 287 (65.9%)** have a
+recoverable concrete title, 98 do not.
+
+Reviewing the output found two ways a separator split can cut INSIDE a noun phrase,
+and both were narrowed rather than left in:
+
+* **`/` removed from the separator set.** A slash joins alternatives within a
+  phrase: `Principal OT Cybersecurity / ICS Security Architect`. It cost 21 of the
+  287 cohort's recoveries, which were fragments, and 0 of the 1,686 cohort.
+* **a coordination truncated to its first element is rejected.** Measured on
+  `Executive Director and Assistant, Associate or Professor of Medicine, Student
+  Health Services`, whose comma split produced `Executive Director and Assistant`.
+  The guard fires only when the conjunction sits immediately before the final word,
+  so `Legal Coordinator & Executive Assistant` is untouched. It cost 8 of the 1,686.
+
+Final counts, with both guards in force:
+
+| cohort | parked | recoverable | no usable title |
+| --- | --- | --- | --- |
+| `role_display_*` refusals | 1,686 | **1,301** | 385 |
+| `posting_title_cannot_pass_the_gates` | 287 | **189** | 98 |
+| **total** | **1,973** (+2 repaired earlier) | **1,490** | **483** |
+
+All 9 displays already applied were re-checked against the tightened rules:
+**9 unchanged, 0 affected.**
+
+### The clean group is 23
+
+3 more parked leads that were never contacted turned out to have a recoverable
+title in the 287 cohort. Applied and read-back verified: **3/3 identical, 0 field
+mismatch, 0 drift, 0 unresolved tokens**.
+
+| email | recovered display | note |
+| --- | --- | --- |
+| jim.detore@cgoncology.com | Associate Director | |
+| kibay@radialentertainment.com | Senior Director | |
+| jaclyn.velez@ucf.edu | Student Health Services | department-like, flagged |
+
+| | |
+| --- | --- |
+| in the nine campaigns, never contacted, copy complete and concrete | 11 |
+| parked, never contacted, title recovered and verified | **12** |
+| **total clean** | **23** |
+
+2 of the 14 never-contacted parked leads still have no usable title
+(`nichole.downes@wonderful.com`, `jwiedemann@devonbank.com`) and stay parked.
+
+Flagged as department-like rather than a person's title, repaired but marked:
+`Promotional Review Operations` (x3), `AI and ML Engineering`,
+`Student Health Services`. 5 of the 12.
+
+## Step GC — both red CI checks fixed and both suites green through the CI harness
+
+| suite, run exactly as CI runs it | result |
+| --- | --- |
+| `rebuild/run_offline_tests.py tests_core -q` | **2172 passed** |
+| `rebuild/run_offline_tests.py tests -q` | **3754 passed, 1 skipped** (a Windows-only skip; CI's `minimum=3755` counts it) |
+| `ci_check_integrity.py` | 35 checked, 0 mismatch, 0 absent |
+| pyflakes on both touched files | clean |
+
+## Step GD — production state at the close
+
+| | |
+| --- | --- |
+| cron | `0 3 * * *` (restored) |
+| start command | carries the hour guard; last deploy 00:54:22Z `SUCCESS`, start declined |
+| `scheduled_executions` | migration 21 applied, **0 rows** — 2026-10-03 unclaimed, so the 03:00Z tick can claim and run |
+| run lock | `held=0` |
+| nine campaigns | PAUSED, FINANCE keeps its prior pause |
+| next tick capacity | stored 22,500 / free 2,500 / `room_needed` 0 — it can acquire |
+| safe rotation candidates left | 11 |
+
+PR #135 holds the pre-enrichment copy gate, the Apollo rate-limit latch and the two
+CI fixes. It is **not merged**, so none of it is live yet.
+
+### Timing note for the merge
+
+A merge redeploys GTM Core Canary, and a redeploy has been observed to consume the
+following cron tick. Merging well before 03:00Z or after about 03:30Z keeps the tick;
+merging in the few minutes before it risks losing it. Either way the hour guard and
+the day claim stop the deploy itself from starting a run.
+
+## Step GE — two claims of mine corrected, with the code as the evidence
+
+### 1. A deploy INSIDE 03:00–05:59Z on an unclaimed day DOES start a run
+
+I said the hour window plus the day claim closed "a deploy must not start a run".
+That is not true, and the code says so. `cmd_run_daily` checks the window first,
+then takes the lock, then claims the day — and `scheduled_execution.claim` succeeds
+whenever the day has **no row**. So:
+
+| start | window | day claim | result |
+| --- | --- | --- | --- |
+| deploy outside 03–05:59Z | **declines** | not reached | no run (verified live at 00:54Z) |
+| deploy inside the window, day already finished | allows | **ALREADY_COMPLETED** | no run |
+| **deploy inside the window, day unclaimed** | allows | **CLAIMED** | **a full run starts** |
+
+And it is worse than neutral: the deploy-started run **takes the day's claim**, so
+the genuine 03:00Z tick is then refused as the duplicate.
+
+What IS genuinely closed: no day can run twice, and no start outside the window
+happens at all. What is not: inside the window the FIRST start wins, whoever
+triggered it. Closing it needs something that tells a cron start from a deploy
+start, and nothing inside the container does. The available lever is narrowing the
+window to the cron's own minute — a decision about the nightly run's start
+tolerance, not a free fix, so it is **not** done here.
+
+Asserted, not glossed:
+`test_a_deploy_inside_the_window_on_an_UNCLAIMED_day_DOES_start_a_run`.
+
+### 2. "Merging well before 03:00Z keeps the tick" — withdrawn
+
+I have no measurement for that. What is recorded is only that a redeploy has been
+observed to leave the following tick silent. The real next start is the thing to
+observe, and it has not happened yet.
+
+## Step GF — the Apollo wait is now honoured in full
+
+`_handle_global` capped the wait at `min(retry_after, 900)`. Worse, the **adapter**
+already clamped it: `apollo.py` did `min(parsed_retry, 900.0)` when parsing
+`Retry-After`. Measured consequence on the 10-02 budget:
+
+| | |
+| --- | --- |
+| rate-limited `people_search` calls | **1,351** |
+| of those carrying a `retry_after` | **1,351** (100%) |
+| the recorded value, on every one | **exactly 900.0** — the old ceiling |
+
+Every refusal sat on the clamp, so Apollo was asking for **at least** 900s and we
+were shortening it. The raw header value is unrecoverable because the clamp ran
+before the value was recorded.
+
+Both caps are gone. The provider's wait is preserved in full at the adapter and
+honoured in full by the latch; 60s is the fallback only when no header is given, and
+a negative or non-finite value never reads as "retry now". The latch stays **per
+run** and is never written to `provider_state`, so a long wait ends Apollo for that
+run without spending instead of becoming a cross-run outage.
+
+Coverage checked rather than assumed — all three Apollo call sites go through
+`_guard_provider`, which tests the latch first: `enrich_organization` (chargeable),
+`search_people` (free), `match_person` (chargeable).
+
+## Step GG — run `20261002T233322.605777Z-b7478fc9`, reconciled in full
+
+Closed 2026-10-03T00:17:38Z, `stop_reason`
+`target_not_reached:apollo_request_allowance_insufficient`.
+
+| | |
+| --- | --- |
+| approvals | **42** |
+| **confirmed Instantly creations** | **0** — `delivery_receipts` has no row for any of the 42 |
+| Airtable rows written | **0** |
+| Instantly outbox | 25 `pending`, 17 `blocked` |
+| Airtable outbox | 25 `pending`, 17 `blocked` — the SAME 17, reason for reason |
+| requests on `prod-scheduled-20261002` | **7,407** |
+| credits reserved | **56** (55 `person_match` + 1 `organization_enrich`) |
+| capacity at close | stored 22,500 / free 2,500 |
+
+Blocked, identical on both channels: 6 `compliance:unknown_jurisdiction:absent`,
+1 `compliance:uk:not_a_verified_corporate_subscriber`, and 10 copy QA —
+4 `role_display_contains_unsafe_characters`,
+3 `role_display_carries_an_appended_qualifier`,
+3 `role_display_longer_than_48_chars`.
+
+Zero production is the result, and it is reported as the result: the run spent 56
+credits, created nothing, and the 10 copy refusals produced no Instantly lead and no
+CRM row — which is the invariant holding.
+
+## Step GH — every count quoted in this incident, reconciled by ID
+
+### Affected threads: 5,630 → 5,352 → **5,343**
+
+7,777 distinct addresses received at least one blank-subject message. Where each one
+is now:
+
+| | |
+| --- | --- |
+| still in a campaign, mutable — the cohort a decision can act on | **5,343** |
+| moved to the hold list | 1,961 |
+| still in a campaign, terminal (338 bounced, 1 completed) | 339 |
+| still in a campaign, replied (excluded) | 80 |
+| no longer in any campaign or on the hold list | 54 |
+| **total** | **7,777** |
+
+The 5,630 predates the parking and the status changes. And my own 5,352 was **9 too
+high**: those 9 were counted because `timestamp_last_contact` was set, but their
+contact was at 2026-10-02T22:09:27Z — one minute before the external pause, **after**
+the send snapshot ended, and all 9 appear in the post-resume record with verdict
+**OK**. They received correct copy with a real subject, so their thread is fine and
+they are not blank-thread victims. **The cohort is 5,343.**
+
+### Parked: 1,688 + 287, and the 1,974 I once quoted
+
+| | |
+| --- | --- |
+| copy-unusable cohort moved out | 1,688 |
+| generic-subject cohort moved out | 287 |
+| overlap | **0** |
+| union | 1,975 |
+| actually on the hold list, read from the API | **1,975** |
+| in the union but not on the list / on the list but in neither cohort | 0 / 0 |
+
+1,974 was an off-by-one in a running tally. 1,686 of the 1,688 carry a recorded
+reason; the other 2 were repaired immediately.
+
+### Repairable: 1,309 → 1,301 and 210 → 189
+
+| | |
+| --- | --- |
+| copy-unusable cohort | **1,301** of 1,686 |
+| generic-subject cohort | **189** of 287 |
+| overlap | **0** |
+| total distinct recoverable | **1,490** |
+| applied and read-back verified | **12** |
+| recoverable but deliberately NOT applied | 1,478 |
+
+Both drops are refusals I added after reading the output, never recoveries lost to a
+bug: 8 from rejecting a coordination cut at its first element, 21 from dropping `/`
+as a separator. All 12 applied leads were re-checked against the tightened rules:
+**12 unchanged, 0 affected.**
+
+## Step GI — the reactivation proposal, per campaign and function
+
+The routing is **read from the code** (`CAMPAIGN_BY_FUNCTION`), not hand-written. My
+first attempt did hand-write it and wrongly reported five leads as unroutable; the
+real map folds ten function keys onto the nine campaigns
+(`customer_success`/`customer_support` to CUSTOMER_EXPERIENCE, `gtm_revenue` to
+GTM_SYSTEMS, `engineering` to AI_TECHNICAL, `marketing` to MARKETING_CREATIVE).
+
+23 clean candidates, **5 held back** on instruction until someone confirms they are
+real job titles: `Promotional Review Operations` (x3), `AI and ML Engineering`,
+`Student Health Services`. **18 proposed:**
+
+| campaign | contacts |
+| --- | --- |
+| OPERATIONS | 7 |
+| PEOPLE_HR | 3 |
+| AI_TECHNICAL | 2 |
+| CUSTOMER_EXPERIENCE | 2 |
+| **FINANCE** | **2** — listed for completeness, its pause is kept |
+| GTM_SYSTEMS | 1 |
+| PRODUCT | 1 |
+
+**0 of the 18 route to a campaign other than the one they already sat in**, so no
+re-assignment is involved. An earlier run of this check reported 4 disagreements;
+that was my own comparison of a campaign name against a campaign id, not a finding.
+
+Every one of the 18 is absent from the send record entirely — asserted, must be 0,
+and is 0. Files: `reactivation_proposal.jsonl` (18),
+`reactivation_held_back.jsonl` (5).
+
+Nothing executed: no campaign created, no lead moved, nothing unpaused.
+
+## Step GJ — cron paused before the tick, and the deployment that did not happen
+
+| | |
+| --- | --- |
+| run lock at 02:40:52Z | `held=0` |
+| `cronSchedule` set to | `null`, applied and **verified** `None` at 02:41:17Z |
+| margin before the 03:00Z tick | 19 minutes |
+
+Then the deployment check, and it found a mistake of mine.
+
+**PR #135 was merged into `main` (`9045ec67`), but the Core deploys from
+`feat/rebuild-core`.** Every other PR in this incident targeted `feat/rebuild-core`
+(#129–#134). So the merge deployed only the two services that track `main`:
+
+| service | branch | deployment | start command |
+| --- | --- | --- | --- |
+| GTM | `main` | `5d84dff5` 02:40:25Z | prints `TGTC_PAUSED_PENDING_CREDITS` and exits |
+| GTM Approved Sync | `main` | `31ae96b3` 02:40:25Z | prints `TGTC_PAUSED_PENDING_CREDITS` and exits |
+| **GTM Core Canary 1000** | `feat/rebuild-core` | **`a5ce3b40` 00:54:22Z, commit `8242de24`** | the guarded daily controller |
+
+Both logs confirm it: `Starting Container` then the paused line, nothing else. **No
+unexpected run started, nothing spent, nothing enrolled.**
+
+So nothing from #135 is live. The effective Core commit is still `8242de24` from
+#134. [TGTChq/GTM#136](https://github.com/TGTChq/GTM/pull/136) carries the same four
+commits onto the branch that actually deploys. Checked before opening it:
+`git diff --diff-filter=A HEAD origin/feat/rebuild-core` is **empty**, so nothing
+exists on the deploy branch that this branch lacks, and the only commits it has that
+this branch does not are the merge commits of my own earlier PRs.
+
+## Step GK — the 25 pending deliveries, diagnosed
+
+| | |
+| --- | --- |
+| Instantly rows `pending` | 25, `last_error = campaign_status_2` |
+| Airtable rows `pending` | 25, `last_error = awaiting_instantly` |
+| attempts / lease | 1 / none held |
+| `available_at` | 01:16–01:17Z, already past |
+
+**Why they did not process: our own rule, not a provider limitation.**
+`delivery.py` deferred on any campaign status other than 1, and the nine campaigns
+are paused. The rows were **deferred** — not blocked, not failed — with
+`available_at = now + 1h`, which is the design: they drain once a campaign is
+reachable. The last delivery drain of the run reported `{}` for both channels
+because it ran at 00:17:38Z while those rows were not due until 01:16:57Z. Nothing
+has drained them since, because only a run drains and the Core cron has not fired.
+
+The Airtable half waiting on `awaiting_instantly` is the CRM invariant working: a
+record only after a genuine Instantly creation.
+
+### Pre-flight on the real 25, which found that 2 are NOT eligible
+
+| | |
+| --- | --- |
+| all five copy fields present | **25 / 25** |
+| unresolved tokens | **0** |
+| `skip_if_in_workspace` set | 25 / 25 |
+| distinct addresses | 25 (no internal duplication) |
+| target campaigns | OPERATIONS 14, GTM_SYSTEMS 4, CUSTOMER_EXPERIENCE 3, AI_TECHNICAL 2, MARKETING_CREATIVE 1, ECOMMERCE 1 — **none to FINANCE** |
+
+But reading the 25 subjects found **2 bare function nouns**, which is exactly what the
+287 parked leads were parked for:
+
+| outbox | approval | subject | original posting title |
+| --- | --- | --- | --- |
+| 18122 | 9070 | `customer support role` | `ISSM / IT Support` |
+| 18150 | 9084 | `operations role` | `TELLER/CUSTOMER SERVICE REP` |
+
+Both posting titles do pass `role_display_send_safe` unchanged, so a title IS
+available — but `ISSM / IT Support` and `TELLER/CUSTOMER SERVICE REP` read badly as a
+subject line against the 591 reference leads, so both are **held back** with the
+candidate recorded, the same treatment as the five department-like displays.
+
+**So 23 of the 25 are eligible, not 25.** The other 23 carry concrete titles
+(`Microsoft Cloud Engineer`, `Plant Accountant`, `Autism Clinic Service Coordinator`,
+`Software Engineer II`, and so on).
+
+This also exposes a gap worth stating separately: **the production gates do not reject
+a bare function-noun subject.** `role_display_send_safe` checks length, characters,
+appended qualifiers and headlines, and buzzword gates read the rendered copy — none of
+them objects to `operations role`. These two rows were created on 2026-10-02, so the
+pipeline can still produce such subjects today. The 363 I re-rendered earlier were a
+repair, not a gate. Closing it would change the funnel, so it is flagged, not changed.
+
+### A paused campaign accepts leads and sends nothing — tested, not assumed
+
+First attempt was inconclusive and said so: `POST /leads` returned 200 with the
+**existing** lead id, because the address was already in the workspace, so nothing
+new was created and the campaign had no reason to change. Repeated with a
+plus-address on the same internal mailbox, which is a genuinely new lead:
+
+| | before | after |
+| --- | --- | --- |
+| campaign status | 2 PAUSED | **2 PAUSED** |
+| `emails_sent` | 1 | **1** |
+| lead contacted | — | **no** (`timestamp_last_contact` null, step `None`) |
+
+Probe lead then deleted, re-read returned **404**. No residue, and the slot returned.
+
+### The recovery path, prepared and not run
+
+`python -m tgtc_core deliver` drains the existing outbox and nothing else.
+`cmd_deliver` claims **no budget, no day, no run lock** and passes no window guard.
+
+- **no enrichment repeated** — the complete payload is already in
+  `delivery_outbox.payload_json`; the drain makes zero Apollo and zero Fantastic calls
+- **no duplicates** — the idempotency key, plus `resolve_membership` on any retry
+  (`attempts > 1`), which records an existing lead as `reconciled` rather than
+  creating one, plus `skip_if_in_workspace` in the payload
+- **no new budget** — delivery only
+- the Airtable rows carry their own deferral, so they need a **second** pass later,
+  not the same sweep. Proved in the test rather than assumed.
+
+Delivering into a paused campaign is gated behind
+`TGTC_DELIVER_INTO_PAUSED_CAMPAIGNS`, **off by default**, because those leads do send
+the moment anyone resumes the campaign — that is an operational choice, not a repair.
+COMPLETED (3) is deliberately excluded: adding leads to a drained campaign flips it
+ACTIVE and it starts sending.
+
+7 tests in `tests_core/test_deliver_into_a_paused_campaign.py`, including that the
+default still defers, that exactly one create call is made and a second drain is a
+no-op, that an existing lead is reconciled rather than recreated, that the Airtable
+row follows the creation, that only PAUSED is opened up and never COMPLETED, and that
+only the literal value `1` counts as set.
+
+## Step GL — exact termination of the run, and the 1,351 verified as real 429s
+
+From the `daily/end` record:
+
+```
+stop_reason   target_not_reached:apollo_request_allowance_insufficient
+target 1000   shortfall 1000   target_met false   rounds 4
+blocks        []                      <- no acquisition block was ever attempted
+drains        [{phase: backlog, cycles: 4, outcome: drained, fresh_after: 0}]
+rotation      {needed: 0, reason: enough_room, free_before: 2500, stored_before: 22500}
+```
+
+`tgtc_core/daily.py` compares the remaining request allowance against the projected
+requests for the next block: with `10,000 − 7,407 = 2,593` left, the projection
+exceeded it, so the controller **declined to start a block at all**. A pre-spend
+refusal, not a failure — which is why `blocks` is empty and the shortfall is the full
+target.
+
+The 1,351 refusals, separated as asked:
+
+| | HTTP | error_class | n | distinct receipts |
+| --- | --- | --- | --- | --- |
+| rate limit | **429** | `rate_limited` | **1,351** | 1 — `retry_after: 900.0` on every one |
+| local budget refusal | — | — | **0** | — |
+| any other rejection | — | — | **0** | — |
+
+There is no attempt in the whole run with a null `http_status`, so nothing was a
+local refusal dressed up as a provider one. Every single refusal reached Apollo and
+came back 429.
+
+## Step GM — the 03:00Z tick of 2026-10-03 was OMITTED
+
+Recorded as fact. **No recovery launched**, per instruction.
+
+The cron was paused at 02:41:17Z, 19 minutes before the scheduled minute, so the
+tick could not fire. Verified at 03:02:10Z, four independent ways:
+
+| check | result |
+| --- | --- |
+| `scheduled_executions` for 2026-10-03 | **0 rows** — the day was never claimed |
+| `run_log` entries after 02:55Z | **0** |
+| provider attempts after 02:55Z | **0** |
+| run lock | `held=0` |
+| the 25 + 25 pending outbox rows | **untouched** |
+
+So no production happened on 2026-10-03, by deliberate choice, and the day's budget
+namespace `prod-scheduled-20261003` is unused and intact. A recovery, if one is ever
+authorised, must name itself explicitly through `TGTC_RUN_RECOVER` and would spend
+that day's remaining allowance — it is not started automatically and was not started
+here.
+
+## Step GN — CI on the PR head, and why it needed dispatching
+
+`.github/workflows/ci.yml` triggers on `pull_request: branches: [main]`. PR #136
+targets `feat/rebuild-core`, so **no CI ran on it automatically** —
+`gh pr checks 136` reported "no checks reported on the branch". The workflow also
+accepts `workflow_dispatch`, so CI was run deliberately against the branch head.
+
+| | |
+| --- | --- |
+| run | `37092615371` |
+| commit | `77bdef4` (the PR's head) |
+| `core` | **success** |
+| `test` | **success** |
+
+Pushes to `feat/rebuild-core` DO trigger CI, so the merge itself will produce a
+second, independent signal.
+
+## Step GO — an inert Core start, prepared, exercised and verified INSIDE the window
+
+The reason this was needed: `cronSchedule: null` does **not** stop a
+deployment-started run. A deployment starts the service's command regardless of the
+schedule, we are inside 03:00–05:59Z so the hour guard allows it, and
+`scheduled_executions` is empty so the day claim allows the first start. Merging
+#136 as things stood would have begun a full acquisition run.
+
+What was done, in order:
+
+1. **The original start command was saved verbatim** to
+   `core_start_command_backup.json` (713 characters). It references only
+   `TGTC_RUN_KIND`, `KIND`, `H` and `BID` — no secret values, so nothing sensitive
+   was written to disk. It is the `sh -ec` wrapper that derives the run kind from the
+   UTC hour, then runs `migrate`, then `budget`, then `run-daily --target 1000`.
+2. **The start command was replaced** with
+   `sh -ec 'echo TGTC_CORE_INERT: ...; echo no migrate, no budget, no run-daily'`.
+   A start-command change alone did **not** create a deployment, so at that point it
+   was configured but unexercised — stated as such rather than claimed as verified.
+3. **A second, independent guard was added**: `TGTC_RUN_WINDOW_UTC=closed`.
+   `start_allowed` fails closed on an unreadable window
+   (`window_unreadable:'closed'`), so even if a deployment somehow ran the ORIGINAL
+   command it would decline before the lock, the budget claim, the day claim and any
+   spend. Verified in code: `(False, "window_unreadable:'closed'")`.
+4. The variable change **did** create a deployment, which exercised the inert start.
+
+Deployment `10892838`, 2026-10-03T03:25:05Z, commit `8242de24`, status SUCCESS, and
+its entire log is:
+
+```
+TGTC_CORE_INERT: deployment start suppressed for the copy-incident merge
+no migrate, no budget, no run-daily
+Starting Container
+```
+
+No `run kind=...` line, no migrate, no budget, no run-daily. Confirmed in the
+database at 03:26Z:
+
+| check | result |
+| --- | --- |
+| `scheduled_executions` rows | **0** |
+| `run_log` entries after 03:20Z | **0** |
+| provider attempts after 03:20Z | **0** |
+| reservations on `prod-scheduled-20261003` | **0** |
+| `budget_claims` for `prod-scheduled-20261003` | **0** |
+| the 25 + 25 pending outbox rows | untouched |
+| run lock | `held=0` |
+
+One honest footnote: a `prod-scheduled-20261003` budget ROW exists, created
+00:54:47Z. That was the 00:54Z deployment, whose start command creates the budget
+before `run-daily` runs; `run-daily` was then declined by the hour guard. The
+namespace has 0 reservations and 0 claims, so it is unused, not spent.
+
+**So a deployment of #136 now cannot start a run**, proven rather than argued, by two
+independent mechanisms.
+
+## Step GP — the authorised recovery, built with the guarantees that were asked for
+
+The drain cannot run from this machine: `TGTC_DATABASE_URL` points at
+`postgres-core.railway.internal`, which does not resolve outside Railway
+(`getaddrinfo failed`), Postgres Core exposes no public TCP proxy (no
+`RAILWAY_TCP_PROXY_DOMAIN`, no `DATABASE_PUBLIC_URL`), and `railway ssh` into the
+Core refuses because a cron container is `exited`. So the recovery has to run as a
+deployment command, which means committed, reviewed code rather than an ad-hoc
+script.
+
+`tgtc_core/services/delivery_recovery.py` plus the
+`python -m tgtc_core recover-deliveries` subcommand:
+
+* **mutual exclusion** — the command takes the production run lock before reading or
+  writing anything, and releases it in a `finally`. A concurrent run or drain is
+  refused with `another production run holds the run lock`.
+* **the named rows are withheld first**, before any delivery, with the reason
+  `recovery_hold:withheld_by_operator` recorded in `blocked_reason`. A row that has
+  already moved is reported as `not_pending_anymore` rather than forced.
+* **revalidation** — every remaining row is re-checked and blocked with a named
+  reason if it fails. The copy contract is **not restated**: `copy_block_reason` is
+  the production rule, asked exactly as approval asks it, so a Control payload is not
+  refused for lacking rendered copy and a Challenger payload gets the same named
+  refusal it would get anywhere else. Two checks are added on top and only for this
+  recovery: the destination must be on the configured allow-list, and a bare
+  function-noun subject is withheld as
+  `recovery_hold:subject_is_a_bare_function_noun`.
+* **verification by id** — for every row that reports delivered, the genuine receipt
+  is read from `delivery_receipts` and the lead is then fetched back from the
+  provider by that `external_id`. A read-back that fails is reported in `unverified`,
+  never assumed.
+* **Airtable strictly second** — the Instantly channel is drained alone, then
+  Airtable. Its existing `awaiting_instantly` gate means a CRM row can only proceed
+  where a genuine creation exists.
+* **no enrichment** — the payload is already on the row, so nothing calls Apollo or
+  Fantastic. Asserted: `request_attempts` is unchanged across a recovery.
+
+The generic-subject rule lives in the recovery and **not** in `DeliveryService`, on
+purpose: the production gates do not reject a bare function noun, and changing that
+would change the funnel. This is a recovery standard applied to this recovery.
+
+15 tests in `tests_core/test_recover_deferred_deliveries.py`, including that a
+withheld row is never delivered and never produces an Airtable record, that a failed
+read-back is reported rather than assumed, that exactly one create call is made and a
+second recovery is a no-op, and that the recovery spends no Apollo and no Fantastic.
+
+## Step GQ — the restore procedure, and why its last step waits for 06:00Z
+
+The Core must end on its original start command and `0 3 * * *`, reached without
+triggering acquisition. Working through it honestly, there is exactly one ordering
+that never allows a start, and its final step cannot happen inside the window.
+
+| step | what redeploys | what the container would run | start decision |
+| --- | --- | --- | --- |
+| 1. run the recovery as the start command | yes | `recover-deliveries` only | n/a — not `run-daily` |
+| 2. restore the original start command | yes | the real controller | **declined**, `TGTC_RUN_WINDOW_UTC=closed` |
+| 3. restore `0 3 * * *` | no — a cron change alone does not deploy | — | — |
+| 4. delete `TGTC_RUN_WINDOW_UTC` | yes | the real controller | hour ≥ 06:00Z → **declined**, outside `3-5` |
+
+Step 4 is the one that cannot be done inside 03:00–05:59Z: with the window back to
+its default and the day unclaimed, that redeploy's start would be allowed and a full
+run would begin. Doing it at or after 06:00Z makes the hour guard decline it, which
+is the whole point of the guard.
+
+So between step 2 and step 4 the Core sits on its real start command with the window
+closed — unable to start at all, which is operationally the same as the cron being
+paused, and it costs nothing: the 2026-10-03 tick is already recorded as omitted and
+the next scheduled tick is 2026-10-04 03:00Z.
+
+Nothing here is a judgement call left open. The commands are fixed; only the clock
+gates step 4.

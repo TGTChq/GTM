@@ -526,6 +526,46 @@ _PROBE_CONTACT = {"first_name": "Probe", "last_name": "Contact",
                   "linkedin_url": "", "apollo_person_id": ""}
 
 
+def challenger_copy_refusal_before_enrichment(
+    *, posting: Dict[str, Any], classification: Dict[str, Any], employer: Dict[str, Any],
+    function_key: str, campaign_id: str, allowed_campaign_ids: Sequence[str],
+    signing_key: str, now: Optional[datetime] = None,
+    env: Optional[Mapping[str, str]] = None) -> str:
+    """The copy refusal, decided from POSTING facts before a contact is paid for.
+
+    Apollo credits buy a CONTACT, and that happens before the copy gate runs at
+    approval -- so a lead the gate refuses has already cost its credits. Every gate
+    the refusal depends on reads posting facts: the role display is ``open_role``
+    and the content gates read ``role_focus``. Only the contact's name is missing,
+    and the copy never depends on it.
+
+    This does not restate any rule. It builds the lead the real flow would build,
+    via ``build_approved_lead``, with a PROBE contact that satisfies the person
+    gates, and then asks ``instantly_payload_with_copy_state`` exactly what it is
+    asked at approval. The final guard is untouched and still runs on the real lead.
+
+    Returns "" unless the refusal is specifically about COPY. A refusal for any
+    other reason is left for the real flow to decide after enrichment, so this can
+    only ever decline to BUY -- it never substitutes for another verdict.
+    """
+    domain = str(employer.get("domain") or "").strip().lower()
+    if not domain:
+        return ""
+    probe = dict(_PROBE_CONTACT)
+    probe.update({"id": 0, "apollo_person_id": "probe", "title": probe.pop("buyer_title"),
+                  "email": "probe@" + domain, "email_status": "verified",
+                  "linkedin_url": "https://linkedin.com/in/probe",
+                  "contact_gate_passed": True, "email_gate_passed": True,
+                  "email_alignment": "EXACT_EMPLOYER_DOMAIN"})
+    built = build_approved_lead(
+        posting=posting, classification=classification, employer=employer, person=probe,
+        function_key=function_key, campaign_id=campaign_id,
+        allowed_campaign_ids=allowed_campaign_ids, signing_key=signing_key, now=now, env=env)
+    if not isinstance(built, ApprovedLead):
+        return ""
+    return challenger_copy_refusal_from_posting(built.lead)
+
+
 def challenger_copy_refusal_from_posting(lead_facts: Dict[str, Any]) -> str:
     """The refusal the FINAL guard would give, decided BEFORE a contact is bought.
 
