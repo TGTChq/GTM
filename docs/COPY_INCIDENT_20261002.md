@@ -2583,3 +2583,148 @@ namespace `prod-scheduled-20261003` is unused and intact. A recovery, if one is 
 authorised, must name itself explicitly through `TGTC_RUN_RECOVER` and would spend
 that day's remaining allowance — it is not started automatically and was not started
 here.
+
+## Step GN — CI on the PR head, and why it needed dispatching
+
+`.github/workflows/ci.yml` triggers on `pull_request: branches: [main]`. PR #136
+targets `feat/rebuild-core`, so **no CI ran on it automatically** —
+`gh pr checks 136` reported "no checks reported on the branch". The workflow also
+accepts `workflow_dispatch`, so CI was run deliberately against the branch head.
+
+| | |
+| --- | --- |
+| run | `37092615371` |
+| commit | `77bdef4` (the PR's head) |
+| `core` | **success** |
+| `test` | **success** |
+
+Pushes to `feat/rebuild-core` DO trigger CI, so the merge itself will produce a
+second, independent signal.
+
+## Step GO — an inert Core start, prepared, exercised and verified INSIDE the window
+
+The reason this was needed: `cronSchedule: null` does **not** stop a
+deployment-started run. A deployment starts the service's command regardless of the
+schedule, we are inside 03:00–05:59Z so the hour guard allows it, and
+`scheduled_executions` is empty so the day claim allows the first start. Merging
+#136 as things stood would have begun a full acquisition run.
+
+What was done, in order:
+
+1. **The original start command was saved verbatim** to
+   `core_start_command_backup.json` (713 characters). It references only
+   `TGTC_RUN_KIND`, `KIND`, `H` and `BID` — no secret values, so nothing sensitive
+   was written to disk. It is the `sh -ec` wrapper that derives the run kind from the
+   UTC hour, then runs `migrate`, then `budget`, then `run-daily --target 1000`.
+2. **The start command was replaced** with
+   `sh -ec 'echo TGTC_CORE_INERT: ...; echo no migrate, no budget, no run-daily'`.
+   A start-command change alone did **not** create a deployment, so at that point it
+   was configured but unexercised — stated as such rather than claimed as verified.
+3. **A second, independent guard was added**: `TGTC_RUN_WINDOW_UTC=closed`.
+   `start_allowed` fails closed on an unreadable window
+   (`window_unreadable:'closed'`), so even if a deployment somehow ran the ORIGINAL
+   command it would decline before the lock, the budget claim, the day claim and any
+   spend. Verified in code: `(False, "window_unreadable:'closed'")`.
+4. The variable change **did** create a deployment, which exercised the inert start.
+
+Deployment `10892838`, 2026-10-03T03:25:05Z, commit `8242de24`, status SUCCESS, and
+its entire log is:
+
+```
+TGTC_CORE_INERT: deployment start suppressed for the copy-incident merge
+no migrate, no budget, no run-daily
+Starting Container
+```
+
+No `run kind=...` line, no migrate, no budget, no run-daily. Confirmed in the
+database at 03:26Z:
+
+| check | result |
+| --- | --- |
+| `scheduled_executions` rows | **0** |
+| `run_log` entries after 03:20Z | **0** |
+| provider attempts after 03:20Z | **0** |
+| reservations on `prod-scheduled-20261003` | **0** |
+| `budget_claims` for `prod-scheduled-20261003` | **0** |
+| the 25 + 25 pending outbox rows | untouched |
+| run lock | `held=0` |
+
+One honest footnote: a `prod-scheduled-20261003` budget ROW exists, created
+00:54:47Z. That was the 00:54Z deployment, whose start command creates the budget
+before `run-daily` runs; `run-daily` was then declined by the hour guard. The
+namespace has 0 reservations and 0 claims, so it is unused, not spent.
+
+**So a deployment of #136 now cannot start a run**, proven rather than argued, by two
+independent mechanisms.
+
+## Step GP — the authorised recovery, built with the guarantees that were asked for
+
+The drain cannot run from this machine: `TGTC_DATABASE_URL` points at
+`postgres-core.railway.internal`, which does not resolve outside Railway
+(`getaddrinfo failed`), Postgres Core exposes no public TCP proxy (no
+`RAILWAY_TCP_PROXY_DOMAIN`, no `DATABASE_PUBLIC_URL`), and `railway ssh` into the
+Core refuses because a cron container is `exited`. So the recovery has to run as a
+deployment command, which means committed, reviewed code rather than an ad-hoc
+script.
+
+`tgtc_core/services/delivery_recovery.py` plus the
+`python -m tgtc_core recover-deliveries` subcommand:
+
+* **mutual exclusion** — the command takes the production run lock before reading or
+  writing anything, and releases it in a `finally`. A concurrent run or drain is
+  refused with `another production run holds the run lock`.
+* **the named rows are withheld first**, before any delivery, with the reason
+  `recovery_hold:withheld_by_operator` recorded in `blocked_reason`. A row that has
+  already moved is reported as `not_pending_anymore` rather than forced.
+* **revalidation** — every remaining row is re-checked and blocked with a named
+  reason if it fails. The copy contract is **not restated**: `copy_block_reason` is
+  the production rule, asked exactly as approval asks it, so a Control payload is not
+  refused for lacking rendered copy and a Challenger payload gets the same named
+  refusal it would get anywhere else. Two checks are added on top and only for this
+  recovery: the destination must be on the configured allow-list, and a bare
+  function-noun subject is withheld as
+  `recovery_hold:subject_is_a_bare_function_noun`.
+* **verification by id** — for every row that reports delivered, the genuine receipt
+  is read from `delivery_receipts` and the lead is then fetched back from the
+  provider by that `external_id`. A read-back that fails is reported in `unverified`,
+  never assumed.
+* **Airtable strictly second** — the Instantly channel is drained alone, then
+  Airtable. Its existing `awaiting_instantly` gate means a CRM row can only proceed
+  where a genuine creation exists.
+* **no enrichment** — the payload is already on the row, so nothing calls Apollo or
+  Fantastic. Asserted: `request_attempts` is unchanged across a recovery.
+
+The generic-subject rule lives in the recovery and **not** in `DeliveryService`, on
+purpose: the production gates do not reject a bare function noun, and changing that
+would change the funnel. This is a recovery standard applied to this recovery.
+
+15 tests in `tests_core/test_recover_deferred_deliveries.py`, including that a
+withheld row is never delivered and never produces an Airtable record, that a failed
+read-back is reported rather than assumed, that exactly one create call is made and a
+second recovery is a no-op, and that the recovery spends no Apollo and no Fantastic.
+
+## Step GQ — the restore procedure, and why its last step waits for 06:00Z
+
+The Core must end on its original start command and `0 3 * * *`, reached without
+triggering acquisition. Working through it honestly, there is exactly one ordering
+that never allows a start, and its final step cannot happen inside the window.
+
+| step | what redeploys | what the container would run | start decision |
+| --- | --- | --- | --- |
+| 1. run the recovery as the start command | yes | `recover-deliveries` only | n/a — not `run-daily` |
+| 2. restore the original start command | yes | the real controller | **declined**, `TGTC_RUN_WINDOW_UTC=closed` |
+| 3. restore `0 3 * * *` | no — a cron change alone does not deploy | — | — |
+| 4. delete `TGTC_RUN_WINDOW_UTC` | yes | the real controller | hour ≥ 06:00Z → **declined**, outside `3-5` |
+
+Step 4 is the one that cannot be done inside 03:00–05:59Z: with the window back to
+its default and the day unclaimed, that redeploy's start would be allowed and a full
+run would begin. Doing it at or after 06:00Z makes the hour guard decline it, which
+is the whole point of the guard.
+
+So between step 2 and step 4 the Core sits on its real start command with the window
+closed — unable to start at all, which is operationally the same as the cron being
+paused, and it costs nothing: the 2026-10-03 tick is already recorded as omitted and
+the next scheduled tick is 2026-10-04 03:00Z.
+
+Nothing here is a judgement call left open. The commands are fixed; only the clock
+gates step 4.

@@ -360,6 +360,38 @@ def cmd_deliver(args) -> int:
     return 0
 
 
+def cmd_recover_deliveries(args) -> int:
+    """Deliver approved outbox rows that a PAUSED campaign deferred, under the run lock.
+
+    Delivery only: no acquisition, no enrichment, no budget claim, no day claim. The
+    payload is already stored on the row, so nothing here calls Apollo or Fantastic.
+    Rows named with --withhold are blocked first, and any row whose copy no longer
+    revalidates is blocked with a named reason rather than delivered.
+    """
+    _require_spend_acknowledgement(args.i_understand_spend)
+    s = _settings()
+    from .db.connection import acquire_run_lock
+    from .services import delivery_recovery
+
+    # Mutual exclusion for the whole operation, so no run or other drain can touch
+    # the same rows. Taken BEFORE anything is read or written.
+    run_lock = acquire_run_lock(args.database_url or s.database_url, connector=connect)
+    if run_lock is None:
+        print("recover-deliveries declined: another production run holds the run lock")
+        return 0
+    try:
+        conn = connect(args.database_url or s.database_url)
+        r = _runner(conn, s, allow_spend=args.i_understand_spend)
+        report = delivery_recovery.recover(
+            conn, r, withhold_ids=tuple(args.withhold or ()), max_items=args.max_items,
+            now=r.now())
+        r._log("recover", "deliveries", report)
+        print(json.dumps(report, indent=2, default=str))
+    finally:
+        run_lock.close()
+    return 0
+
+
 def cmd_budget(args) -> int:
     from .services.spend_budget import BudgetLimits, create_budget
 
@@ -877,7 +909,7 @@ def main(argv=None) -> int:
                      ("run-target", cmd_run_target), ("work", cmd_work),
                      ("deliver", cmd_deliver), ("ledger", cmd_ledger), ("import-airtable", cmd_import_airtable),
                      ("prune", cmd_prune), ("demo", cmd_demo), ("check-db", cmd_check_db), ("budget", cmd_budget),
-                     ("run-daily", cmd_run_daily)):
+                     ("run-daily", cmd_run_daily), ("recover-deliveries", cmd_recover_deliveries)):
         p = sub.add_parser(name)
         p.add_argument("--database-url", default="")
         p.add_argument("--max-items", type=int, default=10000 if name in ("run-target", "run-daily") else 1000)
@@ -887,6 +919,9 @@ def main(argv=None) -> int:
         p.add_argument("--i-understand-spend", action="store_true", help="required for cycle/work/deliver against real providers")
         if name == "work":
             p.add_argument("--kind", required=True, choices=("resolve_identity", "classify", "qualify_opportunity"))
+        if name == "recover-deliveries":
+            p.add_argument("--withhold", type=int, action="append", default=[],
+                           help="outbox id to block BEFORE delivering (repeatable)")
         if name == "run-target":
             p.add_argument("--target", type=int, default=None)
             p.add_argument("--max-rounds", type=int, default=None)
