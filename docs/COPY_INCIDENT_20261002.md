@@ -3479,6 +3479,11 @@ the reason it was obvious is that all nine were identical.
 | floor kept for the daily run | 1,500 |
 | **available to the recovery now** | **978** |
 
+**This paragraph is wrong; see "Corrections and the move route" below.** It reasons about
+5,934 recipients against 978 slots without asking whether a recipient needs a slot at all.
+Measured afterwards, 5,892 of them do not: a move costs no storage, and only 42 need a new
+record. Kept because the reasoning is what the measurement corrected.
+
 So the queue does not fit, and it was never going to. It drains in batches of 150 per
 hourly tick — sized for the hour, because each contact costs two provider calls against a
 key that allows 20 a minute, and the Instantly client has no rate handling of its own —
@@ -3537,3 +3542,141 @@ letting them through — and none of them carries anybody else's.
   send before then: the approved schedule has the weekend off.
 * Until a real message has been received and read, this is implemented and armed, not
   proved. Enrolling is not sending, and 2026-09-21 is what it costs to confuse them.
+
+---
+
+# Corrections and the move route, 2026-10-03 later
+
+Three things published earlier in this ledger were wrong. They are corrected here rather
+than edited away, because the reasoning that produced them is the useful part.
+
+## 1. "The queue does not fit, and it was never going to" — WRONG
+
+It fits. The section above reasoned about 5,934 recipients against 978 available slots
+without ever asking whether a recipient needs a slot at all.
+
+Measured with our own mailbox, before a single real contact was touched: **a move
+relocates a stored contact and costs nothing.** The recovery campaign went 1 → 0 and the
+hold list 1,975 → 1,976 while the total stayed the same, and the lead kept its id, its
+address and its data. Counted with the endpoints that answer immediately, because
+`/campaigns/analytics` did not move at all for over a minute while a lead was created and
+moved twice — which is also why the first attempt at this measurement reported "a create
+costs 0 slots", an artifact of a stale read.
+
+| route | recipients | storage |
+| --- | --- | --- |
+| move from one of the nine paused campaigns | 4,309 | none |
+| move from the incident hold list | 1,337 | none |
+| create, because rotation already removed the record | 42 | one slot each |
+| withheld: bounced at the provider | 246 | — |
+| **authorised** | **5,934** | **42 slots**, against 978 free |
+
+So the recovery needs **42** slots. Saying it fits because "978 free plus 3,220 rotation
+candidates covers 5,934" would have been wrong by 5,892 — that arithmetic only matters
+because almost nobody needs a slot. Rotation is configured and will not be needed.
+
+## 2. The reasons summed to 1,845 against 1,843 excluded — WRONG, and 518 was 517
+
+One mistake, counted twice over. The published table used the selector's reason counts
+taken BEFORE de-duplication (1,140 rows, one of which was a second `people` row for an
+address already counted), listed that duplicate AGAIN as its own line, and added
+FINANCE's 704 on top: 1,140 + 704 + 1 = 1,845. The email-domain line was given as 518
+where the deduplicated figure is 517.
+
+Published now, one reason per recipient, mutually exclusive, counted one way:
+
+| | |
+| --- | --- |
+| held: FINANCE is paused, and they are NOT diverted | 704 |
+| email not on the employer's own domain | 517 |
+| no concrete role from any open vacancy | 482 |
+| no vacancy still open at that employer | 66 |
+| compliance: unknown jurisdiction | 51 |
+| suppressed by something other than this incident | 17 |
+| replied since | 6 |
+| **excluded or held** | **1,843** |
+| **authorised** | **5,934** |
+| **affected recipients** | **7,777** |
+
+Asserted, not asserted-at: no address appears in both halves, no address appears twice in
+either, and the two add to exactly the audited set.
+
+## 3. A second withholding this found: 246 are BOUNCED
+
+Not a correction of a number, but of a belief — that our own records knew who had
+bounced. They did not. 246 of the authorised recipients are marked bounced by Instantly
+and our `outcome_events` had nothing, because the provider recorded it and we did not.
+Their first email never arrived, so there is nothing to apologise for, and writing again
+spends our own deliverability for nothing. They are withheld with that reason.
+
+That leaves **5,646 to move and 42 to create**.
+
+## What the measurement also found in our own code
+
+**A lead's variables live FLATTENED in `payload`.** There is no
+`payload.custom_variables`. The verification written earlier looked for the nested shape,
+would have found nothing, and would have reported `verified_missing:verified_role` for
+every single enrolment — a clean, consistent, total failure that looked like a working
+safety check. It was caught by creating one lead with our own mailbox and reading it back.
+
+**`/emails` returns the body**, as `body.html`, already rendered with the signature
+expanded. So the gate can ask the real question.
+
+## The gate now reads the email that arrived
+
+Fourteen named checks on the received message, and it needs every one: the recipient, the
+whole subject, the whole body, the greeting carrying this person's name, the role carrying
+their vacancy, the signature rendered rather than left as a placeholder, nothing still
+pending, nothing added after the signature, and the whole received body kept as evidence
+so a human can read what actually arrived.
+
+A send record is not enough and neither is a matching subject. The incident was 16,875
+sends whose enrolment, status and delivery were all fine.
+
+## Ordering, and why each step is where it is
+
+* The role is written and **read back before the move**. The campaign is ACTIVE, so a lead
+  arriving without it could be sent "Your  opening" inside the next window — the
+  incident, caused by the repair.
+* The PATCH **merges**, because `custom_variables` REPLACES the whole set. The fake in the
+  tests replaces too, so a caller that forgets loses data there as well.
+* The record is backed up to the **database** before anything changes it, so a move is
+  reversible from production and not only from a file on a workstation.
+* Their old sequence is abandoned. Authorised, and the point: this one email and nothing
+  else. They are never moved back and their four steps are never restarted.
+
+## Rotation protects every campaign that is SENDING
+
+Protection by hard-coded id is protection against the campaigns we remembered. Measured
+2026-10-03, three campaigns were ACTIVE whose ids are in none of our sets — "Customer
+Success - Other", "Customer Success 50 - 500" and "MARKETING & CREATIVE" — so their
+contacts were on offer to rotation. An unreadable status is now also a refusal, because
+not knowing is not evidence of safety.
+
+This is NOT the rule removed earlier today. That one refused a lead whose campaign was not
+COMPLETED and hid 3,220 finished, silent, unsuppressed leads. This one refuses only where
+the campaign can still send. One existing assertion changed on purpose: a finished contact
+in an ACTIVE campaign is no longer rotatable.
+
+## Live state
+
+| | |
+| --- | --- |
+| deployments at `cd19fc05` | Core `16b5247d-291a-429c-ada8-ef4f9dd0c861`, Replies `cf4d522b-d3f9-4386-aa8d-849e370bba9a`, Weekly `f0b5b1f3-d8f7-4c0f-a08d-127888b78b7b` |
+| the deployment started no run | run lock free, `run_log` empty since, 0 paid calls |
+| queue in production | 4,309 move-from-campaign · 1,337 move-from-list · 42 create · 246 withheld · 1 internal test enrolled |
+| unrouted | 0 |
+| storage the full recovery needs | **42** slots, 978 available |
+| variables set on Replies | `TGTC_OOO_FOLLOWUP_CAMPAIGN_ID`, `TGTC_RECOVERY_MAY_ROTATE=1`, `TGTC_INSTANTLY_ROTATION_ENABLED=1` |
+| a live gap that closed | without the OOO id on this service, the hourly poll was reading neither that campaign's replies nor protecting its contacts from rotation |
+| the 22:15Z tick | eaten by the 22:11:33Z redeploy, which is known behaviour and not a fault; next tick 23:15Z |
+| emails actually sent | **0** |
+
+## Still ahead
+
+* **[#141](https://github.com/TGTChq/GTM/pull/141)**, CI green on `40e1c53`. The move route
+  is not in the deployed image until it merges.
+* **Monday 2026-10-05, 08:00 America/Chicago.** The internal test sends, the next tick
+  reads the whole received email, and only then does the first real batch move.
+
+Prepared and deployed. Not recovered: nothing has been sent.
