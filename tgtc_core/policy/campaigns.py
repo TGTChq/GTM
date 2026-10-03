@@ -161,6 +161,20 @@ CHALLENGER_V2_BY_ORIGINAL = {
 }
 
 
+#: The single-step campaign that carries the ONE repair email for the 2026-09-21 blank
+#: sends. It is NOT a Challenger campaign and must never be routed to by the daily run:
+#: new production goes to the v2 campaigns. It is hard-coded rather than read from an
+#: environment variable because the only reason the nine Challenger ids were ever absent
+#: at send time was an environment patch that deleted them, and the copy contract below
+#: has to hold whatever the environment says.
+EMPTY_EMAIL_RECOVERY_CAMPAIGN_ID = "6288f23d-1a51-4c69-a08c-0b2fb4ccf695"
+
+#: Its literal copy references these per-lead custom variables, so a lead without them
+#: receives "Your  opening" -- the incident, in a smaller font. `firstName` and
+#: `accountSignature` are Instantly's own fields and are not listed here.
+EMPTY_EMAIL_RECOVERY_REQUIRED_VARIABLES = ("verified_role",)
+
+
 def campaign_id_allowed(campaign_id: str, allowed_campaign_ids, env: Optional[Mapping[str, str]] = None) -> bool:
     """Is this campaign id a legitimate destination?
 

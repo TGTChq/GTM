@@ -232,6 +232,19 @@ class InstantlyClient:
     def get_campaign(self, campaign_id: str) -> InstantlyResult:
         return self._call("GET", f"/campaigns/{campaign_id}")
 
+    def pause_campaign(self, campaign_id: str) -> InstantlyResult:
+        """Stop a campaign from sending anything further. The emergency brake.
+
+        A paused campaign keeps its leads, their history and their position: this is how
+        the nine Challenger campaigns were stopped on 2026-10-02 without losing the
+        record of what had happened. It is the correct response to evidence that what is
+        going out is wrong, because the alternative -- deleting leads -- destroys the
+        evidence needed to work out who was affected.
+        """
+        if not campaign_id:
+            raise ValueError("pause_campaign needs a campaign id")
+        return self._call("POST", f"/campaigns/{campaign_id}/pause")
+
     def resolve_membership(self, email: str, target_campaign: str) -> Tuple[str, Tuple[str, ...]]:
         """Authoritative membership for one email; fails closed to UNKNOWN."""
         result, campaigns = self.search_by_contact(email)

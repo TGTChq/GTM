@@ -134,3 +134,33 @@ def test_the_slack_message_names_every_alert_and_fits_slacks_limits(conn):
     for block in message["blocks"]:
         rendered = json.dumps(block)
         assert len(rendered) < 3500, "a Slack section caps at 3000 characters"
+
+
+def test_a_row_held_for_an_inactive_campaign_is_not_reported_as_stuck(conn, clock):
+    """FINANCE v2 is deliberately kept out of sending, so its approvals pile up by
+    design. An alert that fires hourly on an intended state stops being believed."""
+    _claim_today(conn, NOW.strftime("%Y%m%d"))
+    _approve_one(conn, clock)
+    _set_due(conn, NOW - timedelta(hours=ha.PENDING_STUCK_HOURS + 2))
+    with transaction(conn):
+        with conn.cursor() as cur:
+            cur.execute("UPDATE delivery_outbox SET last_error = 'campaign_status_0' "
+                        "WHERE channel = 'instantly'")
+            cur.execute("UPDATE delivery_outbox SET last_error = 'awaiting_instantly' "
+                        "WHERE channel = 'airtable'")
+    assert "pending_deliveries" not in _names(ha.evaluate(conn, now=NOW))
+
+
+def test_a_row_stuck_for_any_other_reason_is_still_reported(conn, clock):
+    """The alert must not be blunted into uselessness: only the campaign-status hold and
+    the Airtable wait are excused."""
+    _claim_today(conn, NOW.strftime("%Y%m%d"))
+    _approve_one(conn, clock)
+    _set_due(conn, NOW - timedelta(hours=ha.PENDING_STUCK_HOURS + 2))
+    with transaction(conn):
+        with conn.cursor() as cur:
+            cur.execute("UPDATE delivery_outbox SET last_error = 'instantly_timeout'")
+    report = ha.evaluate(conn, now=NOW)
+    assert "pending_deliveries" in _names(report)
+    alert = next(a for a in report["alerts"] if a["check"] == "pending_deliveries")
+    assert alert["detail"]["by_channel"] == {"airtable": 1, "instantly": 1}

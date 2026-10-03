@@ -178,25 +178,30 @@ def test_the_settings_are_bounded_and_off_by_default():
 def test_the_protected_set_is_every_live_campaign_including_the_v2_replacements():
     """Rotation must never remove a contact from a campaign that can still send.
 
-    Was eighteen. Since 2026-10-03 it is twenty-seven: the nine originals, the nine
-    Control, and the nine v2 replacements -- which are protected automatically because
-    `protected_ids` derives from `KNOWN_CHALLENGER_CAMPAIGN_IDS`, so a new Challenger
-    campaign cannot be created outside rotation's protection by accident. Plus the OOO
-    follow-up when it is configured, because it holds people who asked us to come back.
+    Was eighteen, then twenty-seven. Since the empty-copy repair it is twenty-eight: the
+    nine originals, the nine Control, the nine v2 replacements -- protected automatically
+    because `protected_ids` derives from `KNOWN_CHALLENGER_CAMPAIGN_IDS`, so a new
+    Challenger campaign cannot be created outside rotation's protection by accident --
+    and the single-step recovery campaign, which holds people owed one repair email.
+    Plus the OOO follow-up when it is configured, because it holds people who asked us to
+    come back.
     """
     from tgtc_core.policy.campaigns import (CHALLENGER_V2_BY_ORIGINAL,
+                                            EMPTY_EMAIL_RECOVERY_CAMPAIGN_ID,
                                             KNOWN_CHALLENGER_CAMPAIGN_IDS,
                                             KNOWN_CONTROL_CAMPAIGN_IDS)
 
     protected = rot.protected_ids(env={})
-    assert len(protected) == 27
-    assert protected == KNOWN_CHALLENGER_CAMPAIGN_IDS | KNOWN_CONTROL_CAMPAIGN_IDS
+    assert len(protected) == 28
+    assert protected == (KNOWN_CHALLENGER_CAMPAIGN_IDS | KNOWN_CONTROL_CAMPAIGN_IDS
+                         | {EMPTY_EMAIL_RECOVERY_CAMPAIGN_ID})
     assert set(CHALLENGER_V2_BY_ORIGINAL) <= protected, "the originals stay protected"
     assert set(CHALLENGER_V2_BY_ORIGINAL.values()) <= protected, "and so do the v2 ones"
     assert not (set(CHALLENGER_V2_BY_ORIGINAL) & set(CHALLENGER_V2_BY_ORIGINAL.values()))
+    assert EMPTY_EMAIL_RECOVERY_CAMPAIGN_ID not in KNOWN_CHALLENGER_CAMPAIGN_IDS,         "the repair campaign is not a Challenger destination and must never be routed to"
 
     with_followup = rot.protected_ids(env={rot.FOLLOWUP_CAMPAIGN_ENV: "ooo-campaign-id"})
-    assert "ooo-campaign-id" in with_followup and len(with_followup) == 28
+    assert "ooo-campaign-id" in with_followup and len(with_followup) == 29
 
 
 # --- when rotation is allowed to happen at all -------------------------------------
