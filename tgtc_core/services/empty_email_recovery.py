@@ -502,6 +502,15 @@ def record_receipts(conn: psycopg.Connection, client, *, limit: int = 200,
     ``sent`` when ``/emails`` returns a message for that address in this campaign, and the
     subject it actually went out with is recorded beside it -- so a blank subject would be
     visible in our own ledger rather than only in somebody's inbox.
+
+    That rests on ``/emails`` honouring ``campaign_id``, which is NOT a safe assumption in
+    this API: ``/leads/list`` silently ignores a ``campaign_id`` and returns the whole
+    workspace. Verified against production 2026-10-03 with an affected address that has
+    one old message and none from this campaign: unfiltered returns that message (from
+    `8bfa0769`, subject ``''`` -- the incident itself), and filtered to this campaign
+    returns nothing. So a receipt here means a message from THIS campaign. If that ever
+    changed, every row would be marked sent against somebody else's blank message and the
+    guard would pause a campaign that had done nothing.
     """
     moment = _now(now)
     with conn.cursor() as cur:
