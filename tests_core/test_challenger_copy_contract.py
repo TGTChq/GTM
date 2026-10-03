@@ -153,3 +153,33 @@ def test_the_claim_registry_actually_loads_and_is_not_silently_empty():
     registry = load_claim_registry()
     assert registry.claims, "claim registry loaded no claims: wave1_claims.json missing or empty"
     assert registry.role_pages, "claim registry loaded no role pages"
+
+
+def test_the_v2_replacement_campaigns_are_covered_by_the_copy_contract():
+    """The reason the v2 ids live in KNOWN_CHALLENGER_CAMPAIGN_IDS and not merely in the
+    routing env. `copy_block_reason` returns "" for a campaign it does not recognise, so
+    a Challenger campaign outside that set would accept a lead with NO rendered copy --
+    which is precisely the defect of 2026-09-21 that sent 16,875 blank messages.
+
+    Created 2026-10-03 because the originals still hold 5,343 contacts whose first email
+    went out blank and who cannot be excluded in place.
+    """
+    from tgtc_core.domain.outbound_copy import REQUIRED_COPY_FIELDS, copy_block_reason
+    from tgtc_core.policy.campaigns import (CHALLENGER_V2_BY_ORIGINAL,
+                                            KNOWN_CHALLENGER_CAMPAIGN_IDS,
+                                            KNOWN_CONTROL_CAMPAIGN_IDS)
+
+    assert len(CHALLENGER_V2_BY_ORIGINAL) == 9
+    for original, replacement in CHALLENGER_V2_BY_ORIGINAL.items():
+        assert original in KNOWN_CHALLENGER_CAMPAIGN_IDS
+        assert replacement in KNOWN_CHALLENGER_CAMPAIGN_IDS, replacement
+        assert replacement not in KNOWN_CONTROL_CAMPAIGN_IDS
+        # an empty payload must be refused for a v2 destination, exactly as for the original
+        assert copy_block_reason({"campaign": replacement, "custom_variables": {}})
+        assert copy_block_reason({"campaign": original, "custom_variables": {}})
+
+    # and a complete payload passes for both
+    full = {k: "<p>x</p>" for k in REQUIRED_COPY_FIELDS}
+    full["rendered_subject"] = "Plant Accountant"
+    for campaign in list(CHALLENGER_V2_BY_ORIGINAL) + list(CHALLENGER_V2_BY_ORIGINAL.values()):
+        assert copy_block_reason({"campaign": campaign, "custom_variables": full}) == ""

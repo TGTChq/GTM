@@ -123,7 +123,42 @@ KNOWN_CHALLENGER_CAMPAIGN_IDS = frozenset({
     "1feb6344-6065-49d7-9764-d125985fb9c9",  # MARKETING & CREATIVE
     "8f25abd5-568a-4e88-b310-9acf85161c6c",  # GTM SYSTEMS
     "8bfa0769-4b9a-4346-8e93-17ac8b726dce",  # AI & TECHNICAL
+    # The v2 replacements, created 2026-10-03. The nine above still hold 5,343 contacts
+    # whose first email went out blank: their thread subject cannot be repaired, Instantly
+    # has no per-lead exclusion (five endpoints 404, `status` and `pause_until` PATCHes
+    # answer 200 and are ignored), and moving a lead destroys its sequence position. So
+    # resuming an original would email 5,343 affected people to reach 33 sendable ones.
+    # Each v2 is a field-for-field copy of its original -- the same approved four steps,
+    # senders, schedule, limits and variable declarations -- with no history attached.
+    #
+    # They belong in THIS set and not merely in the routing env, because this set is what
+    # `copy_block_reason` consults to decide that the copy contract applies at all. A
+    # Challenger campaign outside it would accept a lead with no rendered copy, which is
+    # the original defect.
+    "5e9dbb14-cbf3-4063-84a1-fbebd7fe8dcb",  # PRODUCT v2
+    "cad0c8f8-b231-488d-bb93-849648a35563",  # OPERATIONS v2
+    "b8361174-25e5-42af-aa88-7e5144f86c11",  # FINANCE v2
+    "beb190b4-333c-4fe5-b809-05766f1d709b",  # PEOPLE & HR v2
+    "4f383858-5403-4e99-9e8a-2ed3cb2cffc7",  # ECOMMERCE v2
+    "a2a8c26c-20fc-427b-821d-d5674687aea7",  # CUSTOMER EXPERIENCE v2
+    "f186db69-e1db-4087-b699-67134081fa98",  # MARKETING & CREATIVE v2
+    "87eeca05-b22a-4371-b76f-d6a15bc27161",  # GTM SYSTEMS v2
+    "ac6fbc13-c10e-4031-919c-307f8e92a33a",  # AI & TECHNICAL v2
 })
+
+#: Which v2 campaign replaces which original. Kept explicit so routing, rotation
+#: protection and any later reconciliation all read the same pairing.
+CHALLENGER_V2_BY_ORIGINAL = {
+    "7b9aa5f3-fe46-49fa-b2ac-fee1da346ed0": "5e9dbb14-cbf3-4063-84a1-fbebd7fe8dcb",
+    "69def27c-7799-41a2-9ba8-205e54ab071b": "cad0c8f8-b231-488d-bb93-849648a35563",
+    "7b319c7a-cc55-4e08-8a47-7058c345d8ae": "b8361174-25e5-42af-aa88-7e5144f86c11",
+    "d2326028-e312-405b-9e16-526bd309d4dd": "beb190b4-333c-4fe5-b809-05766f1d709b",
+    "c3e81c21-db44-40f5-addc-d9945a78394b": "4f383858-5403-4e99-9e8a-2ed3cb2cffc7",
+    "269cd138-00b1-48c3-9093-16c36120a20e": "a2a8c26c-20fc-427b-821d-d5674687aea7",
+    "1feb6344-6065-49d7-9764-d125985fb9c9": "f186db69-e1db-4087-b699-67134081fa98",
+    "8f25abd5-568a-4e88-b310-9acf85161c6c": "87eeca05-b22a-4371-b76f-d6a15bc27161",
+    "8bfa0769-4b9a-4346-8e93-17ac8b726dce": "ac6fbc13-c10e-4031-919c-307f8e92a33a",
+}
 
 
 def campaign_id_allowed(campaign_id: str, allowed_campaign_ids, env: Optional[Mapping[str, str]] = None) -> bool:
