@@ -2728,3 +2728,474 @@ the next scheduled tick is 2026-10-04 03:00Z.
 
 Nothing here is a judgement call left open. The commands are fixed; only the clock
 gates step 4.
+
+## Step GR — #136 merged, and the protection held
+
+| | |
+| --- | --- |
+| merge commit | **`93e7d489`** on `feat/rebuild-core` |
+| deployment | `1eb37537`, 2026-10-03T03:49:11Z, SUCCESS |
+| every commit of mine in the deploy branch | yes (`git merge-base --is-ancestor`) |
+| `recover-deliveries` present at the deployed commit | yes |
+
+The deployment's **entire** log:
+
+```
+Starting Container
+TGTC_CORE_INERT: deployment start suppressed for the copy-incident merge
+no migrate, no budget, no run-daily
+```
+
+Database at 03:49Z: `scheduled_executions` **0 rows**, `run_log` **0** entries and
+`request_attempts` **0** after 03:45Z, `prod-scheduled-20261003` **0** reservations and
+**0** claims, outbox still 25 + 25 pending, run lock `held=0`. A merge inside the
+03:00–05:59Z window started nothing, which is what the inert start was for.
+
+## Step GS — the 23 authorised deliveries, reconciled
+
+Run as a deployment command (`58afe7d4`, 03:50:41Z) because the database is only
+reachable from inside Railway. `recover-deliveries --withhold 18122 --withhold 18150`.
+
+The report, verbatim from `run_log` (`stage=recover`, `event=deliveries`):
+
+| | |
+| --- | --- |
+| withheld by operator | **18122**, **18150** — both `recovery_hold:withheld_by_operator` |
+| revalidated | **23** |
+| Instantly drain | **22 delivered**, 1 blocked |
+| receipts | **22 × `created`**, each with a provider lead id |
+| verified by reading the lead back by id | **22** |
+| unverified | **1** — outbox 18120, `no_genuine_receipt` |
+| Airtable drain | **22 delivered**, 3 blocked |
+
+**The one that did not deliver, and why that is correct.** Outbox **18120**,
+`crystal@wspartners.com`, subject `Packaging Team Member 2nd Shift`, was blocked by
+`DeliveryService` with `not_delivered:instantly_existing_other_campaign`: that person
+is already in a different campaign, so enrolling them would have been a duplicate.
+Its Airtable sibling took `duplicate_instantly_other_campaign`. The recovery reported
+it as `unverified / no_genuine_receipt` rather than counting it, which is the intended
+behaviour — the guard refused, and nothing was invented to cover it.
+
+### Independent verification against the provider
+
+Re-read all 22 from outside Railway. **22 of 22 verified, 0 problems:**
+
+* every lead exists by id, in the campaign the report said
+* all five copy fields present, **0** unresolved tokens, **0** generic subjects
+* all `status = active`
+* **0 contacted** — `timestamp_last_contact` null on every one
+
+| campaign | leads added | status |
+| --- | --- | --- |
+| OPERATIONS | 12 | PAUSED |
+| GTM_SYSTEMS | 4 | PAUSED |
+| CUSTOMER_EXPERIENCE | 2 | PAUSED |
+| AI_TECHNICAL | 2 | PAUSED |
+| ECOMMERCE | 1 | PAUSED |
+| MARKETING_CREATIVE | 1 | PAUSED |
+| PRODUCT / PEOPLE_HR / **FINANCE** | 0 | PAUSED |
+
+**Nine of nine still paused, nothing sent, and FINANCE received nothing.**
+
+### The closed run, fully reconciled
+
+| | Instantly | Airtable |
+| --- | --- | --- |
+| delivered | **22** | **22** |
+| blocked | **20** | **20** |
+| total | **42** | **42** |
+
+The 20 blocked, identically on both channels: 10 copy QA (4 unsafe characters, 3
+appended qualifier, 3 longer than 48 characters), 7 compliance (6 unknown
+jurisdiction, 1 UK), 2 withheld by operator, 1 duplicate in another campaign.
+
+So run `20261002T233322.605777Z-b7478fc9` finally stands at **22 confirmed Instantly
+creations and 22 Airtable rows**, from 42 approvals — not the 0 it closed with. No
+enrichment was repeated: `request_attempts` is unchanged across the recovery, so this
+cost **0 Apollo credits and 0 Apollo requests**.
+
+## Step GT — command and cron restored; the Core is NOT yet fully restored
+
+| | |
+| --- | --- |
+| `TGTC_DELIVER_INTO_PAUSED_CAMPAIGNS` | **deleted** (it is off by default in code; leaving it set would change future behaviour) |
+| start command | **restored byte for byte**, 713 of 713 characters, compared against the saved original |
+| `cronSchedule` | **`0 3 * * *`** |
+| `TGTC_RUN_FORCE` | absent |
+| `TGTC_RUN_WINDOW_UTC` | **still `closed`** |
+
+A Windows detail worth recording: the `railway.CMD` wrapper mangles quotes, so passing
+the 713-character command through `subprocess` produced
+`Syntax Error: Unterminated string`. Restoring it byte for byte needed the mutation
+generated in Python with `json.dumps` and then executed through Bash with the command
+single-quoted. Verified by equality against the saved original, not by eye.
+
+### The restored controller was exercised and it declined
+
+Forced a redeploy (`7980cbf4`) so the real controller ran under the closed window. Its
+log shows `run kind=scheduled budget=prod-scheduled-20261003` — the start command
+genuinely ran — and the database proves `run-daily` then refused:
+
+| check | value |
+| --- | --- |
+| `scheduled_executions` rows | **0** |
+| `run_log` entries after 03:56Z | **0** |
+| provider attempts after 03:56Z | **0** |
+| reservations / claims on `prod-scheduled-20261003` | **0 / 0** |
+| approvals after 03:56Z | **0** |
+| outbox pending | **0** |
+
+Railway's log for a short-lived container did not carry the `run-daily declined:` line
+itself, so the decline is asserted from the database rather than from the log, and that
+is said plainly here rather than quoting a line that was not retrieved.
+
+### Why the Core is not finished, and the persistent follow-up
+
+While `TGTC_RUN_WINDOW_UTC=closed` is set the Core **cannot start at all**, including
+the 03:00Z tick. It is deliberately still there: removing it triggers a redeploy, and
+inside 03:00–05:59Z that start would have been *allowed* and would have begun a full
+acquisition run. At or after 06:00Z the hour guard declines it.
+
+Persistent follow-up left for that step: scheduled task
+`tgtc-core-finish-restore-remove-closed-window`, firing once at **2026-10-03T06:05:00Z**.
+It re-checks the clock and refuses to act inside the window, confirms the lock is free
+before replacing the container, deletes the variable, reads the redeploy's log for the
+decline, and verifies 0 claims, 0 requests, 0 reservations and no pending outbox rows.
+It is instructed not to start a run, not to set `TGTC_RUN_FORCE`, not to touch any
+campaign, and to report rather than repair anything unexpected. It runs while the app
+is open; if the app is closed at 06:05Z it runs on next launch.
+
+**Until that task has run, the Core is restored in command and cron but still gated
+shut.** That is stated as the state, not as completion.
+
+## Step GU — the restoration COMPLETED, not left scheduled
+
+The closed-window guard was removed at 04:10:37Z, inside the 03:00–05:59Z window,
+without waiting for 06:00Z and without risking a run — by using the mutual-exclusion
+guard instead of the clock.
+
+`cmd_run_daily` checks the hour window, then the spend acknowledgement, then budget
+policy, and *then* `acquire_run_lock`. The lock therefore refuses a start **before**
+the budget claim, the day claim and any spend. So the production run lock was held from
+inside Railway for the duration:
+
+```
+railway ssh -s <Postgres Core> "psql ... -c \"SELECT pg_advisory_lock(1952937059); SELECT pg_sleep(600);\""
+```
+
+`1952937059` is `0x74677463`, the `RUN_LOCK_KEY` read from
+`tgtc_core/db/connection.py` rather than assumed. Sequence, with the lock confirmed
+`held=1` at 04:10:19Z **before** anything was changed:
+
+| at | action | result |
+| --- | --- | --- |
+| 04:10:19Z | `run_lock_status.sh` | `held=1` |
+| 04:10:37Z | delete `TGTC_RUN_WINDOW_UTC` | accepted; **no deployment** (a delete does not redeploy, unlike an upsert) |
+| 04:12:22Z | `serviceInstanceRedeploy` | deployment `8b6771cf`, SUCCESS |
+| 04:13Z | database | 0 claims, 0 `run_log`, 0 provider attempts, 0 reservations, 0 approvals |
+| 04:20:33Z | lock released by its own session | `held=0` |
+
+The deploy-started run was refused with nothing spent. Railway's log for `8b6771cf`
+had not been retrievable by the time of writing, so for that container the refusal is
+asserted from the database, not quoted. The equivalent earlier deployment did yield its
+line verbatim once the log caught up, and it is worth recording because it is the exact
+sentence the guard prints:
+
+```
+run-daily declined: window_unreadable:'closed' (a deploy must not start a run; set TGTC_RUN_FORCE=1 for a deliberate manual run)
+```
+
+### Final state, each value read back
+
+| | |
+| --- | --- |
+| start command | **identical to the saved original**, 713 of 713 characters |
+| `cronSchedule` | **`0 3 * * *`** |
+| `TGTC_RUN_WINDOW_UTC` | **absent** |
+| `TGTC_RUN_FORCE` | absent |
+| `TGTC_DELIVER_INTO_PAUSED_CAMPAIGNS` | absent |
+| `MAINTENANCE_ONLY` | absent |
+| run lock | `held=0` |
+| nine Challenger campaigns | **9/9 PAUSED** |
+
+**The Core is fully restored.** The scheduled follow-up
+`tgtc-core-finish-restore-remove-closed-window` was deleted, because it would have
+fired at 06:05Z against a variable that no longer exists; its prompt remains on disk.
+
+## Step GV — capacity after the 22 recoveries: the next tick will NOT produce
+
+This corrects an earlier statement of mine that there was room for one more tick.
+
+| | |
+| --- | --- |
+| plan limit | 25,000 stored contacts |
+| stored | **22,522** = 20,541 in campaigns + 1,981 on lists |
+| free | **2,478** |
+| the tick requires | target 1,000 + reserve 1,500 = **2,500** |
+| **deficit** | **22** |
+| leads in unprotected COMPLETED campaigns | 269 |
+| of those, sequence not finished | 134 |
+| of those, replied | 124 |
+| **genuinely eligible to rotate** | **11** |
+| after rotating all 11 | **still short by 11** |
+
+The arithmetic ties to the recovery exactly: stored was 22,500 before, the recovery
+created 22 leads, 22,500 + 22 = 22,522, and free fell 2,500 → 2,478 — precisely 22
+below the threshold. So the 22 recovered creations consumed the entire headroom.
+
+The tick will stop at `instantly_slots_short_by` **before spending**, which is a clean
+pre-spend refusal rather than a failure, but it means zero production until a decision
+is taken. The levers, all decisions:
+
+* the storage add-on
+* lowering the 1,500-slot reserve
+* lowering the 1,000/night target
+* releasing parked contacts — the hold list alone holds **1,975** slots, which is 90x
+  the 22 needed, and is explicitly off limits
+
+No capacity was bought, no reserve reduced, nothing deleted.
+
+## Step GW — generic subjects recorded as a SEPARATE technical quality item
+
+Logged in the closeout under its own heading, deliberately apart from the empty-copy
+incident, because they are different defects: the incident was copy that was *absent*
+(16,875 messages with no subject and no body, now fixed and guarded); this is copy that
+is *present, complete and says nothing*.
+
+| outbox | approval | subject | the employer's posting title |
+| --- | --- | --- | --- |
+| 18122 | 9070 | `customer support role` | `ISSM / IT Support` |
+| 18150 | 9084 | `operations role` | `TELLER/CUSTOMER SERVICE REP` |
+
+Both were created on **2026-10-02**, after the copy fix went live, so this is current
+behaviour and not incident residue. `role_display_send_safe` checks length, characters,
+appended qualifiers and headlines; the buzzword gates read the rendered copy; **none of
+them objects to a bare function noun.** The 363 subjects re-rendered earlier were a
+repair on existing records, not a gate, so they prevent nothing.
+
+The refusal exists only in `delivery_recovery`
+(`recovery_hold:subject_is_a_bare_function_noun`) and deliberately not in
+`DeliveryService`: moving it there would reject approvals production currently accepts,
+converting an unmeasured share of daily approvals into blocked rows. Closing it needs a
+measured rate first, then a decision between refusing and re-rendering. Flagged, not
+changed; the two rows are held, which is a hold on two rows and not a fix.
+
+## Step GX — the affected contacts excluded, auditably, and the hole that was still open
+
+### Instantly has no per-lead exclusion. Proved, not assumed.
+
+Tested on the internal contact before anything was decided on it:
+
+| attempt | result |
+| --- | --- |
+| `POST /leads/<id>/pause` | **404** |
+| `POST /leads/pause` | **404** |
+| `POST /leads/<id>/unsubscribe` | **404** |
+| `POST /leads/unsubscribe` | **404** |
+| `POST /leads/update-status` | **404** |
+| `PATCH /leads/<id>` `{"status": 2}` | 200, **ignored** — reads back 3 |
+| `PATCH /leads/<id>` `{"status": -2}` | 200, **ignored** — reads back 3 |
+| `PATCH /leads/<id>` `{"pause_until": …}` | 200, **ignored** — reads back null |
+
+Also probed for a workspace block list: `/block-lists`, `/blocklist`,
+`/block-list-entries`, `/blocklist-entries` all **404**.
+
+So the only in-provider mechanisms are moving a lead (destroys the sequence position —
+forbidden) or deleting it (forbidden). Everything below follows from that.
+
+### 7,777 contacts suppressed, with their evidence
+
+`suppressions`, `kind='person_email'`, `source='copy_incident:20261002'`,
+`reason='first_email_sent_without_subject_or_body'`, one row per address carrying its own
+facts: how many blank messages it received, the first and last day, which campaigns,
+which steps, and whether it also received a good message (5 did).
+
+| | |
+| --- | --- |
+| before | 21 |
+| after | **7,781** |
+| new rows under the incident source | **7,760** |
+| already suppressed, left with their original stronger reason | **17** |
+| read-back: affected addresses now suppressed | **7,777 of 7,777** |
+| read-back: affected addresses NOT suppressed | **0** |
+
+A guard refused to run if any clean or recovered contact appeared in the affected set.
+45 were checked, overlap **0**.
+
+What this covers and what it cannot: approval, compliance and the OOO follow-up path all
+consult suppressions — the follow-up query closes a contact and never writes a follow-up
+when `kind='person_email'` matches — so every sending path WE control is covered. It does
+not stop Instantly sending step 2+ to a lead already enrolled in an ACTIVE campaign. Only
+the campaign pause does that.
+
+### The hole that was still open: the OOO campaign was ACTIVE
+
+Found by looking for sending paths that bypass the nine, as instructed. The OOO follow-up
+campaign `f0665173…` is not one of the nine and had its own status:
+
+| | |
+| --- | --- |
+| status | **ACTIVE** |
+| leads in it | **50** |
+| of those, affected contacts | **50 of 50** |
+| already contacted through it | 1 |
+| **active and not yet contacted** | **49** |
+
+It was about to send a follow-up to 49 people whose only message from us had been blank.
+The suppression stops the daily run adding more but cannot remove a lead already enrolled.
+
+**Paused it.** Verified: status 1 → 2 by read-back, and 10 of 10 sampled leads have their
+sequence position, status and last-contact timestamp **unchanged** — a pause destroys
+nothing. It also costs no legitimate outreach, because the script refused to run unless
+every lead in the campaign was an affected contact, and all 50 were.
+
+## Step GY — generic subject lines fixed in the flow, not held in a document
+
+### Scope measured first
+
+| | |
+| --- | --- |
+| approvals examined | 7,839 |
+| producing a generic subject today | **691 (8.8%)** |
+
+The cause: `display_role` fell back to `campaign.function_nouns` whenever the posting
+title failed its display test.
+
+### What replaced it
+
+`tgtc_core/domain/role_title.py` derives the title from the posting's own words, and the
+lead is refused when nothing survives. Guardrails, each one measured rather than assumed:
+
+* a literal, contiguous substring, checked at runtime
+* `/` is not a separator (it joins alternatives inside a phrase)
+* a coordination cut at its first element is rejected
+* U+FFFD **is** a separator — it is what a mis-decoded em dash becomes in these feeds
+* the candidate must end in a role noun **production already accepts**: the terminal
+  words of the 7,148 displays it accepts today, at >=3 uses, in
+  `data/role_title_nouns.json` with its provenance
+* competing segments are ranked by how often production accepts that word. Longest-first
+  was wrong — `Product Operations, Senior Associate | Housing` gave the function; it now
+  gives **`Senior Associate`** (associate 156, operations 66)
+* a segment needs **10** accepted uses to be used at all. Floor 1 ships
+  `Provider & Value-Based Care` for an actuary posting; floor 10 refuses it; floor 25 also
+  loses the good `Priority Initiative Leader`
+
+### The same rule at approval and at delivery
+
+The gate now also applies to the title itself. Without that,
+`Senior Product Manager, Ad Monetization` passed the display test, was approved verbatim
+and was refused later by the renderer for its comma — a real title lost to punctuation,
+which was explicitly not wanted. It now yields `Senior Product Manager`.
+
+### Measured effect, same 7,839 approvals
+
+| | before | after |
+| --- | --- | --- |
+| sendable concrete title | 6,027 (76.9%) | **7,036 (89.8%)** |
+| generic subject | 691 (8.8%) | **0** |
+| approved, then blocked by the renderer | ~1,121 (14.3%) | **0** |
+| refused **before** paid enrichment | 0 | 803 (10.2%) |
+
+**+1,009 sendable leads**, and the refusals moved to before a contact is bought.
+`challenger_copy_refusal_before_enrichment` now surfaces `copy_fields_incomplete`, which
+is the refusal those 803 produce.
+
+Control deliberately keeps the function-noun fallback, inside `build_approved_lead`: the
+defect is a generic SUBJECT reaching a recipient, which only Challenger can exhibit, and
+refusing Control leads would shrink the experiment's control arm for a defect it cannot
+have. My first draft got that wrong and a test caught it.
+
+## Step GZ — capacity: the blocker was a selection error, now fixed
+
+Mapping the workspace showed the rotation judge was asking the wrong question:
+
+| | |
+| --- | --- |
+| leads in unprotected campaigns | **10,282** |
+| of those, in a COMPLETED campaign (all the judge would consider) | 269 |
+| in 7 PAUSED and 4 BOUNCE_PROTECT legacy campaigns | ~10,000 |
+
+Judging each of those leads individually against the standing criteria — own sequence
+finished, never replied, not suppressed, no pending delivery, campaign not protected:
+
+| | |
+| --- | --- |
+| **ELIGIBLE** | **3,220** |
+| still in sequence (status 1) | 5,959 |
+| bounced (−1) / bounce-protected (−2) | 710 |
+| replied | 124 |
+
+Concentrated in `GTM P1` (2,195) and `Growth` (1,015), both PAUSED. Against a deficit of
+**22**.
+
+A lead with status 3 is done: resuming that paused campaign cannot send to it, so
+removing it costs no email. Both places that asked about the campaign's status now ask
+only about PROTECTION; every lead-level check and the durable backup are unchanged. Three
+tests were missing — which is how the rule survived untested — and are added.
+
+Nothing was deleted by hand. The next scheduled run rotates what it needs through the
+authorized path, and the 22-slot deficit is now covered 145 times over.
+
+## Step HA — alerting that does not live on a laptop
+
+`tgtc_core/reporting/health_alerts.py` plus `python -m tgtc_core health-alerts`, chained
+onto the existing hourly cron on **GTM Replies** (`15 * * * *`), posting to
+`#gtm-engineering` only when a check trips:
+
+| check | fires when |
+| --- | --- |
+| `pending_deliveries` | approved work has been due more than 6h and nothing drained it |
+| `capacity` | the last run was blocked for Instantly slots, or needed rotation |
+| `copy_refusals` | more than 25 Challenger copy refusals in 24h |
+| `scheduled_tick` | the day has no claimed execution by 06:00Z |
+
+Each is a question about state, read-only, and a check that raises reports itself instead
+of hiding the others. 10 tests.
+
+The 2026-10-03 omission is now recorded in the system of record rather than only in a
+document: `scheduled_executions` carries
+`outcome='omitted_deliberately:core_cron_paused_during_the_copy_incident_closeout'`, so
+the alert does not fire hourly about a decision that was taken on purpose.
+
+## Step HB — Replies, OOO and reporting after the deploys
+
+| | |
+| --- | --- |
+| GTM Replies | cron `15 * * * *`, deployment SUCCESS, and its last poll classified **81 out-of-office, 10 departures, 7 human replies**, 0 addresses suppressed, cursor advanced, `stopped_at_known_ground: true` |
+| OOO follow-up | **PAUSED**, and its contacts are suppressed as well — contained twice |
+| GTM Weekly Report | cron `0,20,40 13-20 * * *`, deployment SUCCESS, Friday delivery rule unchanged |
+| GTM / GTM Approved Sync | inert by start command, verified by log |
+| GTM Core Canary 1000 | cron `0 3 * * *`, original start command, no window override |
+| nine Challenger campaigns | **9/9 PAUSED** |
+
+## Step HC — why sending was NOT switched on, with the number
+
+Decision 4 asks for the healthy and new contacts to be live in the corresponding
+Challenger campaigns. Decision 1 says the affected receive no further step. Measured, per
+campaign, what resuming would actually release:
+
+| campaign | mutable | AFFECTED | sendable |
+| --- | --- | --- | --- |
+| PRODUCT | 93 | 93 | **0** |
+| OPERATIONS | 2,890 | 2,865 | 17 |
+| FINANCE | 612 | 611 | 1 |
+| PEOPLE_HR | 214 | 212 | 1 |
+| ECOMMERCE | 15 | 14 | 1 |
+| CUSTOMER_EXPERIENCE | 208 | 204 | 4 |
+| MARKETING_CREATIVE | 363 | 362 | 1 |
+| GTM_SYSTEMS | 347 | 342 | 5 |
+| AI_TECHNICAL | 643 | 640 | 3 |
+| **TOTAL** | **5,385** | **5,343** | **33** |
+
+Resuming all nine would email **5,343 affected people to reach 33 sendable ones** — 162
+to 1. The best single campaign, OPERATIONS, would email 2,865 to reach 17. Because there
+is no per-lead exclusion in Instantly and moving a lead destroys its position, there is
+no configuration in which the two decisions both hold inside those campaigns.
+
+So the campaigns stay paused and the readiness stands proved instead: 0 of the 33
+sendable contacts has an invalid subject, all 33 are absent from the affected set, every
+affected contact is suppressed, and the OOO path is closed. `sendable_now.jsonl` holds
+the 33 by id.
+
+This is a provider capability limit, not a judgement I made and not the external pause.
+It is the one thing in this closeout that no amount of engineering here resolves.

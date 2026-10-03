@@ -57,7 +57,12 @@ def _reach_the_approval_time_guard(monkeypatch):
                         lambda self, opp, emp, posting, classification: "")
 
 
-def _approve(conn, clock, title):
+def _approve(conn, clock, title, *, force_display=None, monkeypatch=None):
+    if force_display is not None:
+        assert monkeypatch is not None, "forcing a display needs monkeypatch"
+        from tgtc_core.domain import approval as approval_module
+        monkeypatch.setattr(approval_module, "display_role",
+                            lambda _title, _function_key: force_display)
     _pid, _eid, oid = seed_opportunity(conn, clock, title=title)
     fake = apollo_for("acme.com", "Acme")
     out = opportunity_service(conn, fake, clock, campaign_env=challenger_env()).process(oid)
@@ -70,13 +75,24 @@ def _approve(conn, clock, title):
 # "Customer Success Manager") and falls back to a function noun for others, so
 # only these actually reach the renderer unsafe -- which is the real production
 # population: 896 unsafe-character + 581 appended-qualifier refusals of 1,829.
-@pytest.mark.parametrize("title, expected_reason", [
+#
+# UPDATE 2026-10-03: these displays are now FORCED, and that is the point. `display_role`
+# sanitises the title itself as of today -- "Customer Success Manager - EMEA" becomes
+# "Customer Success Manager" instead of reaching the renderer with its qualifier -- so no
+# posting title produces an unsafe display any more. The invariant still matters, because
+# a display can reach approval from somewhere other than today's title stage: the 25
+# outbox rows signed before this change carried exactly these shapes, two of them a bare
+# function noun. If such a lead reaches `_commit_approval`, it must be stored and
+# blocked, never raise and end the run.
+@pytest.mark.parametrize("forced_display, expected_reason", [
     ("Manager, Customer Success", "role_display_contains_unsafe_characters"),
     ("Customer Success Manager, Enterprise", "role_display_contains_unsafe_characters"),
     ("Customer Success Manager - EMEA", "role_display_carries_an_appended_qualifier"),
 ])
-def test_unrenderable_challenger_copy_blocks_the_outbox_and_does_not_raise(conn, clock, title, expected_reason):
-    out, approvals, outbox = _approve(conn, clock, title)
+def test_unrenderable_challenger_copy_blocks_the_outbox_and_does_not_raise(
+        conn, clock, monkeypatch, forced_display, expected_reason):
+    out, approvals, outbox = _approve(conn, clock, "Customer Success Manager",
+                                      force_display=forced_display, monkeypatch=monkeypatch)
 
     # the lead is approved, stored and counted -- never dropped
     assert out.outcome == "approved", out
@@ -102,12 +118,14 @@ def test_a_renderable_challenger_lead_is_pending_and_carries_the_copy(conn, cloc
         assert "{{" not in variables[key]
 
 
-def test_a_blocked_copy_lead_can_never_be_drained(conn, clock):
+def test_a_blocked_copy_lead_can_never_be_drained(conn, clock, monkeypatch):
     """The row is terminal for delivery: draining the channel must not send it."""
     from tgtc_core.testing.fakes import FakeAirtable, FakeInstantly
     from tests_core.helpers import delivery_service
 
-    _out, _approvals, outbox = _approve(conn, clock, "Manager, Customer Success")
+    _out, _approvals, outbox = _approve(conn, clock, "Customer Success Manager",
+                                        force_display="Manager, Customer Success",
+                                        monkeypatch=monkeypatch)
     assert [r["state"] for r in outbox] == ["blocked", "blocked"]
 
     instantly = FakeInstantly(campaign_status={CHALLENGER_ID_BY_CAMPAIGN_KEY["customer_experience"]: 1})
@@ -118,7 +136,7 @@ def test_a_blocked_copy_lead_can_never_be_drained(conn, clock):
     assert created[0]["n"] == 0
 
 
-def test_the_person_reuse_route_also_blocks_instead_of_raising(conn, clock):
+def test_the_person_reuse_route_also_blocks_instead_of_raising(conn, clock, monkeypatch):
     """The SECOND approval route. `_commit_approval` is called from two places and
     this one (the reused-verified-person branch) has no exception handler at all,
     so a raise here would end the run outright."""
@@ -137,9 +155,15 @@ def test_the_person_reuse_route_also_blocks_instead_of_raising(conn, clock):
         cur.execute("UPDATE approvals SET state = 'revoked', revoke_reason = 'test'")
     conn.commit()
 
-    # a second opportunity at the same employer, whose title cannot render
+    # A second opportunity at the same employer, carrying a display that cannot render.
+    # The display is FORCED for the reason given above the parametrized test: since
+    # 2026-10-03 no posting title yields an unsafe display, but a stored one can still
+    # reach this route, and this branch has no exception handler at all.
     _p, _e, o_fin = seed_opportunity(conn, clock, function_key="finance", domain=domain,
-                                     org_name=org, job_id="fin-1", title="Manager, Finance")
+                                     org_name=org, job_id="fin-1", title="Finance Manager")
+    from tgtc_core.domain import approval as approval_module
+    monkeypatch.setattr(approval_module, "display_role",
+                        lambda _title, _function_key: "Manager, Finance")
     out = svc().process(o_fin)
 
     assert out.outcome == "approved" and out.reason == "reused_verified_person", out
@@ -151,12 +175,14 @@ def test_the_person_reuse_route_also_blocks_instead_of_raising(conn, clock):
         assert (r["blocked_reason"] or "").startswith("challenger_copy_qa_failed:"), r
 
 
-def test_a_copy_blocked_lead_is_never_written_to_airtable(conn, clock):
+def test_a_copy_blocked_lead_is_never_written_to_airtable(conn, clock, monkeypatch):
     """No Instantly creation, so no CRM row either -- the standing invariant."""
     from tgtc_core.testing.fakes import FakeAirtable, FakeInstantly
     from tests_core.helpers import delivery_service
 
-    _out, _approvals, outbox = _approve(conn, clock, "Manager, Customer Success")
+    _out, _approvals, outbox = _approve(conn, clock, "Customer Success Manager",
+                                        force_display="Manager, Customer Success",
+                                        monkeypatch=monkeypatch)
     assert [r["state"] for r in outbox] == ["blocked", "blocked"]
 
     airtable = FakeAirtable()

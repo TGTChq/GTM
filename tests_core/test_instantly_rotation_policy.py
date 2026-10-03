@@ -464,3 +464,52 @@ def test_rotation_skips_the_followup_campaign_entirely(conn, monkeypatch):
                      delete=lambda i: (deleted.append(i), InstantlyResult(True, 200))[1])
     assert deleted == [], "a protected campaign must not be paged or deleted from"
     assert out["deleted"] == 0 and out["considered"] == 0
+
+
+def test_a_finished_contact_in_a_PAUSED_campaign_is_eligible(conn):
+    """The selection gap, measured 2026-10-03. `judge` and the enumeration both asked
+    whether the CAMPAIGN was completed, which hid 3,220 leads whose own sequence was
+    finished, who never replied and who were not suppressed -- while the run was blocked
+    for want of 22 slots. 10,282 leads sit in unprotected campaigns and only 269 of them
+    were in a COMPLETED one.
+
+    A lead with status 3 is done: resuming that paused campaign cannot send to it, so
+    removing it costs no email. Protection, an unfinished sequence, a reply and our own
+    suppressions all still refuse."""
+    leads_of, delete, deleted = world({OLD: [lead(1), lead(2)]})
+    for status, label in ((2, "PAUSED"), (-2, "BOUNCE_PROTECT"), (1, "ACTIVE"), (0, "DRAFT")):
+        deleted.clear()
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM instantly_rotation_backup")
+        conn.commit()
+        out = rot.rotate(conn, None, needed=10, batch=10,
+                         campaigns=[{"id": OLD, "status": status, "name": "Legacy " + label}],
+                         leads_of=leads_of, delete=delete)
+        assert out["deleted"] == 2, (label, out)
+        assert sorted(deleted) == ["L1", "L2"], label
+        assert len(backup_rows(conn)) == 2, "the record must be backed up first, " + label
+
+
+def test_protection_still_wins_whatever_the_campaign_status(conn):
+    """Dropping the campaign-status rule must not open a protected campaign."""
+    leads_of, delete, deleted = world({LIVE: [lead(1)], CONTROL: [lead(2)]})
+    for status in (1, 2, 3, -2, 0):
+        out = rot.rotate(conn, None, needed=10, batch=10,
+                         campaigns=[{"id": LIVE, "status": status, "name": "CHALLENGER"},
+                                    {"id": CONTROL, "status": status, "name": "CONTROL"}],
+                         leads_of=leads_of, delete=delete)
+        assert out["deleted"] == 0 and deleted == [], status
+        assert backup_rows(conn) == []
+
+
+def test_an_unfinished_contact_in_a_paused_campaign_is_still_refused(conn):
+    """A paused campaign can be resumed, so a lead still in sequence must not go."""
+    leads_of, delete, deleted = world({OLD: [lead(1, status=1), lead(2, status=-1),
+                                             lead(3, reply="2026-09-01T10:00:00Z")]})
+    out = rot.rotate(conn, None, needed=10, batch=10,
+                     campaigns=[{"id": OLD, "status": 2, "name": "Legacy paused"}],
+                     leads_of=leads_of, delete=delete)
+    assert out["deleted"] == 0 and deleted == []
+    assert out["refused"]["sequence_not_finished:1"] == 1
+    assert out["refused"]["sequence_not_finished:-1"] == 1
+    assert out["refused"]["has_reply"] == 1

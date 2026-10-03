@@ -360,6 +360,43 @@ def cmd_deliver(args) -> int:
     return 0
 
 
+def cmd_health_alerts(args) -> int:
+    """Check for capacity blocks, copy refusals, stuck deliveries and a missed tick.
+
+    Read-only: it asks the database four questions and, when one of them trips, posts to
+    Slack. It sends no email, touches no campaign and spends nothing, so it is safe to
+    run on a short cron. By default it stays silent unless something is wrong, so an
+    hourly schedule does not become noise.
+    """
+    from .reporting import health_alerts
+    from .reporting.slack import SlackError, api_sender, resolve_channel
+
+    s = _settings()
+    conn = connect(args.database_url or s.database_url)
+    report = health_alerts.evaluate(conn)
+    print(json.dumps(report, indent=2, default=str))
+    alerts = report.get("alerts") or []
+    if not alerts:
+        return 0
+    if args.send != "slack":
+        return 0
+    token = (os.environ.get(args.slack_token_env) or "").strip()
+    if not token or not args.slack_channel:
+        print("alerts found but no Slack destination was configured; nothing was sent",
+              file=sys.stderr)
+        return 0
+    try:
+        channel = resolve_channel(token, args.slack_channel)
+        sent = api_sender(token, channel["id"])(args.slack_channel,
+                                                health_alerts.blocks_for(report))
+        print(json.dumps({"sent": sent}, indent=2, default=str))
+    except SlackError as exc:
+        # A failed alert must be loud in the log rather than silently swallowed.
+        print(f"alert delivery failed: {exc}", file=sys.stderr)
+        return 0
+    return 0
+
+
 def cmd_recover_deliveries(args) -> int:
     """Deliver approved outbox rows that a PAUSED campaign deferred, under the run lock.
 
@@ -909,7 +946,8 @@ def main(argv=None) -> int:
                      ("run-target", cmd_run_target), ("work", cmd_work),
                      ("deliver", cmd_deliver), ("ledger", cmd_ledger), ("import-airtable", cmd_import_airtable),
                      ("prune", cmd_prune), ("demo", cmd_demo), ("check-db", cmd_check_db), ("budget", cmd_budget),
-                     ("run-daily", cmd_run_daily), ("recover-deliveries", cmd_recover_deliveries)):
+                     ("run-daily", cmd_run_daily), ("recover-deliveries", cmd_recover_deliveries),
+                     ("health-alerts", cmd_health_alerts)):
         p = sub.add_parser(name)
         p.add_argument("--database-url", default="")
         p.add_argument("--max-items", type=int, default=10000 if name in ("run-target", "run-daily") else 1000)
@@ -919,6 +957,10 @@ def main(argv=None) -> int:
         p.add_argument("--i-understand-spend", action="store_true", help="required for cycle/work/deliver against real providers")
         if name == "work":
             p.add_argument("--kind", required=True, choices=("resolve_identity", "classify", "qualify_opportunity"))
+        if name == "health-alerts":
+            p.add_argument("--send", choices=("none", "slack"), default="none")
+            p.add_argument("--slack-channel", default="")
+            p.add_argument("--slack-token-env", default="SLACK_BOT_TOKEN")
         if name == "recover-deliveries":
             p.add_argument("--withhold", type=int, action="append", default=[],
                            help="outbox id to block BEFORE delivering (repeatable)")

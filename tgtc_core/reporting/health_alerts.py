@@ -1,0 +1,176 @@
+"""Operational alerts that do not depend on anybody's laptop.
+
+Three failures in this incident were only noticed because a human went looking:
+
+* acquisition refused for want of Instantly slots, and the run produced nothing;
+* a Challenger lead was approved whose copy could not render, which on 2026-09-21
+  became 16,875 blank messages before anyone saw it;
+* 25 approved deliveries sat `pending` for hours because the only thing that drains the
+  outbox is a run, and no run came.
+
+Each of those is visible in the database within minutes. This module turns them into a
+check that a Railway cron can run, so the watching does not live on a workstation and
+does not stop when one is closed.
+
+Every check is a question about state, not a trend, and each carries the number that
+makes it actionable. Nothing here sends email, touches a campaign or spends anything.
+"""
+from __future__ import annotations
+
+import json
+from datetime import datetime, timedelta, timezone
+from typing import Any, Callable, Dict, List, Optional
+
+#: An outbox row due this long ago that nothing has drained is stuck, not waiting.
+PENDING_STUCK_HOURS = 6
+#: A scheduled day with no claim by this hour UTC means the tick did not run.
+TICK_EXPECTED_BY_HOUR = 6
+#: Copy refusals are normal; this many in a day is a change worth seeing.
+COPY_REFUSAL_ALERT = 25
+
+
+def _rows(conn, sql: str, params: tuple = ()) -> List[Dict[str, Any]]:
+    with conn.cursor() as cur:
+        cur.execute(sql, params)
+        return [dict(r) for r in cur.fetchall()]
+
+
+def _one(conn, sql: str, params: tuple = ()) -> Any:
+    rows = _rows(conn, sql, params)
+    if not rows:
+        return None
+    return next(iter(rows[0].values()))
+
+
+def check_pending_deliveries(conn, *, now: datetime) -> Optional[Dict[str, Any]]:
+    """Approved work nothing is draining."""
+    cutoff = now - timedelta(hours=PENDING_STUCK_HOURS)
+    rows = _rows(conn,
+                 "SELECT channel, count(*) AS n, min(available_at) AS oldest "
+                 "FROM delivery_outbox WHERE state = 'pending' AND available_at <= %s "
+                 "GROUP BY channel ORDER BY channel", (cutoff,))
+    if not rows:
+        return None
+    total = sum(int(r["n"]) for r in rows)
+    oldest = min(r["oldest"] for r in rows if r["oldest"])
+    return {
+        "check": "pending_deliveries",
+        "severity": "high",
+        "summary": "%d approved deliveries have been due for more than %dh"
+                   % (total, PENDING_STUCK_HOURS),
+        "detail": {"by_channel": {r["channel"]: int(r["n"]) for r in rows},
+                   "oldest_due_at": oldest.isoformat() if hasattr(oldest, "isoformat") else str(oldest)},
+        "why_it_matters": "only a run drains the outbox; if no run comes, approved contacts are never created",
+    }
+
+
+def check_capacity(conn, *, now: datetime) -> Optional[Dict[str, Any]]:
+    """The last run refused to acquire because there were not enough Instantly slots."""
+    rows = _rows(conn,
+                 "SELECT run_id, details, created_at FROM run_log "
+                 "WHERE stage = 'daily' AND event = 'end' ORDER BY id DESC LIMIT 1")
+    if not rows:
+        return None
+    details = rows[0]["details"]
+    if isinstance(details, str):
+        try:
+            details = json.loads(details)
+        except ValueError:
+            details = {}
+    details = details or {}
+    stop = str(details.get("stop_reason") or "")
+    rotation = details.get("rotation") or {}
+    blocked = "instantly_slots_short_by" in stop or "slots" in stop
+    deficit = rotation.get("deficit") or rotation.get("needed") or 0
+    if not blocked and not (isinstance(deficit, int) and deficit > 0):
+        return None
+    return {
+        "check": "capacity",
+        "severity": "high" if blocked else "medium",
+        "summary": "the last run %s (deficit %s slots)"
+                   % ("was blocked for Instantly capacity" if blocked else "needed rotation", deficit),
+        "detail": {"run_id": rows[0]["run_id"], "stop_reason": stop,
+                   "free_before": rotation.get("free_before"), "deficit": deficit,
+                   "rotated": rotation.get("rotated")},
+        "why_it_matters": "a capacity refusal produces zero leads for the day and spends nothing, so it is silent",
+    }
+
+
+def check_copy_refusals(conn, *, now: datetime) -> Optional[Dict[str, Any]]:
+    """Challenger copy that could not be rendered."""
+    since = now - timedelta(hours=24)
+    rows = _rows(conn,
+                 "SELECT blocked_reason, count(*) AS n FROM delivery_outbox "
+                 "WHERE state = 'blocked' AND updated_at >= %s "
+                 "AND (blocked_reason LIKE 'challenger_copy%%' OR blocked_reason LIKE 'copy_%%') "
+                 "GROUP BY 1 ORDER BY n DESC", (since,))
+    total = sum(int(r["n"]) for r in rows)
+    if total < COPY_REFUSAL_ALERT:
+        return None
+    return {
+        "check": "copy_refusals",
+        "severity": "medium",
+        "summary": "%d Challenger leads were refused for copy in the last 24h" % total,
+        "detail": {"by_reason": {r["blocked_reason"]: int(r["n"]) for r in rows[:8]}},
+        "why_it_matters": "a copy refusal is correct, but a jump in them means the renderer or the title data moved",
+    }
+
+
+def check_scheduled_tick(conn, *, now: datetime) -> Optional[Dict[str, Any]]:
+    """The day's scheduled execution never claimed."""
+    if now.hour < TICK_EXPECTED_BY_HOUR:
+        return None
+    day = now.strftime("%Y%m%d")
+    claimed = _one(conn, "SELECT count(*) FROM scheduled_executions WHERE execution_day = %s", (day,))
+    if claimed:
+        return None
+    return {
+        "check": "scheduled_tick",
+        "severity": "high",
+        "summary": "no scheduled execution claimed %s by %02d:00Z" % (day, now.hour),
+        "detail": {"execution_day": day},
+        "why_it_matters": "a cron that does not fire leaves no log at all, so silence looks like success",
+    }
+
+
+CHECKS: List[Callable[..., Optional[Dict[str, Any]]]] = [
+    check_pending_deliveries, check_capacity, check_copy_refusals, check_scheduled_tick,
+]
+
+
+def evaluate(conn, *, now: Optional[datetime] = None) -> Dict[str, Any]:
+    moment = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    alerts = []
+    for check in CHECKS:
+        try:
+            result = check(conn, now=moment)
+        except Exception as exc:                       # a broken check must not hide the others
+            result = {"check": getattr(check, "__name__", "unknown"), "severity": "medium",
+                      "summary": "the check itself failed: %s" % exc.__class__.__name__,
+                      "detail": {"error": str(exc)[:200]},
+                      "why_it_matters": "an alert that cannot run is an alert that will not fire"}
+        if result:
+            alerts.append(result)
+    return {"at": moment.strftime("%Y-%m-%dT%H:%M:%SZ"), "alerts": alerts,
+            "checked": [getattr(c, "__name__", "?") for c in CHECKS]}
+
+
+def blocks_for(report: Dict[str, Any]) -> Dict[str, Any]:
+    alerts = report.get("alerts") or []
+    header = "TGTC alert: %d condition%s at %s" % (
+        len(alerts), "" if len(alerts) == 1 else "s", report.get("at"))
+    blocks: List[Dict[str, Any]] = [
+        {"type": "header", "text": {"type": "plain_text", "text": header[:150]}}]
+    for alert in alerts:
+        lines = ["*%s* (%s)" % (alert["check"], alert["severity"]), alert["summary"],
+                 "_%s_" % alert["why_it_matters"]]
+        detail = alert.get("detail") or {}
+        if detail:
+            lines.append("```%s```" % json.dumps(detail, default=str)[:600])
+        blocks.append({"type": "section",
+                       "text": {"type": "mrkdwn", "text": "\n".join(lines)[:2900]}})
+    return {"blocks": blocks, "text": header}
+
+
+__all__ = ["evaluate", "blocks_for", "CHECKS", "PENDING_STUCK_HOURS",
+           "TICK_EXPECTED_BY_HOUR", "COPY_REFUSAL_ALERT"]
