@@ -119,9 +119,18 @@ def test_instantly_payload_uses_documented_fields_and_the_control_variable_names
     assert variables["role_focus"] == "product roadmap and requirements"
 
 
-def test_display_role_and_role_focus_are_never_empty_for_a_known_function():
+def test_display_role_is_the_employers_words_or_nothing():
+    """The contract changed on 2026-10-03, deliberately: `display_role` used to fall
+    back to the campaign's function noun, which is how `operations role` and
+    `customer support role` became subject lines (691 of 7,839 exported approvals,
+    8.8%). It now returns a title the employer actually wrote, or "" so the lead is
+    refused before a contact is paid for. The function-noun fallback survives only for
+    CONTROL destinations, inside `build_approved_lead`, because a Control campaign
+    carries its own literal subject and can never show this defect."""
     assert ap.display_role("Customer Success Manager (Remote - US)", "customer_success") == "Customer Success Manager"
-    assert ap.display_role("", "customer_success") == "customer success role"
-    assert ap.display_role("URGENT!!! hiring $$$ 12345678 x/y|z", "finance") == "finance role"
+    assert ap.display_role("", "customer_success") == ""
+    assert ap.display_role("URGENT!!! hiring $$$ 12345678 x/y|z", "finance") == ""
+    # punctuation alone must not cost a real title
+    assert ap.display_role("Senior Product Manager, Ad Monetization", "product") == "Senior Product Manager"
     assert ap.role_focus_text(["a", "b", "c", "d"]) == "a, b, and c"
     assert ap.role_focus_text(["a", "b"]) == "a and b"

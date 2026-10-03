@@ -547,7 +547,21 @@ class DeliveryService:
             if str(camp.data.get("id") or "") != target or type(status) is not int:
                 self._set(item, "failed", available_at=self._backoff_at(item), error="campaign_response_invalid")
                 return DeliveryOutcome(item.id, "instantly", "failed", "campaign_response_invalid")
-            if status != 1:
+            # A PAUSED campaign (2) is the one case where deferring is stricter than
+            # it needs to be, and it is the reason 25 approved rows from
+            # 20261002T233322Z sat undelivered. Measured on the internal TEST B
+            # campaign on 2026-10-03: creating a genuinely new lead in a PAUSED
+            # campaign left status 2, left `emails_sent` unchanged, and the lead was
+            # never contacted (`timestamp_last_contact` null, no step). So the
+            # provider does allow it and nothing is sent.
+            #
+            # It stays OFF by default: delivering into a paused campaign is an
+            # operational choice, because those leads will send the moment someone
+            # resumes it. COMPLETED (3) is deliberately NOT covered -- adding leads
+            # to a drained campaign flips it to ACTIVE, which would start sending.
+            paused_ok = status == 2 and str(
+                self.env.get("TGTC_DELIVER_INTO_PAUSED_CAMPAIGNS", "") or "").strip() == "1"
+            if status != 1 and not paused_ok:
                 self._set(item, "pending", available_at=self.now() + timedelta(hours=1), error=f"campaign_status_{status}")
                 return DeliveryOutcome(item.id, "instantly", "deferred", f"campaign_not_active:{status}")
         if item.version_state_before in ("in_flight", "claimed") or item.attempts > 1:

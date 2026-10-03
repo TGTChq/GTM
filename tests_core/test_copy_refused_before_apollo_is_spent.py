@@ -32,7 +32,11 @@ def test_an_unrenderable_posting_is_closed_before_any_apollo_is_spent(conn, cloc
     out, fake, oid = _run(conn, clock, UNRENDERABLE)
 
     assert out.outcome == "closed"
-    assert "challenger_copy_qa_failed:role_display_contains_unsafe_characters" in out.reason
+    # Since display_role stopped inventing a function noun, a title with no usable job
+    # title in it is refused EARLIER and by name: `copy_fields_incomplete` rather than
+    # a renderer QA reason. The invariant under test is unchanged -- closed, and nothing
+    # bought.
+    assert out.reason == "copy_fields_incomplete", out.reason
 
     # the whole point: nothing was bought
     assert fake.served_paid == 0, "a refusal readable from the vacancy must not buy a contact"
@@ -69,12 +73,15 @@ def test_a_control_destination_is_never_pre_refused(conn, clock):
 
 
 @pytest.mark.parametrize("role, expect_refusal", [
+    # No segment of this is a title: "Manager" and "Product" are single words.
     ("Manager, Product", True),
-    ("Product Manager - EMEA", True),
-    # the core's own role pipeline reduces an over-long title to the campaign's
-    # function noun ("product role"), which PASSES the display gate -- measured,
-    # not assumed. It is listed here so that behaviour stays pinned.
-    ("Product Manager for Strategic Enterprise Accounts and Partnerships", False),
+    # Punctuation and a trailing region no longer cost a real title: this now yields
+    # "Product Manager" and is approved. It used to be refused.
+    ("Product Manager - EMEA", False),
+    # An over-long title used to be reduced to the function noun "product role", which
+    # passed every gate and shipped as a subject line. It is now refused, before a
+    # contact is bought.
+    ("Product Manager for Strategic Enterprise Accounts and Partnerships", True),
     ("Product Manager", False),
     ("Senior Product Manager", False),
 ])
@@ -98,10 +105,20 @@ def test_the_pre_check_and_the_final_guard_give_the_same_verdict(role, expect_re
 
     built = approval.build_approved_lead(**{**base, "campaign_id": CHALLENGER,
                                            "allowed_campaign_ids": [CHALLENGER]})
-    final, _payload = approval.instantly_payload_with_copy_state(
-        built.lead, skip_if_in_workspace=True, verify_on_import=False)
 
     assert bool(pre) == expect_refusal, (role, pre)
+
+    if isinstance(built, approval.ApprovalRefusal):
+        # The refusal can now come from `build_approved_lead` itself, because
+        # `display_role` returns "" instead of inventing a function noun. There is no
+        # lead to run the final guard on, and the two gates still agree: both refuse,
+        # by the same name.
+        assert expect_refusal, (role, built.reason)
+        assert pre == built.reason == "copy_fields_incomplete", (role, pre, built.reason)
+        return
+
+    final, _payload = approval.instantly_payload_with_copy_state(
+        built.lead, skip_if_in_workspace=True, verify_on_import=False)
     assert pre == final, (role, pre, final)
 
 
