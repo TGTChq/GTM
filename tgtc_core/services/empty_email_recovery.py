@@ -36,6 +36,7 @@ it claims it from a message id Instantly returns, never from a successful enrolm
 from __future__ import annotations
 
 import os
+import time
 from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List, Mapping, Optional
 
@@ -61,10 +62,26 @@ REVOKING_EVENTS = frozenset({
 STORAGE_FLOOR_ENV = "TGTC_RECOVERY_STORAGE_FLOOR"
 DEFAULT_STORAGE_FLOOR = 1500
 
-#: How many contacts one tick may enrol, matching the campaign's own daily pace so the
-#: send budget shared with the v2 campaigns is not raided in one go.
+#: How many contacts one tick may enrol.
+#:
+#: Sized for the hour it runs in, not for the queue. Each contact costs two provider
+#: calls -- the create, and the read-back that proves it -- and the key allows 20 requests
+#: a minute, so 150 contacts is about 15 minutes and leaves the hourly tick room for the
+#: reply poll and the alert. Enrolling is not sending: the campaign's own
+#: ``daily_max_leads`` of 500 paces the send budget shared with the v2 campaigns, so
+#: enrolling faster only queues people inside the campaign.
 BATCH_ENV = "TGTC_RECOVERY_BATCH"
-DEFAULT_BATCH = 500
+DEFAULT_BATCH = 150
+
+#: Seconds between provider calls.
+#:
+#: The Instantly client has no rate handling of its own -- unlike the Airtable and Apollo
+#: clients, a 429 falls through it as a plain failure -- so the pacing lives here rather
+#: than being assumed. 3 seconds is the documented 20 requests a minute. Widening the
+#: client's retry behaviour would change every caller, including the daily run, and that
+#: is a different change from this one.
+PACE_SECONDS_ENV = "TGTC_RECOVERY_PACE_SECONDS"
+DEFAULT_PACE_SECONDS = 3.0
 
 #: Measured 2026-09-24 on plan pid_hg_v1 (HyperGrowth): the allowance is a stock of
 #: stored contacts, not a monthly grant.
@@ -88,6 +105,36 @@ OPEN_STATES = ("authorised", "reserved", "enrolled")
 def _int_env(env: Mapping[str, str], name: str, default: int) -> int:
     try:
         value = int(str(env.get(name, "")).strip())
+    except (TypeError, ValueError):
+        return default
+    return value if value >= 0 else default
+
+
+class _Pace:
+    """A minimum gap between provider calls, so a batch does not trip the rate limit.
+
+    Deliberately a sleep rather than a retry: a 429 that has already happened has
+    consumed an attempt and told a row it failed, and the point is not to get there.
+    """
+
+    def __init__(self, seconds: float, sleep=time.sleep, clock=time.monotonic):
+        self.seconds = max(0.0, float(seconds))
+        self._sleep, self._clock = sleep, clock
+        self._last = None
+
+    def wait(self) -> None:
+        if not self.seconds:
+            return
+        if self._last is not None:
+            gap = self._clock() - self._last
+            if gap < self.seconds:
+                self._sleep(self.seconds - gap)
+        self._last = self._clock()
+
+
+def _float_env(env: Mapping[str, str], name: str, default: float) -> float:
+    try:
+        value = float(str(env.get(name, "")).strip())
     except (TypeError, ValueError):
         return default
     return value if value >= 0 else default
@@ -320,7 +367,7 @@ def _verify_created(client, lead_id: str, row: Mapping[str, Any]) -> str:
 
 def enrol(conn: psycopg.Connection, client, *, limit: Optional[int] = None,
           env: Optional[Mapping[str, str]] = None, now: Optional[datetime] = None,
-          dry_run: bool = False) -> Dict[str, Any]:
+          dry_run: bool = False, pace: Optional[_Pace] = None) -> Dict[str, Any]:
     """Create one batch of recovery contacts, and verify each one by id.
 
     Returns what happened, never a bare success. A contact is only ``enrolled`` once it
@@ -373,6 +420,8 @@ def enrol(conn: psycopg.Connection, client, *, limit: Optional[int] = None,
     created = refused = failed = 0
     stopped = ""
     reasons: Dict[str, int] = {}
+    clock = pace if pace is not None else _Pace(
+        _float_env(environ, PACE_SECONDS_ENV, DEFAULT_PACE_SECONDS))
     for row in rows:
         # Reserved BEFORE the call, so a crash between the create and the record leaves a
         # row that says "this may already exist in Instantly" rather than one that looks
@@ -381,6 +430,7 @@ def enrol(conn: psycopg.Connection, client, *, limit: Optional[int] = None,
             tx.execute("UPDATE empty_email_recovery SET state = 'reserved', reserved_at = %s, "
                        "attempts = attempts + 1 WHERE email = %s", (moment, row["email"]))
         payload = _payload(row)
+        clock.wait()
         try:
             result = client.create_lead(payload)
         except ValueError as exc:                     # the copy contract refused it
@@ -393,6 +443,15 @@ def enrol(conn: psycopg.Connection, client, *, limit: Optional[int] = None,
             continue
         if not result.ok:
             message = str(result.message or "")
+            if result.status == 429:
+                # Not this row's fault, and not a refusal. Stop the batch, leave everybody
+                # sendable, and let the next tick carry on.
+                with transaction(conn) as tx:
+                    tx.execute("UPDATE empty_email_recovery SET state = 'authorised', "
+                               "last_error = %s WHERE email = %s",
+                               ("rate_limited", row["email"]))
+                stopped = "rate_limited"
+                break
             if "lead limit" in message.lower() or "remaining uploads" in message.lower():
                 # The allowance is the real ceiling. Park the rest of the queue rather
                 # than burning attempts against a wall, and leave this row sendable.
@@ -411,6 +470,7 @@ def enrol(conn: psycopg.Connection, client, *, limit: Optional[int] = None,
             continue
         data = result.data if isinstance(result.data, dict) else {}
         lead_id = str(data.get("id") or "")
+        clock.wait()
         problem = _verify_created(client, lead_id, row) if lead_id else "created_without_id"
         if problem:
             failed += 1
@@ -434,7 +494,8 @@ def enrol(conn: psycopg.Connection, client, *, limit: Optional[int] = None,
 
 
 def record_receipts(conn: psycopg.Connection, client, *, limit: int = 200,
-                    now: Optional[datetime] = None) -> Dict[str, Any]:
+                    now: Optional[datetime] = None, env: Optional[Mapping[str, str]] = None,
+                    pace: Optional[_Pace] = None) -> Dict[str, Any]:
     """Mark as sent only the contacts Instantly can show a message for.
 
     The distinction this module is built around: enrolling is not sending. A row becomes
@@ -451,7 +512,11 @@ def record_receipts(conn: psycopg.Connection, client, *, limit: int = 200,
 
     sent = 0
     unapproved: List[str] = []
+    clock = pace if pace is not None else _Pace(
+        _float_env(env if env is not None else os.environ, PACE_SECONDS_ENV,
+                   DEFAULT_PACE_SECONDS))
     for row in rows:
+        clock.wait()
         result = client.emails_for(row["email"],
                                    campaign_id=EMPTY_EMAIL_RECOVERY_CAMPAIGN_ID, limit=10)
         if not result.ok:
@@ -598,5 +663,5 @@ __all__ = ["load_queue", "revalidate", "free_slots", "enrol", "record_receipts",
            "guard", "ledger", "GUARD_PAUSE_REASONS",
            "EMPTY_EMAIL_RECOVERY_CAMPAIGN_ID", "INCIDENT_SUPPRESSION_SOURCE",
            "REVOKING_EVENTS", "STORAGE_FLOOR_ENV", "BATCH_ENV", "PLAN_ALLOWANCE_ENV",
-           "MAY_ROTATE_ENV",
+           "MAY_ROTATE_ENV", "PACE_SECONDS_ENV", "DEFAULT_PACE_SECONDS",
            "DEFAULT_STORAGE_FLOOR", "DEFAULT_BATCH", "SENDABLE_STATES", "OPEN_STATES"]

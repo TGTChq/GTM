@@ -476,8 +476,10 @@ def cmd_recover_empty_emails(args) -> int:
                 conn, client, limit=args.batch if args.batch > 0 else None,
                 dry_run=args.plan)
         if not args.no_receipts:
+            # Bounded by the hour, not by --max-items: each receipt is one paced provider
+            # call, so a thousand of them would outlast the tick that asked for them.
             report["stages"]["receipts"] = recovery.record_receipts(
-                conn, client, limit=args.max_items)
+                conn, client, limit=min(args.max_items, args.receipts))
         # Last, and never skipped: if what went out was wrong, stop the campaign before
         # the next tick enrols anybody else.
         report["stages"]["guard"] = recovery.guard(conn, client, pause=not args.plan)
@@ -1047,6 +1049,8 @@ def main(argv=None) -> int:
                            help="how many to enrol this tick (0 = the configured batch)")
             p.add_argument("--plan", action="store_true",
                            help="say what would be enrolled and create nothing")
+            p.add_argument("--receipts", type=int, default=200,
+                           help="how many enrolments to check for a sent message this tick")
             p.add_argument("--no-enrol", action="store_true")
             p.add_argument("--no-receipts", action="store_true")
         if name == "recover-deliveries":

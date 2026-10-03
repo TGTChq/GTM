@@ -18,6 +18,9 @@ from tgtc_core.services import empty_email_recovery as rec
 from tests_core.helpers import sql1, sqlall
 
 INCIDENT = rec.INCIDENT_SUPPRESSION_SOURCE
+#: The real 3-second pace is asserted by its own tests below. Everywhere else it would
+#: only make the suite slow, so it is off and said so rather than inherited.
+NO_PACE = {rec.PACE_SECONDS_ENV: "0"}
 
 
 class Result:
@@ -30,7 +33,8 @@ class FakeInstantly:
     """Enough of the client to exercise the paths, and it records what it was asked."""
 
     def __init__(self, *, stored=1000, allowance_error=False, emails_sent=0,
-                 drop_variables=False, subject=None, on_lists=0):
+                 drop_variables=False, subject=None, on_lists=0, rate_limited=False):
+        self.rate_limited = rate_limited
         self.stored = stored
         self.on_lists = on_lists
         self.deleted: list = []
@@ -80,6 +84,8 @@ class FakeInstantly:
         unknown = set(payload) - DOCUMENTED_LEAD_FIELDS
         if unknown:
             raise ValueError("undocumented: %s" % sorted(unknown))
+        if self.rate_limited:
+            return Result(False, 429, message="Too many requests")
         if self.allowance_error:
             return Result(False, 403, message='{"message":"Lead limit reached. Remaining uploads: 0"}')
         lead_id = "L%d" % (len(self.created) + 1)
@@ -105,6 +111,17 @@ class FakeInstantly:
     def pause_campaign(self, campaign_id):
         self.paused.append(campaign_id)
         return Result(data={"status": 2})
+
+
+class CountingPace(rec._Pace):
+    """Records every wait instead of taking it."""
+
+    def __init__(self, seconds=3.0):
+        self.waits = 0
+        super().__init__(seconds, sleep=self._record, clock=lambda: 0.0)
+
+    def _record(self, seconds):
+        self.waits += 1
 
 
 def queue_row(i, *, role="Tax Accountant", first="Ana"):
@@ -232,7 +249,7 @@ def test_a_lead_whose_role_vanished_on_the_way_out_is_withheld_not_sent(conn):
                     "WHERE email = 'p1@employer.test'")
     conn.commit()
     client = FakeInstantly()
-    report = rec.enrol(conn, client, limit=10, env={})
+    report = rec.enrol(conn, client, limit=10, env=dict(NO_PACE))
     assert report["enrolled"] == 0 and report["withheld"] == 1
     assert client.created == []
     row = affected_rows(conn, "state, state_reason")[0]
@@ -244,7 +261,7 @@ def test_a_created_lead_that_reads_back_without_its_role_is_not_enrolled(conn):
     """A 200 on the create is not evidence. The incident was 200s all the way down."""
     load(conn, 1)
     client = FakeInstantly(drop_variables=True)
-    report = rec.enrol(conn, client, limit=10, env={})
+    report = rec.enrol(conn, client, limit=10, env=dict(NO_PACE))
     assert report["enrolled"] == 0 and report["failed"] == 1
     row = affected_rows(conn, "state, last_error, instantly_lead_id")[0]
     assert row["state"] == "authorised"             # it stays sendable, once the data is fixed
@@ -255,7 +272,7 @@ def test_a_created_lead_that_reads_back_without_its_role_is_not_enrolled(conn):
 def test_an_enrolled_contact_is_only_sent_when_instantly_shows_a_message(conn):
     load(conn, 2)
     client = FakeInstantly()
-    rec.enrol(conn, client, limit=10, env={})
+    rec.enrol(conn, client, limit=10, env=dict(NO_PACE))
     assert set(states(conn).values()) == {"enrolled"}
 
     # Nothing has been sent yet, so nothing may claim it was.
@@ -278,7 +295,7 @@ def test_a_blank_subject_that_got_out_is_recorded_and_pauses_the_campaign(conn):
     """The incident itself, as a test: our ledger must show it, not only an inbox."""
     load(conn, 1)
     client = FakeInstantly()
-    rec.enrol(conn, client, limit=10, env={})
+    rec.enrol(conn, client, limit=10, env=dict(NO_PACE))
     client.messages["p1@employer.test"] = {"message_id": "M1", "subject": ""}
     report = rec.record_receipts(conn, client)
     assert report["subject_not_as_approved_count"] == 1
@@ -292,7 +309,7 @@ def test_a_blank_subject_that_got_out_is_recorded_and_pauses_the_campaign(conn):
 def test_more_messages_than_recipients_is_a_second_email_and_stops_the_campaign(conn):
     load(conn, 2)
     client = FakeInstantly()
-    rec.enrol(conn, client, limit=10, env={})
+    rec.enrol(conn, client, limit=10, env=dict(NO_PACE))
     client.emails_sent = 4   # two affected plus the test row, and a fourth message
     guard = rec.guard(conn, client)
     assert "second_email_sent" in guard["campaign_paused_because"]
@@ -302,7 +319,7 @@ def test_more_messages_than_recipients_is_a_second_email_and_stops_the_campaign(
 def test_the_guard_stays_quiet_when_nothing_is_wrong(conn):
     load(conn, 2)
     client = FakeInstantly()
-    rec.enrol(conn, client, limit=10, env={})
+    rec.enrol(conn, client, limit=10, env=dict(NO_PACE))
     client.emails_sent = 2
     guard = rec.guard(conn, client)
     assert guard["findings"] == [] and client.paused == []
@@ -345,14 +362,14 @@ def test_a_revoked_recipient_is_never_enrolled(conn):
     event(conn, "p1@employer.test", "human_reply")
     rec.revalidate(conn)
     client = FakeInstantly()
-    rec.enrol(conn, client, limit=10, env={})
+    rec.enrol(conn, client, limit=10, env=dict(NO_PACE))
     assert [c["email"] for c in client.created] == ["p2@employer.test"]
 
 
 def test_somebody_who_was_already_suppressed_elsewhere_before_the_send_is_a_guard_finding(conn):
     load(conn, 1)
     client = FakeInstantly()
-    rec.enrol(conn, client, limit=10, env={})
+    rec.enrol(conn, client, limit=10, env=dict(NO_PACE))
     suppress(conn, "p1@employer.test", source="reply_workflow", reason="unsubscribe")
     client.messages["p1@employer.test"] = {"message_id": "M1",
                                            "subject": "Your Tax Accountant opening"}
@@ -367,7 +384,7 @@ def test_somebody_who_was_already_suppressed_elsewhere_before_the_send_is_a_guar
 def test_the_daily_run_keeps_its_floor(conn):
     load(conn, 5)
     client = FakeInstantly(stored=24000)            # 1,000 free against a floor of 1,500
-    report = rec.enrol(conn, client, limit=10, env={})
+    report = rec.enrol(conn, client, limit=10, env=dict(NO_PACE))
     assert report["stopped"] == "storage_floor_reached"
     assert report["enrolled"] == 0 and client.created == []
     assert set(states(conn).values()) == {"authorised"}
@@ -376,7 +393,7 @@ def test_the_daily_run_keeps_its_floor(conn):
 def test_only_the_slots_above_the_floor_are_taken(conn):
     load(conn, 5)
     client = FakeInstantly(stored=23498)            # 1,502 free, floor 1,500 -> room for 2
-    report = rec.enrol(conn, client, limit=10, env={})
+    report = rec.enrol(conn, client, limit=10, env=dict(NO_PACE))
     assert report["enrolled"] == 2
     assert sorted(states(conn).values()) == ["authorised", "authorised", "authorised",
                                              "enrolled", "enrolled"]
@@ -385,7 +402,7 @@ def test_only_the_slots_above_the_floor_are_taken(conn):
 def test_the_providers_own_refusal_parks_the_queue_without_losing_it(conn):
     load(conn, 4)
     client = FakeInstantly(allowance_error=True)
-    report = rec.enrol(conn, client, limit=10, env={})
+    report = rec.enrol(conn, client, limit=10, env=dict(NO_PACE))
     assert report["stopped"] == "provider_storage_full"
     assert report["enrolled"] == 0
     # Every row is still sendable, and the one that was tried says why it was not.
@@ -397,7 +414,7 @@ def test_the_providers_own_refusal_parks_the_queue_without_losing_it(conn):
 def test_a_batch_is_bounded_so_the_shared_send_budget_is_not_raided(conn):
     load(conn, 10)
     client = FakeInstantly()
-    report = rec.enrol(conn, client, limit=3, env={})
+    report = rec.enrol(conn, client, limit=3, env=dict(NO_PACE))
     assert report["enrolled"] == 3
     assert rec.ledger(conn)["remaining_to_enrol"] == 7
 
@@ -406,7 +423,7 @@ def test_the_floor_and_the_batch_are_configurable_without_code(conn):
     load(conn, 10)
     client = FakeInstantly(stored=20000)
     report = rec.enrol(conn, client, env={rec.STORAGE_FLOOR_ENV: "4999",
-                                          rec.BATCH_ENV: "4"})
+                                          rec.BATCH_ENV: "4", **NO_PACE})
     assert report["capacity"]["available"] == 1      # 5,000 free minus a 4,999 floor
     assert report["enrolled"] == 1
 
@@ -438,14 +455,14 @@ def test_a_workspace_whose_lead_lists_cannot_be_read_stops_the_tick(conn):
         def list_lead_lists(self, *, limit=100, starting_after=None):
             return Result(False, 500, message="upstream error")
 
-    report = rec.enrol(conn, Blind(), limit=10, env={})
+    report = rec.enrol(conn, Blind(), limit=10, env=dict(NO_PACE))
     assert report["stopped"] == "capacity_unknown" and report["enrolled"] == 0
 
 
 def test_the_queue_waits_at_the_floor_unless_rotation_is_explicitly_allowed(conn):
     load(conn, 3)
     client = FakeInstantly(stored=24000)
-    report = rec.enrol(conn, client, limit=10, env={})
+    report = rec.enrol(conn, client, limit=10, env=dict(NO_PACE))
     assert report["stopped"] == "storage_floor_reached"
     assert report["rotation"] is None and client.deleted == []
 
@@ -456,7 +473,7 @@ def test_when_rotation_is_allowed_it_is_the_authorised_one_with_its_own_guards(c
     client = FakeInstantly(stored=24000)
     report = rec.enrol(conn, client, limit=10,
                        env={rec.MAY_ROTATE_ENV: "1",
-                            "TGTC_INSTANTLY_ROTATION_ENABLED": "0"})
+                            "TGTC_INSTANTLY_ROTATION_ENABLED": "0", **NO_PACE})
     # Rotation was asked and declined itself, because it is disabled in this environment.
     assert report["rotation"]["reason"] == "rotation_disabled"
     assert report["stopped"] == "storage_floor_reached"
@@ -467,7 +484,7 @@ def test_a_recovered_contact_is_not_net_new_and_opens_no_second_airtable_row(con
     """They were acquired, approved and emailed weeks ago. This is a repair."""
     load(conn, 3)
     client = FakeInstantly()
-    rec.enrol(conn, client, limit=10, env={})
+    rec.enrol(conn, client, limit=10, env=dict(NO_PACE))
     client.messages["p1@employer.test"] = {"message_id": "M1",
                                            "subject": "Your Tax Accountant opening"}
     rec.record_receipts(conn, client)
@@ -479,7 +496,7 @@ def test_a_recovered_contact_is_not_net_new_and_opens_no_second_airtable_row(con
 def test_the_recovery_spends_nothing_at_a_metered_provider(conn):
     load(conn, 2)
     client = FakeInstantly()
-    rec.enrol(conn, client, limit=10, env={})
+    rec.enrol(conn, client, limit=10, env=dict(NO_PACE))
     assert sql1(conn, "SELECT count(*) AS n FROM credit_events") == 0
     assert sql1(conn, "SELECT count(*) AS n FROM provider_state") == 0
 
@@ -513,7 +530,7 @@ def test_the_ledger_is_one_row_per_recipient_and_accounts_for_all_of_them(conn):
     event(conn, "p1@employer.test", "human_reply")
     rec.revalidate(conn)
     client = FakeInstantly()
-    rec.enrol(conn, client, limit=2, env={})
+    rec.enrol(conn, client, limit=2, env=dict(NO_PACE))
     client.messages["p2@employer.test"] = {"message_id": "M1",
                                            "subject": "Your Tax Accountant opening"}
     rec.record_receipts(conn, client)
@@ -529,7 +546,7 @@ def test_the_ledger_is_one_row_per_recipient_and_accounts_for_all_of_them(conn):
 def test_a_dry_run_creates_nothing(conn):
     load(conn, 3)
     client = FakeInstantly()
-    report = rec.enrol(conn, client, limit=10, env={}, dry_run=True)
+    report = rec.enrol(conn, client, limit=10, env=dict(NO_PACE), dry_run=True)
     assert report["would_enrol"] == 3 and client.created == []
     assert set(states(conn).values()) == {"authorised"}
 
@@ -541,7 +558,7 @@ def test_an_unmeasurable_workspace_stops_rather_than_guesses(conn):
         def campaign_analytics(self):
             return Result(False, 500, message="upstream error")
 
-    report = rec.enrol(conn, Blind(), limit=10, env={})
+    report = rec.enrol(conn, Blind(), limit=10, env=dict(NO_PACE))
     assert report["stopped"] == "capacity_unknown" and report["enrolled"] == 0
 
 
@@ -554,7 +571,7 @@ def test_an_enrolment_that_is_interrupted_leaves_the_row_claimed(conn):
             raise KeyboardInterrupt("container replaced mid-call")
 
     with pytest.raises(KeyboardInterrupt):
-        rec.enrol(conn, Crash(), limit=10, env={})
+        rec.enrol(conn, Crash(), limit=10, env=dict(NO_PACE))
     row = affected_rows(conn, "state, attempts")[0]
     assert row["state"] == "reserved" and row["attempts"] == 1
 
@@ -565,7 +582,7 @@ def test_an_alert_fires_on_harm_and_stays_quiet_on_a_healthy_queue(conn):
 
     load(conn, 2)
     client = FakeInstantly()
-    rec.enrol(conn, client, limit=10, env={})
+    rec.enrol(conn, client, limit=10, env=dict(NO_PACE))
     client.messages["p1@employer.test"] = {"message_id": "M1",
                                            "subject": "Your Tax Accountant opening"}
     rec.record_receipts(conn, client)
@@ -595,7 +612,7 @@ def test_an_enrolment_nothing_has_sent_for_three_days_is_surfaced(conn):
 
     load(conn, 1)
     client = FakeInstantly()
-    rec.enrol(conn, client, limit=10, env={}, now=NOW - timedelta(hours=96))
+    rec.enrol(conn, client, limit=10, env=dict(NO_PACE), now=NOW - timedelta(hours=96))
     alert = health_alerts.check_empty_email_recovery(conn, now=NOW)
     assert alert["detail"]["enrolled_over_72h_with_no_message"] == 1
 
@@ -607,7 +624,7 @@ def test_no_stranger_is_enrolled_before_one_of_our_own_has_received_it(conn):
     """On 2026-09-21 the 7,777 recipients WERE the test. Not again."""
     rec.load_queue(conn, [queue_row(i) for i in range(1, 4)])
     client = FakeInstantly()
-    report = rec.enrol(conn, client, limit=10, env={})
+    report = rec.enrol(conn, client, limit=10, env=dict(NO_PACE))
     assert report["stopped"] == "awaiting_internal_test"
     assert report["internal_test"]["passed"] is False
     assert client.created == []
@@ -618,7 +635,7 @@ def test_the_internal_test_itself_is_enrolled_while_the_gate_is_shut(conn):
     rec.load_queue(conn, [queue_row(1),
                           dict(queue_row(9), email="qa@tgtc.test", is_internal_test=True)])
     client = FakeInstantly()
-    report = rec.enrol(conn, client, limit=10, env={})
+    report = rec.enrol(conn, client, limit=10, env=dict(NO_PACE))
     assert report["enrolled"] == 1
     assert [c["email"] for c in client.created] == ["qa@tgtc.test"]
     assert states(conn)["p1@employer.test"] == "authorised"
@@ -628,7 +645,7 @@ def test_an_enrolled_test_is_not_a_passed_test(conn):
     """Enrolling is not sending, and sending is not the approved subject arriving."""
     rec.load_queue(conn, [dict(queue_row(9), email="qa@tgtc.test", is_internal_test=True)])
     client = FakeInstantly()
-    rec.enrol(conn, client, limit=10, env={})
+    rec.enrol(conn, client, limit=10, env=dict(NO_PACE))
     assert rec.internal_test_passed(conn)["passed"] is False
 
     client.messages["qa@tgtc.test"] = {"message_id": "T1", "subject": "wrong subject"}
@@ -640,13 +657,67 @@ def test_the_gate_opens_only_on_a_received_message_with_the_approved_subject(con
     rec.load_queue(conn, [queue_row(1),
                           dict(queue_row(9), email="qa@tgtc.test", is_internal_test=True)])
     client = FakeInstantly()
-    rec.enrol(conn, client, limit=10, env={})
+    rec.enrol(conn, client, limit=10, env=dict(NO_PACE))
     client.messages["qa@tgtc.test"] = {"message_id": "T1",
                                        "subject": "Your Tax Accountant opening"}
     rec.record_receipts(conn, client)
     gate = rec.internal_test_passed(conn)
     assert gate["passed"] is True and gate["address"] == "qa@tgtc.test"
 
-    report = rec.enrol(conn, client, limit=10, env={})
+    report = rec.enrol(conn, client, limit=10, env=dict(NO_PACE))
     assert report["enrolled"] == 1
     assert "p1@employer.test" in [c["email"] for c in client.created]
+
+
+# --------------------------------------------------------------------------- pacing
+
+
+def test_every_provider_call_in_a_batch_is_paced(conn):
+    """Two calls per contact, each one waiting, because the client has no rate handling.
+
+    Unlike the Airtable and Apollo clients, a 429 falls through the Instantly client as a
+    plain failure, so an unpaced batch of 150 would spend its attempts on the rate limit.
+    """
+    load(conn, 3)
+    client = FakeInstantly()
+    pace = CountingPace()
+    report = rec.enrol(conn, client, limit=10, env={}, pace=pace)
+    assert report["enrolled"] == 3
+    # The first call of all needs no wait; after that, one per create and one per
+    # read-back: 3 creates + 3 verifications = 6 calls, 5 waits.
+    assert pace.waits == 5
+
+
+def test_receipts_are_paced_too(conn):
+    load(conn, 2)
+    client = FakeInstantly()
+    rec.enrol(conn, client, limit=10, env=dict(NO_PACE))
+    pace = CountingPace()
+    rec.record_receipts(conn, client, pace=pace)
+    assert pace.waits == 1, "one call per enrolment, so one wait after the first"
+
+
+def test_a_rate_limit_stops_the_batch_and_blames_nobody(conn):
+    """It is not a refusal and not this row's fault, so the row stays sendable."""
+    load(conn, 4)
+    client = FakeInstantly(rate_limited=True)
+    report = rec.enrol(conn, client, limit=10, env={}, pace=CountingPace(0))
+    assert report["stopped"] == "rate_limited"
+    assert report["enrolled"] == 0 and report["failed"] == 0
+    assert set(states(conn).values()) == {"authorised"}
+    assert sql1(conn, "SELECT count(*) AS n FROM empty_email_recovery "
+                      "WHERE last_error = 'rate_limited'") == 1
+
+
+def test_the_batch_is_sized_for_the_hour_it_runs_in(conn):
+    """150 contacts x 2 paced calls is about 15 minutes, inside an hourly tick."""
+    assert rec.DEFAULT_BATCH * 2 * rec.DEFAULT_PACE_SECONDS <= 20 * 60
+    assert 60 / rec.DEFAULT_PACE_SECONDS == 20, "the documented requests per minute"
+
+
+def test_the_pace_can_be_turned_off_for_a_one_off_run(conn):
+    load(conn, 2)
+    client = FakeInstantly()
+    pace = CountingPace(0)
+    rec.enrol(conn, client, limit=10, env={rec.PACE_SECONDS_ENV: "0"}, pace=pace)
+    assert pace.waits == 0
