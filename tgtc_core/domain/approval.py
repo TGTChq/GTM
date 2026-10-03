@@ -516,6 +516,79 @@ def instantly_payload(lead: Dict[str, Any], *, skip_if_in_workspace: bool, verif
     return payload
 
 
+#: Placeholder contact for the pre-enrichment probe. The copy gates decide on
+#: POSTING facts -- the role display is ``open_role`` and the content gates read
+#: ``role_focus`` -- so the contact only has to be present, not real. Measured
+#: 2026-10-02 over 7,839 approvals: the probe reproduced the final guard's verdict
+#: on every one, 1,829 refusals and 0 false positives.
+_PROBE_CONTACT = {"first_name": "Probe", "last_name": "Contact",
+                  "buyer_title": "Head of Function", "email": "probe@example.invalid",
+                  "linkedin_url": "", "apollo_person_id": ""}
+
+
+def challenger_copy_refusal_before_enrichment(
+    *, posting: Dict[str, Any], classification: Dict[str, Any], employer: Dict[str, Any],
+    function_key: str, campaign_id: str, allowed_campaign_ids: Sequence[str],
+    signing_key: str, now: Optional[datetime] = None,
+    env: Optional[Mapping[str, str]] = None) -> str:
+    """The copy refusal, decided from POSTING facts before a contact is paid for.
+
+    Apollo credits buy a CONTACT, and that happens before the copy gate runs at
+    approval -- so a lead the gate refuses has already cost its credits. Every gate
+    the refusal depends on reads posting facts: the role display is ``open_role``
+    and the content gates read ``role_focus``. Only the contact's name is missing,
+    and the copy never depends on it.
+
+    This does not restate any rule. It builds the lead the real flow would build,
+    via ``build_approved_lead``, with a PROBE contact that satisfies the person
+    gates, and then asks ``instantly_payload_with_copy_state`` exactly what it is
+    asked at approval. The final guard is untouched and still runs on the real lead.
+
+    Returns "" unless the refusal is specifically about COPY. A refusal for any
+    other reason is left for the real flow to decide after enrichment, so this can
+    only ever decline to BUY -- it never substitutes for another verdict.
+    """
+    domain = str(employer.get("domain") or "").strip().lower()
+    if not domain:
+        return ""
+    probe = dict(_PROBE_CONTACT)
+    probe.update({"id": 0, "apollo_person_id": "probe", "title": probe.pop("buyer_title"),
+                  "email": "probe@" + domain, "email_status": "verified",
+                  "linkedin_url": "https://linkedin.com/in/probe",
+                  "contact_gate_passed": True, "email_gate_passed": True,
+                  "email_alignment": "EXACT_EMPLOYER_DOMAIN"})
+    built = build_approved_lead(
+        posting=posting, classification=classification, employer=employer, person=probe,
+        function_key=function_key, campaign_id=campaign_id,
+        allowed_campaign_ids=allowed_campaign_ids, signing_key=signing_key, now=now, env=env)
+    if not isinstance(built, ApprovedLead):
+        return ""
+    return challenger_copy_refusal_from_posting(built.lead)
+
+
+def challenger_copy_refusal_from_posting(lead_facts: Dict[str, Any]) -> str:
+    """The refusal the FINAL guard would give, decided BEFORE a contact is bought.
+
+    Apollo credits are spent revealing and verifying a contact, which happens
+    before the copy gate runs at approval, so a copy-refused lead has already been
+    paid for. This answers the same question from the posting alone.
+
+    It does not re-implement the rules: it calls
+    ``instantly_payload_with_copy_state`` -- the same renderer, the same QA gates
+    and the same reason strings -- with a placeholder contact. The final guard is
+    unchanged and still runs; this only lets a caller decline to pay first.
+
+    Returns "" for a Control destination or when the copy renders.
+    """
+    if lead_facts.get("campaign_id") not in KNOWN_CHALLENGER_CAMPAIGN_IDS:
+        return ""
+    probe = dict(lead_facts)
+    probe.update(_PROBE_CONTACT)
+    refusal, _payload = instantly_payload_with_copy_state(
+        probe, skip_if_in_workspace=False, verify_on_import=False)
+    return refusal
+
+
 def instantly_payload_with_copy_state(lead: Dict[str, Any], *, skip_if_in_workspace: bool,
                                       verify_on_import: bool) -> Tuple[str, Dict[str, Any]]:
     """``(copy_refusal, payload)``; the refusal is "" when the copy is complete.

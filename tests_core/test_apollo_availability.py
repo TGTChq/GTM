@@ -57,6 +57,12 @@ def test_rate_limit_auth_timeout_and_server_are_distinct(conn, clock):
     out = svc.process(oid)
     assert out.outcome == "wait" and out.reason == "apollo_rate_limited"
     assert sql1(conn, "SELECT state FROM provider_state WHERE provider = 'apollo'") is None   # a throttle is not a refusal
+    # A 429 now also holds Apollo off for the retry-after WITHIN this run, so the
+    # next opportunity does not rediscover the same limit (measured 2026-10-02:
+    # 1,351 rate-limited people_search calls, 18% of the day's request allowance).
+    # It is bounded, so advancing past it restores normal behaviour -- which is
+    # what the rest of this test is about.
+    clock.advance(seconds=901)
     fake.fail_next = ["timeout"]
     out = svc.process(oid)
     assert out.outcome == "retry" and out.reason == "apollo_timeout"

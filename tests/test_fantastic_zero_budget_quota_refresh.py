@@ -31,7 +31,7 @@ import os
 import tempfile
 import unittest
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest import mock
 
@@ -40,15 +40,26 @@ import fantastic_jobs_adapter as fja
 from orchestrator import fantastic_governor as G
 from orchestrator.pipeline import Orchestrator
 
+#: What the authorized 2026-09-03 count request actually returned, kept verbatim as
+#: the captured evidence. It stays pinned wherever `now` is pinned to NOW as well,
+#: which is every unit-level use below: against 2026-09-03 this date IS in the
+#: future, so those tests are time-independent.
+CAPTURED_BILLING_DATE = "2026-10-01T23:39:15.948851Z"
 # Provider truth captured by the ONE authorized live count request (2026-09-03).
 PROVIDER_HEADERS = {
     "x-api-jobs-limit": "100000",
     "x-api-jobs-remaining": "100000",
     "x-api-requests-limit": "50000",
     "x-api-requests-remaining": "49999",
-    "x-api-next-billing-date": "2026-10-01T23:39:15.948851Z",
+    "x-api-next-billing-date": CAPTURED_BILLING_DATE,
 }
-BILLING_DATE = "2026-10-01T23:39:15.948851Z"
+#: The fixture the end-to-end runs serve, which CANNOT be a pinned literal. The
+#: header means the NEXT billing date, so once the captured value fell into the
+#: past every refresh reported a fresh cycle key, the governor rolled the cycle
+#: (`cycle_rolled: true`) and DISCARDED the seeded spend -- so scenario 5 stopped
+#: exercising a spent daily allowance and started asserting against a healed
+#: budget of 3266 instead. Derived at import time so it cannot go stale again.
+BILLING_DATE = (datetime.now(timezone.utc) + timedelta(days=29)).isoformat().replace("+00:00", "Z")
 STALE_REMAINING = 236
 QUOTA_FLOOR = 500          # FANTASTIC_JOBS_MIN_JOBS_QUOTA_REMAINING on GTM
 NOW = datetime(2026, 9, 3, 13, 0, tzinfo=timezone.utc)

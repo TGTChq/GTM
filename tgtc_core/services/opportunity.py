@@ -39,6 +39,7 @@ from ..db import work_queue
 from ..domain.contact_ranking import organization_evidence, rank_candidates
 from ..domain.approval import (
     COMPLIANCE_LEAD_FIELDS, ApprovalRefusal, ApprovedLead, airtable_fields, build_approved_lead,
+    challenger_copy_refusal_before_enrichment,
     instantly_payload_with_copy_state, outreach_blocked_reason,
 )
 from ..domain.jurisdiction import observe_contact_country
@@ -358,6 +359,14 @@ class OpportunityService:
         self.campaign_env = campaign_env
         self.signing_key = signing_key
         self.retry_hours = retry_hours
+        # A rate limit is a property of the PROVIDER right now, not of one
+        # opportunity. Measured 2026-10-02: RATE_LIMITED raised for the
+        # opportunity in hand but recorded nothing, so every later
+        # opportunity re-hit the limit -- 1,351 rate-limited people_search
+        # calls, 18% of the day's request allowance, each burning a request
+        # for nothing. This latch holds Apollo off for exactly the
+        # retry-after the provider asked for, and no longer.
+        self._apollo_throttled_until: Optional[datetime] = None
         self.search_pages = max(1, people_search_max_pages)
         self.search_page_size = max(1, min(100, people_search_page_size))
         self.run_id = run_id or "legacy-unattributed"
@@ -614,6 +623,11 @@ class OpportunityService:
     def _guard_provider(self, *, chargeable: bool = True) -> None:
         """Reserve only at a chargeable call. A free search can find no usable
         people; it must not consume the sole recovery probe for the next opportunity."""
+        if self._apollo_throttled_until is not None:
+            if self.now() < self._apollo_throttled_until:
+                raise ProviderWait("apollo_rate_limited_this_run",
+                                   self._apollo_throttled_until)
+            self._apollo_throttled_until = None
         check = provider_state.reserve_probe if chargeable else provider_state.may_attempt
         gate = check(self.conn, "apollo", retry_hours=self.retry_hours, now=self.now())
         if not gate["allowed"]:
@@ -632,8 +646,16 @@ class OpportunityService:
                                           state=provider_state.UNAUTHORIZED, now=moment)
             raise ProviderWait("apollo_unauthorized", moment + timedelta(hours=self.retry_hours))
         if result.outcome is Outcome.RATE_LIMITED:
-            wait = min(float(result.retry_after or 60.0), 900.0)
-            raise ProviderWait("apollo_rate_limited", moment + timedelta(seconds=wait))
+            # The provider's own retry-after is honoured IN FULL. An earlier version
+            # capped it at 900s, which meant that when Apollo asked for longer we
+            # called it again BEFORE it said to -- the very behaviour that burned
+            # 1,351 requests. When the provider names no wait, 60s is the fallback
+            # rather than an invented longer outage.
+            wait = max(float(result.retry_after), 0.0) if result.retry_after else 60.0
+            # Still per RUN, never written to provider_state: a long wait ends Apollo
+            # for this run without spending, and the next run starts clean.
+            self._apollo_throttled_until = moment + timedelta(seconds=wait)
+            raise ProviderWait("apollo_rate_limited", self._apollo_throttled_until)
         if result.outcome is Outcome.TIMEOUT or result.outcome is Outcome.SERVER:
             raise ProviderRetry(result.outcome.value)
         if result.outcome is Outcome.VALIDATION and not (allow_not_found and result.status == 404):
@@ -891,6 +913,23 @@ class OpportunityService:
                 return int(cur.fetchone()["id"])
 
     # --- approval ----------------------------------------------------------------
+    def _copy_refusal_before_enrichment(self, opp: Dict[str, Any], emp: Dict[str, Any],
+                                       posting: Dict[str, Any], classification: Dict[str, Any]) -> str:
+        """Named copy refusal readable from the posting, or "" to proceed to spend.
+
+        Resolves the destination the same way ``_approve`` does, so the probe is
+        judged against the campaign this opportunity would really be delivered into.
+        """
+        campaign_id = resolve_campaign_id(opp["function_key"],
+                                         self._confirmed_size_count(emp, posting), self.campaign_env)
+        employer_view = dict(emp)
+        employer_view["excluded_industry"] = excluded_industry(str(emp.get("industry") or ""))
+        return challenger_copy_refusal_before_enrichment(
+            posting=posting, classification=classification, employer=employer_view,
+            function_key=opp["function_key"], campaign_id=campaign_id,
+            allowed_campaign_ids=list(self.campaign_env.values()),
+            signing_key=self.signing_key, now=self.now(), env=os.environ)
+
     def _approve(self, opp: Dict[str, Any], emp: Dict[str, Any], posting: Dict[str, Any], classification: Dict[str, Any],
                  person_row: Dict[str, Any]) -> ApprovedLead | ApprovalRefusal:
         # I2: the campaign this lead is actually delivered into is resolved HERE,
@@ -1162,6 +1201,16 @@ class OpportunityService:
             return self._wait_for_dependency(
                 opportunity_id, f"configuration_pending:no_campaign_configured:{opp['function_key']}"
             )
+        # Same intent as the route check above, one step further: a Challenger
+        # campaign body is only the rendered copy, so if this posting cannot
+        # produce copy the lead can never be sent -- and the Apollo credits that
+        # reveal a contact would be spent to discover a refusal we can already
+        # read from the vacancy. Measured 2026-10-02 over 7,839 approvals: the
+        # probe reproduced the final guard's verdict on every one, 1,829 refusals
+        # and 0 false positives. The final guard still runs at approval.
+        copy_block = self._copy_refusal_before_enrichment(opp, emp, posting, classification)
+        if copy_block:
+            return self._close(opportunity_id, copy_block)
         epoch = int(opp.get("evidence_epoch") or 1)
         if epoch > int(rule("max_evidence_epochs")):
             return self._close(opportunity_id, "evidence_epochs_exhausted")

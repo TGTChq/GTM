@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
@@ -42,6 +43,8 @@ HARD_BATCH_CEILING = 2000
 PLAN_CONTACTS_ENV = "TGTC_INSTANTLY_PLAN_CONTACTS"
 DEFAULT_PLAN_CONTACTS = 25000
 ENABLED_ENV = "TGTC_INSTANTLY_ROTATION_ENABLED"
+#: The OOO follow-up destination. Protected: it holds deferrals we promised.
+FOLLOWUP_CAMPAIGN_ENV = "TGTC_OOO_FOLLOWUP_CAMPAIGN_ID"
 FLOOR_ENV = "TGTC_INSTANTLY_FREE_SLOT_FLOOR"
 BATCH_ENV = "TGTC_INSTANTLY_ROTATION_BATCH"
 
@@ -69,8 +72,18 @@ def settings(env: Optional[Dict[str, str]] = None) -> Dict[str, int]:
             "batch": min(HARD_BATCH_CEILING, max(0, _int_env(env, BATCH_ENV, 500)))}
 
 
-def protected_ids() -> frozenset:
-    return KNOWN_CHALLENGER_CAMPAIGN_IDS | KNOWN_CONTROL_CAMPAIGN_IDS
+def protected_ids(env: Optional[Dict[str, str]] = None) -> frozenset:
+    """Campaigns rotation must never remove a contact from.
+
+    The nine Challenger and nine Control campaigns, plus the OOO follow-up
+    campaign. That last one was NOT protected before, and it is a real omission:
+    it holds people who asked us to come back later, so deleting them discards a
+    deferral we promised to honour. Measured 2026-10-02: of the twelve contacts
+    rotation actually removed over four days, four came from it.
+    """
+    extra = str((env if env is not None else os.environ).get(FOLLOWUP_CAMPAIGN_ENV, "") or "").strip()
+    base = KNOWN_CHALLENGER_CAMPAIGN_IDS | KNOWN_CONTROL_CAMPAIGN_IDS
+    return (base | {extra}) if extra else base
 
 
 def _held_emails(conn: psycopg.Connection) -> set:
@@ -90,9 +103,10 @@ def _held_emails(conn: psycopg.Connection) -> set:
     return held
 
 
-def judge(lead: Dict[str, Any], *, campaign_id: str, campaign_status: Any, held: set) -> str:
+def judge(lead: Dict[str, Any], *, campaign_id: str, campaign_status: Any, held: set,
+          protected: Optional[frozenset] = None) -> str:
     """'' when this contact may be removed, otherwise why not. One place, one rule set."""
-    if campaign_id in protected_ids():
+    if campaign_id in (protected if protected is not None else protected_ids()):
         return "live_campaign"
     if campaign_status != CAMPAIGN_COMPLETED:
         return f"campaign_not_completed:{campaign_status}"
@@ -184,6 +198,7 @@ def rotate(conn: psycopg.Connection, transport: Any, *, needed: int, batch: int,
         raise RotationRefused("a rotation batch of zero was requested")
     bid = batch_id or f"rot-{(now or datetime.now(timezone.utc)).strftime('%Y%m%dT%H%M%SZ')}-{uuid.uuid4().hex[:6]}"
     held = _held_emails(conn)
+    protected = protected_ids()
     out: Dict[str, Any] = {"needed": needed, "ceiling": ceiling, "considered": 0, "backed_up": 0,
                            "deleted": 0, "failed": 0, "refused": {}, "batch_id": bid}
 
@@ -192,13 +207,14 @@ def rotate(conn: psycopg.Connection, transport: Any, *, needed: int, batch: int,
             break
         cid = str(campaign.get("id") or "")
         status = campaign.get("status")
-        if cid in protected_ids() or status != CAMPAIGN_COMPLETED:
+        if cid in protected or status != CAMPAIGN_COMPLETED:
             continue
         for lead in leads_of(cid):
             if out["deleted"] >= ceiling:
                 break
             out["considered"] += 1
-            why = judge(lead, campaign_id=cid, campaign_status=status, held=held)
+            why = judge(lead, campaign_id=cid, campaign_status=status, held=held,
+                        protected=protected)
             if why:
                 out["refused"][why] = out["refused"].get(why, 0) + 1
                 continue

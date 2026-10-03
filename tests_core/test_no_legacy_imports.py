@@ -63,13 +63,25 @@ def test_shared_copy_renderer_has_no_legacy_or_network_dependencies():
         if path.name == "outcomes.py":
             continue
         assert set(_top_level_imports(path)) <= allowed, path
+    import os
     import subprocess
+    # The child must start CLEAN. `rebuild/run_offline_tests.py` puts a temporary
+    # directory on PYTHONPATH holding a `sitecustomize.py` that imports
+    # `ci_no_network`, which imports `requests.adapters` to refuse outbound HTTP.
+    # Inherited, that preloads `requests` into every descendant interpreter and the
+    # assertion below would fail on a module the renderer never touched. So pin
+    # PYTHONPATH to the repository and skip user site-packages.
+    env = dict(os.environ, PYTHONPATH=str(ROOT), PYTHONNOUSERSITE="1")
+    # And measure what the import ADDS, so a future preload cannot make this vacuous
+    # in either direction.
     subprocess.run(
         [sys.executable, "-c",
-         "import outbound_wave1.resolver, sys; "
-         "leaked = {'http_utils', 'config', 'requests', 'instantly_client'} & set(sys.modules); "
-         "assert not leaked, leaked"],
-        cwd=ROOT, check=True)
+         "import sys; before = set(sys.modules); "
+         "import outbound_wave1.resolver; "
+         "banned = {'http_utils', 'config', 'requests', 'instantly_client'}; "
+         "assert not (banned & set(sys.modules)), ('preloaded', banned & set(sys.modules)); "
+         "assert not (banned & (set(sys.modules) - before)), banned & (set(sys.modules) - before)"],
+        cwd=ROOT, env=env, check=True)
 
 
 def test_core_image_includes_the_shared_copy_and_claim_registry():

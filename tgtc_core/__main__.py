@@ -215,6 +215,17 @@ def cmd_budget_id(args) -> int:
 def cmd_run_daily(args) -> int:
     """The daily production controller: 1,000 fresh Instantly creations is a MINIMUM;
     drain first, buy in small blocks, deliver everything produced (``tgtc_core.daily``)."""
+    # A DEPLOY starts a cron service's command, not only the schedule. On
+    # 2026-10-02, with cronSchedule deliberately None, two deployments each began
+    # a full acquisition run. So the window is checked FIRST -- before spend is
+    # acknowledged, a budget is claimed or the run lock is taken.
+    from .services.run_guard import start_allowed
+
+    allowed, reason = start_allowed()
+    if not allowed:
+        print(f"run-daily declined: {reason} (a deploy must not start a run; "
+              f"set TGTC_RUN_FORCE=1 for a deliberate manual run)")
+        return 0
     _require_spend_acknowledgement(args.i_understand_spend)
     s = _settings()
     _require_persistent_budget(args, s)
@@ -234,6 +245,19 @@ def cmd_run_daily(args) -> int:
         conn = connect(args.database_url or s.database_url)
         apply_schema(conn)
         r = _runner(conn, s, allow_spend=args.i_understand_spend)
+        # The run lock only stops an OVERLAP. A deployment starts a cron service's
+        # command, so a second sequential run on the same day is possible -- it
+        # happened twice on 2026-10-02. The day's execution is claimed durably
+        # here, before any spend, and a completed day refuses a duplicate while an
+        # interrupted one requires an explicitly named recovery.
+        from .services import scheduled_execution
+        day_claim = scheduled_execution.claim(conn, run_id=r.run_id, env=os.environ)
+        r._log("daily", "execution_claim", day_claim.to_dict())
+        if not day_claim.allowed:
+            print(f"run-daily declined: {day_claim.reason} "
+                  f"(state={day_claim.state}; a recovery must name "
+                  f"TGTC_RUN_RECOVER=<day>:<interrupted_run_id>)")
+            return 0
         try:
             claimed = claim(conn, budget_id=s.spend_budget_id, kind=args.budget_kind, run_id=r.run_id)
         except BudgetPolicyError as exc:
@@ -253,6 +277,9 @@ def cmd_run_daily(args) -> int:
         print(json.dumps(out, indent=2, default=str))
         print(f"daily run {report.stop_reason}: fresh Instantly {out['fresh_instantly_created']}/{args.target}, "
               f"backlog {out['backlog_instantly_created']}")
+        # The day is closed only now. If the process dies before this, the claim
+        # stays open and reads as INTERRUPTED rather than completed.
+        scheduled_execution.mark_finished(conn, run_id=r.run_id, outcome=report.stop_reason)
         # A business shortfall exits 0 (visible in the ledger); only a broken system is non-zero.
         return run_exit_code(classified)
     finally:
