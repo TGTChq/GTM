@@ -41,6 +41,22 @@ def challenger_env():
             for f in FUNCTION_KEYS}
 
 
+@pytest.fixture(autouse=True)
+def _reach_the_approval_time_guard(monkeypatch):
+    """These tests are about the APPROVAL-TIME guard: a Challenger lead with no
+    renderable copy must be stored and blocked rather than raise.
+
+    Production now also refuses such a posting BEFORE paid enrichment, which
+    closes the opportunity and so never reaches approval -- that gate has its own
+    file, `test_copy_refused_before_apollo_is_spent.py`. Disabling it here keeps
+    each test exercising one gate instead of the earlier one standing in.
+    """
+    from tgtc_core.services.opportunity import OpportunityService
+
+    monkeypatch.setattr(OpportunityService, "_copy_refusal_before_enrichment",
+                        lambda self, opp, emp, posting, classification: "")
+
+
 def _approve(conn, clock, title):
     _pid, _eid, oid = seed_opportunity(conn, clock, title=title)
     fake = apollo_for("acme.com", "Acme")
