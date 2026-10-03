@@ -2407,3 +2407,179 @@ and is 0. Files: `reactivation_proposal.jsonl` (18),
 `reactivation_held_back.jsonl` (5).
 
 Nothing executed: no campaign created, no lead moved, nothing unpaused.
+
+## Step GJ — cron paused before the tick, and the deployment that did not happen
+
+| | |
+| --- | --- |
+| run lock at 02:40:52Z | `held=0` |
+| `cronSchedule` set to | `null`, applied and **verified** `None` at 02:41:17Z |
+| margin before the 03:00Z tick | 19 minutes |
+
+Then the deployment check, and it found a mistake of mine.
+
+**PR #135 was merged into `main` (`9045ec67`), but the Core deploys from
+`feat/rebuild-core`.** Every other PR in this incident targeted `feat/rebuild-core`
+(#129–#134). So the merge deployed only the two services that track `main`:
+
+| service | branch | deployment | start command |
+| --- | --- | --- | --- |
+| GTM | `main` | `5d84dff5` 02:40:25Z | prints `TGTC_PAUSED_PENDING_CREDITS` and exits |
+| GTM Approved Sync | `main` | `31ae96b3` 02:40:25Z | prints `TGTC_PAUSED_PENDING_CREDITS` and exits |
+| **GTM Core Canary 1000** | `feat/rebuild-core` | **`a5ce3b40` 00:54:22Z, commit `8242de24`** | the guarded daily controller |
+
+Both logs confirm it: `Starting Container` then the paused line, nothing else. **No
+unexpected run started, nothing spent, nothing enrolled.**
+
+So nothing from #135 is live. The effective Core commit is still `8242de24` from
+#134. [TGTChq/GTM#136](https://github.com/TGTChq/GTM/pull/136) carries the same four
+commits onto the branch that actually deploys. Checked before opening it:
+`git diff --diff-filter=A HEAD origin/feat/rebuild-core` is **empty**, so nothing
+exists on the deploy branch that this branch lacks, and the only commits it has that
+this branch does not are the merge commits of my own earlier PRs.
+
+## Step GK — the 25 pending deliveries, diagnosed
+
+| | |
+| --- | --- |
+| Instantly rows `pending` | 25, `last_error = campaign_status_2` |
+| Airtable rows `pending` | 25, `last_error = awaiting_instantly` |
+| attempts / lease | 1 / none held |
+| `available_at` | 01:16–01:17Z, already past |
+
+**Why they did not process: our own rule, not a provider limitation.**
+`delivery.py` deferred on any campaign status other than 1, and the nine campaigns
+are paused. The rows were **deferred** — not blocked, not failed — with
+`available_at = now + 1h`, which is the design: they drain once a campaign is
+reachable. The last delivery drain of the run reported `{}` for both channels
+because it ran at 00:17:38Z while those rows were not due until 01:16:57Z. Nothing
+has drained them since, because only a run drains and the Core cron has not fired.
+
+The Airtable half waiting on `awaiting_instantly` is the CRM invariant working: a
+record only after a genuine Instantly creation.
+
+### Pre-flight on the real 25, which found that 2 are NOT eligible
+
+| | |
+| --- | --- |
+| all five copy fields present | **25 / 25** |
+| unresolved tokens | **0** |
+| `skip_if_in_workspace` set | 25 / 25 |
+| distinct addresses | 25 (no internal duplication) |
+| target campaigns | OPERATIONS 14, GTM_SYSTEMS 4, CUSTOMER_EXPERIENCE 3, AI_TECHNICAL 2, MARKETING_CREATIVE 1, ECOMMERCE 1 — **none to FINANCE** |
+
+But reading the 25 subjects found **2 bare function nouns**, which is exactly what the
+287 parked leads were parked for:
+
+| outbox | approval | subject | original posting title |
+| --- | --- | --- | --- |
+| 18122 | 9070 | `customer support role` | `ISSM / IT Support` |
+| 18150 | 9084 | `operations role` | `TELLER/CUSTOMER SERVICE REP` |
+
+Both posting titles do pass `role_display_send_safe` unchanged, so a title IS
+available — but `ISSM / IT Support` and `TELLER/CUSTOMER SERVICE REP` read badly as a
+subject line against the 591 reference leads, so both are **held back** with the
+candidate recorded, the same treatment as the five department-like displays.
+
+**So 23 of the 25 are eligible, not 25.** The other 23 carry concrete titles
+(`Microsoft Cloud Engineer`, `Plant Accountant`, `Autism Clinic Service Coordinator`,
+`Software Engineer II`, and so on).
+
+This also exposes a gap worth stating separately: **the production gates do not reject
+a bare function-noun subject.** `role_display_send_safe` checks length, characters,
+appended qualifiers and headlines, and buzzword gates read the rendered copy — none of
+them objects to `operations role`. These two rows were created on 2026-10-02, so the
+pipeline can still produce such subjects today. The 363 I re-rendered earlier were a
+repair, not a gate. Closing it would change the funnel, so it is flagged, not changed.
+
+### A paused campaign accepts leads and sends nothing — tested, not assumed
+
+First attempt was inconclusive and said so: `POST /leads` returned 200 with the
+**existing** lead id, because the address was already in the workspace, so nothing
+new was created and the campaign had no reason to change. Repeated with a
+plus-address on the same internal mailbox, which is a genuinely new lead:
+
+| | before | after |
+| --- | --- | --- |
+| campaign status | 2 PAUSED | **2 PAUSED** |
+| `emails_sent` | 1 | **1** |
+| lead contacted | — | **no** (`timestamp_last_contact` null, step `None`) |
+
+Probe lead then deleted, re-read returned **404**. No residue, and the slot returned.
+
+### The recovery path, prepared and not run
+
+`python -m tgtc_core deliver` drains the existing outbox and nothing else.
+`cmd_deliver` claims **no budget, no day, no run lock** and passes no window guard.
+
+- **no enrichment repeated** — the complete payload is already in
+  `delivery_outbox.payload_json`; the drain makes zero Apollo and zero Fantastic calls
+- **no duplicates** — the idempotency key, plus `resolve_membership` on any retry
+  (`attempts > 1`), which records an existing lead as `reconciled` rather than
+  creating one, plus `skip_if_in_workspace` in the payload
+- **no new budget** — delivery only
+- the Airtable rows carry their own deferral, so they need a **second** pass later,
+  not the same sweep. Proved in the test rather than assumed.
+
+Delivering into a paused campaign is gated behind
+`TGTC_DELIVER_INTO_PAUSED_CAMPAIGNS`, **off by default**, because those leads do send
+the moment anyone resumes the campaign — that is an operational choice, not a repair.
+COMPLETED (3) is deliberately excluded: adding leads to a drained campaign flips it
+ACTIVE and it starts sending.
+
+7 tests in `tests_core/test_deliver_into_a_paused_campaign.py`, including that the
+default still defers, that exactly one create call is made and a second drain is a
+no-op, that an existing lead is reconciled rather than recreated, that the Airtable
+row follows the creation, that only PAUSED is opened up and never COMPLETED, and that
+only the literal value `1` counts as set.
+
+## Step GL — exact termination of the run, and the 1,351 verified as real 429s
+
+From the `daily/end` record:
+
+```
+stop_reason   target_not_reached:apollo_request_allowance_insufficient
+target 1000   shortfall 1000   target_met false   rounds 4
+blocks        []                      <- no acquisition block was ever attempted
+drains        [{phase: backlog, cycles: 4, outcome: drained, fresh_after: 0}]
+rotation      {needed: 0, reason: enough_room, free_before: 2500, stored_before: 22500}
+```
+
+`tgtc_core/daily.py` compares the remaining request allowance against the projected
+requests for the next block: with `10,000 − 7,407 = 2,593` left, the projection
+exceeded it, so the controller **declined to start a block at all**. A pre-spend
+refusal, not a failure — which is why `blocks` is empty and the shortfall is the full
+target.
+
+The 1,351 refusals, separated as asked:
+
+| | HTTP | error_class | n | distinct receipts |
+| --- | --- | --- | --- | --- |
+| rate limit | **429** | `rate_limited` | **1,351** | 1 — `retry_after: 900.0` on every one |
+| local budget refusal | — | — | **0** | — |
+| any other rejection | — | — | **0** | — |
+
+There is no attempt in the whole run with a null `http_status`, so nothing was a
+local refusal dressed up as a provider one. Every single refusal reached Apollo and
+came back 429.
+
+## Step GM — the 03:00Z tick of 2026-10-03 was OMITTED
+
+Recorded as fact. **No recovery launched**, per instruction.
+
+The cron was paused at 02:41:17Z, 19 minutes before the scheduled minute, so the
+tick could not fire. Verified at 03:02:10Z, four independent ways:
+
+| check | result |
+| --- | --- |
+| `scheduled_executions` for 2026-10-03 | **0 rows** — the day was never claimed |
+| `run_log` entries after 02:55Z | **0** |
+| provider attempts after 02:55Z | **0** |
+| run lock | `held=0` |
+| the 25 + 25 pending outbox rows | **untouched** |
+
+So no production happened on 2026-10-03, by deliberate choice, and the day's budget
+namespace `prod-scheduled-20261003` is unused and intact. A recovery, if one is ever
+authorised, must name itself explicitly through `TGTC_RUN_RECOVER` and would spend
+that day's remaining allowance — it is not started automatically and was not started
+here.
