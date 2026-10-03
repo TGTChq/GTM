@@ -429,6 +429,65 @@ def cmd_recover_deliveries(args) -> int:
     return 0
 
 
+def cmd_recover_empty_emails(args) -> int:
+    """Drain the authorised queue for the ONE repair email, in batches, idempotently.
+
+    Four stages, in this order and for a reason: load whatever authorised rows are being
+    handed over, revoke anybody the authorisation no longer covers, enrol as many as
+    storage allows above the floor the daily run needs, then record as SENT only the
+    people Instantly can show a message for.
+
+    It spends nothing: no Apollo, no Fantastic, no Anthropic, no budget claim and no day
+    claim. It writes no approval, no outbox row and no Airtable record, so a recovered
+    contact cannot be counted as net-new work or open a second Airtable row.
+
+    Safe to run on a short cron and safe to run twice. Enrolling is not sending: whether
+    anything leaves is decided by the recovery campaign's own status and its approved
+    window.
+    """
+    from .db.connection import acquire_run_lock
+    from .providers.http import RequestsTransport
+    from .providers.instantly import InstantlyClient
+    from .services import empty_email_recovery as recovery
+
+    s = _settings()
+    if not s.instantly_api_key:
+        print("recover-empty-emails declined: no Instantly credentials in this environment")
+        return 0
+
+    # The same mutual exclusion a run takes. Rotation deletes contacts and the run
+    # acquires them; both move the storage this reads, so they must not interleave.
+    run_lock = acquire_run_lock(args.database_url or s.database_url, connector=connect)
+    if run_lock is None:
+        print("recover-empty-emails declined: another production run holds the run lock")
+        return 0
+    report = {"stages": {}}
+    try:
+        conn = connect(args.database_url or s.database_url)
+        client = InstantlyClient(RequestsTransport(), base_url=s.instantly_base_url,
+                                 api_key=s.instantly_api_key)
+        if args.queue_file:
+            rows = [json.loads(line) for line in
+                    open(args.queue_file, encoding="utf-8").read().splitlines() if line.strip()]
+            report["stages"]["load"] = recovery.load_queue(conn, rows)
+        report["stages"]["revalidate"] = recovery.revalidate(conn)
+        if not args.no_enrol:
+            report["stages"]["enrol"] = recovery.enrol(
+                conn, client, limit=args.batch if args.batch > 0 else None,
+                dry_run=args.plan)
+        if not args.no_receipts:
+            report["stages"]["receipts"] = recovery.record_receipts(
+                conn, client, limit=args.max_items)
+        # Last, and never skipped: if what went out was wrong, stop the campaign before
+        # the next tick enrols anybody else.
+        report["stages"]["guard"] = recovery.guard(conn, client, pause=not args.plan)
+        report["ledger"] = recovery.ledger(conn)
+    finally:
+        run_lock.close()
+    print(json.dumps(report, indent=2, default=str))
+    return 0
+
+
 def cmd_budget(args) -> int:
     from .services.spend_budget import BudgetLimits, create_budget
 
@@ -960,7 +1019,8 @@ def main(argv=None) -> int:
                      ("deliver", cmd_deliver), ("ledger", cmd_ledger), ("import-airtable", cmd_import_airtable),
                      ("prune", cmd_prune), ("demo", cmd_demo), ("check-db", cmd_check_db), ("budget", cmd_budget),
                      ("run-daily", cmd_run_daily), ("recover-deliveries", cmd_recover_deliveries),
-                     ("health-alerts", cmd_health_alerts)):
+                     ("health-alerts", cmd_health_alerts),
+                     ("recover-empty-emails", cmd_recover_empty_emails)):
         p = sub.add_parser(name)
         p.add_argument("--database-url", default="")
         p.add_argument("--max-items", type=int, default=10000 if name in ("run-target", "run-daily") else 1000)
@@ -974,6 +1034,15 @@ def main(argv=None) -> int:
             p.add_argument("--send", choices=("none", "slack"), default="none")
             p.add_argument("--slack-channel", default="")
             p.add_argument("--slack-token-env", default="SLACK_BOT_TOKEN")
+        if name == "recover-empty-emails":
+            p.add_argument("--queue-file", default="",
+                           help="JSON-lines file of authorised recipients to add to the queue")
+            p.add_argument("--batch", type=int, default=0,
+                           help="how many to enrol this tick (0 = the configured batch)")
+            p.add_argument("--plan", action="store_true",
+                           help="say what would be enrolled and create nothing")
+            p.add_argument("--no-enrol", action="store_true")
+            p.add_argument("--no-receipts", action="store_true")
         if name == "recover-deliveries":
             p.add_argument("--withhold", type=int, action="append", default=[],
                            help="outbox id to block BEFORE delivering (repeatable)")

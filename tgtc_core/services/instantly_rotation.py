@@ -37,7 +37,8 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tupl
 import psycopg
 
 from ..db.connection import jsonb, transaction
-from ..policy.campaigns import KNOWN_CHALLENGER_CAMPAIGN_IDS, KNOWN_CONTROL_CAMPAIGN_IDS
+from ..policy.campaigns import (EMPTY_EMAIL_RECOVERY_CAMPAIGN_ID,
+                                KNOWN_CHALLENGER_CAMPAIGN_IDS, KNOWN_CONTROL_CAMPAIGN_IDS)
 
 CAMPAIGN_COMPLETED = 3
 LEAD_FINISHED = 3
@@ -78,14 +79,16 @@ def settings(env: Optional[Dict[str, str]] = None) -> Dict[str, int]:
 def protected_ids(env: Optional[Dict[str, str]] = None) -> frozenset:
     """Campaigns rotation must never remove a contact from.
 
-    The nine Challenger and nine Control campaigns, plus the OOO follow-up
+    The nine Challenger campaigns, the nine v2 campaigns that replaced them, the nine
+    Control campaigns, the empty-copy recovery campaign and the OOO follow-up
     campaign. That last one was NOT protected before, and it is a real omission:
     it holds people who asked us to come back later, so deleting them discards a
     deferral we promised to honour. Measured 2026-10-02: of the twelve contacts
     rotation actually removed over four days, four came from it.
     """
     extra = str((env if env is not None else os.environ).get(FOLLOWUP_CAMPAIGN_ENV, "") or "").strip()
-    base = KNOWN_CHALLENGER_CAMPAIGN_IDS | KNOWN_CONTROL_CAMPAIGN_IDS
+    base = (KNOWN_CHALLENGER_CAMPAIGN_IDS | KNOWN_CONTROL_CAMPAIGN_IDS
+            | {EMPTY_EMAIL_RECOVERY_CAMPAIGN_ID})
     return (base | {extra}) if extra else base
 
 
@@ -101,6 +104,14 @@ def _held_emails(conn: psycopg.Connection) -> set:
             JOIN people p ON p.id = a.person_id
             WHERE o.state IN ('pending', 'failed', 'claimed', 'in_flight') AND p.email IS NOT NULL
             """)
+        held |= {str(r["e"]) for r in cur.fetchall()}
+        # Somebody owed the one repair email for the 2026-09-21 blank sends. They are
+        # also suppressed, which already holds them, but the suppression is what the
+        # recovery grants a per-contact exception to -- so the protection is stated here
+        # on its own terms and does not depend on that row surviving.
+        cur.execute(
+            "SELECT lower(email) AS e FROM empty_email_recovery "
+            "WHERE state IN ('authorised', 'reserved', 'enrolled')")
         held |= {str(r["e"]) for r in cur.fetchall()}
     conn.commit()
     return held
@@ -329,6 +340,47 @@ def _lead_list_occupancy(instantly: Any) -> Tuple[int, int, bool]:
     return total, len(lists), True
 
 
+def enumerate_campaigns(instantly: Any) -> List[Dict[str, Any]]:
+    """Every campaign in the workspace, paged. The inventory rotation chooses from."""
+    out: List[Dict[str, Any]] = []
+    after = None
+    while True:
+        result = instantly.list_campaigns(limit=100, starting_after=after)
+        if not getattr(result, "ok", False):
+            break
+        data = getattr(result, "data", None) or {}
+        items = data.get("items") or []
+        out.extend(i for i in items if isinstance(i, dict))
+        after = data.get("next_starting_after")
+        if not after or not items:
+            break
+    return out
+
+
+def campaign_leads(instantly: Any) -> Callable[[str], Iterable[Dict[str, Any]]]:
+    """A ``leads_of`` for ``make_room``, so every caller pages identically.
+
+    Stops on the first failed page rather than treating a truncated read as a complete
+    one: a short list would make rotation believe a campaign holds fewer contacts than it
+    does, and the judgement that protects people runs per contact.
+    """
+    def leads_of(campaign_id: str):
+        after = None
+        while True:
+            result = instantly.list_campaign_leads(campaign_id, limit=100, starting_after=after)
+            if not getattr(result, "ok", False):
+                return
+            data = getattr(result, "data", None) or {}
+            items = data.get("items") or []
+            for item in items:
+                if isinstance(item, dict):
+                    yield item
+            after = data.get("next_starting_after")
+            if not after or not items:
+                return
+    return leads_of
+
+
 def room_needed(free: Optional[int], *, target: int, reserve: int) -> int:
     """Slots this run must free before it starts. Zero means leave the workspace alone.
 
@@ -400,4 +452,5 @@ def pending_backups(conn: psycopg.Connection) -> int:
 
 
 __all__ = ["rotate", "judge", "settings", "enabled", "protected_ids", "pending_backups",
-           "occupancy", "room_needed", "make_room", "RotationRefused", "HARD_BATCH_CEILING"]
+           "occupancy", "room_needed", "make_room", "enumerate_campaigns",
+           "campaign_leads", "RotationRefused", "HARD_BATCH_CEILING"]

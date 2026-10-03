@@ -22,7 +22,9 @@ from datetime import datetime
 from html.parser import HTMLParser
 from typing import Any, Mapping
 
-from ..policy.campaigns import KNOWN_CHALLENGER_CAMPAIGN_IDS
+from ..policy.campaigns import (EMPTY_EMAIL_RECOVERY_CAMPAIGN_ID,
+                                EMPTY_EMAIL_RECOVERY_REQUIRED_VARIABLES,
+                                KNOWN_CHALLENGER_CAMPAIGN_IDS)
 
 #: Every one of these must be present, non-empty, fully resolved and carry
 #: visible text before a Challenger lead may be created.
@@ -73,13 +75,46 @@ def _visible(value: str) -> str:
     return " ".join(parser.parts).strip()
 
 
+def _recovery_block_reason(payload: Mapping[str, Any]) -> str:
+    """The recovery campaign's own contract: literal copy, so the gaps must be filled.
+
+    Its body holds the approved words plus three variables. Two are Instantly's own
+    (`firstName`, `accountSignature`); the third, `verified_role`, is ours, it is in the
+    SUBJECT as well as the body, and an absent value would send "Your  opening". That is
+    the same failure as the incident this campaign exists to repair, which is why it is
+    refused here rather than trusted to the enroller.
+
+    `first_name` is checked too: the greeting is "Hi {{firstName}}," and Instantly fills
+    it from this field, so an empty one produces "Hi ,".
+    """
+    if not str(payload.get("first_name") or "").strip():
+        return "recovery_copy_missing:first_name"
+    variables = payload.get("custom_variables")
+    if not isinstance(variables, dict):
+        return "recovery_copy_missing_variables"
+    for key in EMPTY_EMAIL_RECOVERY_REQUIRED_VARIABLES:
+        value = variables.get(key)
+        if not isinstance(value, str) or not value.strip():
+            return f"recovery_copy_missing:{key}"
+        if "{{" in value or "}}" in value:
+            return f"recovery_copy_unresolved:{key}"
+        # A replacement character reached titles earlier in this incident and would be
+        # printed to a stranger in a subject line.
+        if "�" in value:
+            return f"recovery_copy_corrupt:{key}"
+    return ""
+
+
 def copy_block_reason(payload: Mapping[str, Any]) -> str:
     """A named refusal, or an empty string when the copy contract passes.
 
     Judges a payload exactly as stored, so it protects both a fresh enrolment and
     a pending outbox row signed before this contract existed.
     """
-    if payload.get("campaign") not in KNOWN_CHALLENGER_CAMPAIGN_IDS:
+    campaign = payload.get("campaign")
+    if campaign == EMPTY_EMAIL_RECOVERY_CAMPAIGN_ID:
+        return _recovery_block_reason(payload)
+    if campaign not in KNOWN_CHALLENGER_CAMPAIGN_IDS:
         return ""
     variables = payload.get("custom_variables")
     if not isinstance(variables, dict):

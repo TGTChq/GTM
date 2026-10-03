@@ -272,36 +272,11 @@ class Runner:
         if self.instantly is None:
             return {"enabled": False, "reason": "no_instantly_transport", "deficit": 0}
 
-        def campaigns() -> List[Dict[str, Any]]:
-            out, after = [], None
-            while True:
-                result = self.instantly.list_campaigns(limit=100, starting_after=after)
-                if not result.ok:
-                    break
-                items = (result.data or {}).get("items") or []
-                out.extend(i for i in items if isinstance(i, dict))
-                after = (result.data or {}).get("next_starting_after")
-                if not after or not items:
-                    break
-            return out
-
-        def leads_of(campaign_id: str):
-            after = None
-            while True:
-                result = self.instantly.list_campaign_leads(campaign_id, limit=100, starting_after=after)
-                if not result.ok:
-                    return
-                items = (result.data or {}).get("items") or []
-                for item in items:
-                    if isinstance(item, dict):
-                        yield item
-                after = (result.data or {}).get("next_starting_after")
-                if not after or not items:
-                    return
-
         out = instantly_rotation.make_room(
-            self.conn, self.instantly, target=target, campaigns=campaigns(),
-            leads_of=leads_of, delete=self.instantly.delete_lead, env=os.environ, now=self.now())
+            self.conn, self.instantly, target=target,
+            campaigns=instantly_rotation.enumerate_campaigns(self.instantly),
+            leads_of=instantly_rotation.campaign_leads(self.instantly),
+            delete=self.instantly.delete_lead, env=os.environ, now=self.now())
         self._log("rotation", "decided", {k: v for k, v in out.items() if k != "rotation"})
         if out.get("rotation"):
             self._log("rotation", "applied", out["rotation"])

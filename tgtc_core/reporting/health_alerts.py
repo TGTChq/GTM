@@ -140,8 +140,60 @@ def check_scheduled_tick(conn, *, now: datetime) -> Optional[Dict[str, Any]]:
     }
 
 
+def check_empty_email_recovery(conn, *, now: datetime) -> Optional[Dict[str, Any]]:
+    """The repair for the blank sends, and anything that says it has gone wrong.
+
+    Reports two different things, because they need different responses. Harm -- a
+    message that went out with an unapproved subject, or somebody enrolled with no role
+    for the subject line -- is high and means the campaign should already be paused.
+    A queue that has stopped moving is medium: it usually means storage is full and the
+    daily run has not yet rotated, which is the design, but it should not be invisible
+    for days.
+    """
+    try:
+        rows = _rows(conn, "SELECT state, count(*) AS n FROM empty_email_recovery GROUP BY 1")
+    except Exception:
+        return None                                   # the table is not there yet
+    by_state = {str(r["state"]): int(r["n"]) for r in rows}
+    if not by_state:
+        return None
+    harm = _rows(conn,
+                 "SELECT count(*) FILTER (WHERE state = 'sent' "
+                 "    AND (evidence->>'subject_as_approved') = 'false') AS wrong_subject, "
+                 "count(*) FILTER (WHERE state IN ('reserved', 'enrolled') "
+                 "    AND length(btrim(verified_role)) = 0) AS roleless "
+                 "FROM empty_email_recovery")[0]
+    wrong = int(harm["wrong_subject"] or 0)
+    roleless = int(harm["roleless"] or 0)
+    waiting = by_state.get("authorised", 0) + by_state.get("reserved", 0)
+    stale = _one(conn,
+                 "SELECT count(*) FROM empty_email_recovery WHERE state = 'enrolled' "
+                 "AND enrolled_at <= %s", (now - timedelta(hours=72),))
+    if not wrong and not roleless and not waiting and not stale:
+        return None
+    severity = "high" if (wrong or roleless) else "medium"
+    if wrong or roleless:
+        summary = ("the recovery campaign shows harm: %d message(s) with an unapproved "
+                   "subject, %d contact(s) enrolled with no role" % (wrong, roleless))
+    elif stale:
+        summary = ("%d recovery contacts have been enrolled for more than 72h with no "
+                   "message recorded" % int(stale or 0))
+    else:
+        summary = "%d recovery contacts are still waiting to be enrolled" % waiting
+    return {
+        "check": "empty_email_recovery",
+        "severity": severity,
+        "summary": summary,
+        "detail": {"by_state": by_state, "unapproved_subject_sent": wrong,
+                   "enrolled_without_a_role": roleless,
+                   "enrolled_over_72h_with_no_message": int(stale or 0)},
+        "why_it_matters": "this campaign exists to repair 16,875 blank messages; a fault in it would repeat them",
+    }
+
+
 CHECKS: List[Callable[..., Optional[Dict[str, Any]]]] = [
     check_pending_deliveries, check_capacity, check_copy_refusals, check_scheduled_tick,
+    check_empty_email_recovery,
 ]
 
 
@@ -179,5 +231,6 @@ def blocks_for(report: Dict[str, Any]) -> Dict[str, Any]:
     return {"blocks": blocks, "text": header}
 
 
-__all__ = ["evaluate", "blocks_for", "CHECKS", "PENDING_STUCK_HOURS",
+__all__ = ["evaluate", "blocks_for", "CHECKS", "check_empty_email_recovery",
+           "PENDING_STUCK_HOURS",
            "TICK_EXPECTED_BY_HOUR", "COPY_REFUSAL_ALERT"]
