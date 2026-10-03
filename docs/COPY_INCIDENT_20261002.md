@@ -1593,3 +1593,89 @@ the approval-exception fix verified in production rather than in a test.
 
 Campaigns stay paused. The 1,975 held leads are untouched. Capacity is still NOT
 sustainable: rotation freed exactly this run's 263 slots.
+
+## Step F5 — the run closed: reconciliation
+
+Run `20261002T233322.605777Z-b7478fc9`, origin **deployment start**, kind
+`scheduled`, budget `prod-scheduled-20261002` (shared, `runs=3`). Lock now free.
+
+| Measure | Value |
+| --- | --- |
+| stop_reason | `target_not_reached:apollo_request_allowance_insufficient` |
+| rounds | 4 |
+| **confirmed Instantly creations** (`receipt_kind='created'`) | **0** |
+| `fresh_instantly_created` | 0 |
+| Airtable rows written | **0** |
+| approvals written | **42** |
+| Apollo credits | **56** of 1,600 |
+| Apollo requests | **7,407** of 10,000 |
+| Fantastic requests | **0** — it bought no new inventory |
+| capacity at start | stored 22,500, free 2,500, deficit 0 (`enough_room`) |
+
+Outbox rows this run wrote, all 42 accounted for:
+
+| State | Reason | Rows |
+| --- | --- | --- |
+| pending | — | **25** |
+| blocked | `compliance:unknown_jurisdiction:absent` | 6 |
+| blocked | `challenger_copy_qa_failed:role_display_contains_unsafe_characters` | 4 |
+| blocked | `challenger_copy_qa_failed:role_display_carries_an_appended_qualifier` | 3 |
+| blocked | `challenger_copy_qa_failed:role_display_longer_than_48_chars` | 3 |
+| blocked | `compliance:uk:not_a_verified_corporate_subscriber` | 1 |
+
+**10 copy refusals, and the run did not die.** On the pre-fix code the first one
+would have raised inside `_commit_approval`, rolled the approval back and ended
+the run. This is the approval-exception fix confirmed in production.
+
+### The five copy fields, verified — with an honest limit
+
+There are **no new Instantly leads to read back**, because the run created none
+(0 confirmed creations, delivery never drained before the allowance stopped it).
+So the read-back was done on what does exist, the 25 stored pending payloads:
+
+```
+pending_rows 25 | has_subject 25 | has_b1 25 | has_b2 25 | has_b3 25 | has_b4 25
+unresolved tokens 0
+```
+
+Samples: subject `Microsoft Cloud Engineer` (body1 338 / body4 242),
+`Experience Server` (384 / 236), `Customer Experience Manager` (353 / 244) —
+real job titles, not function nouns. Those 25 are queued for the next run's
+delivery drain; they are approvals, **not** leads, and are counted as such.
+
+### Why it produced nothing, measured against history
+
+| Budget day | Apollo calls / limit | credits | creations | stop |
+| --- | --- | --- | --- | --- |
+| `…20260928` | 9,508 / 10,000 | 762 | 517 | apollo request allowance |
+| `…20260929` | 0 | 0 | 0 | instantly slots short |
+| `…20260930` | 0 | 0 | 0 | instantly slots short |
+| `…20261001` | 0 | 0 | 0 | instantly slots short |
+| `…20261002` | 7,407 / 10,000 | 56 | **0** | apollo request allowance |
+
+Two things follow, and neither is about the copy fix:
+
+1. **The Apollo REQUEST allowance, not credits, is the binding constraint
+   whenever capacity allows.** 09-26, 09-27, 09-28 and now 10-02 all stopped on
+   it, while credits stayed far below their ceiling (56 of 1,600 this time).
+2. **This run bought no new inventory** (`fantastic_requests: 0`) and ground the
+   existing `qualify_opportunity` backlog instead, at roughly **176 Apollo
+   requests per approval** against about **18 per creation** on 09-28. That ratio
+   is what working a four-day-old backlog costs, not what a healthy run costs.
+
+So the throughput picture is NOT "the copy guard reduced output". Output was 0
+because the request allowance ran out while reworking stale inventory. I am not
+projecting a per-run figure from this.
+
+### Capacity after the run
+
+Still **not** sustainable, and I am not calling it so. Rotation freed exactly
+this run's 263 slots; the run then consumed none of them (0 creations), so free
+capacity is unchanged at about 2,500 — enough for one run, with the safe
+rotation population largely spent.
+
+## Step F6 — ready to deploy the duplicate protection
+
+Lock is free (`held=0`), service `Completed`, cron still `None`. PR
+**[#134](https://github.com/TGTChq/GTM/pull/134)** holds the per-day execution
+claim; full suite **2,155 passed**, integrity 35/35.
