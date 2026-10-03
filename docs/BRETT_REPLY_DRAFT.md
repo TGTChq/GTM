@@ -47,9 +47,7 @@ mine:
 - rotation had been scoring every successful deletion as a failure and giving up
   after three. That's why the run created nothing for four days straight
 - a deploy starts the nightly container whether or not it's the scheduled time, so
-  merging a fix could kick off a second run. Closed with a time window plus a
-  per-day claim in the database, and verified live: a deploy at 00:54 UTC was
-  declined with no run started
+  merging a fix could kick off a second run
 
 **Records repaired.** 5,653 leads rebuilt from their approved records, every one
 re-read back from Instantly to confirm: all five copy fields correct, nothing else
@@ -64,7 +62,8 @@ body; a second confirmed bodies 2, 3 and 4.
 **Campaigns are all paused, and the nightly job is paused too.** I turned eight
 back on at 19:45 UTC after checking every sendable lead, then at 22:10 UTC all
 nine were paused again — that wasn't me, my write log stops at 19:45. If that was
-you, fine. If it wasn't, tell me and I'll dig.
+you, fine. If it wasn't, tell me and I'll dig. 125 emails went out in that window
+and I checked every one: all had a real subject and real copy.
 
 **One thing I tested rather than assumed, and it changes the options.** I wanted to
 know whether we could pull the affected people out of a campaign and put them back
@@ -80,20 +79,20 @@ proposes putting people back.
 subject from what it actually sent, which was nothing. So their follow-ups now
 carry correct copy under an empty subject. The body is fixed, the thread subject
 can't be, and from the test above we can't quietly move them aside and restore
-them later. 5,352 of them are still sitting mid-sequence in the campaigns.
+them later. **5,343** of them are still sitting mid-sequence in the campaigns.
 Whether we keep emailing that group at all is your call, and the campaigns stay
 off until you've made it.
 
 2. **The 1,975 parked leads — I went back to the original job postings.** For
-1,309 of them there's a real job title sitting inside the posting title that the
+**1,490** of them there's a real job title sitting inside the posting title that the
 quality gates had rejected for its shape: "Senior Product Manager, Ad
 Monetization" was refused for the comma, "Customer Success Manager - EMEA" for the
 trailing region. Every recovered title is a literal piece of the employer's own
-posting text, nothing invented, and all of them pass every gate. The other 377
+posting text, nothing invented, and all of them pass every gate. The other 483
 genuinely have no title in there to recover. But here's the catch, and it's the
-reason this isn't just a fix: 1,961 of those 1,975 had already received a broken
-email before I parked them. Only 14 never got anything, and 9 of those have a
-recoverable title. I've repaired and verified those 9. The other 1,300 have a
+reason this isn't just a fix: **1,961 of those 1,975 had already received a broken
+email** before I parked them. Only 14 never got anything, and 12 of those have a
+recoverable title. I've repaired and verified those 12. The other 1,478 have a
 tested repair sitting ready and unapplied, because applying it changes nothing
 until you decide about re-contacting people who already got a blank email.
 
@@ -105,20 +104,29 @@ to do it — 11 candidates left. The levers are the storage add-on, the 1,500-sl
 reserve, the 1,000/night target, or releasing those parked contacts. All of those
 are decisions, not bugs.
 
-**What's ready to switch on, when you say so.** 20 contacts are genuinely clean:
-11 still in the campaigns and 9 of the parked ones, all never contacted, all with
-a real job title and complete copy. The only way to send to them without touching
-anyone else is a new campaign on the same approved four-step sequence, which is
-correct for them because they've never been emailed. Finance stays paused either
-way. I've prepared it and haven't run it.
+**What's ready to switch on, when you say so.** 23 contacts are genuinely clean —
+never emailed, real job title, complete copy. 5 of them I'm holding back because
+the recovered title reads like a department rather than someone's job ("Promotional
+Review Operations", "Student Health Services"), so **18** are in the proposal, split
+OPERATIONS 7, PEOPLE_HR 3, AI_TECHNICAL 2, CUSTOMER_EXPERIENCE 2, FINANCE 2,
+GTM_SYSTEMS 1, PRODUCT 1. All 18 route to the campaign they were already in, so
+nothing gets reassigned. Finance stays paused either way. I've prepared it and
+haven't run it.
 
-Two corrections to things I said earlier. I'd floated "about 850 leads a night"
-and "280 more Apollo credits" — withdraw both, they assumed we pay for contacts
-the copy gate then discards and we don't; that refusal is visible from the job
-posting before we buy anybody. I've now built and tested that check and it's in
-review, not live. And separately, while reading the Apollo spend I found the run
-had burned 1,351 of its 10,000 daily requests re-hitting the same rate limit over
-and over, because a throttle wasn't being remembered between contacts. That's
-fixed in the same review. Neither of those needed more budget.
+**Last night's run, for completeness: it produced nothing.** 42 approvals, zero
+leads actually created in Instantly, zero rows in Airtable, 56 Apollo credits spent.
+17 of the 42 were blocked — 7 on compliance, 10 because the job title can't produce
+sendable copy — and those 10 correctly produced neither an Instantly lead nor a CRM
+row. It stopped because it ran out of Apollo requests, not credits.
+
+Two corrections to things I said earlier. I'd floated "about 850 leads a night" and
+"280 more Apollo credits" — withdraw both, they assumed we pay for contacts the copy
+gate then discards and we don't; that refusal is visible from the job posting before
+we buy anybody. I've now built and tested that check and it's in review, not live.
+And separately, while reading the Apollo spend I found the run had burned 1,351 of
+its 10,000 daily requests re-hitting the same rate limit, because a throttle wasn't
+being remembered between contacts and because we were cutting short the wait Apollo
+asked for. Every one of those 1,351 refusals came back asking us to wait at least
+15 minutes and we were ignoring it. Both fixed in the same review, no extra budget.
 
 Luis
