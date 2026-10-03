@@ -66,8 +66,15 @@ def test_people_search_requests_full_page_and_verified_email_profiles():
     assert ('contact_email_status[]', 'verified') in calls[0]
 
 
-@pytest.mark.parametrize('value,expected', [('nan', None), ('inf', None), ('-1', None), ('1e50', 900.0), ('30', 30.0)])
-def test_retry_after_is_finite_nonnegative_and_bounded(value, expected):
+@pytest.mark.parametrize('value,expected', [
+    ('nan', None), ('inf', None), ('-1', None), ('not-a-number', None),
+    # No longer clamped to 900. Every one of the 1,351 rate-limited calls on
+    # 2026-10-02 was recorded at exactly the old 900.0 ceiling, so Apollo was asking
+    # for at least that much and the clamp was shortening what we honoured. The sole
+    # consumer is the per-run latch, which never persists.
+    ('1e50', 1e50), ('3600', 3600.0), ('30', 30.0), ('0', 0.0),
+])
+def test_retry_after_is_finite_nonnegative_and_preserved_in_full(value, expected):
     result = classify(Response(status=429, text='{}', headers={'Retry-After': value}))
     assert result.retry_after == expected
 

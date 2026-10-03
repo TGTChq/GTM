@@ -2236,3 +2236,174 @@ A merge redeploys GTM Core Canary, and a redeploy has been observed to consume t
 following cron tick. Merging well before 03:00Z or after about 03:30Z keeps the tick;
 merging in the few minutes before it risks losing it. Either way the hour guard and
 the day claim stop the deploy itself from starting a run.
+
+## Step GE — two claims of mine corrected, with the code as the evidence
+
+### 1. A deploy INSIDE 03:00–05:59Z on an unclaimed day DOES start a run
+
+I said the hour window plus the day claim closed "a deploy must not start a run".
+That is not true, and the code says so. `cmd_run_daily` checks the window first,
+then takes the lock, then claims the day — and `scheduled_execution.claim` succeeds
+whenever the day has **no row**. So:
+
+| start | window | day claim | result |
+| --- | --- | --- | --- |
+| deploy outside 03–05:59Z | **declines** | not reached | no run (verified live at 00:54Z) |
+| deploy inside the window, day already finished | allows | **ALREADY_COMPLETED** | no run |
+| **deploy inside the window, day unclaimed** | allows | **CLAIMED** | **a full run starts** |
+
+And it is worse than neutral: the deploy-started run **takes the day's claim**, so
+the genuine 03:00Z tick is then refused as the duplicate.
+
+What IS genuinely closed: no day can run twice, and no start outside the window
+happens at all. What is not: inside the window the FIRST start wins, whoever
+triggered it. Closing it needs something that tells a cron start from a deploy
+start, and nothing inside the container does. The available lever is narrowing the
+window to the cron's own minute — a decision about the nightly run's start
+tolerance, not a free fix, so it is **not** done here.
+
+Asserted, not glossed:
+`test_a_deploy_inside_the_window_on_an_UNCLAIMED_day_DOES_start_a_run`.
+
+### 2. "Merging well before 03:00Z keeps the tick" — withdrawn
+
+I have no measurement for that. What is recorded is only that a redeploy has been
+observed to leave the following tick silent. The real next start is the thing to
+observe, and it has not happened yet.
+
+## Step GF — the Apollo wait is now honoured in full
+
+`_handle_global` capped the wait at `min(retry_after, 900)`. Worse, the **adapter**
+already clamped it: `apollo.py` did `min(parsed_retry, 900.0)` when parsing
+`Retry-After`. Measured consequence on the 10-02 budget:
+
+| | |
+| --- | --- |
+| rate-limited `people_search` calls | **1,351** |
+| of those carrying a `retry_after` | **1,351** (100%) |
+| the recorded value, on every one | **exactly 900.0** — the old ceiling |
+
+Every refusal sat on the clamp, so Apollo was asking for **at least** 900s and we
+were shortening it. The raw header value is unrecoverable because the clamp ran
+before the value was recorded.
+
+Both caps are gone. The provider's wait is preserved in full at the adapter and
+honoured in full by the latch; 60s is the fallback only when no header is given, and
+a negative or non-finite value never reads as "retry now". The latch stays **per
+run** and is never written to `provider_state`, so a long wait ends Apollo for that
+run without spending instead of becoming a cross-run outage.
+
+Coverage checked rather than assumed — all three Apollo call sites go through
+`_guard_provider`, which tests the latch first: `enrich_organization` (chargeable),
+`search_people` (free), `match_person` (chargeable).
+
+## Step GG — run `20261002T233322.605777Z-b7478fc9`, reconciled in full
+
+Closed 2026-10-03T00:17:38Z, `stop_reason`
+`target_not_reached:apollo_request_allowance_insufficient`.
+
+| | |
+| --- | --- |
+| approvals | **42** |
+| **confirmed Instantly creations** | **0** — `delivery_receipts` has no row for any of the 42 |
+| Airtable rows written | **0** |
+| Instantly outbox | 25 `pending`, 17 `blocked` |
+| Airtable outbox | 25 `pending`, 17 `blocked` — the SAME 17, reason for reason |
+| requests on `prod-scheduled-20261002` | **7,407** |
+| credits reserved | **56** (55 `person_match` + 1 `organization_enrich`) |
+| capacity at close | stored 22,500 / free 2,500 |
+
+Blocked, identical on both channels: 6 `compliance:unknown_jurisdiction:absent`,
+1 `compliance:uk:not_a_verified_corporate_subscriber`, and 10 copy QA —
+4 `role_display_contains_unsafe_characters`,
+3 `role_display_carries_an_appended_qualifier`,
+3 `role_display_longer_than_48_chars`.
+
+Zero production is the result, and it is reported as the result: the run spent 56
+credits, created nothing, and the 10 copy refusals produced no Instantly lead and no
+CRM row — which is the invariant holding.
+
+## Step GH — every count quoted in this incident, reconciled by ID
+
+### Affected threads: 5,630 → 5,352 → **5,343**
+
+7,777 distinct addresses received at least one blank-subject message. Where each one
+is now:
+
+| | |
+| --- | --- |
+| still in a campaign, mutable — the cohort a decision can act on | **5,343** |
+| moved to the hold list | 1,961 |
+| still in a campaign, terminal (338 bounced, 1 completed) | 339 |
+| still in a campaign, replied (excluded) | 80 |
+| no longer in any campaign or on the hold list | 54 |
+| **total** | **7,777** |
+
+The 5,630 predates the parking and the status changes. And my own 5,352 was **9 too
+high**: those 9 were counted because `timestamp_last_contact` was set, but their
+contact was at 2026-10-02T22:09:27Z — one minute before the external pause, **after**
+the send snapshot ended, and all 9 appear in the post-resume record with verdict
+**OK**. They received correct copy with a real subject, so their thread is fine and
+they are not blank-thread victims. **The cohort is 5,343.**
+
+### Parked: 1,688 + 287, and the 1,974 I once quoted
+
+| | |
+| --- | --- |
+| copy-unusable cohort moved out | 1,688 |
+| generic-subject cohort moved out | 287 |
+| overlap | **0** |
+| union | 1,975 |
+| actually on the hold list, read from the API | **1,975** |
+| in the union but not on the list / on the list but in neither cohort | 0 / 0 |
+
+1,974 was an off-by-one in a running tally. 1,686 of the 1,688 carry a recorded
+reason; the other 2 were repaired immediately.
+
+### Repairable: 1,309 → 1,301 and 210 → 189
+
+| | |
+| --- | --- |
+| copy-unusable cohort | **1,301** of 1,686 |
+| generic-subject cohort | **189** of 287 |
+| overlap | **0** |
+| total distinct recoverable | **1,490** |
+| applied and read-back verified | **12** |
+| recoverable but deliberately NOT applied | 1,478 |
+
+Both drops are refusals I added after reading the output, never recoveries lost to a
+bug: 8 from rejecting a coordination cut at its first element, 21 from dropping `/`
+as a separator. All 12 applied leads were re-checked against the tightened rules:
+**12 unchanged, 0 affected.**
+
+## Step GI — the reactivation proposal, per campaign and function
+
+The routing is **read from the code** (`CAMPAIGN_BY_FUNCTION`), not hand-written. My
+first attempt did hand-write it and wrongly reported five leads as unroutable; the
+real map folds ten function keys onto the nine campaigns
+(`customer_success`/`customer_support` to CUSTOMER_EXPERIENCE, `gtm_revenue` to
+GTM_SYSTEMS, `engineering` to AI_TECHNICAL, `marketing` to MARKETING_CREATIVE).
+
+23 clean candidates, **5 held back** on instruction until someone confirms they are
+real job titles: `Promotional Review Operations` (x3), `AI and ML Engineering`,
+`Student Health Services`. **18 proposed:**
+
+| campaign | contacts |
+| --- | --- |
+| OPERATIONS | 7 |
+| PEOPLE_HR | 3 |
+| AI_TECHNICAL | 2 |
+| CUSTOMER_EXPERIENCE | 2 |
+| **FINANCE** | **2** — listed for completeness, its pause is kept |
+| GTM_SYSTEMS | 1 |
+| PRODUCT | 1 |
+
+**0 of the 18 route to a campaign other than the one they already sat in**, so no
+re-assignment is involved. An earlier run of this check reported 4 disagreements;
+that was my own comparison of a campaign name against a campaign id, not a finding.
+
+Every one of the 18 is absent from the send record entirely — asserted, must be 0,
+and is 0. Files: `reactivation_proposal.jsonl` (18),
+`reactivation_held_back.jsonl` (5).
+
+Nothing executed: no campaign created, no lead moved, nothing unpaused.

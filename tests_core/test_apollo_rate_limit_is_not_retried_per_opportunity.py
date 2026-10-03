@@ -66,16 +66,48 @@ def test_the_latch_releases_exactly_when_the_provider_said(conn, clock):
     assert svc._apollo_throttled_until is None
 
 
-def test_the_wait_is_bounded_and_never_becomes_an_outage(conn, clock):
-    """A provider asking for a day must not take Apollo out for a day; and a
-    60-second throttle must not become the six-hour block record_refusal would
-    impose."""
+def test_a_long_retry_after_is_honoured_in_full_and_not_shortened(conn, clock):
+    """The provider's wait is never cut short. An earlier version capped it at 900s,
+    which called Apollo again BEFORE it said to -- the behaviour that burned the
+    1,351 requests in the first place."""
     svc = _service(conn, clock)
     with pytest.raises(ProviderWait):
         svc._handle_global(ApolloResult(Outcome.RATE_LIMITED, status=429, retry_after=86400.0),
                            chargeable=False)
-    assert svc._apollo_throttled_until == clock() + timedelta(seconds=900)
-    assert svc._apollo_throttled_until < clock() + timedelta(hours=1)
+    assert svc._apollo_throttled_until == clock() + timedelta(seconds=86400)
+    # 900s was the old cap; prove we do NOT come back then.
+    clock.advance(seconds=901)
+    with pytest.raises(ProviderWait, match="apollo_rate_limited_this_run"):
+        svc._guard_provider(chargeable=False)
+
+
+def test_a_long_wait_stays_in_this_run_and_is_never_persisted(conn, clock):
+    """Honouring a long wait must not become a six-hour cross-run outage the way
+    record_refusal would: the latch lives on the service, not in provider_state."""
+    from tgtc_core.services import provider_state
+
+    svc = _service(conn, clock)
+    before = provider_state.load(conn, "apollo")
+    with pytest.raises(ProviderWait):
+        svc._handle_global(ApolloResult(Outcome.RATE_LIMITED, status=429, retry_after=86400.0),
+                           chargeable=False)
+    assert provider_state.load(conn, "apollo") == before
+    fresh = _service(conn, clock)
+    assert fresh._apollo_throttled_until is None
+    fresh._guard_provider(chargeable=False)          # a new run is not throttled
+
+
+def test_a_missing_or_absurd_retry_after_falls_back_without_inventing_an_outage(conn, clock):
+    svc = _service(conn, clock)
+    with pytest.raises(ProviderWait):
+        svc._handle_global(ApolloResult(Outcome.RATE_LIMITED, status=429), chargeable=False)
+    assert svc._apollo_throttled_until == clock() + timedelta(seconds=60)
+    svc._apollo_throttled_until = None
+    with pytest.raises(ProviderWait):
+        svc._handle_global(ApolloResult(Outcome.RATE_LIMITED, status=429, retry_after=-5.0),
+                           chargeable=False)
+    # Never in the past: a negative value must not read as "retry immediately".
+    assert svc._apollo_throttled_until >= clock()
 
 
 def test_credit_exhaustion_and_unauthorized_still_record_provider_state(conn, clock):

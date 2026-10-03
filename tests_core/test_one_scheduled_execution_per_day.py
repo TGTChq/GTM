@@ -142,3 +142,35 @@ def test_the_guard_window_matches_the_start_command_s_own_hour_inference():
         guard_allows, _ = run_guard.start_allowed(
             datetime(2026, 10, 3, hour, tzinfo=timezone.utc), env={})
         assert guard_allows == start_command_says_scheduled, hour
+
+
+def test_a_deploy_inside_the_window_on_an_UNCLAIMED_day_DOES_start_a_run(conn):
+    """The residual hole, asserted rather than glossed over.
+
+    I described the two guards as closing "a deploy must not start a run". They do
+    not, entirely. The hour window only refuses starts OUTSIDE 03:00-05:59Z, and the
+    day claim only refuses a SECOND start. So a deploy between 03:00 and 05:59Z on a
+    day whose scheduled run has not claimed yet starts a full run -- and takes the
+    day's claim, after which the genuine 03:00Z tick is refused as the duplicate.
+
+    What is genuinely closed: no day can ever run twice, and no start outside the
+    window happens at all. What is not: inside the window, the FIRST start wins
+    whether it came from the cron or from a deployment.
+
+    Closing it needs something that distinguishes a cron-triggered start from a
+    deploy-triggered one. Nothing inside the container does today, so narrowing the
+    window to the cron's own minute is the available lever -- and that is a decision
+    about the nightly run's start tolerance, not a free fix.
+    """
+    inside = datetime(2026, 10, 3, 4, 0, 0, tzinfo=timezone.utc)
+    allowed, _ = run_guard.start_allowed(inside, env={})
+    assert allowed, "04:00Z is inside the window"
+
+    assert se.state_of(conn, now=inside)["state"] == "unclaimed"
+    deploy = se.claim(conn, run_id="started-by-a-deployment", now=inside, env={})
+    assert deploy.allowed, "the day claim does NOT stop the first start of the day"
+    assert deploy.state == se.CLAIMED
+
+    # And the real tick is now the one that loses.
+    tick = se.claim(conn, run_id="the-0300z-cron-tick", now=inside + timedelta(minutes=30), env={})
+    assert not tick.allowed

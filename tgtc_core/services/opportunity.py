@@ -646,9 +646,14 @@ class OpportunityService:
                                           state=provider_state.UNAUTHORIZED, now=moment)
             raise ProviderWait("apollo_unauthorized", moment + timedelta(hours=self.retry_hours))
         if result.outcome is Outcome.RATE_LIMITED:
-            wait = min(float(result.retry_after or 60.0), 900.0)
-            # Bounded by the provider's own retry-after, so a 60-second throttle
-            # does not become a six-hour outage the way record_refusal would.
+            # The provider's own retry-after is honoured IN FULL. An earlier version
+            # capped it at 900s, which meant that when Apollo asked for longer we
+            # called it again BEFORE it said to -- the very behaviour that burned
+            # 1,351 requests. When the provider names no wait, 60s is the fallback
+            # rather than an invented longer outage.
+            wait = max(float(result.retry_after), 0.0) if result.retry_after else 60.0
+            # Still per RUN, never written to provider_state: a long wait ends Apollo
+            # for this run without spending, and the next run starts clean.
             self._apollo_throttled_until = moment + timedelta(seconds=wait)
             raise ProviderWait("apollo_rate_limited", self._apollo_throttled_until)
         if result.outcome is Outcome.TIMEOUT or result.outcome is Outcome.SERVER:
