@@ -12,8 +12,11 @@ Every rule here exists because getting it wrong costs somebody something:
 * **backed up first, durably.** The verbatim Instantly record and its checksum go into
   our own database BEFORE the delete is attempted, so an interrupted batch still leaves
   a complete account of what it touched -- and every removed contact can be re-uploaded;
-* **finished and silent only.** The campaign must be `completed`, the contact must have
-  reached the end of the sequence, and it must never have replied;
+* **finished and silent only.** The CONTACT must have reached the end of its sequence
+  (status 3) and must never have replied. The campaign's own status is deliberately
+  NOT asked: requiring `completed` hid 3,220 safe candidates in paused and
+  bounce-protected legacy campaigns while a run was blocked for 22 slots, and a
+  finished contact receives nothing even if its campaign is resumed;
 * **live outreach is untouchable.** The nine Challenger and nine Control ids are refused
   by id, whatever their status says;
 * **our own people are untouchable.** An address we suppressed, or one still waiting for

@@ -33,7 +33,10 @@ CHALLENGER_ID_BY_CAMPAIGN_KEY = {
     "gtm_systems": "8f25abd5-568a-4e88-b310-9acf85161c6c",
     "ai_technical": "8bfa0769-4b9a-4346-8e93-17ac8b726dce",
 }
-assert set(CHALLENGER_ID_BY_CAMPAIGN_KEY.values()) == set(KNOWN_CHALLENGER_CAMPAIGN_IDS)
+# A subset, not equality: since 2026-10-03 the live set also holds the nine v2
+# replacements, and the copy contract must apply to those too. What matters here is that
+# every id this file routes to is one the contract recognises.
+assert set(CHALLENGER_ID_BY_CAMPAIGN_KEY.values()) <= set(KNOWN_CHALLENGER_CAMPAIGN_IDS)
 
 
 def challenger_env():

@@ -246,7 +246,10 @@ CHALLENGER_BY_FUNCTION = {
 def test_ten_internal_keys_collapse_to_exactly_nine_challenger_campaigns():
     assert len(CHALLENGER_BY_FUNCTION) == 10
     assert len(set(CHALLENGER_BY_FUNCTION.values())) == 9
-    assert set(CHALLENGER_BY_FUNCTION.values()) == set(KNOWN_CHALLENGER_CAMPAIGN_IDS)
+    # A subset, not equality. Since 2026-10-03 the recognised set also holds the nine v2
+    # replacements, because that set is what the copy contract consults; the routing map
+    # still names nine destinations and every one of them must be recognised.
+    assert set(CHALLENGER_BY_FUNCTION.values()) <= set(KNOWN_CHALLENGER_CAMPAIGN_IDS)
 
 
 def test_the_only_shared_campaign_is_customer_experience():
@@ -263,7 +266,17 @@ def test_every_function_key_has_a_challenger_destination():
 
 
 def test_challenger_and_control_campaigns_are_disjoint():
-    """Eighteen campaigns exist. A new lead must never reach a retired Control one."""
+    """A new lead must never reach a retired Control campaign.
+
+    Was nine Challenger ids against nine Control. Since 2026-10-03 it is eighteen
+    against nine: the nine originals plus their nine v2 replacements, which the copy
+    contract has to recognise. The disjointness is the invariant and is unchanged.
+    """
+    from tgtc_core.policy.campaigns import CHALLENGER_V2_BY_ORIGINAL
+
     assert not (KNOWN_CHALLENGER_CAMPAIGN_IDS & KNOWN_CONTROL_CAMPAIGN_IDS)
-    assert len(KNOWN_CHALLENGER_CAMPAIGN_IDS) == 9
+    assert len(KNOWN_CHALLENGER_CAMPAIGN_IDS) == 18
+    assert len(KNOWN_CONTROL_CAMPAIGN_IDS) == 9
+    assert len(CHALLENGER_V2_BY_ORIGINAL) == 9
+    assert not (set(CHALLENGER_V2_BY_ORIGINAL.values()) & KNOWN_CONTROL_CAMPAIGN_IDS)
     assert len(KNOWN_CONTROL_CAMPAIGN_IDS) == 9
