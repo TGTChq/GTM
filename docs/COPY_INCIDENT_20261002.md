@@ -2979,3 +2979,223 @@ The refusal exists only in `delivery_recovery`
 converting an unmeasured share of daily approvals into blocked rows. Closing it needs a
 measured rate first, then a decision between refusing and re-rendering. Flagged, not
 changed; the two rows are held, which is a hold on two rows and not a fix.
+
+## Step GX — the affected contacts excluded, auditably, and the hole that was still open
+
+### Instantly has no per-lead exclusion. Proved, not assumed.
+
+Tested on the internal contact before anything was decided on it:
+
+| attempt | result |
+| --- | --- |
+| `POST /leads/<id>/pause` | **404** |
+| `POST /leads/pause` | **404** |
+| `POST /leads/<id>/unsubscribe` | **404** |
+| `POST /leads/unsubscribe` | **404** |
+| `POST /leads/update-status` | **404** |
+| `PATCH /leads/<id>` `{"status": 2}` | 200, **ignored** — reads back 3 |
+| `PATCH /leads/<id>` `{"status": -2}` | 200, **ignored** — reads back 3 |
+| `PATCH /leads/<id>` `{"pause_until": …}` | 200, **ignored** — reads back null |
+
+Also probed for a workspace block list: `/block-lists`, `/blocklist`,
+`/block-list-entries`, `/blocklist-entries` all **404**.
+
+So the only in-provider mechanisms are moving a lead (destroys the sequence position —
+forbidden) or deleting it (forbidden). Everything below follows from that.
+
+### 7,777 contacts suppressed, with their evidence
+
+`suppressions`, `kind='person_email'`, `source='copy_incident:20261002'`,
+`reason='first_email_sent_without_subject_or_body'`, one row per address carrying its own
+facts: how many blank messages it received, the first and last day, which campaigns,
+which steps, and whether it also received a good message (5 did).
+
+| | |
+| --- | --- |
+| before | 21 |
+| after | **7,781** |
+| new rows under the incident source | **7,760** |
+| already suppressed, left with their original stronger reason | **17** |
+| read-back: affected addresses now suppressed | **7,777 of 7,777** |
+| read-back: affected addresses NOT suppressed | **0** |
+
+A guard refused to run if any clean or recovered contact appeared in the affected set.
+45 were checked, overlap **0**.
+
+What this covers and what it cannot: approval, compliance and the OOO follow-up path all
+consult suppressions — the follow-up query closes a contact and never writes a follow-up
+when `kind='person_email'` matches — so every sending path WE control is covered. It does
+not stop Instantly sending step 2+ to a lead already enrolled in an ACTIVE campaign. Only
+the campaign pause does that.
+
+### The hole that was still open: the OOO campaign was ACTIVE
+
+Found by looking for sending paths that bypass the nine, as instructed. The OOO follow-up
+campaign `f0665173…` is not one of the nine and had its own status:
+
+| | |
+| --- | --- |
+| status | **ACTIVE** |
+| leads in it | **50** |
+| of those, affected contacts | **50 of 50** |
+| already contacted through it | 1 |
+| **active and not yet contacted** | **49** |
+
+It was about to send a follow-up to 49 people whose only message from us had been blank.
+The suppression stops the daily run adding more but cannot remove a lead already enrolled.
+
+**Paused it.** Verified: status 1 → 2 by read-back, and 10 of 10 sampled leads have their
+sequence position, status and last-contact timestamp **unchanged** — a pause destroys
+nothing. It also costs no legitimate outreach, because the script refused to run unless
+every lead in the campaign was an affected contact, and all 50 were.
+
+## Step GY — generic subject lines fixed in the flow, not held in a document
+
+### Scope measured first
+
+| | |
+| --- | --- |
+| approvals examined | 7,839 |
+| producing a generic subject today | **691 (8.8%)** |
+
+The cause: `display_role` fell back to `campaign.function_nouns` whenever the posting
+title failed its display test.
+
+### What replaced it
+
+`tgtc_core/domain/role_title.py` derives the title from the posting's own words, and the
+lead is refused when nothing survives. Guardrails, each one measured rather than assumed:
+
+* a literal, contiguous substring, checked at runtime
+* `/` is not a separator (it joins alternatives inside a phrase)
+* a coordination cut at its first element is rejected
+* U+FFFD **is** a separator — it is what a mis-decoded em dash becomes in these feeds
+* the candidate must end in a role noun **production already accepts**: the terminal
+  words of the 7,148 displays it accepts today, at >=3 uses, in
+  `data/role_title_nouns.json` with its provenance
+* competing segments are ranked by how often production accepts that word. Longest-first
+  was wrong — `Product Operations, Senior Associate | Housing` gave the function; it now
+  gives **`Senior Associate`** (associate 156, operations 66)
+* a segment needs **10** accepted uses to be used at all. Floor 1 ships
+  `Provider & Value-Based Care` for an actuary posting; floor 10 refuses it; floor 25 also
+  loses the good `Priority Initiative Leader`
+
+### The same rule at approval and at delivery
+
+The gate now also applies to the title itself. Without that,
+`Senior Product Manager, Ad Monetization` passed the display test, was approved verbatim
+and was refused later by the renderer for its comma — a real title lost to punctuation,
+which was explicitly not wanted. It now yields `Senior Product Manager`.
+
+### Measured effect, same 7,839 approvals
+
+| | before | after |
+| --- | --- | --- |
+| sendable concrete title | 6,027 (76.9%) | **7,036 (89.8%)** |
+| generic subject | 691 (8.8%) | **0** |
+| approved, then blocked by the renderer | ~1,121 (14.3%) | **0** |
+| refused **before** paid enrichment | 0 | 803 (10.2%) |
+
+**+1,009 sendable leads**, and the refusals moved to before a contact is bought.
+`challenger_copy_refusal_before_enrichment` now surfaces `copy_fields_incomplete`, which
+is the refusal those 803 produce.
+
+Control deliberately keeps the function-noun fallback, inside `build_approved_lead`: the
+defect is a generic SUBJECT reaching a recipient, which only Challenger can exhibit, and
+refusing Control leads would shrink the experiment's control arm for a defect it cannot
+have. My first draft got that wrong and a test caught it.
+
+## Step GZ — capacity: the blocker was a selection error, now fixed
+
+Mapping the workspace showed the rotation judge was asking the wrong question:
+
+| | |
+| --- | --- |
+| leads in unprotected campaigns | **10,282** |
+| of those, in a COMPLETED campaign (all the judge would consider) | 269 |
+| in 7 PAUSED and 4 BOUNCE_PROTECT legacy campaigns | ~10,000 |
+
+Judging each of those leads individually against the standing criteria — own sequence
+finished, never replied, not suppressed, no pending delivery, campaign not protected:
+
+| | |
+| --- | --- |
+| **ELIGIBLE** | **3,220** |
+| still in sequence (status 1) | 5,959 |
+| bounced (−1) / bounce-protected (−2) | 710 |
+| replied | 124 |
+
+Concentrated in `GTM P1` (2,195) and `Growth` (1,015), both PAUSED. Against a deficit of
+**22**.
+
+A lead with status 3 is done: resuming that paused campaign cannot send to it, so
+removing it costs no email. Both places that asked about the campaign's status now ask
+only about PROTECTION; every lead-level check and the durable backup are unchanged. Three
+tests were missing — which is how the rule survived untested — and are added.
+
+Nothing was deleted by hand. The next scheduled run rotates what it needs through the
+authorized path, and the 22-slot deficit is now covered 145 times over.
+
+## Step HA — alerting that does not live on a laptop
+
+`tgtc_core/reporting/health_alerts.py` plus `python -m tgtc_core health-alerts`, chained
+onto the existing hourly cron on **GTM Replies** (`15 * * * *`), posting to
+`#gtm-engineering` only when a check trips:
+
+| check | fires when |
+| --- | --- |
+| `pending_deliveries` | approved work has been due more than 6h and nothing drained it |
+| `capacity` | the last run was blocked for Instantly slots, or needed rotation |
+| `copy_refusals` | more than 25 Challenger copy refusals in 24h |
+| `scheduled_tick` | the day has no claimed execution by 06:00Z |
+
+Each is a question about state, read-only, and a check that raises reports itself instead
+of hiding the others. 10 tests.
+
+The 2026-10-03 omission is now recorded in the system of record rather than only in a
+document: `scheduled_executions` carries
+`outcome='omitted_deliberately:core_cron_paused_during_the_copy_incident_closeout'`, so
+the alert does not fire hourly about a decision that was taken on purpose.
+
+## Step HB — Replies, OOO and reporting after the deploys
+
+| | |
+| --- | --- |
+| GTM Replies | cron `15 * * * *`, deployment SUCCESS, and its last poll classified **81 out-of-office, 10 departures, 7 human replies**, 0 addresses suppressed, cursor advanced, `stopped_at_known_ground: true` |
+| OOO follow-up | **PAUSED**, and its contacts are suppressed as well — contained twice |
+| GTM Weekly Report | cron `0,20,40 13-20 * * *`, deployment SUCCESS, Friday delivery rule unchanged |
+| GTM / GTM Approved Sync | inert by start command, verified by log |
+| GTM Core Canary 1000 | cron `0 3 * * *`, original start command, no window override |
+| nine Challenger campaigns | **9/9 PAUSED** |
+
+## Step HC — why sending was NOT switched on, with the number
+
+Decision 4 asks for the healthy and new contacts to be live in the corresponding
+Challenger campaigns. Decision 1 says the affected receive no further step. Measured, per
+campaign, what resuming would actually release:
+
+| campaign | mutable | AFFECTED | sendable |
+| --- | --- | --- | --- |
+| PRODUCT | 93 | 93 | **0** |
+| OPERATIONS | 2,890 | 2,865 | 17 |
+| FINANCE | 612 | 611 | 1 |
+| PEOPLE_HR | 214 | 212 | 1 |
+| ECOMMERCE | 15 | 14 | 1 |
+| CUSTOMER_EXPERIENCE | 208 | 204 | 4 |
+| MARKETING_CREATIVE | 363 | 362 | 1 |
+| GTM_SYSTEMS | 347 | 342 | 5 |
+| AI_TECHNICAL | 643 | 640 | 3 |
+| **TOTAL** | **5,385** | **5,343** | **33** |
+
+Resuming all nine would email **5,343 affected people to reach 33 sendable ones** — 162
+to 1. The best single campaign, OPERATIONS, would email 2,865 to reach 17. Because there
+is no per-lead exclusion in Instantly and moving a lead destroys its position, there is
+no configuration in which the two decisions both hold inside those campaigns.
+
+So the campaigns stay paused and the readiness stands proved instead: 0 of the 33
+sendable contacts has an invalid subject, all 33 are absent from the affected set, every
+affected contact is suppressed, and the OOO path is closed. `sendable_now.jsonl` holds
+the 33 by id.
+
+This is a provider capability limit, not a judgement I made and not the external pause.
+It is the one thing in this closeout that no amount of engineering here resolves.

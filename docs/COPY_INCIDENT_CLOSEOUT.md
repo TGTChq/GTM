@@ -320,6 +320,29 @@ The budget namespace `prod-scheduled-20261003` is unused.
 **No recovery was launched.** A recovery must name itself through `TGTC_RUN_RECOVER`
 and would spend that day's remaining allowance; that is a decision, not a default.
 
+## RESOLVED 2026-10-03 — generic subjects are fixed in the flow
+
+What follows described an open defect. It is now fixed, measured and deployed through
+[TGTChq/GTM#137](https://github.com/TGTChq/GTM/pull/137); the record of the defect is
+kept below because the numbers in it are the justification for the change.
+
+| | before | after |
+| --- | --- | --- |
+| sendable concrete title | 6,027 (76.9%) | **7,036 (89.8%)** |
+| generic subject | 691 (8.8%) | **0** |
+| approved, then blocked by the renderer | ~1,121 (14.3%) | **0** |
+| refused **before** paid enrichment | 0 | 803 (10.2%) |
+
+`display_role` no longer invents a function noun. A title that fails the display test is
+re-derived from the posting's own words as a literal substring, ending in a role noun
+production already accepts, ranked by how often it accepts it, with a floor of 10 uses;
+when nothing survives the lead is refused, and the refusal is reachable before a contact
+is bought. The same gate now applies to the title itself, so a real job title is no
+longer lost to punctuation. Control keeps the old fallback, because only Challenger can
+show this defect.
+
+### The original record
+
 ## Open technical item — generic subjects are accepted by production
 
 **This is NOT the incident above, and it is recorded separately on purpose.** The
