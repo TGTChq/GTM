@@ -1217,3 +1217,55 @@ def test_the_pace_is_the_measured_one_not_an_assumed_one(conn):
     assert 60 / rec.DEFAULT_PACE_SECONDS == 120, "a 30% margin under what was observed"
     # A batch still has to fit the tick that runs it: four calls per move.
     assert rec.DEFAULT_BATCH * 4 * rec.DEFAULT_PACE_SECONDS <= 15 * 60
+
+
+def test_a_lead_already_at_its_destination_is_not_moved_again(conn):
+    """What makes an interrupted load resumable instead of stuck.
+
+    A container replaced mid-batch leaves a row `reserved` whose lead has already moved.
+    Asking for the move again would be asking to move it out of a campaign it has already
+    left: that fails, and the row would be parked forever.
+    """
+    pass_the_internal_test(conn)
+    client = FakeInstantly()
+    email, lead_id = movable(conn, client, 1)
+    rec.enrol(conn, client, limit=10, env=dict(NO_PACE))
+    assert len(client.moved) == 1 and states(conn)[email] == "enrolled"
+
+    # Walk it back to `reserved`, as an interrupted batch would leave it, and re-run.
+    with conn.cursor() as cur:
+        cur.execute("UPDATE empty_email_recovery SET state = 'reserved' WHERE email = %s",
+                    (email,))
+    conn.commit()
+    report = rec.enrol(conn, client, limit=10, env=dict(NO_PACE))
+
+    assert report["moved_existing_records"] == 1, "it finishes rather than failing"
+    assert len(client.moved) == 1, "and it does not ask for the move a second time"
+    assert states(conn)[email] == "enrolled"
+
+
+def test_the_wait_for_a_move_backs_off_instead_of_a_flat_three_seconds(conn):
+    """Measured during the load: a flat 3s pinned it at 14 a minute while the rate limit
+    allowed 120, because the job usually lands inside a second."""
+    waits = []
+
+    class Slow(FakeInstantly):
+        def __init__(self, **kw):
+            super().__init__(**kw)
+            self.reads = 0
+
+        def get_lead(self, lead_id):
+            self.reads += 1
+            # Lands on the third read, as a pending job does.
+            if lead_id in self.leads and self.reads < 3:
+                return Result(data={**self.leads[lead_id], "campaign": "elsewhere"})
+            return super().get_lead(lead_id)
+
+    client = Slow()
+    # Where the move will have put it; the first reads still report the old campaign,
+    # which is what a pending background job looks like from outside.
+    client.seed_existing("EX1", email="p1@employer.test", campaign=CAMPAIGN)
+    settled = rec._settle(client, "EX1", want_campaign=CAMPAIGN, sleep=waits.append)
+    assert str(settled.get("campaign")) == CAMPAIGN
+    assert waits == [0.5, 1.0], "half a second, then one, then it was there"
+    assert all(w <= 8.0 for w in waits)
