@@ -64,29 +64,43 @@ DEFAULT_STORAGE_FLOOR = 1500
 
 #: How many contacts one tick may enrol.
 #:
-#: Sized for the hour it runs in, not for the queue. Each contact costs two provider
-#: calls -- the create, and the read-back that proves it -- and the key allows 20 requests
-#: a minute, so 150 contacts is about 15 minutes and leaves the hourly tick room for the
-#: reply poll and the alert. Enrolling is not sending: the campaign's own
-#: ``daily_max_leads`` of 500 paces the send budget shared with the v2 campaigns, so
-#: enrolling faster only queues people inside the campaign.
+#: Sized for the tick it runs in, not for the queue. A move costs about four provider
+#: calls (read the lead, write its role, move it, read it back) and a create two, so at
+#: the measured pace of 120 a minute a batch of 400 is roughly thirteen minutes -- inside
+#: a fifteen-minute tick, with the run lock preventing an overlap if it is not.
+#:
+#: Enrolling is not sending. The campaign's own ``daily_max_leads`` of 500 paces the send
+#: budget shared with the v2 campaigns, and while the campaign is paused nothing leaves at
+#: all, so enrolling faster only queues people inside it.
 BATCH_ENV = "TGTC_RECOVERY_BATCH"
-DEFAULT_BATCH = 150
+DEFAULT_BATCH = 400
 
 #: Seconds between provider calls.
 #:
 #: The Instantly client has no rate handling of its own -- unlike the Airtable and Apollo
 #: clients, a 429 falls through it as a plain failure -- so the pacing lives here rather
-#: than being assumed. 3 seconds is the documented 20 requests a minute. Widening the
-#: client's retry behaviour would change every caller, including the daily run, and that
-#: is a different change from this one.
+#: than being assumed.
+#:
+#: MEASURED 2026-10-04, having previously been assumed: 60 unpaced GETs completed in 21.1
+#: seconds, 171 a minute, with zero 429s and no rate-limit headers on any response. The
+#: 3 seconds this used to wait came from a scratchpad client's guess at "20 a minute", and
+#: it was the difference between a load taking three hours and nineteen. 0.5 s is 120 a
+#: minute, which leaves a 30% margin under what was observed rather than riding it.
 PACE_SECONDS_ENV = "TGTC_RECOVERY_PACE_SECONDS"
-DEFAULT_PACE_SECONDS = 3.0
+DEFAULT_PACE_SECONDS = 0.5
 
 #: Measured 2026-09-24 on plan pid_hg_v1 (HyperGrowth): the allowance is a stock of
 #: stored contacts, not a monthly grant.
 PLAN_ALLOWANCE_ENV = "TGTC_INSTANTLY_LEAD_ALLOWANCE"
 DEFAULT_PLAN_ALLOWANCE = 25000
+
+#: Does the automation enrol at all?
+#:
+#: OFF by default, and that is the handover state: the queue is loaded, the campaign is
+#: paused, and whether to test and activate is the team's decision rather than something
+#: a cron reaches on its own. Setting it is how the bulk load was performed and how a
+#: later batch would be.
+ENROL_ENABLED_ENV = "TGTC_RECOVERY_ENROL_ENABLED"
 
 #: May a short tick ask the already-authorised rotation to free slots?
 #:
@@ -526,6 +540,9 @@ def _verify_created(client, lead_id: str, row: Mapping[str, Any]) -> str:
     return ""
 
 
+#: Instantly campaign statuses. 2 is paused: it holds its leads and sends nothing.
+CAMPAIGN_PAUSED = 2
+
 #: Instantly's own verdict on a lead, and what it means for a repair email.
 LEAD_BOUNCED = -1
 LEAD_UNSUBSCRIBED = -2
@@ -533,6 +550,30 @@ LEAD_UNSUBSCRIBED = -2
 #: blank email either, and writing to it again spends deliverability for nothing.
 REFUSING_LEAD_STATUSES = {LEAD_BOUNCED: "provider_bounced",
                           LEAD_UNSUBSCRIBED: "provider_unsubscribed"}
+
+
+def campaign_is_paused(client) -> Dict[str, Any]:
+    """Is the recovery campaign paused right now, according to the provider?
+
+    The question that replaces the internal-test gate for LOADING. Enrolling somebody
+    into a paused campaign cannot email them: their lead sits there with its copy ready
+    and nothing goes out. So the whole queue can be loaded and left for the team to
+    decide on, which is not the same thing as making it sendable.
+
+    Read from the provider on every batch, never from configuration. The campaign was
+    activated once in this incident and paused again; a stale belief about which it is now
+    is exactly the kind of thing that sends 16,875 emails.
+    """
+    result = client.get_campaign(EMPTY_EMAIL_RECOVERY_CAMPAIGN_ID)
+    if not result.ok:
+        return {"known": False, "paused": False,
+                "reason": str(result.message)[:200] or str(result.status)}
+    status = (result.data or {}).get("status")
+    try:
+        status = int(status)
+    except (TypeError, ValueError):
+        return {"known": False, "paused": False, "reason": "unreadable status %r" % status}
+    return {"known": True, "paused": status == CAMPAIGN_PAUSED, "status": status}
 
 
 def _settle(client, lead_id: str, *, want_campaign: str, tries: int = 10,
@@ -655,13 +696,30 @@ def enrol(conn: psycopg.Connection, client, *, limit: Optional[int] = None,
     moment = _now(now)
     batch = limit if limit is not None else _int_env(environ, BATCH_ENV, DEFAULT_BATCH)
 
-    # The internal test comes first and alone. Until one of our own addresses has RECEIVED
-    # this email and all of it checked out, no stranger is enrolled -- which is the check
-    # that was missing on 2026-09-21, when 7,777 people became the test.
+    if str(environ.get(ENROL_ENABLED_ENV, "")).strip() not in ("1", "true", "True"):
+        return {"stage": "enrol", "enrolled": 0, "stopped": "enrolment_disabled",
+                "note": "the queue is loaded and the campaign is paused; enrolling is a "
+                        "deliberate act, not something a tick reaches on its own"}
+
+    # Somebody may only be enrolled into this campaign when it cannot email them yet.
+    # Either the campaign is PAUSED -- so a lead sits in it with its copy ready and
+    # nothing goes out -- or one of our own addresses has already RECEIVED this email and
+    # all of it checked out. Without one of those two, nobody is touched. On 2026-09-21
+    # the 7,777 recipients were the test; that is what this refuses to repeat.
     gate = internal_test_passed(conn)
+    paused = campaign_is_paused(client)
+    may_enrol = bool(paused.get("paused")) or bool(gate["passed"])
+    if not may_enrol:
+        return {"stage": "enrol", "enrolled": 0, "internal_test": gate,
+                "campaign": paused,
+                "stopped": "campaign_is_live_and_the_internal_test_has_not_passed"}
+
+    # While the campaign is paused the whole queue may load. Once it is live, only what
+    # the proven test covers.
+    load_everybody = bool(paused.get("paused")) or bool(gate["passed"])
     with conn.cursor() as cur:
         sql = ("SELECT * FROM empty_email_recovery WHERE state = ANY(%s) "
-               + ("" if gate["passed"] else "AND is_internal_test ")
+               + ("" if load_everybody else "AND is_internal_test ")
                # Movable recipients first: they cost no storage, so a tight workspace
                # never stops the bulk of the recovery.
                + "ORDER BY is_internal_test DESC, (source_kind = 'absent'), "
@@ -691,8 +749,7 @@ def enrol(conn: psycopg.Connection, client, *, limit: Optional[int] = None,
             # Rotation deletes contacts. It is authorised, but it does not run on behalf
             # of a repair that has not yet proved it can send a correct email: the
             # internal test comes first, then capacity is made for real recipients.
-            may_rotate = (gate["passed"]
-                          and str(environ.get(MAY_ROTATE_ENV, "")).strip()
+            may_rotate = (str(environ.get(MAY_ROTATE_ENV, "")).strip()
                           in ("1", "true", "True"))
             if room < len(wanted_create) and may_rotate:
                 rotation = _make_room(conn, client, want=len(wanted_create), env=environ,
@@ -704,7 +761,7 @@ def enrol(conn: psycopg.Connection, client, *, limit: Optional[int] = None,
 
     rows = movable + needs_create
     if not rows:
-        if not gate["passed"]:
+        if not load_everybody:
             stopped = "awaiting_internal_test"
         elif held_for_storage:
             stopped = ("capacity_unknown" if not capacity.get("measured")
@@ -712,13 +769,14 @@ def enrol(conn: psycopg.Connection, client, *, limit: Optional[int] = None,
         else:
             stopped = "queue_empty"
         return {"stage": "enrol", "enrolled": 0, "capacity": capacity,
-                "internal_test": gate, "rotation": rotation,
+                "internal_test": gate, "campaign": paused, "rotation": rotation,
                 "held_for_storage": held_for_storage, "stopped": stopped}
     if dry_run:
         return {"stage": "plan", "enrolled": 0, "would_enrol": len(rows),
                 "would_move": len(movable), "would_create": len(needs_create),
                 "held_for_storage": held_for_storage, "capacity": capacity,
-                "internal_test": gate, "sample": [r["email"] for r in rows[:5]]}
+                "internal_test": gate, "campaign": paused,
+                "sample": [r["email"] for r in rows[:5]]}
 
     created = refused = failed = moved = 0
     stopped = ""
@@ -815,7 +873,8 @@ def enrol(conn: psycopg.Connection, client, *, limit: Optional[int] = None,
             "moved_existing_records": moved, "created_new_records": created,
             "withheld": refused, "failed": failed, "capacity": capacity,
             "rotation": rotation, "held_for_storage": held_for_storage,
-            "internal_test": gate, "stopped": stopped, "reasons": reasons}
+            "internal_test": gate, "campaign": paused, "stopped": stopped,
+            "reasons": reasons}
 
 
 # ----------------------------------------------------------------------- receipts
@@ -1007,5 +1066,6 @@ __all__ = ["load_queue", "set_route", "revalidate", "free_slots", "enrol", "reco
            "SIGNATURE_MARKER",
            "EMPTY_EMAIL_RECOVERY_CAMPAIGN_ID", "INCIDENT_SUPPRESSION_SOURCE",
            "REVOKING_EVENTS", "STORAGE_FLOOR_ENV", "BATCH_ENV", "PLAN_ALLOWANCE_ENV",
-           "MAY_ROTATE_ENV", "PACE_SECONDS_ENV", "DEFAULT_PACE_SECONDS",
+           "MAY_ROTATE_ENV", "ENROL_ENABLED_ENV", "campaign_is_paused",
+           "CAMPAIGN_PAUSED", "PACE_SECONDS_ENV", "DEFAULT_PACE_SECONDS",
            "DEFAULT_STORAGE_FLOOR", "DEFAULT_BATCH", "SENDABLE_STATES", "OPEN_STATES"]
