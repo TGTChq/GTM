@@ -18,9 +18,11 @@ from tgtc_core.services import empty_email_recovery as rec
 from tests_core.helpers import sql1, sqlall
 
 INCIDENT = rec.INCIDENT_SUPPRESSION_SOURCE
-#: The real 3-second pace is asserted by its own tests below. Everywhere else it would
-#: only make the suite slow, so it is off and said so rather than inherited.
-NO_PACE = {rec.PACE_SECONDS_ENV: "0"}
+#: What a test needs to make `enrol` do any work: the switch on, and no pacing. The
+#: switch is OFF in production by default -- that is the handover state -- and the real
+#: pace is asserted by its own tests below; everywhere else it would only make the suite
+#: slow, so both are stated here rather than inherited.
+NO_PACE = {rec.PACE_SECONDS_ENV: "0", rec.ENROL_ENABLED_ENV: "1"}
 
 
 class Result:
@@ -35,7 +37,10 @@ class FakeInstantly:
     def __init__(self, *, stored=1000, allowance_error=False, emails_sent=0,
                  drop_variables=False, subject=None, on_lists=0, rate_limited=False,
                  move_fails=False, patch_fails=False, move_never_settles=False,
-                 prefix="L"):
+                 prefix="L", campaign_status=2, campaign_unreadable=False):
+        # Paused by default, which is the state the whole queue is loaded into.
+        self.campaign_status = campaign_status
+        self.campaign_unreadable = campaign_unreadable
         self.rate_limited = rate_limited
         self.move_fails = move_fails
         self.patch_fails = patch_fails
@@ -56,6 +61,12 @@ class FakeInstantly:
         self.leads: dict = {}
         self.paused: list = []
         self.messages: dict = {}
+
+    # --- the campaign, which is what decides whether loading is safe
+    def get_campaign(self, campaign_id):
+        if self.campaign_unreadable:
+            return Result(False, 500, message="upstream error")
+        return Result(data={"id": campaign_id, "status": self.campaign_status})
 
     # --- capacity
     def list_lead_lists(self, *, limit=100, starting_after=None):
@@ -739,25 +750,30 @@ def test_an_enrolment_nothing_has_sent_for_three_days_is_surfaced(conn):
 # -------------------------------------------------------------- the internal test
 
 
-def test_no_stranger_is_enrolled_before_one_of_our_own_has_received_it(conn):
-    """On 2026-09-21 the 7,777 recipients WERE the test. Not again."""
+def test_no_stranger_reaches_a_campaign_that_can_send_before_we_have_received_it(conn):
+    """On 2026-09-21 the 7,777 recipients WERE the test. Not again.
+
+    The rule moved rather than loosened. Loading into a PAUSED campaign is safe, so the
+    queue may load; what stays forbidden is somebody unproven sitting in a campaign that
+    can email them.
+    """
     rec.load_queue(conn, [queue_row(i) for i in range(1, 4)])
-    client = FakeInstantly()
-    report = rec.enrol(conn, client, limit=10, env=dict(NO_PACE))
-    assert report["stopped"] == "awaiting_internal_test"
+    live = FakeInstantly(campaign_status=1)
+    report = rec.enrol(conn, live, limit=10, env=dict(NO_PACE))
+    assert report["stopped"] == "campaign_is_live_and_the_internal_test_has_not_passed"
     assert report["internal_test"]["passed"] is False
-    assert client.created == []
+    assert live.created == [] and live.moved == []
     assert set(states(conn).values()) == {"authorised"}
 
 
-def test_the_internal_test_itself_is_enrolled_while_the_gate_is_shut(conn):
+def test_a_paused_campaign_takes_the_test_row_first(conn):
+    """Ordering, so the thing that has to be checked is in place before the rest."""
     rec.load_queue(conn, [queue_row(1),
                           dict(queue_row(9), email="qa@tgtc.test", is_internal_test=True)])
-    client = FakeInstantly()
+    client = FakeInstantly(campaign_status=2)
     report = rec.enrol(conn, client, limit=10, env=dict(NO_PACE))
-    assert report["enrolled"] == 1
-    assert [c["email"] for c in client.created] == ["qa@tgtc.test"]
-    assert states(conn)["p1@employer.test"] == "authorised"
+    assert report["enrolled"] == 2
+    assert client.created[0]["email"] == "qa@tgtc.test", "the test row goes in first"
 
 
 def test_an_enrolled_test_is_not_a_passed_test(conn):
@@ -773,15 +789,17 @@ def test_an_enrolled_test_is_not_a_passed_test(conn):
 
 
 def test_the_gate_opens_only_on_a_received_message_with_the_approved_subject(conn):
-    rec.load_queue(conn, [queue_row(1),
-                          dict(queue_row(9), email="qa@tgtc.test", is_internal_test=True)])
-    client = FakeInstantly()
+    """And once it is open, a LIVE campaign may take real recipients."""
+    rec.load_queue(conn, [dict(queue_row(9), email="qa@tgtc.test", is_internal_test=True)])
+    client = FakeInstantly(campaign_status=2)
     rec.enrol(conn, client, limit=10, env=dict(NO_PACE))
     client.delivered("qa@tgtc.test")
     rec.record_receipts(conn, client, pace=CountingPace(0))
     gate = rec.internal_test_passed(conn)
     assert gate["passed"] is True and gate["address"] == "qa@tgtc.test"
 
+    rec.load_queue(conn, [queue_row(1)])
+    client.campaign_status = 1                      # now it can send
     report = rec.enrol(conn, client, limit=10, env=dict(NO_PACE))
     assert report["enrolled"] == 1
     assert "p1@employer.test" in [c["email"] for c in client.created]
@@ -799,7 +817,7 @@ def test_every_provider_call_in_a_batch_is_paced(conn):
     load(conn, 3)
     client = FakeInstantly()
     pace = CountingPace()
-    report = rec.enrol(conn, client, limit=10, env={}, pace=pace)
+    report = rec.enrol(conn, client, limit=10, env={rec.ENROL_ENABLED_ENV: "1"}, pace=pace)
     assert report["enrolled"] == 3
     # The first call of all needs no wait; after that, one per create and one per
     # read-back: 3 creates + 3 verifications = 6 calls, 5 waits.
@@ -819,18 +837,12 @@ def test_a_rate_limit_stops_the_batch_and_blames_nobody(conn):
     """It is not a refusal and not this row's fault, so the row stays sendable."""
     load(conn, 4)
     client = FakeInstantly(rate_limited=True)
-    report = rec.enrol(conn, client, limit=10, env={}, pace=CountingPace(0))
+    report = rec.enrol(conn, client, limit=10, env={rec.ENROL_ENABLED_ENV: "1"}, pace=CountingPace(0))
     assert report["stopped"] == "rate_limited"
     assert report["enrolled"] == 0 and report["failed"] == 0
     assert set(states(conn).values()) == {"authorised"}
     assert sql1(conn, "SELECT count(*) AS n FROM empty_email_recovery "
                       "WHERE last_error = 'rate_limited'") == 1
-
-
-def test_the_batch_is_sized_for_the_hour_it_runs_in(conn):
-    """150 contacts x 2 paced calls is about 15 minutes, inside an hourly tick."""
-    assert rec.DEFAULT_BATCH * 2 * rec.DEFAULT_PACE_SECONDS <= 20 * 60
-    assert 60 / rec.DEFAULT_PACE_SECONDS == 20, "the documented requests per minute"
 
 
 def test_the_pace_can_be_turned_off_for_a_one_off_run(conn):
@@ -1137,3 +1149,71 @@ def test_the_whole_received_email_is_kept_as_evidence(conn):
     assert all(checks.values()), checks
     assert "An earlier email from us went out without its message" in row["evidence"]["received_body"]
     assert row["evidence"]["sent_subject"] == "Your Tax Accountant opening"
+
+
+# ------------------------------------------------ loading into a campaign that is paused
+
+
+def test_enrolment_is_off_unless_somebody_turns_it_on(conn):
+    """The handover state: the queue is loaded, the campaign is paused, and whether to
+    test and activate belongs to the team rather than to a cron."""
+    rec.load_queue(conn, [queue_row(1)])
+    client = FakeInstantly()
+    report = rec.enrol(conn, client, limit=10, env={rec.PACE_SECONDS_ENV: "0"})
+    assert report["stopped"] == "enrolment_disabled"
+    assert report["enrolled"] == 0
+    assert client.created == [] and client.moved == []
+
+
+def test_a_paused_campaign_is_what_lets_the_whole_queue_load(conn):
+    """Enrolling into a paused campaign cannot email anybody: the lead sits there with
+    its copy ready. So the internal test is not required to LOAD, only to send."""
+    client = FakeInstantly(campaign_status=2)
+    rec.load_queue(conn, [queue_row(i) for i in range(1, 4)])
+    assert rec.internal_test_passed(conn)["passed"] is False
+
+    report = rec.enrol(conn, client, limit=10, env=dict(NO_PACE))
+
+    assert report["enrolled"] == 3
+    assert report["campaign"] == {"known": True, "paused": True, "status": 2}
+    assert report["internal_test"]["passed"] is False
+
+
+def test_a_live_campaign_without_a_proven_test_enrols_nobody(conn):
+    """The original protection, kept: the only way somebody unproven reaches a campaign
+    that can send is if this refuses to happen."""
+    client = FakeInstantly(campaign_status=1)
+    rec.load_queue(conn, [queue_row(i) for i in range(1, 4)])
+    report = rec.enrol(conn, client, limit=10, env=dict(NO_PACE))
+    assert report["stopped"] == "campaign_is_live_and_the_internal_test_has_not_passed"
+    assert report["enrolled"] == 0
+    assert client.created == [] and client.moved == []
+    assert set(states(conn).values()) == {"authorised"}
+
+
+def test_a_live_campaign_with_a_proven_test_may_enrol(conn):
+    client = FakeInstantly(campaign_status=1)
+    pass_the_internal_test(conn)
+    rec.load_queue(conn, [queue_row(1)])
+    report = rec.enrol(conn, client, limit=10, env=dict(NO_PACE))
+    assert report["enrolled"] == 1
+    assert report["campaign"]["paused"] is False
+
+
+def test_a_campaign_whose_status_cannot_be_read_enrols_nobody(conn):
+    """Not knowing whether it can send is not the same as knowing it cannot."""
+    client = FakeInstantly(campaign_unreadable=True)
+    rec.load_queue(conn, [queue_row(1)])
+    report = rec.enrol(conn, client, limit=10, env=dict(NO_PACE))
+    assert report["stopped"] == "campaign_is_live_and_the_internal_test_has_not_passed"
+    assert report["campaign"]["known"] is False
+    assert client.created == [] and client.moved == []
+
+
+def test_the_pace_is_the_measured_one_not_an_assumed_one(conn):
+    """Measured 2026-10-04: 60 unpaced GETs in 21.1s, 171 a minute, zero 429s. The 3
+    seconds this used to wait was a guess at "20 a minute" and cost a factor of eight."""
+    assert rec.DEFAULT_PACE_SECONDS == 0.5
+    assert 60 / rec.DEFAULT_PACE_SECONDS == 120, "a 30% margin under what was observed"
+    # A batch still has to fit the tick that runs it: four calls per move.
+    assert rec.DEFAULT_BATCH * 4 * rec.DEFAULT_PACE_SECONDS <= 15 * 60
