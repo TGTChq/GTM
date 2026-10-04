@@ -576,18 +576,25 @@ def campaign_is_paused(client) -> Dict[str, Any]:
     return {"known": True, "paused": status == CAMPAIGN_PAUSED, "status": status}
 
 
-def _settle(client, lead_id: str, *, want_campaign: str, tries: int = 10,
+def _settle(client, lead_id: str, *, want_campaign: str, tries: int = 6,
             sleep=None) -> Dict[str, Any]:
     """Wait for a move to actually land. ``/leads/move`` answers 200 with a pending job.
 
     A 200 here means accepted, not done -- the response is a background job whose status
     is ``pending``. So the lead is read back until it reports the campaign we asked for,
     and an exhausted wait returns what it last saw rather than pretending.
+
+    The waits back off from half a second rather than being a flat three. Measured during
+    the 2026-10-04 load, a flat 3 s was costing about 3 s per contact and pinning the
+    whole load at 14 a minute while the rate limit allowed 120: the job usually lands
+    inside a second, so waiting three for it was most of the cost of the operation.
+    Backing off 0.5, 1, 2, 4, 8 still gives a slow job 15 s to finish.
     """
     import time
 
     nap = sleep or time.sleep
     last: Dict[str, Any] = {}
+    delay = 0.5
     for attempt in range(tries):
         result = client.get_lead(lead_id)
         if result.ok and isinstance(result.data, dict):
@@ -595,7 +602,8 @@ def _settle(client, lead_id: str, *, want_campaign: str, tries: int = 10,
             if str(last.get("campaign") or "") == want_campaign:
                 return last
         if attempt < tries - 1:
-            nap(3)
+            nap(delay)
+            delay = min(delay * 2, 8.0)
     return last
 
 
@@ -614,6 +622,10 @@ def _bring_across(conn: psycopg.Connection, client, row: Mapping[str, Any], *,
     Their old sequence is abandoned: a move clears ``status_summary``, which is authorised
     and is the point -- they are to receive this one email and nothing else. They are
     never moved back, and their four original steps are never restarted.
+
+    Safe to re-run on a row an earlier attempt left ``reserved``: the lead is re-read, a
+    role that is already right is not re-written, and a lead already in the destination
+    is not moved again.
     """
     lead_id = str(row["instantly_lead_id"] or "")
     source_kind = str(row["source_kind"] or "")
@@ -660,13 +672,22 @@ def _bring_across(conn: psycopg.Connection, client, row: Mapping[str, Any], *,
         # Read-after-write here is eventually consistent, so this is checked after the
         # move rather than immediately, where a correct write reads back as a failure.
 
-    clock.wait()
-    moved = client.move_lead_from(lead_id, source_kind=source_kind, source_id=source_id,
-                                 to_campaign=EMPTY_EMAIL_RECOVERY_CAMPAIGN_ID)
-    if not moved.ok:
-        return "authorised", "move_failed:%s" % (moved.status or "error")
-
-    settled = _settle(client, lead_id, want_campaign=EMPTY_EMAIL_RECOVERY_CAMPAIGN_ID)
+    # Already there? Then the move happened and something lost the answer -- a container
+    # replaced mid-batch, a deploy, a crash between the move and the record. Asking for
+    # the move again would be asking to move it out of a campaign it has already left,
+    # which fails and would park the row forever. This is what makes an interrupted load
+    # resumable rather than stuck.
+    if str(lead.get("campaign") or "") == EMPTY_EMAIL_RECOVERY_CAMPAIGN_ID:
+        settled = lead
+    else:
+        clock.wait()
+        moved = client.move_lead_from(lead_id, source_kind=source_kind,
+                                      source_id=source_id,
+                                      to_campaign=EMPTY_EMAIL_RECOVERY_CAMPAIGN_ID)
+        if not moved.ok:
+            return "authorised", "move_failed:%s" % (moved.status or "error")
+        settled = _settle(client, lead_id,
+                          want_campaign=EMPTY_EMAIL_RECOVERY_CAMPAIGN_ID)
     if str(settled.get("campaign") or "") != EMPTY_EMAIL_RECOVERY_CAMPAIGN_ID:
         return "authorised", "move_not_settled"
     after = lead_variables(settled)
