@@ -3849,3 +3849,146 @@ ACTIVE today** ("Customer Success - Other", "Customer Success 50 - 500").
 
 Nobody has received anything. Enrolling is not sending, and 2026-09-21 is what it costs to
 confuse the two.
+
+---
+
+# The crash in the panel, 2026-10-05 — read-only forensics
+
+Nothing was restarted, redeployed, re-run, reactivated or reconfigured to produce this.
+
+## What failed
+
+**GTM Core Canary 1000**, deployment `931b524d-a89e-4987-aaa1-a5329557cbd7` (commit
+`2dad8c53`), status **CRASHED**. It is the service's current deployment, so the Core is not
+in a healthy state even though Railway lists the service.
+
+The daily run `20261005T030408.538066Z-e587c1f2` started at 03:04:07Z, claimed budget
+`prod-scheduled-20261005`, worked for seventy minutes, and died at **04:15:26Z** with an
+unhandled exception:
+
+```
+psycopg.errors.DeadlockDetected: deadlock detected
+  INSERT INTO request_attempts (provider, operation, partition...
+  Process 45981 waits for RowExclusiveLock on relation 16418; blocked by process 46323.
+  Process 46323 waits for AccessExclusiveLock on relation 16710; blocked by process 45981.
+```
+
+Resolved against the live catalogue: **16418 = `request_attempts`, 16710 =
+`provider_state`.** Both are the Core's own acquisition tables.
+
+## Why — and it is not a one-off
+
+An `AccessExclusiveLock` is DDL, not application traffic. There is no `LOCK TABLE`
+anywhere in the codebase, and exactly one statement wants that lock on that table:
+
+```sql
+-- tgtc_core/db/migrations/002_ownership_epochs_lifecycle.sql:24
+ALTER TABLE provider_state ADD COLUMN IF NOT EXISTS probe_reserved_at timestamptz;
+```
+
+`ALTER TABLE ... ADD COLUMN IF NOT EXISTS` takes an AccessExclusiveLock even when the
+column already exists — Postgres must hold the lock to look. And `apply_schema` re-executes
+**every migration on every call**, unconditionally; the recorded version is only written
+afterwards.
+
+`cmd_replies_poll` calls `apply_schema` at `tgtc_core/__main__.py:702`. So **every hourly
+tick of GTM Replies runs the full DDL set against the live production database.**
+
+The timing closes it rather than suggesting it. The Replies tick logged its reply poll at
+**04:17:12Z**; `apply_schema` runs before that poll, so its DDL was in flight at ~04:15–
+04:16. The Core died at 04:15:26. The lock cycle is then exactly what the detail line says:
+the tick's DDL transaction held `request_attempts` and wanted `provider_state`, while the
+Core's acquisition held `provider_state` (from `reserve_probe`) and wanted
+`request_attempts` to insert an attempt.
+
+**Yesterday fits the same shape.** Run `20261004T030500.894304Z-63aa79a0` claimed at
+03:05Z, last logged at 06:50Z, and its container had restarted by 07:38Z — an hourly tick
+boundary sits between those. The restarted container then did the right thing and refused
+to start a second paid run: `run-daily declined:
+outside_scheduled_window:07Z_not_in_03-05`. That guard is working.
+
+So: **two consecutive daily runs lost, to the same mechanism, in the ordinary
+configuration.** My migrations 022 and 023 added more DDL to `apply_schema` (four ALTERs,
+two constraint swaps and a DROP/CREATE TRIGGER), which lengthens that transaction and
+widens the window. I cannot quantify how much, and the statement that actually deadlocked
+predates this work by a month.
+
+## Nobody was told
+
+An alert fired on 2026-10-04T19:18:46Z — `check_pending_deliveries`, "only a run drains the
+outbox" — and the log says:
+
+```
+alerts found but no Slack destination was configured; nothing was sent
+```
+
+**`SLACK_BOT_TOKEN` is not set on GTM Replies, nor on the Core. Only GTM Weekly Report has
+it.** So the hourly health check computes correctly and discards the result. Earlier in this
+incident I reported monitoring as live on the strength of observing `"alerts": []`; an empty
+list never exercised delivery, and that claim was wrong. Two lost daily runs went
+unannounced.
+
+## State, measured not assumed
+
+| | |
+| --- | --- |
+| run lock | **free** |
+| 20261005 claim | claimed 03:04, `finished_at` NULL → **INTERRUPTED** |
+| 20261004 claim | claimed 03:05, `finished_at` NULL → **INTERRUPTED** |
+| can 2026-10-06 run? | **yes** — the claim is `ON CONFLICT (execution_day) DO NOTHING`, so a new day key claims cleanly. The two open claims do not block it |
+| will either lost day be retried? | **no** — a same-day retry returns `interrupted_run_needs_explicit_recovery` unless a recovery token names that exact day and run |
+| spend on 10-05 before the crash | Apollo 368 requests / 368 credits · Fantastic 24 requests / **1,932 credits** |
+| spend on 10-04 before it stopped | Apollo 179 credits, Anthropic 187 requests |
+| delivery outbox | 16,616 delivered · 2,366 blocked · **90 pending** (45 `awaiting_instantly`, 45 `campaign_status_0`) |
+| pending due over 6h | **0** — the 90 are held, not stuck |
+| work items unfinished | 3,248 |
+
+## The recovery, from the provider
+
+| | |
+| --- | --- |
+| status | **paused** |
+| sequence | 1 step, subject and body identical to the approved text |
+| leads | 5,641, counted from `/leads/list` |
+| `emails_sent_count` | **0** |
+| `new_leads_contacted_count` / `contacted_count` | **0 / 0** |
+| messages in `/emails` | **0** |
+| `TGTC_RECOVERY_ENROL_ENABLED` | **`0`** |
+| nine originals · OOO · FINANCE v2 | paused · paused · draft |
+| eight other v2 | ACTIVE, untouched |
+
+`bounced_count: 2` on the campaign is a carried-over lead attribute, not a send: both the
+sent counter and `/emails` are zero.
+
+No code path in the core can un-pause a campaign. The only occurrence of "activate" is a
+word inside a docstring; `pause_campaign` exists and has no opposite. Activation needs a
+person.
+
+## Next ticks
+
+| service | cron | next |
+| --- | --- | --- |
+| GTM Replies | `15 * * * *` | hourly at :15 |
+| GTM Core Canary 1000 | `0 3 * * *` | 2026-10-06 03:00Z |
+| GTM Weekly Report | `0,20,40 13-20 * * *` | 2026-10-05 13:00Z |
+
+A CRASHED deployment is the service's current one. The schedule lives on the service
+instance rather than the deployment, so the expectation is that 03:00Z fires again — but
+that is an expectation, not something this check proved, and it is the one thing to watch
+rather than assume.
+
+## Recommended, not done
+
+1. **Stop `apply_schema` running on every tick.** Either gate it on the recorded
+   `schema_migrations` version so a tick with nothing to apply does no DDL, or drop it from
+   `cmd_replies_poll` entirely and leave migrations to deploys and to `migrate`. This is
+   the root cause and it will take a third run otherwise.
+2. **Put `SLACK_BOT_TOKEN` on GTM Replies** so the hourly alert can actually deliver, and
+   prove it with one alert that arrives rather than one that computes.
+3. **Decide the two lost days.** Neither will be retried without an explicit recovery
+   token naming the day and the run id. 3,248 work items and 90 held deliveries are
+   waiting.
+4. **Make the deadlock survivable** — a retry around the acquisition insert, or a
+   `lock_timeout`, so a transient lock cycle costs a partition rather than the whole run.
+5. **Cap retries per row in the recovery enroller.** The 38 OOO rows reached 16 attempts
+   each. Harmless with enrolment off; a ceiling belongs there before it is turned on.
