@@ -3992,3 +3992,47 @@ rather than assume.
    `lock_timeout`, so a transient lock cycle costs a partition rather than the whole run.
 5. **Cap retries per row in the recovery enroller.** The 38 OOO rows reached 16 attempts
    each. Harmless with enrolment off; a ceiling belongs there before it is turned on.
+
+---
+
+# The two lost daily runs, and what they cost — for the team
+
+Both died to the same mechanism: the hourly Replies tick ran `apply_schema`, whose
+`ALTER TABLE ... ADD COLUMN IF NOT EXISTS` takes an AccessExclusiveLock even when the
+column exists, and that deadlocked the Core's acquisition. Fixed in `5064812`; the fix is
+not deployed until that merges.
+
+| | 2026-10-04 | 2026-10-05 |
+| --- | --- | --- |
+| run id | `20261004T030500.894304Z-63aa79a0` | `20261005T030408.538066Z-e587c1f2` |
+| claimed | 03:05Z | 03:04Z |
+| last event | 06:50Z | **04:15:26Z** |
+| how it ended | container restarted by 07:38Z; the restarted one correctly refused a second paid run (`outside_scheduled_window:07Z_not_in_03-05`) | `psycopg.errors.DeadlockDetected` on `INSERT INTO request_attempts`, unhandled |
+| `finished_at` | **never closed** → INTERRUPTED | **never closed** → INTERRUPTED |
+| Apollo | 179 requests / 179 credits | 368 requests / 368 credits |
+| Fantastic | 6 requests / **600 credits** | 24 requests / **1,932 credits** |
+
+**Spent across the two days: 547 Apollo credits and 2,532 Fantastic credits, for no
+completed run.**
+
+What they left behind, measured 2026-10-05 05:3xZ: 3,248 work items unfinished, and 90
+pending deliveries — 45 `awaiting_instantly`, 45 `campaign_status_0` (the FINANCE v2
+draft). None of the 90 is due: they are held, not stuck.
+
+## Neither day will retry itself
+
+The claim is per day (`ON CONFLICT (execution_day) DO NOTHING`), so **2026-10-06 claims a
+fresh key and proceeds** — the two open claims do not block it. But a retry of either lost
+day returns `interrupted_run_needs_explicit_recovery` unless a recovery token names that
+exact day and that exact run id. That is deliberate: an interrupted run is not a completed
+one, and restarting it is somebody's decision.
+
+So the team has a choice to make, not a task to wait for:
+
+* **leave them.** The work is not lost, only deferred: unfinished work items are picked up
+  by later runs, and the 90 held deliveries drain when their campaigns can take them. The
+  credits already spent are spent either way.
+* **authorise a recovery** for one or both days with the token, which re-opens that day's
+  budget rather than a new one.
+
+Nothing in this change decides that, and nothing was executed toward it.
