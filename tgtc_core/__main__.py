@@ -49,7 +49,9 @@ def cmd_migrate(args) -> int:
         print("TGTC_DATABASE_URL is required", file=sys.stderr)
         return 2
     conn = connect(url)
-    version = apply_schema(conn)
+    # The explicit path: this is the command whose whole job is to apply
+    # migrations, so it always does the work even when nothing is pending.
+    version = apply_schema(conn, force=True)
     print(json.dumps({"schema_version": version}))
     return 0
 

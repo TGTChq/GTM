@@ -388,7 +388,11 @@ def test_apply_schema_dedupes_preexisting_duplicate_company_size_evidence_before
         )
     conn.commit()
 
-    apply_schema(conn)  # must not raise "could not create unique index ... is duplicated"
+    # force=True because this test IS the apply path. Since 2026-10-05 a call on an
+    # already-current schema returns without DDL, so the hourly reply tick stops
+    # deadlocking the daily run. The dedupe is a one-time upgrade step and the unique
+    # index prevents runtime duplicates, so skipping it when current loses nothing.
+    apply_schema(conn, force=True)  # must not raise "could not create unique index ... is duplicated"
 
     rows = sqlall(conn, "SELECT id FROM evidence WHERE subject_kind = 'employer' AND subject_id = %s "
                         "AND fact = 'company:firmographic_conflict'", (eid,))
@@ -397,7 +401,7 @@ def test_apply_schema_dedupes_preexisting_duplicate_company_size_evidence_before
                              "AND fact = 'company:firmographic_conflict'", (eid_solo,))
     assert len(solo_rows) == 1, "a non-duplicated row must survive untouched"
     # Applying again (the constraint now exists and holds) must still be a no-op.
-    apply_schema(conn)
+    apply_schema(conn, force=True)
 
 
 def test_make_posting_row_default_size_band_is_consistent_with_headcount():
