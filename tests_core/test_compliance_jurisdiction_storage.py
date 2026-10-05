@@ -96,9 +96,10 @@ def test_reapplying_the_schema_is_harmless(conn):
 
 @pytest.mark.parametrize("table,column", [(t, c) for t, cols in COMPLIANCE_COLUMNS.items() for c in cols])
 def test_schema_sql_mirrors_the_migration_for_fresh_installs(table, column):
-    """apply_schema() runs schema.sql FIRST on every call, so a fresh install
-    that never replays 011 must still get these columns (the precedent every
-    migration 007-010 follows)."""
+    """apply_schema() runs schema.sql FIRST whenever it does any work, so a fresh
+    install that never replays 011 must still get these columns (the precedent every
+    migration 007-010 follows). Since 2026-10-05 a call on an already-current schema
+    returns without touching it, which is why "on every call" is no longer the claim."""
     text = SCHEMA_PATH.read_text(encoding="utf-8")
     assert column in text, f"{table}.{column} is not mirrored into schema.sql"
 
