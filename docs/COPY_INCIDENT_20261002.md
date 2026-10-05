@@ -4036,3 +4036,79 @@ So the team has a choice to make, not a task to wait for:
   budget rather than a new one.
 
 Nothing in this change decides that, and nothing was executed toward it.
+
+---
+
+# FINANCE v2 — reviewed and activated, 2026-10-05
+
+## Why it was a draft, and why FINANCE was paused at all
+
+Two separate things, and only the second one mattered.
+
+**FINANCE v2 had no contacts.** When the nine v2 campaigns were created and the 32
+revalidated contacts were moved into them, FINANCE's single candidate
+(`josh.schmidt@sharp.com`) was dropped because its posting had expired, so the premise of
+its email was no longer true. That left FINANCE v2 with zero. But PRODUCT v2 also had zero
+and was activated, so an empty campaign is not what kept this one in draft.
+
+**FINANCE original was paused by a person, before and apart from the copy incident.** In
+the pre-incident backup — captured 16:21:31Z on 2026-10-02, before any write of this
+work — FINANCE's `timestamp_updated` is **2026-10-02T15:44:06Z** while the other eight read
+2026-09-25T00:09–00:10Z, and FINANCE alone had `not_sending_status=None`. So somebody paused
+it about 37 minutes before the incident response began at 16:15Z. That pause was preserved
+throughout, on the principle that whoever made it owns resuming it. Instantly no longer
+shows that timestamp: the external mass pause at 2026-10-02T22:10:49Z overwrote it, so the
+only surviving evidence is the backup recorded here.
+
+## Why it was not activated on the first ask
+
+The reason for that pause was never written down anywhere reachable. In particular the
+Slack bot holds `files:write, files:read, channels:read, incoming-webhook, chat:write` —
+`conversations.history` returns **`missing_scope`** — so the one place a team instruction
+would live could not be read. "Reason unknown" is not "no reason", and an old pause does
+not stop applying because the other eight are running.
+
+## What released it
+
+The person who paused it says it was theirs and that they did it to try something, so the
+pause they owned is lifted. **That is their recollection, not a record** — the 15:44:06Z
+timestamp proves a person acted, not which person. It is written down here so the team can
+contradict it if it is wrong.
+
+## Verified before the write
+
+| | |
+| --- | --- |
+| sequence | 4 steps, `{{rendered_subject}}` + `{{rendered_email_N_html}}`, exactly one `{{accountSignature}}` per step |
+| senders | 33 |
+| window | 08:00–18:00 America/Chicago, weekends off |
+| limits | `daily_max_leads` 250, stop on reply, unsubscribe header on |
+| contacts in the campaign | 0 |
+| **the 45 deliveries activation releases** | **all five copy fields complete on 45 of 45**, 0 unresolved variables, 0 replacement characters |
+| those 45 people | 0 suppressed, 0 opted out, 0 in the recovery queue |
+| real subjects | "Accounting Manager", "VP Finance", "PROGRAM CONTROL ANALYST III", "Staff Accountant" |
+
+One correction worth keeping: a first pass counted "45 held deliveries with no subject" and
+called it the incident repeating. It was not. There are **45 approvals with two outbox rows
+each** — an `instantly` row and an `airtable` row — and the Airtable rows carry no Instantly
+copy by design. Split by channel, the 45 Instantly rows are complete and the 45 Airtable
+rows are irrelevant to sending. Counting across two channels produced a false alarm.
+
+## After the write, read back
+
+| | |
+| --- | --- |
+| FINANCE v2 | **status 1 (ACTIVE)** |
+| steps / subject / body / senders | unchanged |
+| contacts at activation | 0 |
+| **FINANCE original** | **2 → 2, untouched** |
+| nine originals | 9 of 9 still paused |
+| OOO follow-up | still paused |
+| recovery campaign | still paused, enrolment still off, still 0 sent |
+| other eight v2 | unchanged, ACTIVE |
+
+## When anything actually sends
+
+Nothing today. The campaign holds no contacts; the 45 enter it only when a run drains the
+outbox, and the next scheduled run is **2026-10-06 03:00Z**. Their first possible send is
+inside Tuesday's window, 13:00–23:00Z.
